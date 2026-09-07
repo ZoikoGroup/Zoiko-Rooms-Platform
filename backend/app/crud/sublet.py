@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.admin_user import AdminUser
 from app.models.identity_verification import IdentityVerification
@@ -13,6 +13,37 @@ from app.models.user_account import UserAccount
 from app.models.guest import Guest
 from app.crud import guest as guest_crud
 from app.crud import notification as notif_crud
+from app.schemas.leasing import SubletRequestRead
+
+
+def to_sublet_request_read(db: Session, sr: SubletRequest) -> SubletRequestRead:
+    """Enrich the bare record with the room/people context a reviewer actually
+    needs -- 'occupancy #14 -> party #37' means nothing on its own."""
+    occupancy = sr.current_occupancy
+    listing = occupancy.listing if occupancy else None
+    current_tenant = occupancy.guest if occupancy else None
+    proposed_renter = db.scalar(select(UserAccount).where(UserAccount.party_id == sr.proposed_renter_party_id))
+
+    return SubletRequestRead(
+        id=sr.id,
+        current_occupancy_id=sr.current_occupancy_id,
+        proposed_renter_party_id=sr.proposed_renter_party_id,
+        status=sr.status,
+        authority_evidence_ref=sr.authority_evidence_ref,
+        admin_decision=sr.admin_decision,
+        admin_notes=sr.admin_notes,
+        decided_by_admin_id=sr.decided_by_admin_id,
+        created_at=sr.created_at,
+        decided_at=sr.decided_at,
+        listing_name=listing.name if listing else "",
+        listing_city=listing.city if listing else "",
+        room_type=listing.room_type if listing else "",
+        guests=listing.guests if listing else 0,
+        bedrooms=listing.bedrooms if listing else 0,
+        bathrooms=listing.bathrooms if listing else 0,
+        current_tenant_name=current_tenant.name if current_tenant else "",
+        proposed_renter_name=proposed_renter.full_name if proposed_renter else "",
+    )
 
 
 def _assert_sublet_permitted(occupancy: Occupancy) -> None:
@@ -90,6 +121,16 @@ def submit_sublet_request(
         related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
     )
 
+    listing = occupancy.listing
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="A sublet was requested for your listing",
+            message=f"{user.full_name} requested to sublet \"{listing.name}\". Zoiko will review before it's approved.",
+            notification_type="sublet_request.submitted",
+            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+        )
+
     db.commit()
     db.refresh(sublet_request)
     return sublet_request
@@ -134,6 +175,21 @@ def _notify_sublet_requester(
     )
 
 
+def _notify_sublet_host(db: Session, occupancy: Occupancy, sublet_request_id: int, *, approved: bool) -> None:
+    listing = occupancy.listing if occupancy else None
+    if not listing or not listing.party_id:
+        return
+    verb = "approved" if approved else "rejected"
+    notif_crud.notify_user_by_party(
+        db, listing.party_id,
+        title=f"A sublet request for your listing was {verb}",
+        message=f"The sublet request for \"{listing.name}\" was {verb}.",
+        notification_type=f"sublet_request.{verb}",
+        related_entity_type="sublet_request",
+        related_entity_id=str(sublet_request_id),
+    )
+
+
 def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: AdminUser, notes: str = "") -> SubletRequest:
     """Admin approves a sublet request."""
     if admin.role != "super_admin":
@@ -158,6 +214,7 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
     sublet_request.decided_at = datetime.now(timezone.utc)
 
     _notify_sublet_requester(db, requester_guest_id, sublet_request.id, approved=True, notes=notes)
+    _notify_sublet_host(db, sublet_request.current_occupancy, sublet_request.id, approved=True)
 
     db.commit()
     db.refresh(sublet_request)
@@ -180,6 +237,7 @@ def reject_sublet_request(db: Session, sublet_request: SubletRequest, admin: Adm
     _notify_sublet_requester(
         db, sublet_request.current_occupancy.guest_id, sublet_request.id, approved=False, notes=notes
     )
+    _notify_sublet_host(db, sublet_request.current_occupancy, sublet_request.id, approved=False)
 
     db.commit()
     db.refresh(sublet_request)
@@ -194,6 +252,10 @@ def list_pending_sublet_requests(db: Session, admin: AdminUser) -> list[SubletRe
     return list(
         db.scalars(
             select(SubletRequest)
+            .options(
+                joinedload(SubletRequest.current_occupancy).joinedload(Occupancy.listing),
+                joinedload(SubletRequest.current_occupancy).joinedload(Occupancy.guest),
+            )
             .where(SubletRequest.status == "pending_admin_review")
             .order_by(SubletRequest.created_at.desc())
         )

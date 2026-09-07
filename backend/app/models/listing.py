@@ -70,7 +70,7 @@ class Listing(Base):
         ForeignKey("parties.id", ondelete="CASCADE"), nullable=True, index=True
     )
 
-    room_id: Mapped[int | None] = mapped_column(ForeignKey("rooms.id"), nullable=True)
+    room_id: Mapped[int | None] = mapped_column(ForeignKey("rooms.id"), nullable=True, index=True)
     market_release_id: Mapped[int | None] = mapped_column(ForeignKey("market_releases.id"), nullable=True)
     min_stay_nights: Mapped[int] = mapped_column(Integer, default=30)
     state: Mapped[str] = mapped_column(String(20), default="DRAFT")

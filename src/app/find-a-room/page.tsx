@@ -1,5 +1,7 @@
+import { Suspense } from "react";
 import { UserSessionProvider } from "@/components/user/UserSessionContext";
 import { RentBrowser } from "@/components/user/RentBrowser";
+import { Loader } from "@/components/ui/Loader";
 
 export default function PublicFindARoomPage() {
   return (
@@ -12,7 +14,9 @@ export default function PublicFindARoomPage() {
           </p>
         </div>
         <UserSessionProvider user={null}>
-          <RentBrowser />
+          <Suspense fallback={<Loader label="Loading available rooms" />}>
+            <RentBrowser />
+          </Suspense>
         </UserSessionProvider>
       </div>
     </div>

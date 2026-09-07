@@ -115,7 +115,16 @@ export function SubletRequestsManager() {
             >
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                  Occupancy #{request.currentOccupancyId} → proposed renter (party #{request.proposedRenterPartyId})
+                  {request.listingName || `Occupancy #${request.currentOccupancyId}`}
+                  {request.listingCity && `, ${request.listingCity}`}
+                </p>
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                  {request.currentTenantName || "Current tenant"} → {request.proposedRenterName || "proposed renter"}
+                  {(request.bedrooms || request.bathrooms || request.guests) && (
+                    <>
+                      {" "}· {request.bedrooms} bd · {request.bathrooms} ba · up to {request.guests} guests
+                    </>
+                  )}
                 </p>
                 <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
                   <span>Requested {formatDate(request.createdAt)}</span>

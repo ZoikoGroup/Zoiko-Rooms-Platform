@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AlertTriangle, Bath, BedDouble, ChevronLeft, ChevronRight, MapPin, Ruler, Search, Users } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -33,8 +33,13 @@ export function RentBrowser() {
   const { user, identityVerified } = useUserSession();
   const { toast, showToast } = useToast();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
-  const [filters, setFilters] = useState<FilterState>(emptyFilters);
+  const [filters, setFilters] = useState<FilterState>(() => ({
+    ...emptyFilters,
+    city: searchParams.get("city") ?? "",
+    maxPrice: searchParams.get("maxPrice") ?? "",
+  }));
   const [offset, setOffset] = useState(0);
 
   const [listings, setListings] = useState<PublicListing[]>([]);

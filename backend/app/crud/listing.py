@@ -118,7 +118,7 @@ def list_listings_for(db: Session, admin: AdminUser) -> list[Listing]:
     else's listing content is still owner-or-super-admin gated separately
     (see _assert_owner_or_super_admin in api/routes/listings.py); this only
     affects what an admin can see and review/approve/reject."""
-    return list(db.scalars(select(Listing).order_by(Listing.name)))
+    return list(db.scalars(select(Listing).options(joinedload(Listing.room)).order_by(Listing.name)))
 
 
 def list_public_listings(

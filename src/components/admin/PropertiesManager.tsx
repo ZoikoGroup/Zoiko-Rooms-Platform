@@ -33,7 +33,6 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { StatCard } from "@/components/admin/StatCard";
 import { formatCurrency, resolveImageUrl } from "@/lib/utils";
-import { unsplash } from "@/lib/images";
 import { apiClientFetch } from "@/lib/api-client";
 import { getCurrentAdmin } from "@/lib/auth";
 import { listingStateLabel, listingStateTone } from "@/lib/status";
@@ -333,6 +332,16 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
       showToast("Minimum stay must be at least 30 nights");
       return;
     }
+    if (!editingId) {
+      if (!form.images.length) {
+        showToast("Add at least one photo before creating this listing");
+        return;
+      }
+      if (!form.description.trim()) {
+        showToast("Add a description before creating this listing");
+        return;
+      }
+    }
 
     const amenities = form.amenities
       .split(",")
@@ -389,9 +398,9 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
             size: Number(form.size),
             minStayNights: Number(form.minStayNights),
             roomId: Number(form.roomId),
-            images: form.images.length ? form.images : [unsplash("hotelBedroom")],
+            images: form.images,
             amenities: amenities.length ? amenities : ["Free WiFi"],
-            description: form.description.trim() || "Newly added listing — details coming soon.",
+            description: form.description.trim(),
             tags: tags.length ? tags : ["New"],
             contactName: form.contactName.trim(),
             contactPhone: form.contactPhone.trim(),

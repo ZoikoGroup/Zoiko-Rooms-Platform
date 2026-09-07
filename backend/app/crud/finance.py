@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.crud.authority import get_valid_authority_for_room
 from app.crud import notification as notif_crud
@@ -25,6 +25,7 @@ from app.models.leasing import Agreement, Offer
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.party import Party
+from app.models.room import Room
 from app.schemas.finance import (
     DepositRelease,
     DisputeCreate,
@@ -49,10 +50,13 @@ def recompute_obligation_status(db: Session, obligation: Obligation) -> None:
 
     if obligation.status in ("WAIVED", "FAILED"):
         return  # terminal states set explicitly elsewhere, not derived from allocations
+    was_refunded = any(a.amount_allocated < 0 for a in obligation.allocations)
     if allocated <= 0:
-        obligation.status = "PENDING"
+        # A refund can zero out (or overshoot past zero) what was previously paid --
+        # that's REFUNDED, not PENDING (which means "never paid at all").
+        obligation.status = "REFUNDED" if was_refunded else "PENDING"
     elif outstanding <= 0:
-        obligation.status = "REFUNDED" if allocated < 0 else "PAID"
+        obligation.status = "PAID"
     else:
         obligation.status = "PARTIALLY_PAID"
 
@@ -145,7 +149,22 @@ def annotate_payment_context(payment: SimulatedPayment) -> SimulatedPayment:
 
 
 def list_payments(db: Session, admin: AdminUser) -> list[SimulatedPayment]:
-    query = select(SimulatedPayment).order_by(SimulatedPayment.created_at.desc())
+    query = (
+        select(SimulatedPayment)
+        .options(
+            selectinload(SimulatedPayment.guest),
+            selectinload(SimulatedPayment.allocations)
+            .selectinload(PaymentAllocation.obligation)
+            .selectinload(Obligation.occupancy)
+            .selectinload(Occupancy.listing),
+            selectinload(SimulatedPayment.allocations)
+            .selectinload(PaymentAllocation.obligation)
+            .selectinload(Obligation.occupancy)
+            .selectinload(Occupancy.room)
+            .selectinload(Room.property),
+        )
+        .order_by(SimulatedPayment.created_at.desc())
+    )
     if admin.role != "super_admin":
         query = query.where(SimulatedPayment.id.in_(_owned_payment_ids(db, admin)))
     return [annotate_payment_context(p) for p in db.scalars(query)]

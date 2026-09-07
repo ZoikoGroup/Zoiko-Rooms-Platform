@@ -52,6 +52,18 @@ _SENSITIVE_HEADING_RE = re.compile(r"\b(password|secret|credential|token|api[- ]
 PUBLIC_ACCESS_CLASSES = ("K0_PUBLIC",)
 
 
+def allowed_access_classes(actor: object) -> tuple[str, ...]:
+    """Return the KB access classes ``actor`` may request from retrieval.
+
+    Single source of truth for the actor -> access-class mapping so a new
+    retrieval call site can't accidentally request a staff-only tier just by
+    forgetting to pass ``access_classes``, or by copying an unvetted value.
+    K1_CUSTOMER+ are modeled (KB_ACCESS_CLASSES) but no staff-access feature
+    has shipped yet, so every actor -- user or admin -- is public-only for now.
+    """
+    return PUBLIC_ACCESS_CLASSES
+
+
 class KnowledgeError(Exception):
     pass
 

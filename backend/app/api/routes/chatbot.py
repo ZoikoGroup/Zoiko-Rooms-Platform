@@ -159,11 +159,13 @@ def send_message_stream(
                     meta = data_obj.get("meta", {})
                     text_parts = [b["text"] for b in blocks if b["type"] == "text"]
                     final_text = "\n".join(p for p in text_parts if p.strip())
+                    tool_results_made = [b for b in blocks if b["type"] == "tool_result"]
                     assistant_message = ChatMessage(
                         conversation_id=conversation.id,
                         role="assistant",
                         content=final_text,
                         tool_calls_json=json.dumps(tool_calls_made),
+                        tool_results_json=json.dumps(tool_results_made),
                         meta_json=json.dumps(meta),
                     )
                     db.add(assistant_message)
