@@ -70,6 +70,37 @@ from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler  # noqa: E402
 SQLiteTypeCompiler.visit_ARRAY = _compile_array_sqlite  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
+# Monkey-patch: SQLite drops tzinfo on DateTime(timezone=True) columns -- it
+# has no native timezone-aware storage, so a value written as e.g.
+# datetime.now(timezone.utc) reads back naive. Every timestamp in this app is
+# always UTC (see the `default=lambda: datetime.now(timezone.utc)` pattern on
+# every model), so re-attaching UTC on the way out is safe and exactly
+# mirrors what PostgreSQL actually returns. Without this, any code comparing
+# a stored datetime against datetime.now(timezone.utc) (e.g.
+# crud/password_reset.py's expiry check) raises "can't compare offset-naive
+# and offset-aware datetimes" under the SQLite test harness even though the
+# same comparison works fine against the real Postgres-backed app.
+# ---------------------------------------------------------------------------
+from sqlalchemy.dialects.sqlite.base import DATETIME as _SQLiteDATETIME  # noqa: E402
+
+_original_datetime_result_processor = _SQLiteDATETIME.result_processor
+
+
+def _datetime_result_processor_with_tz(self, dialect, coltype):
+    base_process = _original_datetime_result_processor(self, dialect, coltype)
+    if not self.timezone:
+        return base_process
+
+    def process(value):
+        result = base_process(value)
+        return result if result is None or result.tzinfo is not None else result.replace(tzinfo=dt.timezone.utc)
+
+    return process
+
+
+_SQLiteDATETIME.result_processor = _datetime_result_processor_with_tz  # type: ignore[assignment]
+
+# ---------------------------------------------------------------------------
 # SQLite engine + session factory (in-memory, isolated per test)
 # ---------------------------------------------------------------------------
 

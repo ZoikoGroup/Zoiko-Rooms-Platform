@@ -15,6 +15,7 @@ from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.room import Room
 from app.schemas.occupancy import OccupancyRead
+from app.services import inventory as inventory_service
 
 
 def to_occupancy_read(occupancy: Occupancy) -> OccupancyRead:
@@ -76,6 +77,7 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
         expected_end_date=_add_months(latest_terms.start_date, latest_terms.term_months),
     )
     db.add(occupancy)
+    inventory_service.mark_hold_occupied(db, source_type="offer", source_id=offer.id)
     db.commit()
     db.refresh(occupancy)
 
@@ -151,11 +153,17 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
     return obligation
 
 
-def end_occupancy(db: Session, occupancy: Occupancy, admin: AdminUser) -> Occupancy:
+def end_occupancy(db: Session, occupancy: Occupancy, admin: AdminUser, correlation_id: str = "") -> Occupancy:
     assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
     occupancy.status = "ENDED"
     occupancy.move_out_date = date.today()
     occupancy.ended_at = datetime.now(timezone.utc)
+    # Frees the room's Inventory Service hold -- a new tenant can now be
+    # held/booked for this same room (see services/inventory.py).
+    inventory_service.release_hold(
+        db, source_type="offer", source_id=occupancy.offer_id, reason="occupancy_ended",
+        correlation_id=correlation_id,
+    )
     db.commit()
     db.refresh(occupancy)
     return occupancy

@@ -21,6 +21,8 @@ from app.models.leasing import Agreement, Application, ApplicationDecision, Offe
 from app.models.listing import Listing
 from app.models.user_account import UserAccount
 from app.schemas.leasing import ApplicationCreate, ApplicationDecide, ApplicationRead, ApplicationUpdate, OfferTermsCreate
+from app.services import inventory as inventory_service
+from app.services.booking_expiry import compute_confirmation_deadline, expire_offer_if_overdue
 
 
 def to_application_read(application: Application) -> ApplicationRead:
@@ -178,10 +180,16 @@ def decide_application(db: Session, application: Application, admin: AdminUser, 
     return decision
 
 
-def get_offer_or_404(db: Session, offer_id: int) -> Offer:
+def get_offer_or_404(db: Session, offer_id: int, correlation_id: str = "") -> Offer:
     offer = db.get(Offer, offer_id)
     if not offer:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Offer not found")
+    # Lazy expiry (ZR-ENG-CLR-001 Rule 7): no scheduler exists in this stack,
+    # so every read of an offer is a checkpoint that self-heals a stale
+    # ACCEPTED-past-deadline offer to EXPIRED before anyone acts on it.
+    if expire_offer_if_overdue(db, offer, correlation_id=correlation_id):
+        db.commit()
+        db.refresh(offer)
     return offer
 
 
@@ -219,11 +227,52 @@ def add_offer_terms(db: Session, offer: Offer, admin: AdminUser, data: OfferTerm
     return terms
 
 
-def set_offer_status(db: Session, offer: Offer, admin: AdminUser, new_status: str) -> Offer:
+def _accept_offer_and_hold_room(db: Session, offer: Offer, new_status: str, correlation_id: str = "") -> None:
+    """ZR-ENG-CLR-001 Rule 4: the room is committed the moment its offer is
+    accepted -- the earliest point a renter has actually said yes, well
+    before an Agreement or Occupancy exists. Rule 7: also starts the
+    accepted-booking confirmation clock (default 24h,
+    settings.offer_acceptance_confirmation_hours) -- see
+    services/booking_expiry.py.
+
+    The status flip and the hold creation happen inside one SAVEPOINT
+    (db.begin_nested()) -- entering a SAVEPOINT flushes whatever was already
+    dirty into the *outer* transaction first, so both the status change and
+    the hold attempt must originate *inside* this block, not before it, or a
+    failed hold wouldn't actually undo the status flip. On a 409 here, the
+    offer is left exactly as it was (still SENT), never silently ACCEPTED
+    with no room actually held for it."""
+    room_id = offer.listing.room_id
+    with db.begin_nested():
+        offer.status = new_status
+        offer.accepted_at = datetime.now(timezone.utc)
+        offer.confirmation_expires_at = compute_confirmation_deadline(offer.accepted_at)
+        if room_id is not None:
+            inventory_service.create_hold(
+                db, room_id=room_id, source_type="offer", source_id=offer.id, correlation_id=correlation_id,
+            )
+
+
+def _release_room_hold_for_offer(db: Session, offer: Offer, reason: str, correlation_id: str = "") -> None:
+    inventory_service.release_hold(
+        db, source_type="offer", source_id=offer.id, reason=reason, correlation_id=correlation_id,
+    )
+
+
+def set_offer_status(
+    db: Session, offer: Offer, admin: AdminUser, new_status: str, correlation_id: str = "",
+) -> Offer:
     assert_provider_access(db, admin, party_id_for_listing(offer.listing))
     if new_status in ("ACCEPTED", "DECLINED"):
         _assert_renter_has_no_account(db, offer.guest_id, action="accept or decline this offer")
-    offer.status = new_status
+    if new_status == "ACCEPTED":
+        _accept_offer_and_hold_room(db, offer, new_status, correlation_id=correlation_id)
+    else:
+        offer.status = new_status
+        if new_status in ("DECLINED", "EXPIRED", "WITHDRAWN"):
+            _release_room_hold_for_offer(
+                db, offer, reason=f"offer_{new_status.lower()}", correlation_id=correlation_id,
+            )
     db.commit()
     db.refresh(offer)
     if new_status == "SENT":
@@ -263,24 +312,25 @@ def _guest_owns_offer(db: Session, user: UserAccount, offer: Offer) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This offer does not belong to you")
 
 
-def user_accept_offer(db: Session, user: UserAccount, offer: Offer) -> Offer:
+def user_accept_offer(db: Session, user: UserAccount, offer: Offer, correlation_id: str = "") -> Offer:
     """The renter accepting their own offer -- previously only an admin could
     do this on the renter's behalf, with no real consent captured from the
     renter's own session."""
     _guest_owns_offer(db, user, offer)
     if offer.status != "SENT":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a sent offer can be accepted")
-    offer.status = "ACCEPTED"
+    _accept_offer_and_hold_room(db, offer, "ACCEPTED", correlation_id=correlation_id)
     db.commit()
     db.refresh(offer)
     return offer
 
 
-def user_decline_offer(db: Session, user: UserAccount, offer: Offer) -> Offer:
+def user_decline_offer(db: Session, user: UserAccount, offer: Offer, correlation_id: str = "") -> Offer:
     _guest_owns_offer(db, user, offer)
     if offer.status != "SENT":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a sent offer can be declined")
     offer.status = "DECLINED"
+    _release_room_hold_for_offer(db, offer, reason="offer_declined", correlation_id=correlation_id)
     db.commit()
     db.refresh(offer)
     return offer
@@ -315,6 +365,7 @@ def create_agreement(db: Session, offer: Offer, admin: AdminUser) -> Agreement:
             agreement_id=agreement.id,
         )
     )
+    inventory_service.mark_hold_booked(db, source_type="offer", source_id=offer.id)
     db.commit()
     db.refresh(agreement)
     return agreement

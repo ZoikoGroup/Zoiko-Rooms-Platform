@@ -78,7 +78,7 @@ def approve_listing(
     """REVIEW -> APPROVED. Any admin/super admin may do this for any listing --
     review is an operational task, not scoped to "listings I personally own"."""
     listing = _get_or_404(db, listing_id)
-    updated = crud.approve_listing(db, listing)
+    updated = crud.approve_listing(db, listing, admin)
     log_audit_event(db, admin, "listing.approve", "listing", listing_id, get_correlation_id(request))
     db.commit()
     return updated
@@ -95,7 +95,7 @@ def publish_listing(
     this for any listing -- review is an operational task, not scoped to
     "listings I personally own"."""
     listing = _get_or_404(db, listing_id)
-    updated = crud.publish_listing(db, listing)
+    updated = crud.publish_listing(db, listing, admin)
     log_audit_event(db, admin, "listing.publish", "listing", listing_id, get_correlation_id(request))
     emit_event(db, "listing.published", "listing", listing_id, {"room_id": listing.room_id})
     db.commit()
@@ -113,7 +113,7 @@ def reject_listing(
     """Reject a listing pending review, with a required reason. Any admin/super
     admin may do this, same as publish."""
     listing = _get_or_404(db, listing_id)
-    updated = crud.reject_listing(db, listing, payload.reason)
+    updated = crud.reject_listing(db, listing, payload.reason, admin)
     log_audit_event(db, admin, "listing.reject", "listing", listing_id, get_correlation_id(request), reason=payload.reason)
     db.commit()
     return updated

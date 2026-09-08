@@ -10,6 +10,7 @@ from app.crud.events import emit_event
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
+from app.services.booking_expiry import sweep_expired_offers
 from app.schemas.leasing import (
     AgreementRead,
     AgreementSign,
@@ -110,8 +111,8 @@ def post_create_offer(
 
 
 @router.get("/offers/{offer_id}", response_model=OfferRead)
-def get_offer(offer_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    offer = crud.get_offer_or_404(db, offer_id)
+def get_offer(offer_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    offer = crud.get_offer_or_404(db, offer_id, correlation_id=get_correlation_id(request))
     assert_provider_access(db, admin, party_id_for_listing(offer.listing))
     return offer
 
@@ -124,9 +125,10 @@ def post_offer_terms(
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
-    offer = crud.get_offer_or_404(db, offer_id)
+    correlation_id = get_correlation_id(request)
+    offer = crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
     terms = crud.add_offer_terms(db, offer, admin, payload)
-    log_audit_event(db, admin, "offer.add_terms", "offer", str(offer_id), get_correlation_id(request))
+    log_audit_event(db, admin, "offer.add_terms", "offer", str(offer_id), correlation_id)
     emit_event(db, "offer.terms_added", "offer", str(offer_id), {"version": terms.version, "monthlyRent": float(terms.monthly_rent)})
     db.commit()
     return terms
@@ -134,35 +136,41 @@ def post_offer_terms(
 
 @router.post("/offers/{offer_id}/send", response_model=OfferRead)
 def post_send_offer(offer_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    offer = crud.get_offer_or_404(db, offer_id)
-    updated = crud.set_offer_status(db, offer, admin, "SENT")
-    log_audit_event(db, admin, "offer.send", "offer", str(offer_id), get_correlation_id(request))
+    correlation_id = get_correlation_id(request)
+    offer = crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
+    updated = crud.set_offer_status(db, offer, admin, "SENT", correlation_id=correlation_id)
+    log_audit_event(db, admin, "offer.send", "offer", str(offer_id), correlation_id)
     db.commit()
     return updated
 
 
 @router.post("/offers/{offer_id}/accept", response_model=OfferRead)
 def post_accept_offer(offer_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    offer = crud.get_offer_or_404(db, offer_id)
-    updated = crud.set_offer_status(db, offer, admin, "ACCEPTED")
-    log_audit_event(db, admin, "offer.accept", "offer", str(offer_id), get_correlation_id(request))
-    emit_event(db, "offer.accepted", "offer", str(offer_id), {})
+    correlation_id = get_correlation_id(request)
+    offer = crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
+    updated = crud.set_offer_status(db, offer, admin, "ACCEPTED", correlation_id=correlation_id)
+    log_audit_event(db, admin, "offer.accept", "offer", str(offer_id), correlation_id)
+    emit_event(
+        db, "offer.accepted", "offer", str(offer_id), {}, correlation_id=correlation_id,
+        idempotency_key=f"offer.accepted:{offer_id}",
+    )
     db.commit()
     return updated
 
 
 @router.post("/offers/{offer_id}/decline", response_model=OfferRead)
 def post_decline_offer(offer_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    offer = crud.get_offer_or_404(db, offer_id)
-    updated = crud.set_offer_status(db, offer, admin, "DECLINED")
-    log_audit_event(db, admin, "offer.decline", "offer", str(offer_id), get_correlation_id(request))
+    correlation_id = get_correlation_id(request)
+    offer = crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
+    updated = crud.set_offer_status(db, offer, admin, "DECLINED", correlation_id=correlation_id)
+    log_audit_event(db, admin, "offer.decline", "offer", str(offer_id), correlation_id)
     db.commit()
     return updated
 
 
 @router.get("/offers/{offer_id}/agreement-eligibility")
-def get_agreement_eligibility(offer_id: int, db: Session = Depends(get_db)):
-    offer = crud.get_offer_or_404(db, offer_id)
+def get_agreement_eligibility(offer_id: int, request: Request, db: Session = Depends(get_db)):
+    offer = crud.get_offer_or_404(db, offer_id, correlation_id=get_correlation_id(request))
     reasons = check_agreement_eligibility(db, offer)
     return {"eligible": not reasons, "reasons": reasons}
 
@@ -174,9 +182,10 @@ def post_create_agreement(
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
-    offer = crud.get_offer_or_404(db, offer_id)
+    correlation_id = get_correlation_id(request)
+    offer = crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
     agreement = crud.create_agreement(db, offer, admin)
-    log_audit_event(db, admin, "agreement.create", "agreement", str(agreement.id), get_correlation_id(request))
+    log_audit_event(db, admin, "agreement.create", "agreement", str(agreement.id), correlation_id)
     emit_event(db, "agreement.created", "agreement", str(agreement.id), {"offerId": offer_id})
     db.commit()
     return agreement
@@ -230,3 +239,23 @@ def post_sign_agreement(
         emit_event(db, "agreement.signed", "agreement", str(agreement_id), {})
     db.commit()
     return updated
+
+
+@router.post("/offers/expire-overdue", dependencies=[Depends(require_super_admin)])
+def post_expire_overdue_offers(
+    request: Request, admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-001 Rule 7: manual substitute for a cron tick -- no
+    scheduler exists in this stack (same limitation as
+    list_occupancies_missing_upcoming_rent). Individual offers already
+    self-heal to EXPIRED lazily on read (get_offer_or_404); this bulk sweep
+    is for ops visibility and for a room to be freed even if nobody happens
+    to read that specific offer again."""
+    correlation_id = get_correlation_id(request)
+    expired = sweep_expired_offers(db, correlation_id=correlation_id)
+    log_audit_event(
+        db, admin, "offer.expire_overdue_sweep", "offer", "bulk", correlation_id,
+        reason=f"expired {len(expired)} offer(s)",
+    )
+    db.commit()
+    return {"expiredCount": len(expired), "expiredOfferIds": [o.id for o in expired]}

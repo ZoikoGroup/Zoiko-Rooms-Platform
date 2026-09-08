@@ -61,6 +61,14 @@ class Offer(Base):
     status: Mapped[str] = mapped_column(String(20), default="DRAFT")
     current_version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # ZR-ENG-CLR-001 Rule 7: set together the moment the offer becomes
+    # ACCEPTED (see crud/leasing.py:_accept_offer_and_hold_room). Both stay
+    # None for an offer that never reached ACCEPTED. The renter-facing
+    # countdown must read confirmation_expires_at directly, never derive it
+    # client-side from accepted_at + a hardcoded duration (10.1: "User-facing
+    # countdown must derive from the server-side expiry timestamp").
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmation_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     application: Mapped["Application"] = relationship(back_populates="offer")
     listing: Mapped["Listing"] = relationship()

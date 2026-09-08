@@ -219,11 +219,19 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
     if requested_total != _round2(payment.amount):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Allocations must sum to the full payment amount")
 
+    # Every other finance mutation (release_deposit, forfeit_deposit, run_payout,
+    # request_refund, decide_refund) scopes a non-super-admin to their own
+    # provider's records -- this one must too, or a regular admin could confirm
+    # a payment against any other provider's obligation.
+    owned_ids = None if admin.role == "super_admin" else _owned_obligation_ids(db, admin)
+
     obligations = []
     for allocation in data.allocations:
         obligation = db.get(Obligation, allocation.obligation_id)
         if not obligation:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Obligation {allocation.obligation_id} not found")
+        if owned_ids is not None and obligation.id not in owned_ids:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
         db.add(PaymentAllocation(payment_id=payment.id, obligation_id=obligation.id, amount_allocated=allocation.amount))
         obligations.append(obligation)
 

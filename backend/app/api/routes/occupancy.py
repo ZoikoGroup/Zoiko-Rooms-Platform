@@ -76,8 +76,9 @@ def post_end_occupancy(
     db: Session = Depends(get_db),
 ):
     occupancy = crud.get_occupancy_or_404(db, occupancy_id)
-    updated = crud.end_occupancy(db, occupancy, admin)
-    log_audit_event(db, admin, "occupancy.end", "occupancy", str(occupancy_id), get_correlation_id(request))
+    correlation_id = get_correlation_id(request)
+    updated = crud.end_occupancy(db, occupancy, admin, correlation_id=correlation_id)
+    log_audit_event(db, admin, "occupancy.end", "occupancy", str(occupancy_id), correlation_id)
     emit_event(db, "occupancy.ended", "occupancy", str(occupancy_id), {})
     db.commit()
     return crud.to_occupancy_read(updated)

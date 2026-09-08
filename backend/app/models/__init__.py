@@ -18,6 +18,8 @@ from app.models.finance import (
 from app.models.guest import Guest
 from app.models.leasing import Agreement, Application, ApplicationDecision, Offer, OfferTerms
 from app.models.listing import Listing
+from app.models.listing_version import ListingVersion
+from app.models.listing_approval import ListingApproval
 from app.models.market_release import MarketRelease
 from app.models.membership import Membership
 from app.models.occupancy import Occupancy
@@ -27,6 +29,7 @@ from app.models.payment import Payment
 from app.models.property import Property
 from app.models.review import Review
 from app.models.room import Room
+from app.models.room_hold import RoomHold
 from app.models.room_passport import RoomPassportClaim, RoomPassportSnapshot
 from app.models.identity_verification import IdentityVerification
 from app.models.password_reset_token import PasswordResetToken
@@ -44,6 +47,8 @@ __all__ = [
     "UserAccount",
     "SubletRequest",
     "Listing",
+    "ListingVersion",
+    "ListingApproval",
     "Guest",
     "Booking",
     "Payment",
@@ -53,6 +58,7 @@ __all__ = [
     "MarketRelease",
     "Property",
     "Room",
+    "RoomHold",
     "AuthorityRecord",
     "RoomPassportClaim",
     "RoomPassportSnapshot",

@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     chat_rate_limit_max: int = 20
     chat_rate_limit_window_seconds: int = 60
 
+    # ZR-ENG-CLR-001 Rule 7 / policy key booking.acceptance_hold_duration:
+    # once an offer is accepted, the room is held (see services/inventory.py)
+    # but the renter must reach a confirmed move-in within this window or the
+    # offer expires and the hold is released. Spec default is 24h.
+    offer_acceptance_confirmation_hours: int = 24
+
     @property
     def is_production(self) -> bool:
         return self.environment.strip().lower() == "production"

@@ -23,6 +23,7 @@ from app.db.session import get_db
 from app.models.leasing import Application
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
+from app.services.booking_expiry import expire_offer_if_overdue
 from app.models.user_account import UserAccount
 from app.schemas.leasing import (
     AgreementRead,
@@ -254,6 +255,7 @@ def withdraw_application(
 @router.get("/applications/{application_id}/offer", response_model=OfferRead)
 def get_own_offer(
     application_id: int,
+    request: Request,
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -268,7 +270,11 @@ def get_own_offer(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own applications")
     if not application.offer:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No offer has been made for this application yet")
-    return application.offer
+    offer = application.offer
+    if expire_offer_if_overdue(db, offer, correlation_id=get_correlation_id(request)):
+        db.commit()
+        db.refresh(offer)
+    return offer
 
 
 @router.post("/offers/{offer_id}/accept", response_model=OfferRead)
@@ -278,10 +284,14 @@ def accept_own_offer(
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    offer = leasing_crud.get_offer_or_404(db, offer_id)
-    updated = leasing_crud.user_accept_offer(db, user, offer)
-    log_audit_event(db, None, "user_offer.accept", "offer", str(offer_id), get_correlation_id(request), reason=f"user:{user.id}")
-    emit_event(db, "offer.accepted", "offer", str(offer_id), {})
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
+    updated = leasing_crud.user_accept_offer(db, user, offer, correlation_id=correlation_id)
+    log_audit_event(db, None, "user_offer.accept", "offer", str(offer_id), correlation_id, reason=f"user:{user.id}")
+    emit_event(
+        db, "offer.accepted", "offer", str(offer_id), {}, correlation_id=correlation_id,
+        idempotency_key=f"offer.accepted:{offer_id}",
+    )
     db.commit()
     return updated
 
@@ -293,9 +303,10 @@ def decline_own_offer(
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    offer = leasing_crud.get_offer_or_404(db, offer_id)
-    updated = leasing_crud.user_decline_offer(db, user, offer)
-    log_audit_event(db, None, "user_offer.decline", "offer", str(offer_id), get_correlation_id(request), reason=f"user:{user.id}")
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
+    updated = leasing_crud.user_decline_offer(db, user, offer, correlation_id=correlation_id)
+    log_audit_event(db, None, "user_offer.decline", "offer", str(offer_id), correlation_id, reason=f"user:{user.id}")
     db.commit()
     return updated
 

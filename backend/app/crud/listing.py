@@ -6,17 +6,20 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.mailer import send_listing_published_email, send_listing_rejected_email
 from app.crud import notification as notification_crud
-from app.crud.authority import get_valid_authority_for_room
 from app.crud.ids import new_id, slugify
 from app.crud.identity_verification import get_verified_identity_for_party
-from app.crud.occupancy_classification import get_classification_for_room
 from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
 from app.models.listing import Listing, MAX_LISTING_IMAGES, SUPPORTED_CURRENCIES
+from app.models.listing_approval import ListingApproval
+from app.models.listing_version import ListingVersion
 from app.models.market_release import MarketRelease
 from app.models.occupancy import Occupancy
 from app.models.room import Room
+from app.models.room_hold import RoomHold
 from app.schemas.listing import ListingCreate, ListingUpdate, PublicListingRead
+from app.services.eligibility import jurisdiction_gates_pass, listing_publication_eligible
+from app.services.listing_versioning import build_snapshot, classify_material_change, compute_content_hash
 
 
 def _occupied_room_ids(db: Session) -> set[int]:
@@ -31,10 +34,16 @@ def _occupied_room_ids(db: Session) -> set[int]:
     agreement committed this room to a specific renter (Occupancy is only
     created once the agreement is signed -- see models/occupancy.py), so a
     room isn't "free again" just because move-in hasn't physically happened
-    yet."""
-    return set(
-        db.scalars(select(Occupancy.room_id).where(Occupancy.status != "ENDED"))
-    )
+    yet.
+
+    ZR-ENG-CLR-001 Section 1, Rule 4: also excludes any room under an active
+    Inventory Service hold (app/services/inventory.py) -- a hold is created
+    the moment an offer is *accepted*, well before Occupancy exists, and a
+    second applicant must not be able to apply (or see the room as bookable)
+    while that hold is active."""
+    occupied = set(db.scalars(select(Occupancy.room_id).where(Occupancy.status != "ENDED")))
+    held = set(db.scalars(select(RoomHold.room_id).where(RoomHold.released_at.is_(None))))
+    return occupied | held
 
 
 def _canonical_location(db: Session, room_id: int | None) -> dict:
@@ -56,7 +65,7 @@ def is_listing_available(db: Session, listing: Listing) -> bool:
     """True only when the listing is published, its room (if any) is active,
     and that room has no active occupancy. Read-only -- never mutates
     Listing.state, which stays admin-approval-workflow-only."""
-    if listing.state != "PUBLISHED":
+    if listing_publication_eligible(listing):
         return False
     if listing.room_id is None:
         return True
@@ -109,6 +118,55 @@ def _resolve_market_release_id_for_room(db: Session, room_id: int | None) -> int
     jurisdiction = room.property.owner_party.jurisdiction
     release = db.scalar(select(MarketRelease).where(MarketRelease.jurisdiction == jurisdiction))
     return release.id if release else None
+
+
+def _create_new_version(db: Session, listing: Listing) -> ListingVersion:
+    """ZR-ENG-CLR-001 Rule 3: every content edit creates a new immutable
+    ListingVersion, classified material vs non-material against whichever
+    version was most recently reviewed (current_public_version, falling back
+    to current_draft_version for a listing that's never been published yet).
+    A non-material change on an already-published listing can replace the
+    public snapshot immediately (no re-review); a material change only ever
+    updates current_draft_version_id -- current_public_version_id is
+    untouched until an explicit approval (see approve_listing)."""
+    reference_version = listing.current_public_version or listing.current_draft_version
+    previous_snapshot = reference_version.snapshot if reference_version else None
+    current_snapshot = build_snapshot(listing)
+    flags, is_material = classify_material_change(previous_snapshot, current_snapshot)
+
+    last_version_no = db.scalar(
+        select(func.max(ListingVersion.version_no)).where(ListingVersion.listing_id == listing.id)
+    ) or 0
+
+    version = ListingVersion(
+        listing_id=listing.id,
+        version_no=last_version_no + 1,
+        snapshot=current_snapshot,
+        content_hash=compute_content_hash(current_snapshot),
+        material_change_flags=flags,
+        is_material=is_material,
+        approval_status="DRAFT",
+    )
+    db.add(version)
+    db.flush()
+
+    listing.current_draft_version_id = version.id
+    if not is_material and listing.current_public_version_id is not None:
+        # Non-material change on an already-published listing: promote
+        # immediately, no review needed (spec 6.2). Recorded as its own
+        # auto-approval decision, not silently skipped, so the approval
+        # history stays a complete record of every promotion to public.
+        version.approval_status = "APPROVED"
+        version.approved_at = datetime.now(timezone.utc)
+        db.add(ListingApproval(
+            listing_version_id=version.id,
+            decision="APPROVED",
+            decision_reason_code="non_material_auto_promote",
+            reviewer_authority_scope="system",
+        ))
+        listing.current_public_version_id = version.id
+    db.flush()
+    return version
 
 
 def list_listings_for(db: Session, admin: AdminUser) -> list[Listing]:
@@ -189,31 +247,45 @@ def get_listing(db: Session, listing_id: str) -> Listing | None:
 
 
 def to_public_listing_read(listing: Listing) -> PublicListingRead:
+    """ZR-ENG-CLR-001 Rule 3 (AC-03): public content is served from the
+    immutable current_public_version snapshot, never the live Listing row --
+    a pending draft edit (approved or not) can never change what's already
+    public until it's explicitly approved and promoted (see approve_listing/
+    _create_new_version). Falls back to the live row only for a listing with
+    no version yet at all (shouldn't happen for anything actually PUBLISHED,
+    but keeps this function safe to call regardless)."""
+    snapshot = listing.current_public_version.snapshot if listing.current_public_version_id else None
+
+    def field(name: str):
+        if snapshot is not None and name in snapshot:
+            return snapshot[name]
+        return getattr(listing, name)
+
     return PublicListingRead(
         id=listing.id,
         slug=listing.slug,
-        name=listing.name,
-        property_type=listing.property_type,
-        room_type=listing.room_type,
-        city=listing.city,
-        location=listing.location,
-        latitude=listing.latitude,
-        longitude=listing.longitude,
-        price_per_night=listing.price_per_night,
-        currency=listing.currency,
+        name=field("name"),
+        property_type=field("property_type"),
+        room_type=field("room_type"),
+        city=field("city"),
+        location=field("location"),
+        latitude=field("latitude"),
+        longitude=field("longitude"),
+        price_per_night=field("price_per_night"),
+        currency=field("currency"),
         rating=listing.rating,
         review_count=listing.review_count,
-        guests=listing.guests,
-        bedrooms=listing.bedrooms,
-        bathrooms=listing.bathrooms,
-        size=listing.size,
-        images=listing.images,
-        amenities=listing.amenities,
-        tags=listing.tags,
-        description=listing.description,
-        featured=listing.featured,
-        room_id=listing.room_id,
-        min_stay_nights=listing.min_stay_nights,
+        guests=field("guests"),
+        bedrooms=field("bedrooms"),
+        bathrooms=field("bathrooms"),
+        size=field("size"),
+        images=field("images"),
+        amenities=field("amenities"),
+        tags=field("tags"),
+        description=field("description"),
+        featured=field("featured"),
+        room_id=field("room_id"),
+        min_stay_nights=field("min_stay_nights"),
         owner_name=listing.contact_name or (listing.owner.full_name if listing.owner else "Host"),
     )
 
@@ -239,6 +311,9 @@ def create_listing(db: Session, data: ListingCreate, owner: AdminUser) -> Listin
     db.add(listing)
     db.commit()
     db.refresh(listing)
+    _create_new_version(db, listing)
+    db.commit()
+    db.refresh(listing)
     return listing
 
 
@@ -261,6 +336,9 @@ def create_listing_for_party(db: Session, data: ListingCreate, party_id: int) ->
         **payload,
     )
     db.add(listing)
+    db.commit()
+    db.refresh(listing)
+    _create_new_version(db, listing)
     db.commit()
     db.refresh(listing)
     return listing
@@ -299,6 +377,9 @@ def update_listing(db: Session, listing: Listing, data: ListingUpdate) -> Listin
         listing.market_release_id = _resolve_market_release_id_for_room(db, listing.room_id)
         for field, value in _canonical_location(db, listing.room_id).items():
             setattr(listing, field, value)
+    db.commit()
+    db.refresh(listing)
+    _create_new_version(db, listing)
     db.commit()
     db.refresh(listing)
     return listing
@@ -371,18 +452,10 @@ def check_publish_eligibility(db: Session, listing: Listing) -> list[str]:
         reasons.append("Minimum stay must be at least 30 nights")
 
     market_release = db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
-    if not market_release or market_release.status != "active":
-        reasons.append("No active market release for this listing")
-    elif listing.min_stay_nights < market_release.min_stay_nights:
+    if market_release and market_release.status == "active" and listing.min_stay_nights < market_release.min_stay_nights:
         reasons.append(f"Minimum stay must be at least {market_release.min_stay_nights} nights for this market")
 
-    authority = get_valid_authority_for_room(db, listing.room_id)
-    if not authority:
-        reasons.append("No verified, unexpired authority record for this room")
-
-    classification = get_classification_for_room(db, listing.room_id)
-    if not classification or classification.review_state in ("UNKNOWN", "UNSUPPORTED"):
-        reasons.append("Occupancy classification is missing or unresolved")
+    reasons.extend(jurisdiction_gates_pass(db, listing.room, market_release))
 
     provider_party_id = listing.room.property.owner_party_id
     identity = get_verified_identity_for_party(db, provider_party_id)
@@ -406,6 +479,20 @@ def submit_listing_for_review(db: Session, listing: Listing) -> Listing:
     db.commit()
     db.refresh(listing)
 
+    # Safety net only for a listing with no version at all yet (created before
+    # versioning existed) -- everything else (a version already sitting in
+    # DRAFT from update_listing, or already auto-promoted to APPROVED because
+    # the last edit was non-material) is left as-is; submit_listing_for_review
+    # moves the *listing's* operational state, it doesn't itself invent content
+    # to review.
+    if listing.current_draft_version is None:
+        _create_new_version(db, listing)
+    if listing.current_draft_version.approval_status == "DRAFT":
+        listing.current_draft_version.approval_status = "UNDER_REVIEW"
+        listing.current_draft_version.submitted_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(listing)
+
     notification_crud.notify_all_admins(
         db,
         title="Listing pending review",
@@ -417,33 +504,80 @@ def submit_listing_for_review(db: Session, listing: Listing) -> Listing:
     return listing
 
 
-def approve_listing(db: Session, listing: Listing) -> Listing:
+def _record_approval_decision(
+    db: Session, version: ListingVersion, decision: str, admin: AdminUser, reason_note: str = "",
+    decision_reason_code: str | None = None,
+) -> ListingApproval:
+    """ZR-ENG-CLR-001 Section 1, Rule 2: every APPROVED/REJECTED transition of a
+    ListingVersion is backed by a structured, attributable ListingApproval
+    record -- never a bare status flip. `version.approval_status` is the
+    current-state projection; the ListingApproval rows are the append-only
+    decision log behind it."""
+    approval = ListingApproval(
+        listing_version_id=version.id,
+        decision=decision,
+        decision_reason_code=decision_reason_code,
+        reason_note=reason_note,
+        reviewer_admin_id=admin.id,
+        reviewer_authority_scope=admin.role,
+    )
+    db.add(approval)
+    return approval
+
+
+def approve_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
     """Admin/super-admin only (enforced at the route level). REVIEW -> APPROVED.
     The approval decision is recorded independently of publish_listing -- an
     APPROVED listing that later gets paused stays approved, so re-publishing it
     never has to re-run (or re-pass) any compliance check. No notification is
     sent here; the USER-facing "approved and published" notification fires once,
     from publish_listing, which is how the review UI's combined "Approve &
-    Publish" action actually reaches the user (see PropertiesManager.tsx)."""
+    Publish" action actually reaches the user (see PropertiesManager.tsx).
+
+    ZR-ENG-CLR-001 Rule 2/3: this is also where the reviewed ListingVersion
+    itself is approved and promoted to current_public_version_id -- approving
+    the listing without also approving/promoting its pending version would
+    leave "APPROVED" state pointing at stale or no public content."""
     if listing.state != "REVIEW":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a listing pending review can be approved")
     listing.state = "APPROVED"
+
+    version = listing.current_draft_version
+    if version is not None and version.approval_status != "APPROVED":
+        version.approval_status = "APPROVED"
+        version.approved_at = datetime.now(timezone.utc)
+        _record_approval_decision(db, version, "APPROVED", admin)
+        listing.current_public_version_id = version.id
+
     db.commit()
     db.refresh(listing)
     return listing
 
 
-def publish_listing(db: Session, listing: Listing) -> Listing:
+def publish_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
     """Admin/super-admin only (enforced at the route level). check_publish_eligibility
     is informational -- it is deliberately NOT consulted here; the admin's decision
     to approve is the final authority, not an automated compliance gate. Works from
     any non-published state that has a room (DRAFT for an admin's own quick-publish,
     APPROVED for the normal review flow, PAUSED to resume a previously-approved
-    listing) -- none of these re-check authority/occupancy/identity."""
+    listing) -- none of these re-check authority/occupancy/identity.
+
+    ZR-ENG-CLR-001 AC-01: a listing MUST NOT become PUBLISHED without an
+    APPROVED, immutable current_public_version behind it. For the normal
+    review flow that's already true (approve_listing already promoted it);
+    this is what makes it true for the DRAFT quick-publish shortcut too --
+    the admin's publish action here IS the approval decision in that case."""
     if listing.room_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Listing must be linked to a room before it can be published")
     if listing.state == "PUBLISHED":
         return listing
+
+    version = listing.current_draft_version or _create_new_version(db, listing)
+    if version.approval_status != "APPROVED":
+        version.approval_status = "APPROVED"
+        version.approved_at = datetime.now(timezone.utc)
+        _record_approval_decision(db, version, "APPROVED", admin, decision_reason_code="publish_admin_decision")
+    listing.current_public_version_id = version.id
 
     listing.rejection_reason = ""
     listing.state = "PUBLISHED"
@@ -466,9 +600,13 @@ def publish_listing(db: Session, listing: Listing) -> Listing:
     return listing
 
 
-def reject_listing(db: Session, listing: Listing, reason: str) -> Listing:
+def reject_listing(db: Session, listing: Listing, reason: str, admin: AdminUser) -> Listing:
     """Admin/super-admin only (enforced at the route level). Only a listing that
-    was actually submitted for review can be rejected."""
+    was actually submitted for review can be rejected. Rejecting the listing
+    also rejects its pending draft version -- current_public_version_id is
+    left untouched, so any previously published content stays live exactly as
+    it was (a rejected resubmission never un-publishes an already-approved
+    version, per ZR-ENG-CLR-001 Rule 3)."""
     if listing.state != "REVIEW":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a listing pending review can be rejected")
     if not reason.strip():
@@ -476,6 +614,12 @@ def reject_listing(db: Session, listing: Listing, reason: str) -> Listing:
 
     listing.state = "REJECTED"
     listing.rejection_reason = reason.strip()
+
+    version = listing.current_draft_version
+    if version is not None and version.approval_status != "APPROVED":
+        version.approval_status = "REJECTED"
+        _record_approval_decision(db, version, "REJECTED", admin, reason_note=listing.rejection_reason)
+
     db.commit()
     db.refresh(listing)
 

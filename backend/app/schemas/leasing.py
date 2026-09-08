@@ -83,6 +83,11 @@ class OfferRead(CamelModel):
     status: str
     current_version: int
     created_at: datetime
+    # ZR-ENG-CLR-001 Rule 7 (10.1): a renter-facing countdown must derive
+    # from this server timestamp directly -- never compute it client-side
+    # from accepted_at plus a hardcoded duration.
+    accepted_at: datetime | None = None
+    confirmation_expires_at: datetime | None = None
     terms: list[OfferTermsRead] = []
     agreement: AgreementRead | None = None
 

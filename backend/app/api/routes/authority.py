@@ -12,6 +12,7 @@ from app.crud.authority import (
     verify_authority_record,
 )
 from app.crud.events import emit_event
+from app.crud.party import assert_provider_access, party_id_for_room
 from app.crud.property import get_room
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
@@ -34,6 +35,7 @@ def post_record(
     room = get_room(db, payload.room_id)
     if not room:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    assert_provider_access(db, admin, party_id_for_room(room))
     return submit_authority_record(db, admin, room, payload)
 
 

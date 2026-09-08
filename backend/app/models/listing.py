@@ -88,9 +88,32 @@ class Listing(Base):
     contact_phone: Mapped[str] = mapped_column(String(50), default="")
     contact_email: Mapped[str] = mapped_column(String(255), default="")
 
+    # ZR-ENG-CLR-001 Section 1, Rule 2/3: the Listing row is the mutable
+    # working record (host's own edits, operational state); it is never the
+    # source of truth for what's actually public. current_public_version_id
+    # points at the immutable ListingVersion snapshot the public read path
+    # serves -- a later draft edit changes current_draft_version_id only, and
+    # can never retroactively change what current_public_version_id already
+    # points at. Nullable: a brand-new listing has no version yet until its
+    # first draft is created.
+    # use_alter=True: these FKs and listing_versions.listing_id form a cycle
+    # between the two tables. Without it, drop/create-all ordering (and the
+    # migration's constraint, matching this) can't resolve which table to
+    # emit first.
+    current_draft_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("listing_versions.id", use_alter=True, name="fk_listings_current_draft_version_id"),
+        nullable=True,
+    )
+    current_public_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("listing_versions.id", use_alter=True, name="fk_listings_current_public_version_id"),
+        nullable=True,
+    )
+
     owner: Mapped["AdminUser"] = relationship(back_populates="listings")
     party: Mapped["Party"] = relationship(back_populates="listings")
     room: Mapped["Room"] = relationship(back_populates="listings")
     market_release: Mapped["MarketRelease"] = relationship(back_populates="listings")
     bookings: Mapped[list["Booking"]] = relationship(back_populates="listing")
     reviews: Mapped[list["Review"]] = relationship(back_populates="listing")
+    current_draft_version: Mapped["ListingVersion"] = relationship(foreign_keys=[current_draft_version_id])
+    current_public_version: Mapped["ListingVersion"] = relationship(foreign_keys=[current_public_version_id])
