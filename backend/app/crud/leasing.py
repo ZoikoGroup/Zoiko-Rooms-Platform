@@ -6,9 +6,10 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.crud.eligibility import check_agreement_eligibility, check_offer_eligibility
+from app.crud.guest import get_guest_for_user
 from app.crud.ids import dicebear_avatar, new_id
 from app.crud.listing import is_listing_available
 from app.crud import notification as notif_crud
@@ -18,6 +19,7 @@ from app.models.finance import OBLIGATION_TYPE_TO_PLANE, Obligation
 from app.models.guest import Guest
 from app.models.leasing import Agreement, Application, ApplicationDecision, Offer, OfferTerms
 from app.models.listing import Listing
+from app.models.user_account import UserAccount
 from app.schemas.leasing import ApplicationCreate, ApplicationDecide, ApplicationRead, ApplicationUpdate, OfferTermsCreate
 
 
@@ -93,7 +95,16 @@ def submit_application(db: Session, data: ApplicationCreate) -> Application:
 
 
 def list_applications_for(db: Session, admin: AdminUser) -> list[Application]:
-    query = select(Application).order_by(Application.submitted_at.desc())
+    query = (
+        select(Application)
+        .options(
+            joinedload(Application.listing),
+            joinedload(Application.guest),
+            selectinload(Application.decisions),
+            joinedload(Application.offer),
+        )
+        .order_by(Application.submitted_at.desc())
+    )
     if admin.role != "super_admin":
         query = query.join(Listing, Listing.id == Application.listing_id).where(Listing.owner_id == admin.id)
     return list(db.scalars(query))
@@ -210,7 +221,66 @@ def add_offer_terms(db: Session, offer: Offer, admin: AdminUser, data: OfferTerm
 
 def set_offer_status(db: Session, offer: Offer, admin: AdminUser, new_status: str) -> Offer:
     assert_provider_access(db, admin, party_id_for_listing(offer.listing))
+    if new_status in ("ACCEPTED", "DECLINED"):
+        _assert_renter_has_no_account(db, offer.guest_id, action="accept or decline this offer")
     offer.status = new_status
+    db.commit()
+    db.refresh(offer)
+    if new_status == "SENT":
+        _notify_offer_guest(db, offer, title="You have a new rental offer", notification_type="offer.sent")
+    return offer
+
+
+def _assert_renter_has_no_account(db: Session, guest_id: str, *, action: str) -> None:
+    """Accepting/declining an offer or signing as renter is admin-doable only
+    for a walk-in guest with no Zoiko login -- a renter with a real account
+    must take that action themselves (see user_accept_offer/user_decline_offer/
+    user_sign_agreement), so an admin can't silently supply consent for them."""
+    guest = db.get(Guest, guest_id)
+    if guest and guest.user_account_id is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"This renter has a Zoiko account and must {action} themselves.",
+        )
+
+
+def _notify_offer_guest(db: Session, offer: Offer, *, title: str, notification_type: str, message: str = "") -> None:
+    guest = db.get(Guest, offer.guest_id)
+    if not guest:
+        return
+    notif_crud.notify_user_by_guest(
+        db, guest,
+        title=title,
+        message=message or f"{title} for \"{offer.listing.name if offer.listing else 'your application'}\".",
+        notification_type=notification_type,
+        related_entity_type="offer", related_entity_id=str(offer.id),
+    )
+
+
+def _guest_owns_offer(db: Session, user: UserAccount, offer: Offer) -> None:
+    guest = get_guest_for_user(db, user)
+    if not guest or guest.id != offer.guest_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This offer does not belong to you")
+
+
+def user_accept_offer(db: Session, user: UserAccount, offer: Offer) -> Offer:
+    """The renter accepting their own offer -- previously only an admin could
+    do this on the renter's behalf, with no real consent captured from the
+    renter's own session."""
+    _guest_owns_offer(db, user, offer)
+    if offer.status != "SENT":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a sent offer can be accepted")
+    offer.status = "ACCEPTED"
+    db.commit()
+    db.refresh(offer)
+    return offer
+
+
+def user_decline_offer(db: Session, user: UserAccount, offer: Offer) -> Offer:
+    _guest_owns_offer(db, user, offer)
+    if offer.status != "SENT":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a sent offer can be declined")
+    offer.status = "DECLINED"
     db.commit()
     db.refresh(offer)
     return offer
@@ -262,16 +332,18 @@ def send_agreement(db: Session, agreement: Agreement, admin: AdminUser) -> Agree
     agreement.status = "SENT"
     db.commit()
     db.refresh(agreement)
+    _notify_offer_guest(
+        db, agreement.offer,
+        title="Your rental agreement is ready to sign",
+        notification_type="agreement.sent",
+    )
     return agreement
 
 
-def sign_agreement(db: Session, agreement: Agreement, as_party: str, admin: AdminUser) -> Agreement:
+def _apply_signature(db: Session, agreement: Agreement, as_party: str) -> Agreement:
     """Simulated e-signature -- no real DocuSign-style provider is connected. Records
     a signature token and timestamp per party; the agreement is SIGNED once both
-    sides have signed. The renter has no login of their own, so both signatures are
-    recorded by the managing provider's admin (or super_admin) attesting they were
-    collected -- the same ownership check as every other agreement action."""
-    assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
+    sides have signed."""
     if as_party not in ("provider", "renter"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "asParty must be 'provider' or 'renter'")
 
@@ -288,7 +360,38 @@ def sign_agreement(db: Session, agreement: Agreement, as_party: str, admin: Admi
 
     db.commit()
     db.refresh(agreement)
+    if agreement.status == "SIGNED":
+        _notify_offer_guest(
+            db, agreement.offer,
+            title="Your rental agreement is fully signed",
+            notification_type="agreement.signed",
+        )
     return agreement
+
+
+def sign_agreement(db: Session, agreement: Agreement, as_party: str, admin: AdminUser) -> Agreement:
+    """Admin-attested signature -- for a renter who has no Zoiko login of their
+    own (a walk-in guest the provider is onboarding manually), the admin
+    records that a signature was collected out of band. A renter with a real
+    account can't be signed for this way -- enforced below, not just documented
+    -- they must sign themselves via user_sign_agreement instead."""
+    assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
+    if as_party == "renter":
+        _assert_renter_has_no_account(db, agreement.offer.guest_id, action="sign this agreement")
+    return _apply_signature(db, agreement, as_party)
+
+
+def user_sign_agreement(db: Session, user: UserAccount, agreement: Agreement) -> Agreement:
+    """The renter signing their own agreement from their own session, instead
+    of an admin attesting the signature on their behalf."""
+    guest = get_guest_for_user(db, user)
+    if not guest or guest.id != agreement.offer.guest_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This agreement does not belong to you")
+    if agreement.status not in ("SENT",):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a sent agreement can be signed")
+    if agreement.signed_by_renter_at:
+        raise HTTPException(status.HTTP_409_CONFLICT, "You have already signed this agreement")
+    return _apply_signature(db, agreement, "renter")
 
 
 def generate_agreement_pdf(agreement: Agreement) -> bytes:

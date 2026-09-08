@@ -1,4 +1,5 @@
 import { OccupancyManager } from "@/components/admin/OccupancyManager";
+import { SubletRequestsManager } from "@/components/admin/SubletRequestsManager";
 
 export default function AdminOccupancyPage() {
   return (
@@ -10,6 +11,7 @@ export default function AdminOccupancyPage() {
         </p>
       </div>
       <OccupancyManager />
+      <SubletRequestsManager />
     </div>
   );
 }

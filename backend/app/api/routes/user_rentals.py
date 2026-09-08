@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -17,16 +18,27 @@ from app.crud.eligibility import check_offer_eligibility
 from app.crud.guest import get_guest_for_user, get_or_create_guest_for_user
 from app.crud.identity_verification import get_verified_identity_for_party
 from app.crud import notification as notif_crud
-from app.crud.user import get_user_by_party_id
+from app.crud.user import get_user_by_email, get_user_by_party_id
 from app.db.session import get_db
 from app.models.leasing import Application
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.user_account import UserAccount
-from app.schemas.leasing import UserApplicationRead, UserApplicationSubmitRequest, UserOccupancyRead, SubletRequestCreate, SubletRequestRead
+from app.schemas.leasing import (
+    AgreementRead,
+    OfferRead,
+    SubletRenterLookup,
+    SubletRequestCreate,
+    SubletRequestRead,
+    UserApplicationRead,
+    UserApplicationSubmitRequest,
+    UserOccupancyRead,
+)
 from app.schemas.review import ReviewCreate, ReviewRead
 
 router = APIRouter(prefix="/api/users/rentals", tags=["user-rentals"], dependencies=[Depends(get_current_user)])
+
+logger = logging.getLogger("zoiko.user_rentals")
 
 
 def _property_and_host(db: Session, listing: Listing | None) -> tuple[str, str, str]:
@@ -43,9 +55,16 @@ def _property_and_host(db: Session, listing: Listing | None) -> tuple[str, str, 
 def _to_user_application_read(db: Session, application: Application) -> UserApplicationRead:
     """listing_name is looked up here (not stored on Application) so it always
     reflects the listing's current name; falls back to "" if the listing was
-    since deleted, which the frontend renders gracefully."""
+    since deleted, which the frontend renders gracefully.
+
+    offer_status/agreement_status are surfaced here too -- application.status
+    alone is stuck on "DECIDED" for the rest of the lifecycle, so without these
+    the applicant can't tell an approved-but-nothing-sent-yet application apart
+    from one whose agreement is fully signed."""
     listing = db.get(Listing, application.listing_id)
     property_address, property_city, host_name = _property_and_host(db, listing)
+    offer = application.offer
+    agreement = offer.agreement if offer else None
     return UserApplicationRead(
         id=application.id,
         listing_id=application.listing_id,
@@ -58,6 +77,10 @@ def _to_user_application_read(db: Session, application: Application) -> UserAppl
         desired_move_in=application.desired_move_in,
         submitted_at=application.submitted_at,
         updated_at=application.updated_at,
+        offer_id=offer.id if offer else None,
+        offer_status=offer.status if offer else None,
+        agreement_id=agreement.id if agreement else None,
+        agreement_status=agreement.status if agreement else None,
     )
 
 
@@ -136,8 +159,13 @@ def submit_rental_application(
         db.commit()
 
         return _to_user_application_read(db, application)
-    except Exception as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    except HTTPException:
+        # A deliberate, safe error from submit_application (e.g. 404/409) --
+        # pass it through unchanged instead of flattening it to a 400.
+        raise
+    except Exception:
+        logger.exception("rental application submission failed for user %s", user.id)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Could not submit your application. Please try again.")
 
 
 @router.get("/applications", response_model=list[UserApplicationRead])
@@ -223,6 +251,73 @@ def withdraw_application(
     return _to_user_application_read(db, application)
 
 
+@router.get("/applications/{application_id}/offer", response_model=OfferRead)
+def get_own_offer(
+    application_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Read-only view of the offer (and its terms/agreement) for one of the
+    user's own applications -- previously the applicant had no way to see
+    their own offer at all; every step was admin-only."""
+    application = db.get(Application, application_id)
+    if not application:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Application not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or application.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own applications")
+    if not application.offer:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No offer has been made for this application yet")
+    return application.offer
+
+
+@router.post("/offers/{offer_id}/accept", response_model=OfferRead)
+def accept_own_offer(
+    offer_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    offer = leasing_crud.get_offer_or_404(db, offer_id)
+    updated = leasing_crud.user_accept_offer(db, user, offer)
+    log_audit_event(db, None, "user_offer.accept", "offer", str(offer_id), get_correlation_id(request), reason=f"user:{user.id}")
+    emit_event(db, "offer.accepted", "offer", str(offer_id), {})
+    db.commit()
+    return updated
+
+
+@router.post("/offers/{offer_id}/decline", response_model=OfferRead)
+def decline_own_offer(
+    offer_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    offer = leasing_crud.get_offer_or_404(db, offer_id)
+    updated = leasing_crud.user_decline_offer(db, user, offer)
+    log_audit_event(db, None, "user_offer.decline", "offer", str(offer_id), get_correlation_id(request), reason=f"user:{user.id}")
+    db.commit()
+    return updated
+
+
+@router.post("/agreements/{agreement_id}/sign", response_model=AgreementRead)
+def sign_own_agreement(
+    agreement_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The renter signing their own agreement -- previously every signature,
+    including the renter's, was recorded by an admin attesting on their behalf."""
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id)
+    updated = leasing_crud.user_sign_agreement(db, user, agreement)
+    log_audit_event(db, None, "user_agreement.sign", "agreement", str(agreement_id), get_correlation_id(request), reason=f"user:{user.id}")
+    if updated.status == "SIGNED":
+        emit_event(db, "agreement.signed", "agreement", str(agreement_id), {})
+    db.commit()
+    return updated
+
+
 @router.get("/occupancies", response_model=list[UserOccupancyRead])
 def list_user_occupancies(
     user: UserAccount = Depends(get_current_user),
@@ -263,6 +358,24 @@ def get_occupancy_details(
     return _to_user_occupancy_read(db, occupancy)
 
 
+@router.get("/sublet-lookup", response_model=SubletRenterLookup)
+def lookup_sublet_renter(email: str, db: Session = Depends(get_db)):
+    """Resolve a proposed renter's email to a party for the sublet form, so the
+    current tenant never has to ask them for a raw party ID. Only the minimum
+    needed to confirm the right person was found is returned -- no other
+    profile detail."""
+    candidate = get_user_by_email(db, email.strip())
+    if not candidate or not candidate.party_id:
+        return SubletRenterLookup(found=False)
+    verified = get_verified_identity_for_party(db, candidate.party_id) is not None
+    return SubletRenterLookup(
+        found=True,
+        party_id=candidate.party_id,
+        name=candidate.full_name,
+        identity_verified=verified,
+    )
+
+
 @router.post("/occupancies/{occupancy_id}/sublet-request", response_model=SubletRequestRead, status_code=status.HTTP_201_CREATED)
 def submit_sublet_request(
     occupancy_id: int,
@@ -295,18 +408,7 @@ def submit_sublet_request(
     emit_event(db, "sublet_request.submitted", "sublet_request", str(sublet_request.id), {"occupancyId": occupancy_id})
     db.commit()
 
-    return SubletRequestRead(
-        id=sublet_request.id,
-        current_occupancy_id=sublet_request.current_occupancy_id,
-        proposed_renter_party_id=sublet_request.proposed_renter_party_id,
-        status=sublet_request.status,
-        authority_evidence_ref=sublet_request.authority_evidence_ref,
-        admin_decision=sublet_request.admin_decision,
-        admin_notes=sublet_request.admin_notes,
-        decided_by_admin_id=sublet_request.decided_by_admin_id,
-        created_at=sublet_request.created_at,
-        decided_at=sublet_request.decided_at,
-    )
+    return sublet_crud.to_sublet_request_read(db, sublet_request)
 
 
 @router.get("/sublet-requests", response_model=list[SubletRequestRead])
@@ -330,21 +432,7 @@ def list_user_sublet_requests(
         )
     )
 
-    return [
-        SubletRequestRead(
-            id=sr.id,
-            current_occupancy_id=sr.current_occupancy_id,
-            proposed_renter_party_id=sr.proposed_renter_party_id,
-            status=sr.status,
-            authority_evidence_ref=sr.authority_evidence_ref,
-            admin_decision=sr.admin_decision,
-            admin_notes=sr.admin_notes,
-            decided_by_admin_id=sr.decided_by_admin_id,
-            created_at=sr.created_at,
-            decided_at=sr.decided_at,
-        )
-        for sr in sublet_requests
-    ]
+    return [sublet_crud.to_sublet_request_read(db, sr) for sr in sublet_requests]
 
 
 @router.post("/reviews", response_model=ReviewRead, status_code=status.HTTP_201_CREATED)

@@ -23,7 +23,10 @@ export function UserSessionProvider({
   user: initialUser,
   children,
 }: {
-  user: UserProfile;
+  /** Pass null for a page that renders without a login (public browsing) --
+      identityVerified stays false and every identity-gated action degrades
+      gracefully rather than throwing. */
+  user: UserProfile | null;
   children: React.ReactNode;
 }) {
   const [user, setUser] = useState<UserProfile | null>(initialUser);

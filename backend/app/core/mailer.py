@@ -179,6 +179,37 @@ def send_listing_published_email(to_email: str, full_name: str, listing_name: st
     )
 
 
+def send_alert_confirmation_email(to_email: str, city: str, unsubscribe_url: str) -> None:
+    send_email(
+        to_email,
+        f"You'll be notified about new rooms in {city}",
+        heading="Alert saved",
+        body_lines=[
+            f"We'll email you at this address whenever a new room matching your criteria in {city} is published.",
+            "You can stop these emails at any time using the link below.",
+        ],
+        cta_label="Unsubscribe from this alert",
+        cta_url=unsubscribe_url,
+    )
+
+
+def send_alert_match_email(to_email: str, city: str, listing_names: list[str], unsubscribe_url: str) -> None:
+    names = ", ".join(listing_names)
+    send_email(
+        to_email,
+        f"New room{'s' if len(listing_names) != 1 else ''} published in {city}",
+        heading=f"New in {city}",
+        body_lines=[
+            f"The following room{'s' if len(listing_names) != 1 else ''} matching your alert "
+            f"{'were' if len(listing_names) != 1 else 'was'} just published: {names}.",
+            "Sign in to view details and apply.",
+            f"Unsubscribe from this alert: {unsubscribe_url}",
+        ],
+        cta_label="View rooms",
+        cta_url=f"{settings.frontend_url}/find-a-room?city={city}",
+    )
+
+
 def send_listing_rejected_email(to_email: str, full_name: str, listing_name: str, reason: str = "") -> None:
     body_lines = [
         f"Hi {full_name},",
