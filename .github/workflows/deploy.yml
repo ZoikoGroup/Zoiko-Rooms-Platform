@@ -28,6 +28,7 @@ jobs:
 
             cd /var/www/zoiko-rooms-platform/app
             git pull origin main
+            cd frontend
             npm install
             npm run build
             pm2 restart zoiko-rooms-platform

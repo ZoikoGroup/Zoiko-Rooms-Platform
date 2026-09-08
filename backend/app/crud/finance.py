@@ -21,6 +21,7 @@ from app.models.finance import (
     RefundRequest,
     SimulatedPayment,
 )
+from app.models.guest import Guest
 from app.models.leasing import Agreement, Offer
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
@@ -63,7 +64,7 @@ def get_amount_outstanding(obligation: Obligation) -> float:
 
 
 def to_obligation_read(obligation: Obligation) -> ObligationRead:
-    guest_id = obligation.agreement.offer.guest_id if obligation.agreement else obligation.occupancy.guest_id
+    guest_id = _obligation_guest_id(obligation)
     return ObligationRead(
         id=obligation.id,
         obligation_type=obligation.obligation_type,
@@ -78,6 +79,77 @@ def to_obligation_read(obligation: Obligation) -> ObligationRead:
         payout_id=obligation.payout_id,
         created_at=obligation.created_at,
     )
+
+
+def _obligation_guest_id(obligation: Obligation) -> str:
+    return obligation.agreement.offer.guest_id if obligation.agreement else obligation.occupancy.guest_id
+
+
+def list_obligations_for_guest(db: Session, guest: Guest) -> list[Obligation]:
+    """Every obligation a renter can see -- the initial rent+deposit
+    (agreement-linked, due *before* move-in even happens, since there's no
+    Occupancy row yet at that point) plus any later occupancy-linked
+    recurring rent. Same two-source shape as the admin-side
+    _owned_obligation_ids, scoped by the offer's guest_id instead of listing
+    ownership."""
+    via_agreement = db.scalars(
+        select(Obligation)
+        .join(Agreement, Agreement.id == Obligation.agreement_id)
+        .join(Offer, Offer.id == Agreement.offer_id)
+        .where(Offer.guest_id == guest.id)
+    )
+    via_occupancy = db.scalars(
+        select(Obligation).join(Occupancy, Occupancy.id == Obligation.occupancy_id).where(Occupancy.guest_id == guest.id)
+    )
+    combined: dict[int, Obligation] = {o.id: o for o in list(via_agreement) + list(via_occupancy)}
+    return sorted(combined.values(), key=lambda o: o.due_date)
+
+
+def pay_obligation_as_renter(db: Session, guest: Guest, obligation: Obligation) -> SimulatedPayment:
+    """Renter self-service full payment of one obligation. Simulated like the
+    rest of this finance system, so it confirms immediately instead of
+    depending on an admin -- unlike the admin confirm_payment path, this
+    deliberately skips auto-generating the next rent period (that needs an
+    acting AdminUser for its own ownership check); OccupancyManager's existing
+    "no upcoming rent obligation" alert is the fallback for an admin to
+    trigger that manually, same as any other payment gap."""
+    if _obligation_guest_id(obligation) != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only pay your own obligations")
+    if obligation.status not in ("PENDING", "PARTIALLY_PAID"):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This obligation is already {obligation.status.lower()}")
+
+    amount_due = get_amount_outstanding(obligation)
+    idempotency_key = f"renter-pay-obligation-{obligation.id}"
+    payment = db.scalar(select(SimulatedPayment).where(SimulatedPayment.idempotency_key == idempotency_key))
+    if payment and payment.status == "SUCCEEDED":
+        return payment
+    if not payment:
+        payment = SimulatedPayment(
+            guest_id=guest.id, amount=amount_due, currency=obligation.currency, idempotency_key=idempotency_key
+        )
+        db.add(payment)
+        db.flush()
+
+    db.add(PaymentAllocation(payment_id=payment.id, obligation_id=obligation.id, amount_allocated=amount_due))
+    db.flush()
+    db.refresh(obligation)
+    recompute_obligation_status(db, obligation)
+
+    if obligation.obligation_type == "DEPOSIT" and obligation.status == "PAID" and not obligation.deposit_record:
+        db.add(DepositRecord(obligation_id=obligation.id, held_amount=obligation.amount))
+
+    payment.status = "SUCCEEDED"
+    payment.confirmed_at = datetime.now(timezone.utc)
+    notif_crud.notify_user_by_guest(
+        db, guest,
+        title="Payment received",
+        message=f"Your payment of {payment.currency} {payment.amount:.2f} has been confirmed.",
+        notification_type="payment.confirmed",
+        related_entity_type="simulated_payment", related_entity_id=str(payment.id),
+    )
+    db.commit()
+    db.refresh(payment)
+    return payment
 
 
 def _owned_listing_ids(db: Session, admin: AdminUser):
@@ -160,9 +232,20 @@ def get_payment_or_404(db: Session, payment_id: int) -> SimulatedPayment:
 
 def create_payment_intent(db: Session, data: SimulatedPaymentCreate) -> SimulatedPayment:
     """Get-or-create by idempotency key -- a retried request never creates a second
-    payment intent."""
+    payment intent. A reused key must describe the *same* request (guest/amount/
+    currency) -- otherwise it's a key collision between two different requests,
+    not a retry, and returning the old payment would silently discard the new one."""
     existing = db.scalar(select(SimulatedPayment).where(SimulatedPayment.idempotency_key == data.idempotency_key))
     if existing:
+        if (
+            existing.guest_id != data.guest_id
+            or _round2(existing.amount) != _round2(data.amount)
+            or existing.currency != data.currency
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This idempotency key was already used for a different payment request",
+            )
         return existing
 
     payment = SimulatedPayment(
@@ -354,6 +437,8 @@ def request_refund(db: Session, data: RefundRequestCreate, admin: AdminUser) -> 
     obligation = db.get(Obligation, data.obligation_id)
     if not payment or not obligation:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment or obligation not found")
+    if admin.role != "super_admin" and obligation.id not in _owned_obligation_ids(db, admin):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
 
     refund = RefundRequest(
         payment_id=data.payment_id,
@@ -372,6 +457,8 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
     """Approving is completing -- there's no separate money-movement step in a
     simulated system. Completing a refund creates a reversing PaymentAllocation and
     recomputes the obligation's status, so the refund actually affects the ledger."""
+    if admin.role != "super_admin" and refund.obligation_id not in _owned_obligation_ids(db, admin):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
     if refund.status != "REQUESTED":
         raise HTTPException(status.HTTP_409_CONFLICT, "Refund has already been decided")
 
@@ -416,7 +503,17 @@ def get_dispute_or_404(db: Session, dispute_id: int) -> DisputeCase:
     return dispute
 
 
+def _assert_owns_dispute_target(db: Session, admin: AdminUser, *, occupancy_id: int | None, payment_id: int | None) -> None:
+    if admin.role == "super_admin":
+        return
+    owns_occupancy = occupancy_id is not None and occupancy_id in set(db.scalars(_owned_occupancy_ids(db, admin)))
+    owns_payment = payment_id is not None and payment_id in _owned_payment_ids(db, admin)
+    if not (owns_occupancy or owns_payment):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
+
+
 def open_dispute(db: Session, data: DisputeCreate, admin: AdminUser) -> DisputeCase:
+    _assert_owns_dispute_target(db, admin, occupancy_id=data.occupancy_id, payment_id=data.payment_id)
     dispute = DisputeCase(
         payment_id=data.payment_id,
         occupancy_id=data.occupancy_id,
@@ -430,6 +527,7 @@ def open_dispute(db: Session, data: DisputeCreate, admin: AdminUser) -> DisputeC
 
 
 def resolve_dispute(db: Session, dispute: DisputeCase, admin: AdminUser, data: DisputeResolve) -> DisputeCase:
+    _assert_owns_dispute_target(db, admin, occupancy_id=dispute.occupancy_id, payment_id=dispute.payment_id)
     if data.status not in ("RESOLVED", "REJECTED"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "status must be RESOLVED or REJECTED")
 

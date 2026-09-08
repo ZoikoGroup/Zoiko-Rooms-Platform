@@ -33,6 +33,17 @@ def list_rooms_for_property(db: Session, property_id: int) -> list[Room]:
     return list(db.scalars(select(Room).where(Room.property_id == property_id).order_by(Room.id)))
 
 
+def list_rooms_for_properties(db: Session, property_ids: list[int]) -> list[Room]:
+    """Bulk variant of list_rooms_for_property -- one query for N properties'
+    rooms instead of N queries. RoomRead.property_id lets the caller bucket the
+    flat result client-side."""
+    if not property_ids:
+        return []
+    return list(
+        db.scalars(select(Room).where(Room.property_id.in_(property_ids)).order_by(Room.property_id, Room.id))
+    )
+
+
 def get_room(db: Session, room_id: int) -> Room | None:
     return db.get(Room, room_id)
 

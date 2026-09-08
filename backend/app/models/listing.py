@@ -1,4 +1,6 @@
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, UniqueConstraint
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,7 +52,9 @@ class Listing(Base):
     # Still Float, still just price_per_night's currency -- widening this to Numeric
     # and deriving it from market/jurisdiction are both separate, later tasks.
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="INR")
-    rating: Mapped[float] = mapped_column(Float, default=4.5)
+    # 0.0 with review_count=0 means "no real rating yet" -- never render this as a
+    # star score without checking review_count first (see crud/review.py).
+    rating: Mapped[float] = mapped_column(Float, default=0.0)
     review_count: Mapped[int] = mapped_column(Integer, default=0)
     guests: Mapped[int] = mapped_column(Integer, nullable=False)
     bedrooms: Mapped[int] = mapped_column(Integer, default=0)
@@ -72,6 +76,10 @@ class Listing(Base):
     market_release_id: Mapped[int | None] = mapped_column(ForeignKey("market_releases.id"), nullable=True)
     min_stay_nights: Mapped[int] = mapped_column(Integer, default=30)
     state: Mapped[str] = mapped_column(String(20), default="DRAFT")
+    # Set once, the first time a listing reaches PUBLISHED (see publish_listing) --
+    # never touched by a later pause/republish. Exists so alert-matching can ask
+    # "what's newly published since I last checked", not just "what's live now".
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Set by an admin/super admin when moving REVIEW -> REJECTED; cleared again on
     # resubmission. Empty for every other state.
     rejection_reason: Mapped[str] = mapped_column(String(1000), default="")

@@ -31,12 +31,16 @@ def get_admin_users(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=AdminUserRead, status_code=status.HTTP_201_CREATED)
-def post_admin_user(payload: AdminUserCreate, db: Session = Depends(get_db)):
+def post_admin_user(
+    payload: AdminUserCreate,
+    acting_admin: AdminUser = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
     if get_admin_by_email(db, payload.email):
         raise HTTPException(status.HTTP_409_CONFLICT, "An admin with this email already exists")
     if payload.role not in ("admin", "super_admin"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Role must be 'admin' or 'super_admin'")
-    return create_admin_user(db, payload)
+    return create_admin_user(db, payload, acting_admin)
 
 
 @router.put("/{admin_id}", response_model=AdminUserRead)

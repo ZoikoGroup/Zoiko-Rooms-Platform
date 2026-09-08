@@ -28,6 +28,8 @@ class Occupancy(Base):
     move_in_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     expected_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     move_out_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    requested_move_out_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    move_out_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

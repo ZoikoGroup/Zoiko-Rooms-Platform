@@ -1,11 +1,11 @@
 from datetime import datetime
 
-from app.schemas.common import CamelModel
+from app.schemas.common import CamelModel, NewPassword
 
 
 class AdminUserCreate(CamelModel):
     email: str
-    password: str
+    password: NewPassword
     full_name: str = "New Admin"
     phone: str = ""
     role: str = "admin"

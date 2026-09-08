@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import HTTPException, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
@@ -227,7 +229,7 @@ def create_listing(db: Session, data: ListingCreate, owner: AdminUser) -> Listin
     listing = Listing(
         id=new_id("L"),
         slug=slugify(data.name),
-        rating=4.5,
+        rating=0.0,
         review_count=0,
         owner_id=owner.id,
         state="DRAFT",
@@ -253,7 +255,7 @@ def create_listing_for_party(db: Session, data: ListingCreate, party_id: int) ->
     payload = data.model_dump()
     payload.update(_canonical_location(db, data.room_id))
     listing = Listing(
-        id=new_id("L"), slug=slugify(data.name), rating=4.5, review_count=0,
+        id=new_id("L"), slug=slugify(data.name), rating=0.0, review_count=0,
         owner_id=None, party_id=party_id, state="DRAFT",
         market_release_id=_resolve_market_release_id_for_room(db, data.room_id),
         **payload,
@@ -368,7 +370,18 @@ def check_publish_eligibility(db: Session, listing: Listing) -> list[str]:
     if listing.min_stay_nights < 30:
         reasons.append("Minimum stay must be at least 30 nights")
 
+    # listing.market_release_id is resolved once at listing-creation time, so a
+    # listing created before its jurisdiction's Market Release existed is stuck
+    # with a stale/null value forever -- fall back to a live lookup by the room's
+    # jurisdiction so this signal doesn't misreport an already-active market.
     market_release = db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
+    if not market_release or market_release.status != "active":
+        market_release = db.scalar(
+            select(MarketRelease).where(
+                MarketRelease.jurisdiction == listing.room.property.owner_party.jurisdiction,
+                MarketRelease.status == "active",
+            )
+        )
     if not market_release or market_release.status != "active":
         reasons.append("No active market release for this listing")
     elif listing.min_stay_nights < market_release.min_stay_nights:
@@ -445,6 +458,8 @@ def publish_listing(db: Session, listing: Listing) -> Listing:
 
     listing.rejection_reason = ""
     listing.state = "PUBLISHED"
+    if listing.published_at is None:
+        listing.published_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(listing)
 

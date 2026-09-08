@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,7 +23,16 @@ from app.models.leasing import Application
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.user_account import UserAccount
-from app.schemas.leasing import UserApplicationRead, UserApplicationSubmitRequest, UserOccupancyRead, SubletRequestCreate, SubletRequestRead
+from app.schemas.leasing import (
+    AgreementRead,
+    OfferRead,
+    RequestMoveOut,
+    SubletRequestCreate,
+    SubletRequestRead,
+    UserApplicationRead,
+    UserApplicationSubmitRequest,
+    UserOccupancyRead,
+)
 from app.schemas.review import ReviewCreate, ReviewRead
 
 router = APIRouter(prefix="/api/users/rentals", tags=["user-rentals"], dependencies=[Depends(get_current_user)])
@@ -46,6 +55,7 @@ def _to_user_application_read(db: Session, application: Application) -> UserAppl
     since deleted, which the frontend renders gracefully."""
     listing = db.get(Listing, application.listing_id)
     property_address, property_city, host_name = _property_and_host(db, listing)
+    latest_decision = max(application.decisions, key=lambda d: d.decided_at, default=None)
     return UserApplicationRead(
         id=application.id,
         listing_id=application.listing_id,
@@ -54,6 +64,7 @@ def _to_user_application_read(db: Session, application: Application) -> UserAppl
         property_city=property_city,
         host_name=host_name,
         status=application.status,
+        decision=latest_decision.decision if latest_decision else None,
         message=application.message,
         desired_move_in=application.desired_move_in,
         submitted_at=application.submitted_at,
@@ -76,6 +87,8 @@ def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyR
         move_in_date=occupancy.move_in_date,
         expected_end_date=occupancy.expected_end_date,
         move_out_date=occupancy.move_out_date,
+        requested_move_out_date=occupancy.requested_move_out_date,
+        move_out_requested_at=occupancy.move_out_requested_at,
         created_at=occupancy.created_at,
         ended_at=occupancy.ended_at,
     )
@@ -223,6 +236,106 @@ def withdraw_application(
     return _to_user_application_read(db, application)
 
 
+@router.get("/applications/{application_id}/agreement", response_model=AgreementRead | None)
+def get_application_agreement(
+    application_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Renter's own view of the agreement tied to their application, once the
+    offer has progressed to an Agreement -- None until then."""
+    application = db.get(Application, application_id)
+    if not application:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Application not found")
+
+    guest = get_guest_for_user(db, user)
+    if not guest or application.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own application's agreement")
+
+    if not application.offer:
+        return None
+    return application.offer.agreement
+
+
+@router.get("/applications/{application_id}/offer", response_model=OfferRead | None)
+def get_application_offer(
+    application_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Renter's own view of the negotiated offer -- rent, deposit, lease term,
+    start date -- so they can actually see what they're agreeing to before (and
+    while) signing, instead of the agreement's bare sign/status state alone."""
+    application = db.get(Application, application_id)
+    if not application:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Application not found")
+
+    guest = get_guest_for_user(db, user)
+    if not guest or application.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own application's offer")
+
+    return application.offer
+
+
+@router.get("/applications/{application_id}/agreement/pdf")
+def download_application_agreement_pdf(
+    application_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Renter's own copy of the agreement PDF -- same generator the admin side
+    uses, ownership-checked via the renter's own guest_id."""
+    application = db.get(Application, application_id)
+    if not application:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Application not found")
+
+    guest = get_guest_for_user(db, user)
+    if not guest or application.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only download your own agreement")
+
+    if not application.offer or not application.offer.agreement:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No agreement to download yet")
+
+    pdf_bytes = leasing_crud.generate_agreement_pdf(application.offer.agreement)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="agreement-{application.offer.agreement.id}.pdf"'},
+    )
+
+
+@router.post("/applications/{application_id}/agreement/sign", response_model=AgreementRead)
+def sign_application_agreement(
+    application_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Renter's own simulated e-signature on their agreement -- same mechanics
+    as the admin-attested signature (leasing_crud.sign_agreement), but
+    self-authorized by the renter owning the application/offer/guest chain."""
+    application = db.get(Application, application_id)
+    if not application:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Application not found")
+
+    guest = get_guest_for_user(db, user)
+    if not guest or application.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only sign your own agreement")
+
+    if not application.offer or not application.offer.agreement:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No agreement to sign yet")
+
+    agreement = leasing_crud.sign_agreement_as_renter(db, application.offer.agreement, guest)
+    log_audit_event(
+        db, None, "user_agreement.sign", "agreement", str(agreement.id), get_correlation_id(request), reason=f"user:{user.id}"
+    )
+    if agreement.status == "SIGNED":
+        emit_event(db, "agreement.signed", "agreement", str(agreement.id), {})
+    db.commit()
+
+    return agreement
+
+
 @router.get("/occupancies", response_model=list[UserOccupancyRead])
 def list_user_occupancies(
     user: UserAccount = Depends(get_current_user),
@@ -263,6 +376,35 @@ def get_occupancy_details(
     return _to_user_occupancy_read(db, occupancy)
 
 
+@router.post("/occupancies/{occupancy_id}/request-move-out", response_model=UserOccupancyRead)
+def request_occupancy_move_out(
+    occupancy_id: int,
+    payload: RequestMoveOut,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Renter's own notice of intent to vacate -- previously there was no
+    self-service way to signal this at all; ending the occupancy itself stays
+    an admin action (deposit inspection/release happens through Finance)."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only request move-out for your own occupancy")
+
+    updated = occupancy_crud.request_move_out(db, occupancy, payload.desired_move_out_date)
+    log_audit_event(
+        db, None, "user_occupancy.request_move_out", "occupancy", str(occupancy_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    db.commit()
+
+    return _to_user_occupancy_read(db, updated)
+
+
 @router.post("/occupancies/{occupancy_id}/sublet-request", response_model=SubletRequestRead, status_code=status.HTTP_201_CREATED)
 def submit_sublet_request(
     occupancy_id: int,
@@ -295,18 +437,7 @@ def submit_sublet_request(
     emit_event(db, "sublet_request.submitted", "sublet_request", str(sublet_request.id), {"occupancyId": occupancy_id})
     db.commit()
 
-    return SubletRequestRead(
-        id=sublet_request.id,
-        current_occupancy_id=sublet_request.current_occupancy_id,
-        proposed_renter_party_id=sublet_request.proposed_renter_party_id,
-        status=sublet_request.status,
-        authority_evidence_ref=sublet_request.authority_evidence_ref,
-        admin_decision=sublet_request.admin_decision,
-        admin_notes=sublet_request.admin_notes,
-        decided_by_admin_id=sublet_request.decided_by_admin_id,
-        created_at=sublet_request.created_at,
-        decided_at=sublet_request.decided_at,
-    )
+    return sublet_crud.to_sublet_request_read(db, sublet_request)
 
 
 @router.get("/sublet-requests", response_model=list[SubletRequestRead])
@@ -330,21 +461,7 @@ def list_user_sublet_requests(
         )
     )
 
-    return [
-        SubletRequestRead(
-            id=sr.id,
-            current_occupancy_id=sr.current_occupancy_id,
-            proposed_renter_party_id=sr.proposed_renter_party_id,
-            status=sr.status,
-            authority_evidence_ref=sr.authority_evidence_ref,
-            admin_decision=sr.admin_decision,
-            admin_notes=sr.admin_notes,
-            decided_by_admin_id=sr.decided_by_admin_id,
-            created_at=sr.created_at,
-            decided_at=sr.decided_at,
-        )
-        for sr in sublet_requests
-    ]
+    return [sublet_crud.to_sublet_request_read(db, sr) for sr in sublet_requests]
 
 
 @router.post("/reviews", response_model=ReviewRead, status_code=status.HTTP_201_CREATED)

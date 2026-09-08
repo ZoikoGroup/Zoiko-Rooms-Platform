@@ -123,6 +123,10 @@ class UserApplicationRead(CamelModel):
     property_city: str = ""
     host_name: str = ""
     status: str
+    # The real outcome once status is "DECIDED" -- "DECIDED" alone renders
+    # identically for an approval and a rejection, which is genuinely
+    # uninformative to the applicant. None while still SUBMITTED/WITHDRAWN.
+    decision: str | None = None
     message: str
     desired_move_in: date | None
     submitted_at: datetime
@@ -143,8 +147,16 @@ class UserOccupancyRead(CamelModel):
     move_in_date: date | None
     expected_end_date: date | None
     move_out_date: date | None
+    requested_move_out_date: date | None
+    move_out_requested_at: datetime | None
     created_at: datetime
     ended_at: datetime | None
+
+
+class RequestMoveOut(CamelModel):
+    """Renter's own move-out notice."""
+
+    desired_move_out_date: date
 
 
 class SubletRequestCreate(CamelModel):
@@ -168,6 +180,13 @@ class SubletRequestRead(CamelModel):
     decided_by_admin_id: int | None
     created_at: datetime
     decided_at: datetime | None
+    # Resolved server-side (not stored columns) so both the requesting renter's
+    # own view and the admin review queue can be searched/displayed by name
+    # instead of raw ids.
+    listing_name: str = ""
+    property_address: str = ""
+    current_renter_name: str = ""
+    proposed_renter_name: str = ""
 
 
 class SubletRequestDecision(CamelModel):

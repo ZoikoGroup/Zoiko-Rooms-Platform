@@ -3,6 +3,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
+from app.crud import notification as notif_crud
 from app.models.admin_user import AdminSettings, AdminUser
 from app.models.booking import Booking
 from app.models.listing import Listing
@@ -25,7 +26,7 @@ def count_active_super_admins(db: Session) -> int:
     )
 
 
-def create_admin_user(db: Session, data: AdminUserCreate) -> AdminUser:
+def create_admin_user(db: Session, data: AdminUserCreate, acting_admin: AdminUser) -> AdminUser:
     admin = AdminUser(
         email=data.email,
         hashed_password=hash_password(data.password),
@@ -35,6 +36,29 @@ def create_admin_user(db: Session, data: AdminUserCreate) -> AdminUser:
     )
     admin.settings = AdminSettings()
     db.add(admin)
+    db.flush()
+
+    notif_crud.notify_admin(
+        db, admin.id,
+        title="Your admin account was created",
+        message=f"{acting_admin.full_name} added you as a {data.role.replace('_', ' ')}.",
+        notification_type="admin_user.created",
+        related_entity_type="admin_user", related_entity_id=str(admin.id),
+    )
+    other_super_admin_ids = db.scalars(
+        select(AdminUser.id).where(
+            AdminUser.role == "super_admin", AdminUser.is_active.is_(True), AdminUser.id != acting_admin.id
+        )
+    )
+    for super_admin_id in other_super_admin_ids:
+        notif_crud.notify_admin(
+            db, super_admin_id,
+            title="New team member added",
+            message=f"{acting_admin.full_name} added {admin.full_name} ({data.role.replace('_', ' ')}).",
+            notification_type="admin_user.created",
+            related_entity_type="admin_user", related_entity_id=str(admin.id),
+        )
+
     db.commit()
     db.refresh(admin)
     return admin
@@ -49,8 +73,40 @@ def update_admin_user(db: Session, target: AdminUser, data: AdminUserUpdate, act
     if target.role == "super_admin" and demoting_or_deactivating and count_active_super_admins(db) <= 1:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "At least one active super admin must remain")
 
-    for field, value in data.model_dump(exclude_unset=True).items():
+    changes = data.model_dump(exclude_unset=True)
+    role_changed = "role" in changes and changes["role"] != target.role
+    deactivated = changes.get("is_active") is False and target.is_active
+    reactivated = changes.get("is_active") is True and not target.is_active
+
+    for field, value in changes.items():
         setattr(target, field, value)
+    db.flush()
+
+    if role_changed:
+        notif_crud.notify_admin(
+            db, target.id,
+            title="Your role was changed",
+            message=f"{acting_admin.full_name} changed your role to {target.role.replace('_', ' ')}.",
+            notification_type="admin_user.role_changed",
+            related_entity_type="admin_user", related_entity_id=str(target.id),
+        )
+    if deactivated:
+        notif_crud.notify_admin(
+            db, target.id,
+            title="Your account was deactivated",
+            message=f"{acting_admin.full_name} deactivated your admin account.",
+            notification_type="admin_user.deactivated",
+            related_entity_type="admin_user", related_entity_id=str(target.id),
+        )
+    elif reactivated:
+        notif_crud.notify_admin(
+            db, target.id,
+            title="Your account was reactivated",
+            message=f"{acting_admin.full_name} reactivated your admin account.",
+            notification_type="admin_user.reactivated",
+            related_entity_type="admin_user", related_entity_id=str(target.id),
+        )
+
     db.commit()
     db.refresh(target)
     return target

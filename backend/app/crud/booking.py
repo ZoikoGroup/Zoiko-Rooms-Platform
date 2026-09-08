@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.crud import notification as notif_crud
 from app.crud.ids import dicebear_avatar, new_id
 from app.crud.listing import is_listing_available
 from app.models.booking import Booking
@@ -91,6 +92,23 @@ def create_booking(db: Session, data: BookingCreate) -> BookingRead:
         payment_status=data.payment_status,
     )
     db.add(booking)
+    db.flush()
+
+    notif_crud.notify_user_by_guest(
+        db, guest,
+        title="Booking confirmed",
+        message=f"Your booking for {listing.name} ({data.check_in.isoformat()} to {data.check_out.isoformat()}) is confirmed.",
+        notification_type="booking.created",
+        related_entity_type="booking", related_entity_id=booking.id,
+    )
+    notif_crud.notify_user_by_party(
+        db, listing.party_id,
+        title="New booking recorded",
+        message=f"A booking was recorded for {listing.name} ({data.check_in.isoformat()} to {data.check_out.isoformat()}).",
+        notification_type="booking.created",
+        related_entity_type="booking", related_entity_id=booking.id,
+    )
+
     db.commit()
     db.refresh(booking)
     booking.listing = listing

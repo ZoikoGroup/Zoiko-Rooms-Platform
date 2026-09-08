@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from app.schemas.common import CamelModel
+from app.schemas.common import CamelModel, NewPassword
 
 
 class UserLoginRequest(CamelModel):
@@ -10,7 +10,7 @@ class UserLoginRequest(CamelModel):
 
 class UserRegisterRequest(CamelModel):
     email: str
-    password: str
+    password: NewPassword
     full_name: str
     phone: str = ""
 
@@ -33,7 +33,7 @@ class UserRead(CamelModel):
 
 class UserPasswordChangeRequest(CamelModel):
     current_password: str
-    new_password: str
+    new_password: NewPassword
 
 
 class UserProfileUpdateRequest(CamelModel):
@@ -51,4 +51,4 @@ class ForgotPasswordResponse(CamelModel):
 
 class ResetPasswordRequest(CamelModel):
     token: str
-    new_password: str
+    new_password: NewPassword

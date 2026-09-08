@@ -28,6 +28,11 @@ class AdminUser(Base):
     role: Mapped[str] = mapped_column(String(20), default="admin")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     approval_status: Mapped[str] = mapped_column(String(20), default="approved")
+    # Login throttling: incremented on each failed login, reset on success.
+    # locked_until blocks login attempts (regardless of password correctness)
+    # until it elapses -- see crud/admin.py:authenticate.
+    failed_login_attempts: Mapped[int] = mapped_column(default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     settings: Mapped["AdminSettings"] = relationship(back_populates="admin_user", uselist=False, cascade="all, delete-orphan")

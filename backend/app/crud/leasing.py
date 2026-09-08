@@ -260,6 +260,13 @@ def get_agreement_or_404(db: Session, agreement_id: int) -> Agreement:
 def send_agreement(db: Session, agreement: Agreement, admin: AdminUser) -> Agreement:
     assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
     agreement.status = "SENT"
+    notif_crud.notify_user_by_guest(
+        db, agreement.offer.guest,
+        title="Agreement ready to sign",
+        message=f"Your rental agreement for {agreement.offer.listing.name} is ready for your signature.",
+        notification_type="agreement.sent",
+        related_entity_type="agreement", related_entity_id=str(agreement.id),
+    )
     db.commit()
     db.refresh(agreement)
     return agreement
@@ -268,9 +275,10 @@ def send_agreement(db: Session, agreement: Agreement, admin: AdminUser) -> Agree
 def sign_agreement(db: Session, agreement: Agreement, as_party: str, admin: AdminUser) -> Agreement:
     """Simulated e-signature -- no real DocuSign-style provider is connected. Records
     a signature token and timestamp per party; the agreement is SIGNED once both
-    sides have signed. The renter has no login of their own, so both signatures are
-    recorded by the managing provider's admin (or super_admin) attesting they were
-    collected -- the same ownership check as every other agreement action."""
+    sides have signed. Renters with their own self-service login sign via
+    sign_agreement_as_renter instead; this admin-attested path remains for a
+    provider's own signature, and as a fallback to record a renter's signature
+    collected outside the app (e.g. a walk-in tenant with no account)."""
     assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
     if as_party not in ("provider", "renter"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "asParty must be 'provider' or 'renter'")
@@ -285,6 +293,50 @@ def sign_agreement(db: Session, agreement: Agreement, as_party: str, admin: Admi
 
     if agreement.signed_by_provider_at and agreement.signed_by_renter_at:
         agreement.status = "SIGNED"
+        notif_crud.notify_user_by_guest(
+            db, agreement.offer.guest,
+            title="Agreement fully signed",
+            message=f"Your rental agreement for {agreement.offer.listing.name} has been fully signed.",
+            notification_type="agreement.signed",
+            related_entity_type="agreement", related_entity_id=str(agreement.id),
+        )
+
+    db.commit()
+    db.refresh(agreement)
+    return agreement
+
+
+def sign_agreement_as_renter(db: Session, agreement: Agreement, guest: Guest) -> Agreement:
+    """Renter self-service counterpart to sign_agreement -- same simulated
+    signature mechanics (a token + timestamp, SIGNED once both sides have
+    signed), but authorized by the renter owning the agreement's offer via
+    their own guest_id instead of provider admin access."""
+    if agreement.offer.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only sign your own agreement")
+    if agreement.status == "DRAFT":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Agreement has not been sent yet")
+    if agreement.status == "VOID":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Agreement is void")
+
+    agreement.signed_by_renter_at = datetime.now(timezone.utc)
+    if not agreement.signature_ref:
+        agreement.signature_ref = new_id("SIG")
+
+    if agreement.signed_by_provider_at and agreement.signed_by_renter_at:
+        agreement.status = "SIGNED"
+
+    party_id = party_id_for_listing(agreement.offer.listing)
+    notif_crud.notify_user_by_party(
+        db, party_id,
+        title="Renter signed the agreement" if agreement.status != "SIGNED" else "Agreement fully signed",
+        message=(
+            f"{agreement.offer.guest.name} signed the agreement for {agreement.offer.listing.name}."
+            if agreement.status != "SIGNED"
+            else f"The agreement for {agreement.offer.listing.name} has been fully signed by both parties."
+        ),
+        notification_type="agreement.signed" if agreement.status == "SIGNED" else "agreement.renter_signed",
+        related_entity_type="agreement", related_entity_id=str(agreement.id),
+    )
 
     db.commit()
     db.refresh(agreement)

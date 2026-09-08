@@ -138,6 +138,7 @@ def send_message_stream(
 
     def event_stream():
         tool_calls_made: list[dict] = []
+        tool_results_made: list[dict] = []
 
         def audit(action: str, reason: str) -> None:
             log_audit_event(db, admin, action, "chat_conversation", str(conversation.id), correlation_id, reason=reason)
@@ -147,6 +148,10 @@ def send_message_stream(
                 if event_type == "tool":
                     tool_calls_made.append({"name": data["name"]})
                     yield _sse("tool", data)
+                elif event_type == "tool_result":
+                    # Audit provenance only -- not forwarded over SSE, the frontend
+                    # doesn't need it.
+                    tool_results_made.append(data)
                 elif event_type == "done":
                     blocks = data["blocks"]
                     text_parts = [b["text"] for b in blocks if b["type"] == "text"]
@@ -156,6 +161,7 @@ def send_message_stream(
                         role="assistant",
                         content=final_text,
                         tool_calls_json=json.dumps(tool_calls_made),
+                        tool_results_json=json.dumps(tool_results_made),
                     )
                     db.add(assistant_message)
                     db.commit()

@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.crud import notification as notif_crud
 from app.crud.eligibility import check_move_in_eligibility
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.models.admin_user import AdminUser
@@ -29,6 +30,8 @@ def to_occupancy_read(occupancy: Occupancy) -> OccupancyRead:
         move_in_date=occupancy.move_in_date,
         expected_end_date=occupancy.expected_end_date,
         move_out_date=occupancy.move_out_date,
+        requested_move_out_date=occupancy.requested_move_out_date,
+        move_out_requested_at=occupancy.move_out_requested_at,
         created_at=occupancy.created_at,
         ended_at=occupancy.ended_at,
     )
@@ -73,6 +76,14 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
         expected_end_date=_add_months(latest_terms.start_date, latest_terms.term_months),
     )
     db.add(occupancy)
+    db.flush()
+    notif_crud.notify_user_by_guest(
+        db, offer.guest,
+        title="Move-in confirmed",
+        message=f"Your move-in for {offer.listing.name} has been confirmed. Welcome!",
+        notification_type="occupancy.move_in_confirmed",
+        related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+    )
     db.commit()
     db.refresh(occupancy)
     return occupancy
@@ -125,6 +136,14 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
         occupancy_id=occupancy.id,
     )
     db.add(obligation)
+    db.flush()
+    notif_crud.notify_user_by_guest(
+        db, occupancy.guest,
+        title="Rent due",
+        message=f"Rent of {obligation.amount:.2f} for {occupancy.listing.name} is due on {next_due.isoformat()}.",
+        notification_type="occupancy.rent_due",
+        related_entity_type="obligation", related_entity_id=str(obligation.id),
+    )
     db.commit()
     db.refresh(obligation)
     return obligation
@@ -135,6 +154,48 @@ def end_occupancy(db: Session, occupancy: Occupancy, admin: AdminUser) -> Occupa
     occupancy.status = "ENDED"
     occupancy.move_out_date = date.today()
     occupancy.ended_at = datetime.now(timezone.utc)
+    notif_crud.notify_user_by_guest(
+        db, occupancy.guest,
+        title="Tenancy ended",
+        message=f"Your tenancy at {occupancy.listing.name} has ended.",
+        notification_type="occupancy.ended",
+        related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+    )
+    db.commit()
+    db.refresh(occupancy)
+    return occupancy
+
+
+def request_move_out(db: Session, occupancy: Occupancy, desired_date: date) -> Occupancy:
+    """Renter's own notice of intent to vacate. Doesn't end the occupancy
+    directly -- that stays an admin action (end_occupancy), since move-out
+    also involves deposit inspection/release handled through Finance. This
+    just records the request and notifies whoever can act on it, closing the
+    "no way to vacate" gap: previously a renter had no way to signal intent to
+    move out at all."""
+    if occupancy.status != "ACTIVE":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only an active occupancy can have a move-out requested")
+    if desired_date < date.today():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Desired move-out date cannot be in the past")
+
+    occupancy.requested_move_out_date = desired_date
+    occupancy.move_out_requested_at = datetime.now(timezone.utc)
+
+    notif_crud.notify_user_by_party(
+        db, party_id_for_listing(occupancy.listing),
+        title="Move-out requested",
+        message=f"{occupancy.guest.name} requested to move out of {occupancy.listing.name} on {desired_date.isoformat()}.",
+        notification_type="occupancy.move_out_requested",
+        related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+    )
+    notif_crud.notify_all_super_admins(
+        db,
+        title="Move-out requested",
+        message=f"{occupancy.guest.name} requested to move out of {occupancy.listing.name} on {desired_date.isoformat()}.",
+        notification_type="occupancy.move_out_requested",
+        related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+    )
+
     db.commit()
     db.refresh(occupancy)
     return occupancy

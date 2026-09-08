@@ -2,7 +2,7 @@
 
 A long-term room-share marketplace (30+ night stays only). Renters browse and apply for verified private rooms; hosts list rooms they own; a super admin reviews identity documents and manages the platform.
 
-- **Frontend** — Next.js 16 (App Router, Turbopack), TypeScript, Tailwind CSS. Lives at the repo root.
+- **Frontend** — Next.js 16 (App Router, Turbopack), TypeScript, Tailwind CSS. Lives in `frontend/`.
 - **Backend** — FastAPI, SQLAlchemy, PostgreSQL, Alembic migrations. Lives in `backend/`.
 
 There are two independent sign-in areas:
@@ -43,7 +43,7 @@ The API is now at `http://localhost:8000` (interactive docs at `/docs`).
 ## 3. Run the frontend
 
 ```bash
-# from the repo root
+cd frontend
 npm install
 copy .env.local.example .env.local   # Windows: copy, macOS/Linux: cp
 npm run dev
@@ -61,10 +61,10 @@ API_URL=http://localhost:8000
 
 | Command | Where | What it does |
 |---|---|---|
-| `npm run dev` | root | Start the frontend dev server |
-| `npm run build` | root | Production build |
-| `npm run lint` | root | Lint the frontend |
-| `npx tsc --noEmit` | root | Type-check the frontend |
+| `npm run dev` | `frontend/` | Start the frontend dev server |
+| `npm run build` | `frontend/` | Production build |
+| `npm run lint` | `frontend/` | Lint the frontend |
+| `npx tsc --noEmit` | `frontend/` | Type-check the frontend |
 | `uvicorn app.main:app --reload` | `backend/` | Start the backend dev server |
 | `alembic upgrade head` | `backend/` | Apply database migrations |
 | `alembic current` | `backend/` | Show the current migration |
@@ -73,12 +73,13 @@ API_URL=http://localhost:8000
 ## Project layout
 
 ```
-src/                    Frontend (App Router)
-  app/(dashboard)/      Admin dashboard pages
-  app/account/          Renter/host pages
-  components/admin/     Admin UI
-  components/user/      Renter/host UI
-  lib/                  API clients, types, shared helpers
+frontend/
+  src/                  Frontend (App Router)
+    app/(dashboard)/    Admin dashboard pages
+    app/account/        Renter/host pages
+    components/admin/   Admin UI
+    components/user/    Renter/host UI
+    lib/                API clients, types, shared helpers
 
 backend/
   app/api/routes/       FastAPI routers (admin_* and user_*)

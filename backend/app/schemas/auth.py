@@ -1,4 +1,4 @@
-from app.schemas.common import CamelModel
+from app.schemas.common import CamelModel, NewPassword
 
 
 class LoginRequest(CamelModel):
@@ -16,4 +16,4 @@ class AdminRead(CamelModel):
 
 class PasswordChangeRequest(CamelModel):
     current_password: str
-    new_password: str
+    new_password: NewPassword

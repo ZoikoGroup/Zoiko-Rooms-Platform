@@ -7,6 +7,7 @@ from app.crud.property import (
     create_room,
     get_property,
     list_properties_for,
+    list_rooms_for_properties,
     list_rooms_for_property,
 )
 from app.db.session import get_db
@@ -39,6 +40,15 @@ def get_properties(admin: AdminUser = Depends(get_current_admin), db: Session = 
 @router.post("", response_model=PropertyRead, status_code=status.HTTP_201_CREATED)
 def post_property(payload: PropertyCreate, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     return create_property(db, admin, payload)
+
+
+@router.get("/rooms", response_model=list[RoomRead])
+def get_rooms_bulk(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """All rooms across every property the current admin can see, in one query --
+    avoids the N+1 (one /properties/{id}/rooms call per property) pattern that
+    PropertiesManager.tsx and TrustSafetyManager.tsx both previously used."""
+    property_ids = [p.id for p in list_properties_for(db, admin)]
+    return list_rooms_for_properties(db, property_ids)
 
 
 @router.get("/{property_id}/rooms", response_model=list[RoomRead])

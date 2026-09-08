@@ -17,5 +17,7 @@ class OccupancyRead(CamelModel):
     move_in_date: date | None
     expected_end_date: date | None
     move_out_date: date | None
+    requested_move_out_date: date | None
+    move_out_requested_at: datetime | None
     created_at: datetime
     ended_at: datetime | None

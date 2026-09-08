@@ -643,6 +643,14 @@ def stream_assistant_reply(
             rows, _allowed = execute_tool(db, actor, call["name"], call["arguments"])
             if any("error" in row for row in rows):
                 yield "tool_error", {"name": call["name"]}
+            # Provenance for the audit log: row count + a few row ids, never full
+            # row content -- lets a compliance review confirm what data class a
+            # tool touched without duplicating PII into the message log itself.
+            yield "tool_result", {
+                "name": call["name"],
+                "rowCount": len(rows),
+                "ids": [row["id"] for row in rows[:5] if isinstance(row, dict) and "id" in row],
+            }
             messages.append(
                 {
                     "role": "tool",

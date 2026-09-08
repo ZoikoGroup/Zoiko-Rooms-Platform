@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.models.admin_user import AdminUser
 from app.models.identity_verification import IdentityVerification
+from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.party import Party
 from app.models.sublet_request import SubletRequest
@@ -13,6 +14,48 @@ from app.models.user_account import UserAccount
 from app.models.guest import Guest
 from app.crud import guest as guest_crud
 from app.crud import notification as notif_crud
+from app.crud.user import get_user_by_party_id
+
+
+def to_sublet_request_read(db: Session, sublet_request: SubletRequest) -> "SubletRequestRead":
+    """Single source of truth for serializing a SubletRequest -- resolves the
+    listing/property/renter names server-side so no caller returns bare ids.
+    Previously duplicated (with only raw ids) at 6 separate call sites across
+    user_rentals.py and occupancy.py."""
+    from app.schemas.leasing import SubletRequestRead  # local import: avoids a schemas<->crud cycle
+
+    listing_name = property_address = current_renter_name = proposed_renter_name = ""
+    occupancy = sublet_request.current_occupancy
+    if occupancy is not None:
+        listing = db.get(Listing, occupancy.listing_id)
+        if listing is not None:
+            listing_name = listing.name
+            if listing.room is not None and listing.room.property is not None:
+                property_address = listing.room.property.address
+        current_guest = db.get(Guest, occupancy.guest_id)
+        if current_guest is not None:
+            current_renter_name = current_guest.name
+
+    proposed_user = get_user_by_party_id(db, sublet_request.proposed_renter_party_id)
+    if proposed_user is not None:
+        proposed_renter_name = proposed_user.full_name
+
+    return SubletRequestRead(
+        id=sublet_request.id,
+        current_occupancy_id=sublet_request.current_occupancy_id,
+        proposed_renter_party_id=sublet_request.proposed_renter_party_id,
+        status=sublet_request.status,
+        authority_evidence_ref=sublet_request.authority_evidence_ref,
+        admin_decision=sublet_request.admin_decision,
+        admin_notes=sublet_request.admin_notes,
+        decided_by_admin_id=sublet_request.decided_by_admin_id,
+        created_at=sublet_request.created_at,
+        decided_at=sublet_request.decided_at,
+        listing_name=listing_name,
+        property_address=property_address,
+        current_renter_name=current_renter_name,
+        proposed_renter_name=proposed_renter_name,
+    )
 
 
 def _assert_sublet_permitted(occupancy: Occupancy) -> None:

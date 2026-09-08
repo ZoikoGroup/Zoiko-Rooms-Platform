@@ -28,6 +28,11 @@ class UserAccount(Base):
     # app/api/deps.py:get_current_user, which rejects any token issued before this
     # timestamp so a reset immediately invalidates sessions from other devices.
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Login throttling: incremented on each failed login, reset on success.
+    # locked_until blocks login attempts (regardless of password correctness)
+    # until it elapses -- see crud/user.py:authenticate_user.
+    failed_login_attempts: Mapped[int] = mapped_column(default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

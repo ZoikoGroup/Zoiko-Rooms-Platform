@@ -1,6 +1,8 @@
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.login_throttle import LOCKOUT_MINUTES, is_locked, record_failed_attempt, record_successful_login
 from app.core.security import hash_password, verify_password
 from app.models.admin_user import AdminSettings, AdminUser
 
@@ -15,8 +17,17 @@ def get_admin_by_id(db: Session, admin_id: int) -> AdminUser | None:
 
 def authenticate(db: Session, email: str, password: str) -> AdminUser | None:
     admin = get_admin_by_email(db, email)
-    if not admin or not verify_password(password, admin.hashed_password):
+    if not admin:
         return None
+    if is_locked(admin):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Too many failed login attempts. Try again in {LOCKOUT_MINUTES} minutes.",
+        )
+    if not verify_password(password, admin.hashed_password):
+        record_failed_attempt(db, admin)
+        return None
+    record_successful_login(db, admin)
     return admin
 
 

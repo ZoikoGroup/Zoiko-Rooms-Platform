@@ -12,6 +12,14 @@ def get_classification_for_room(db: Session, room_id: int) -> OccupancyClassific
     return db.scalar(select(OccupancyClassification).where(OccupancyClassification.room_id == room_id))
 
 
+def list_classifications_for_rooms(db: Session, room_ids: list[int]) -> list[OccupancyClassification]:
+    if not room_ids:
+        return []
+    return list(
+        db.scalars(select(OccupancyClassification).where(OccupancyClassification.room_id.in_(room_ids)))
+    )
+
+
 def set_classification(db: Session, room: Room, data: OccupancyClassificationSet) -> OccupancyClassification:
     record = get_classification_for_room(db, room.id)
     if not record:

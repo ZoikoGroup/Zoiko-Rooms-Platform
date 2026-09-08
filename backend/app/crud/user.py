@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.login_throttle import LOCKOUT_MINUTES, is_locked, record_failed_attempt, record_successful_login
 from app.core.security import hash_password, verify_password
 from app.models.party import Party
 from app.models.user_account import UserAccount
@@ -27,8 +29,17 @@ def get_user_by_party_id(db: Session, party_id: int | None) -> UserAccount | Non
 
 def authenticate_user(db: Session, email: str, password: str) -> UserAccount | None:
     user = get_user_by_email(db, email)
-    if not user or not verify_password(password, user.hashed_password):
+    if not user:
         return None
+    if is_locked(user):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Too many failed login attempts. Try again in {LOCKOUT_MINUTES} minutes.",
+        )
+    if not verify_password(password, user.hashed_password):
+        record_failed_attempt(db, user)
+        return None
+    record_successful_login(db, user)
     return user
 
 
