@@ -140,6 +140,13 @@ def submit_rental_application(
         log_audit_event(db, None, "user_application.submit", "application", str(application.id), get_correlation_id(request), reason=f"user:{user.id}")
 
         listing = db.get(Listing, application.listing_id)
+        notif_crud.notify_user(
+            db, user.id,
+            title="Application submitted",
+            message=f'Your application for "{listing.name if listing else application.listing_id}" has been submitted.',
+            notification_type="application.confirmation",
+            related_entity_type="application", related_entity_id=str(application.id),
+        )
         if listing and listing.party_id:
             notif_crud.notify_user_by_party(
                 db, listing.party_id,

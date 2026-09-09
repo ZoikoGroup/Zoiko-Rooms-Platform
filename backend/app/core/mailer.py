@@ -225,3 +225,89 @@ def send_listing_rejected_email(to_email: str, full_name: str, listing_name: str
         cta_label="Review your listings",
         cta_url=f"{settings.frontend_url}/account/host/listings",
     )
+
+
+def send_application_decided_email(to_email: str, full_name: str, listing_name: str, approved: bool) -> None:
+    verb = "approved" if approved else "not approved"
+    send_email(
+        to_email,
+        f"Your rental application was {verb}",
+        heading="Application approved" if approved else "Application not approved",
+        body_lines=[
+            f"Hi {full_name},",
+            f"Your application for \"{listing_name}\" was {verb}.",
+        ],
+        cta_label="View your applications",
+        cta_url=f"{settings.frontend_url}/account/applications",
+    )
+
+
+def send_agreement_executed_email(to_email: str, full_name: str, listing_name: str) -> None:
+    send_email(
+        to_email,
+        f"Your rental agreement for '{listing_name}' is signed",
+        heading="Agreement executed",
+        body_lines=[
+            f"Hi {full_name},",
+            f"The rental agreement for \"{listing_name}\" has been signed by both parties and is now in effect.",
+        ],
+        cta_label="View your applications",
+        cta_url=f"{settings.frontend_url}/account/applications",
+    )
+
+
+def send_payment_confirmed_email(to_email: str, full_name: str, amount: float, currency: str) -> None:
+    send_email(
+        to_email,
+        "Your payment has been received",
+        heading="Payment received",
+        body_lines=[
+            f"Hi {full_name},",
+            f"We've recorded your payment of {currency} {amount:.2f}. Thank you.",
+        ],
+        cta_label="View your payments",
+        cta_url=f"{settings.frontend_url}/account/payments",
+    )
+
+
+def send_deposit_status_email(to_email: str, full_name: str, amount: float, released: bool) -> None:
+    verb = "released" if released else "forfeited"
+    send_email(
+        to_email,
+        f"Your security deposit was {verb}",
+        heading="Deposit released" if released else "Deposit forfeited",
+        body_lines=[
+            f"Hi {full_name},",
+            f"{amount:.2f} of your security deposit has been {verb}." if released else "Your security deposit has been forfeited.",
+        ],
+        cta_label="View your payments",
+        cta_url=f"{settings.frontend_url}/account/payments",
+    )
+
+
+def send_refund_completed_email(to_email: str, full_name: str, amount: float, currency: str) -> None:
+    send_email(
+        to_email,
+        "Your refund has been processed",
+        heading="Refund processed",
+        body_lines=[
+            f"Hi {full_name},",
+            f"A refund of {currency} {amount:.2f} has been processed to your account records.",
+        ],
+        cta_label="View your payments",
+        cta_url=f"{settings.frontend_url}/account/payments",
+    )
+
+
+def send_payout_paid_email(to_email: str, full_name: str, amount: float, currency: str, period_key: str) -> None:
+    send_email(
+        to_email,
+        "Your payout has been paid",
+        heading="Payout paid",
+        body_lines=[
+            f"Hi {full_name},",
+            f"A payout of {currency} {amount:.2f} for {period_key} has been paid out to you.",
+        ],
+        cta_label="View your listings",
+        cta_url=f"{settings.frontend_url}/account/host/listings",
+    )
