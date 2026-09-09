@@ -320,6 +320,7 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
         raise HTTPException(status.HTTP_409_CONFLICT, "Proposed renter no longer has an approved identity verification")
     _assert_sublet_permitted(sublet_request.current_occupancy)
 
+    listing = sublet_request.current_occupancy.listing
     proposed_guest = _guest_for_proposed_party(db, sublet_request.proposed_renter_party_id)
     is_co_tenancy = sublet_request.arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES
     policy = resolve_market_policy(db)
@@ -385,6 +386,25 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
             title="You're now the tenant of record",
             message=f"Your sublet arrangement for occupancy #{sublet_request.current_occupancy_id} has been approved. You are now the tenant of record.",
             notification_type="sublet_request.occupant_approved",
+            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+        )
+
+    # Only notified now that they're actually authorized -- never earlier in the
+    # request/review flow, so a proposed occupant's involvement isn't exposed
+    # prematurely.
+    notif_crud.notify_user_by_guest(
+        db, proposed_guest,
+        title="You've been authorized as a new occupant",
+        message=f'You have been approved to take over occupancy of "{listing.name}".' if listing else "You have been approved to take over an occupancy.",
+        notification_type="sublet_request.authorized",
+        related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+    )
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="Occupant changed via sublet",
+            message=f'The occupant of "{listing.name}" has changed following an approved sublet request.',
+            notification_type="sublet_request.tenant_changed",
             related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
         )
 
