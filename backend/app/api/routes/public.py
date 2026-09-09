@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user_optional
+from app.crud import notification as notif_crud
 from app.crud.leasing import submit_application, to_application_read
 from app.crud.listing import get_listing, is_listing_available, list_public_listings, to_public_listing_read
 from app.crud.review import list_reviews_for_listing
@@ -85,4 +86,24 @@ def get_public_listing_reviews(listing_id: str, db: Session = Depends(get_db)):
 def post_application(payload: ApplicationCreate, db: Session = Depends(get_db)):
     """No auth -- the separate renter-facing website submits directly on a renter's
     behalf, same as the existing new-guest booking flow."""
-    return to_application_read(submit_application(db, payload))
+    application = submit_application(db, payload)
+
+    listing = get_listing(db, application.listing_id)
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="New rental application",
+            message=f'A new application was submitted for your listing "{listing.name}".',
+            notification_type="application.received",
+            related_entity_type="application", related_entity_id=str(application.id),
+        )
+    notif_crud.notify_all_super_admins(
+        db,
+        title="New rental application submitted",
+        message=f"A new application was submitted for listing {application.listing_id}.",
+        notification_type="application.submitted",
+        related_entity_type="application", related_entity_id=str(application.id),
+    )
+    db.commit()
+
+    return to_application_read(application)

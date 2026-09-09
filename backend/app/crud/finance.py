@@ -5,11 +5,20 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.mailer import (
+    send_deposit_status_email,
+    send_payment_confirmed_email,
+    send_payout_paid_email,
+    send_refund_completed_email,
+)
 from app.crud.authority import get_valid_authority_for_room
+from app.crud.guest import get_user_for_guest
 from app.crud import notification as notif_crud
 from app.crud.occupancy import generate_next_rent_obligation
 from app.crud.party import assert_provider_access, get_or_create_default_party
+from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
+from app.models.guest import Guest
 from app.models.finance import (
     PLATFORM_FEE_RATE,
     DepositRecord,
@@ -214,6 +223,9 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
         notification_type="payment.confirmed",
         related_entity_type="simulated_payment", related_entity_id=str(payment.id),
     )
+    payer = get_user_for_guest(db, payment.guest) if payment.guest else None
+    if payer:
+        send_payment_confirmed_email(payer.email, payer.full_name, payment.amount, payment.currency)
     db.commit()
 
     # Auto-generate the next recurring rent obligation once a period's rent clears --
@@ -247,6 +259,30 @@ def get_deposit_record_or_404(db: Session, deposit_id: int) -> DepositRecord:
     return record
 
 
+def _notify_deposit_guest(db: Session, record: DepositRecord, *, released: bool) -> None:
+    """Tells the renter about the deposit's actual holding-status transition
+    (HELD -> RELEASED/FORFEITED) -- distinct from the generic "payment received"
+    notice sent when the deposit was originally collected."""
+    obligation = record.obligation
+    guest_id = obligation.agreement.offer.guest_id if obligation.agreement else obligation.occupancy.guest_id
+    guest = db.get(Guest, guest_id)
+    if not guest:
+        return
+    if released:
+        title, message = "Your deposit was released", f"{_round2(record.released_amount)} of your security deposit has been released."
+    else:
+        title, message = "Your deposit was forfeited", "Your security deposit has been forfeited."
+    notif_crud.notify_user_by_guest(
+        db, guest,
+        title=title, message=message,
+        notification_type="deposit.released" if released else "deposit.forfeited",
+        related_entity_type="deposit_record", related_entity_id=str(record.id),
+    )
+    renter_user = get_user_for_guest(db, guest)
+    if renter_user:
+        send_deposit_status_email(renter_user.email, renter_user.full_name, _round2(record.released_amount), released)
+
+
 def release_deposit(db: Session, record: DepositRecord, admin: AdminUser, data: DepositRelease) -> DepositRecord:
     party_id = record.obligation.agreement.offer.listing.room.property.owner_party_id if record.obligation.agreement \
         else record.obligation.occupancy.listing.room.property.owner_party_id
@@ -260,6 +296,9 @@ def release_deposit(db: Session, record: DepositRecord, admin: AdminUser, data: 
     record.released_at = datetime.now(timezone.utc)
     record.notes = data.notes or record.notes
     record.status = "RELEASED" if _round2(record.released_amount) >= _round2(record.held_amount) else "PARTIALLY_RELEASED"
+
+    _notify_deposit_guest(db, record, released=True)
+
     db.commit()
     db.refresh(record)
     return record
@@ -272,6 +311,9 @@ def forfeit_deposit(db: Session, record: DepositRecord, admin: AdminUser) -> Dep
 
     record.status = "FORFEITED"
     record.released_at = datetime.now(timezone.utc)
+
+    _notify_deposit_guest(db, record, released=False)
+
     db.commit()
     db.refresh(record)
     return record
@@ -321,6 +363,26 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
         payout.paid_at = datetime.now(timezone.utc)
         for obligation in matched:
             obligation.payout_id = payout.id
+        notif_crud.notify_user_by_party(
+            db, party.id,
+            title="Payout received",
+            message=f"A payout of {payout.currency} {net:.2f} for {period_key} has been paid out to you.",
+            notification_type="payout.paid",
+            related_entity_type="payout_record", related_entity_id=str(payout.id),
+        )
+        host_user = get_user_by_party_id(db, party.id)
+        if host_user:
+            send_payout_paid_email(host_user.email, host_user.full_name, net, payout.currency, period_key)
+    else:
+        # Actionable, not just informational -- the host needs to resolve the
+        # missing authority record before this payout can actually go out.
+        notif_crud.notify_user_by_party(
+            db, party.id,
+            title="Payout on hold",
+            message=f"Your payout for {period_key} is on hold: {held_reason}.",
+            notification_type="payout.held",
+            related_entity_type="payout_record", related_entity_id=str(payout.id),
+        )
 
     db.commit()
     db.refresh(payout)
@@ -392,9 +454,55 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
     refund.status = "COMPLETED"
     refund.decided_by_admin_id = admin.id
     refund.decided_at = datetime.now(timezone.utc)
+
+    if refund.payment.guest:
+        notif_crud.notify_user_by_guest(
+            db, refund.payment.guest,
+            title="Your refund was processed",
+            message=f"A refund of {refund.payment.currency} {refund.amount:.2f} has been processed.",
+            notification_type="refund.completed",
+            related_entity_type="refund_request", related_entity_id=str(refund.id),
+        )
+        payer = get_user_for_guest(db, refund.payment.guest)
+        if payer:
+            send_refund_completed_email(payer.email, payer.full_name, refund.amount, refund.payment.currency)
+
     db.commit()
     db.refresh(refund)
     return refund
+
+
+def _dispute_participants(dispute: DisputeCase) -> tuple[Guest | None, int | None]:
+    """Resolves (guest, host_party_id) for a dispute from whichever of
+    occupancy/payment it's linked to -- occupancy has both directly; a
+    payment-only dispute is resolved via its first allocation's obligation,
+    the same chain annotate_payment_context already walks for display."""
+    if dispute.occupancy:
+        listing = dispute.occupancy.listing
+        return dispute.occupancy.guest, (listing.party_id if listing else None)
+    if dispute.payment:
+        for allocation in dispute.payment.allocations:
+            obligation = allocation.obligation
+            occupancy = obligation.occupancy if obligation else None
+            if occupancy:
+                listing = occupancy.listing
+                return dispute.payment.guest, (listing.party_id if listing else None)
+        return dispute.payment.guest, None
+    return None, None
+
+
+def _notify_dispute_participants(db: Session, dispute: DisputeCase, *, title: str, message: str, notification_type: str) -> None:
+    guest, party_id = _dispute_participants(dispute)
+    if guest:
+        notif_crud.notify_user_by_guest(
+            db, guest, title=title, message=message, notification_type=notification_type,
+            related_entity_type="dispute_case", related_entity_id=str(dispute.id),
+        )
+    if party_id:
+        notif_crud.notify_user_by_party(
+            db, party_id, title=title, message=message, notification_type=f"{notification_type}_for_host",
+            related_entity_type="dispute_case", related_entity_id=str(dispute.id),
+        )
 
 
 def list_dispute_cases(db: Session, admin: AdminUser) -> list[DisputeCase]:
@@ -424,6 +532,23 @@ def open_dispute(db: Session, data: DisputeCreate, admin: AdminUser) -> DisputeC
         description=data.description,
     )
     db.add(dispute)
+    db.flush()
+
+    # No deadline exists on DisputeCase -- none is stated here, deliberately.
+    _notify_dispute_participants(
+        db, dispute,
+        title="A dispute has been opened",
+        message=f"A {dispute.category.lower()} dispute has been opened and is under review.",
+        notification_type="dispute.opened",
+    )
+    notif_crud.notify_all_super_admins(
+        db,
+        title="New dispute opened",
+        message=f"A {dispute.category.lower()} dispute (#{dispute.id}) requires review.",
+        notification_type="dispute.opened_admin",
+        related_entity_type="dispute_case", related_entity_id=str(dispute.id),
+    )
+
     db.commit()
     db.refresh(dispute)
     return dispute
@@ -436,6 +561,15 @@ def resolve_dispute(db: Session, dispute: DisputeCase, admin: AdminUser, data: D
     dispute.status = data.status
     dispute.resolution_notes = data.resolution_notes
     dispute.resolved_at = datetime.now(timezone.utc)
+
+    verb = "resolved" if data.status == "RESOLVED" else "closed"
+    _notify_dispute_participants(
+        db, dispute,
+        title=f"Your dispute was {verb}",
+        message=data.resolution_notes or f"Dispute #{dispute.id} was {verb}.",
+        notification_type="dispute.resolved",
+    )
+
     db.commit()
     db.refresh(dispute)
     return dispute

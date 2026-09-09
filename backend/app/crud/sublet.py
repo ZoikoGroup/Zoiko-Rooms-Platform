@@ -171,6 +171,7 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
     # person who submitted this request.
     requester_guest_id = sublet_request.current_occupancy.guest_id
 
+    listing = sublet_request.current_occupancy.listing
     proposed_guest = _guest_for_proposed_party(db, sublet_request.proposed_renter_party_id)
     sublet_request.current_occupancy.guest_id = proposed_guest.id
     sublet_request.status = "approved"
@@ -180,6 +181,25 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
     sublet_request.decided_at = datetime.now(timezone.utc)
 
     _notify_sublet_requester(db, requester_guest_id, sublet_request.id, approved=True, notes=notes)
+
+    # Only notified now that they're actually authorized -- never earlier in the
+    # request/review flow, so a proposed occupant's involvement isn't exposed
+    # prematurely.
+    notif_crud.notify_user_by_guest(
+        db, proposed_guest,
+        title="You've been authorized as a new occupant",
+        message=f'You have been approved to take over occupancy of "{listing.name}".' if listing else "You have been approved to take over an occupancy.",
+        notification_type="sublet_request.authorized",
+        related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+    )
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="Occupant changed via sublet",
+            message=f'The occupant of "{listing.name}" has changed following an approved sublet request.',
+            notification_type="sublet_request.tenant_changed",
+            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+        )
 
     db.commit()
     db.refresh(sublet_request)
