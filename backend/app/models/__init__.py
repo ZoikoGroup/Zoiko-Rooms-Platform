@@ -19,6 +19,7 @@ from app.models.guest import Guest
 from app.models.leasing import Agreement, Application, ApplicationDecision, Offer, OfferTerms
 from app.models.listing import Listing
 from app.models.market_release import MarketRelease
+from app.models.market_policy import MarketPolicyPack
 from app.models.membership import Membership
 from app.models.occupancy import Occupancy
 from app.models.occupancy_classification import OccupancyClassification
@@ -51,6 +52,7 @@ __all__ = [
     "Party",
     "Membership",
     "MarketRelease",
+    "MarketPolicyPack",
     "Property",
     "Room",
     "AuthorityRecord",

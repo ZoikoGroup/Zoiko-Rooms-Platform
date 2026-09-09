@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, require_super_admin
 from app.core.correlation import get_correlation_id
+from app.core.identity_uploads import resolve_identity_document_path, save_identity_document
 from app.crud import finance as crud
 from app.crud.finance import annotate_payment_context
 from app.crud.audit import log_audit_event
@@ -11,6 +13,9 @@ from app.db.session import get_db
 from app.models.admin_user import AdminUser
 from app.models.party import Party
 from app.schemas.finance import (
+    DepositClaimCreate,
+    DepositClaimRead,
+    DepositClaimResolve,
     DepositRecordRead,
     DepositRelease,
     DisputeCreate,
@@ -76,7 +81,7 @@ def post_confirm_payment(
 
 @router.get("/deposits", response_model=list[DepositRecordRead])
 def get_deposits(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    return crud.list_deposit_records(db, admin)
+    return [crud.to_deposit_record_read(r) for r in crud.list_deposit_records(db, admin)]
 
 
 @router.post("/deposits/{deposit_id}/release", response_model=DepositRecordRead)
@@ -92,7 +97,7 @@ def post_release_deposit(
     log_audit_event(db, admin, "deposit.release", "deposit_record", str(deposit_id), get_correlation_id(request))
     emit_event(db, "deposit.released", "deposit_record", str(deposit_id), {"amount": payload.amount, "moneyPlane": "SAFEGUARDED"})
     db.commit()
-    return updated
+    return crud.to_deposit_record_read(updated)
 
 
 @router.post("/deposits/{deposit_id}/forfeit", response_model=DepositRecordRead)
@@ -107,7 +112,73 @@ def post_forfeit_deposit(
     log_audit_event(db, admin, "deposit.forfeit", "deposit_record", str(deposit_id), get_correlation_id(request))
     emit_event(db, "deposit.forfeited", "deposit_record", str(deposit_id), {"moneyPlane": "SAFEGUARDED"})
     db.commit()
-    return updated
+    return crud.to_deposit_record_read(updated)
+
+
+@router.get("/deposits/{deposit_id}/claims", response_model=list[DepositClaimRead])
+def get_deposit_claims(deposit_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    record = crud.get_deposit_record_or_404(db, deposit_id)
+    return [crud.to_deposit_claim_read(c) for c in crud.list_deposit_claims_for_record(db, admin, record)]
+
+
+@router.post("/deposits/{deposit_id}/claims", response_model=DepositClaimRead, status_code=status.HTTP_201_CREATED)
+def post_submit_deposit_claim(
+    deposit_id: int,
+    payload: DepositClaimCreate,
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    record = crud.get_deposit_record_or_404(db, deposit_id)
+    claim = crud.submit_deposit_claim(db, record, admin, payload)
+    log_audit_event(db, admin, "deposit_claim.submit", "deposit_claim", str(claim.id), get_correlation_id(request))
+    emit_event(db, "deposit_claim.submitted", "deposit_claim", str(claim.id), {"depositRecordId": deposit_id})
+    db.commit()
+    return crud.to_deposit_claim_read(claim)
+
+
+@router.post("/deposit-claim-items/{item_id}/evidence", response_model=DepositClaimRead)
+async def post_deposit_claim_item_evidence(
+    item_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    item = crud.get_deposit_claim_item_or_404(db, item_id)
+    stored_filename, original_filename, content_type, _ = await save_identity_document(file)
+    crud.attach_deposit_claim_item_evidence(db, item, admin, stored_filename, original_filename, content_type)
+    log_audit_event(db, admin, "deposit_claim_item.evidence_attach", "deposit_claim_item", str(item_id), get_correlation_id(request))
+    db.commit()
+    return crud.to_deposit_claim_read(item.claim)
+
+
+@router.get("/deposit-claim-items/{item_id}/evidence")
+def get_deposit_claim_item_evidence(item_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    item = crud.get_deposit_claim_item_or_404(db, item_id)
+    crud.assert_deposit_record_access(db, admin, item.claim.deposit_record)
+    if not item.evidence_filename:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No evidence uploaded for this claim item")
+    path = resolve_identity_document_path(item.evidence_filename)
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Evidence file is missing")
+    return FileResponse(path, media_type=item.evidence_content_type, filename=item.evidence_original_name)
+
+
+@router.post("/deposit-claims/{claim_id}/resolve", response_model=DepositClaimRead)
+def post_resolve_deposit_claim(
+    claim_id: int,
+    payload: DepositClaimResolve,
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    claim = crud.get_deposit_claim_or_404(db, claim_id)
+    updated = crud.resolve_deposit_claim(db, claim, admin, payload)
+    log_audit_event(db, admin, "deposit_claim.resolve", "deposit_claim", str(claim_id), get_correlation_id(request), reason=payload.notes)
+    emit_event(db, "deposit_claim.resolved", "deposit_claim", str(claim_id), {})
+    db.commit()
+    return crud.to_deposit_claim_read(updated)
 
 
 @router.post("/payouts/run", response_model=PayoutRecordRead)

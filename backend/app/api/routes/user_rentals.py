@@ -2,11 +2,14 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.correlation import get_correlation_id
+from app.core.identity_uploads import resolve_identity_document_path
+from app.crud import finance as finance_crud
 from app.crud import leasing as leasing_crud
 from app.crud import occupancy as occupancy_crud
 from app.crud import review as review_crud
@@ -24,6 +27,7 @@ from app.models.leasing import Application
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.user_account import UserAccount
+from app.schemas.finance import DepositClaimItemRead, DepositClaimItemRespond, DepositClaimRead
 from app.schemas.leasing import (
     AgreementRead,
     OfferRead,
@@ -401,7 +405,8 @@ def submit_sublet_request(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Proposed renter must have verified identity")
 
     sublet_request = sublet_crud.submit_sublet_request(
-        db, user, occupancy_id, payload.proposed_renter_party_id, payload.authority_evidence_ref
+        db, user, occupancy_id, payload.proposed_renter_party_id, payload.arrangement_type,
+        payload.authority_evidence_ref, payload.proposed_monthly_rent,
     )
 
     log_audit_event(db, None, "user_sublet_request.submit", "sublet_request", str(sublet_request.id), get_correlation_id(request), reason=f"user:{user.id}")
@@ -417,22 +422,65 @@ def list_user_sublet_requests(
     db: Session = Depends(get_db),
 ):
     """List all sublet requests initiated by current user."""
-    from app.models.sublet_request import SubletRequest
-
     guest = get_guest_for_user(db, user)
     if not guest:
         return []
 
-    sublet_requests = list(
-        db.scalars(
-            select(SubletRequest)
-            .join(Occupancy, Occupancy.id == SubletRequest.current_occupancy_id)
-            .where(Occupancy.guest_id == guest.id)
-            .order_by(SubletRequest.created_at.desc())
-        )
-    )
+    sublet_requests = sublet_crud.list_sublet_requests_for_guest(db, guest.id)
 
     return [sublet_crud.to_sublet_request_read(db, sr) for sr in sublet_requests]
+
+
+@router.get("/deposit-claims", response_model=list[DepositClaimRead])
+def list_my_deposit_claims(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Every deposit claim a host has submitted against any of this renter's
+    occupancies, across every deposit they've ever funded."""
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        return []
+    return [finance_crud.to_deposit_claim_read(c) for c in finance_crud.list_deposit_claims_for_guest(db, guest.id)]
+
+
+@router.post("/deposit-claim-items/{item_id}/respond", response_model=DepositClaimItemRead)
+def respond_to_deposit_claim_item(
+    item_id: int,
+    payload: DepositClaimItemRespond,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Renter accepts, partially accepts, or disputes one line item of a host's
+    deposit claim. Ownership is enforced inside the crud layer -- it 404s/403s
+    if this item's deposit doesn't trace back to the calling user's own guest
+    record, the same pattern used for sublet-request ownership."""
+    item = finance_crud.get_deposit_claim_item_or_404(db, item_id)
+    updated = finance_crud.respond_to_deposit_claim_item(db, item, user, payload)
+    log_audit_event(
+        db, None, "user_deposit_claim_item.respond", "deposit_claim_item", str(item_id),
+        get_correlation_id(request), reason=f"user:{user.id}:{payload.response}",
+    )
+    emit_event(db, "deposit_claim_item.responded", "deposit_claim_item", str(item_id), {"response": payload.response})
+    db.commit()
+    return finance_crud.to_deposit_claim_item_read(updated)
+
+
+@router.get("/deposit-claim-items/{item_id}/evidence")
+def get_my_deposit_claim_item_evidence(item_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Lets a renter view the evidence behind a claim item before deciding
+    whether to accept or dispute it -- without this, 'review the evidence' is
+    just a phrase with nothing behind it."""
+    item = finance_crud.get_deposit_claim_item_or_404(db, item_id)
+    record = item.claim.deposit_record
+    guest = get_guest_for_user(db, user)
+    owner_guest_id = finance_crud.deposit_record_guest_id(record)
+    if not guest or owner_guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This deposit claim does not belong to you")
+    if not item.evidence_filename:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No evidence uploaded for this claim item")
+    path = resolve_identity_document_path(item.evidence_filename)
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Evidence file is missing")
+    return FileResponse(path, media_type=item.evidence_content_type, filename=item.evidence_original_name)
 
 
 @router.post("/reviews", response_model=ReviewRead, status_code=status.HTTP_201_CREATED)

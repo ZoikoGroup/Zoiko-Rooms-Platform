@@ -12,6 +12,7 @@ from app.crud.eligibility import check_agreement_eligibility, check_offer_eligib
 from app.crud.guest import get_guest_for_user
 from app.crud.ids import dicebear_avatar, new_id
 from app.crud.listing import is_listing_available
+from app.crud.market_policy import resolve_market_policy
 from app.crud import notification as notif_crud
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.models.admin_user import AdminUser
@@ -202,6 +203,18 @@ def add_offer_terms(db: Session, offer: Offer, admin: AdminUser, data: OfferTerm
     assert_provider_access(db, admin, party_id_for_listing(offer.listing))
     if offer.status not in ("DRAFT", "SENT"):
         raise HTTPException(status.HTTP_409_CONFLICT, "Offer terms can only be added while the offer is draft or sent")
+
+    # ZR-ENG-CLR-002 AC-02: the quote engine must reject any deposit amount
+    # above the resolved market-pack cap -- not a Zoiko-invented number, and
+    # not something the UI can silently bypass by omission.
+    policy = resolve_market_policy(db)
+    max_deposit = round(data.monthly_rent * float(policy.deposit_max_rent_multiple), 2)
+    if data.deposit_amount > max_deposit:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Deposit amount {data.deposit_amount:.2f} exceeds the resolved market cap of "
+            f"{max_deposit:.2f} ({policy.deposit_max_rent_multiple}x monthly rent, jurisdiction={policy.jurisdiction_code})",
+        )
 
     next_version = offer.current_version + 1
     terms = OfferTerms(

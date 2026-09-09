@@ -66,6 +66,14 @@ class SimulatedPaymentRead(CamelModel):
     property_address: str = ""
 
 
+class DepositInstrumentRead(CamelModel):
+    id: int
+    instrument_type: str
+    custody_model: str
+    calculation_snapshot: dict
+    created_at: datetime
+
+
 class DepositRecordRead(CamelModel):
     id: int
     obligation_id: int
@@ -74,11 +82,65 @@ class DepositRecordRead(CamelModel):
     released_amount: float
     released_at: datetime | None
     notes: str
+    instrument: DepositInstrumentRead | None = None
+    claimed_amount: float = 0
+    disputed_amount: float = 0
 
 
 class DepositRelease(CamelModel):
     amount: float
     notes: str = ""
+
+
+class DepositClaimItemCreate(CamelModel):
+    category_code: str
+    amount_requested: float
+    description: str = ""
+
+
+class DepositClaimCreate(CamelModel):
+    items: list[DepositClaimItemCreate]
+
+
+class DepositClaimItemRead(CamelModel):
+    id: int
+    claim_id: int
+    category_code: str
+    amount_requested: float
+    description: str
+    has_evidence: bool = False
+    evidence_original_name: str = ""
+    tenant_response: str
+    final_amount: float | None
+    created_at: datetime
+
+
+class DepositClaimItemRespond(CamelModel):
+    response: str  # "ACCEPT" | "PARTIAL_ACCEPT" | "DISPUTE"
+    accepted_amount: float | None = None  # required when response == "PARTIAL_ACCEPT"
+
+
+class DepositClaimItemFinalAmount(CamelModel):
+    item_id: int
+    final_amount: float
+
+
+class DepositClaimResolve(CamelModel):
+    item_final_amounts: list[DepositClaimItemFinalAmount]
+    notes: str = ""
+
+
+class DepositClaimRead(CamelModel):
+    id: int
+    deposit_record_id: int
+    status: str
+    submitted_by_admin_id: int
+    submitted_at: datetime
+    renter_responded_at: datetime | None
+    resolved_by_admin_id: int | None
+    resolved_at: datetime | None
+    resolution_notes: str
+    items: list[DepositClaimItemRead] = []
 
 
 class PayoutRunRequest(CamelModel):

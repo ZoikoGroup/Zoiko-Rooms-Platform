@@ -44,6 +44,7 @@ export function LeasingManager() {
   const [role, setRole] = useState<AdminRole | null>(null);
   const [toast, setToast] = useState("");
   const [termsOfferId, setTermsOfferId] = useState<number | null>(null);
+  const [termsListingId, setTermsListingId] = useState<string | null>(null);
   const [termsForm, setTermsForm] = useState(emptyTermsForm);
   const [applicationModalOpen, setApplicationModalOpen] = useState(false);
   const [editingApplicationId, setEditingApplicationId] = useState<number | null>(null);
@@ -215,9 +216,16 @@ export function LeasingManager() {
     }
   }
 
-  function openTermsModal(offerId: number) {
-    setTermsForm(emptyTermsForm);
+  function openTermsModal(offerId: number, listingId: string) {
+    // Suggest a monthly rent from the listing's advertised nightly price
+    // instead of leaving the admin to type a number from memory with nothing
+    // to check it against -- still fully editable if the actual negotiated
+    // rent differs.
+    const listing = listingsById[listingId];
+    const suggestedMonthlyRent = listing ? String(Math.round(listing.pricePerNight * 30)) : "";
+    setTermsForm({ ...emptyTermsForm, monthlyRent: suggestedMonthlyRent });
     setTermsOfferId(offerId);
+    setTermsListingId(listingId);
   }
 
   async function submitTerms(e: React.FormEvent) {
@@ -234,6 +242,7 @@ export function LeasingManager() {
         }),
       });
       setTermsOfferId(null);
+      setTermsListingId(null);
       showToast("Offer terms added");
       loadApplications();
     } catch {
@@ -420,7 +429,7 @@ export function LeasingManager() {
                 )}
                 <div className="flex flex-wrap gap-2">
                   {(offer.status === "DRAFT" || offer.status === "SENT") && (
-                    <Button size="sm" variant="outline" onClick={() => openTermsModal(offer.id)}>
+                    <Button size="sm" variant="outline" onClick={() => openTermsModal(offer.id, application.listingId)}>
                       {latestTerms ? "Update Terms" : "Add Terms"}
                     </Button>
                   )}
@@ -430,14 +439,20 @@ export function LeasingManager() {
                     </Button>
                   )}
                   {offer.status === "SENT" && (
-                    <>
-                      <Button size="sm" variant="primary" onClick={() => transitionOffer(offer.id, "accept")}>
-                        <CheckCircle2 className="h-3.5 w-3.5" /> Accept
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => transitionOffer(offer.id, "decline")}>
-                        <XCircle className="h-3.5 w-3.5" /> Decline
-                      </Button>
-                    </>
+                    offer.guestHasAccount ? (
+                      <p className="text-xs italic text-slate-400 dark:text-slate-500">
+                        Awaiting the renter&apos;s own response — they have a Zoiko account and must accept or decline this themselves.
+                      </p>
+                    ) : (
+                      <>
+                        <Button size="sm" variant="primary" onClick={() => transitionOffer(offer.id, "accept")}>
+                          <CheckCircle2 className="h-3.5 w-3.5" /> Accept
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => transitionOffer(offer.id, "decline")}>
+                          <XCircle className="h-3.5 w-3.5" /> Decline
+                        </Button>
+                      </>
+                    )
                   )}
                   {offer.status === "ACCEPTED" && !agreement && (
                     <Button size="sm" variant="accent" onClick={() => createAgreement(offer.id)}>
@@ -472,9 +487,15 @@ export function LeasingManager() {
                         </Button>
                       )}
                       {!agreement.signedByRenterAt && (
-                        <Button size="sm" variant="outline" onClick={() => signAgreement(agreement.id, "renter")}>
-                          Sign as Renter
-                        </Button>
+                        offer.guestHasAccount ? (
+                          <p className="text-xs italic text-slate-400 dark:text-slate-500">
+                            Awaiting the renter&apos;s own signature — they have a Zoiko account and must sign this themselves.
+                          </p>
+                        ) : (
+                          <Button size="sm" variant="outline" onClick={() => signAgreement(agreement.id, "renter")}>
+                            Sign as Renter
+                          </Button>
+                        )
                       )}
                     </>
                   )}
@@ -613,8 +634,14 @@ export function LeasingManager() {
         </form>
       </Modal>
 
-      <Modal open={termsOfferId !== null} onClose={() => setTermsOfferId(null)} title="Offer Terms">
+      <Modal open={termsOfferId !== null} onClose={() => { setTermsOfferId(null); setTermsListingId(null); }} title="Offer Terms">
         <form onSubmit={submitTerms} className="space-y-3.5">
+          {termsListingId && listingsById[termsListingId] && (
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Listing is advertised at {formatCurrency(listingsById[termsListingId].pricePerNight)}/night — monthly rent below is
+              pre-filled from that; change it if the actual agreed rent differs.
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">

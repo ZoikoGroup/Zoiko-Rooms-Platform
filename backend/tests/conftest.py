@@ -21,6 +21,7 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 from app.models.admin_user import AdminUser
+from app.models.market_policy import MarketPolicyPack
 from app.models.user_account import UserAccount
 
 # ---------------------------------------------------------------------------
@@ -107,6 +108,22 @@ def db_engine():
             "END"
         ))
         conn.commit()
+
+    # Every test DB needs a resolvable market policy pack -- deposit funding,
+    # offer-terms creation, and sublet submission/approval all call
+    # resolve_market_policy(db) and fail closed (409) with none configured.
+    # Mirrors alembic/versions/0027_market_policy_packs.py's seed row; this
+    # doesn't run Alembic migrations, so it has to be inserted directly.
+    with Session(bind=eng) as seed_session:
+        seed_session.add(MarketPolicyPack(
+            jurisdiction_code="IN",
+            version=1,
+            effective_from=dt.date(2026, 1, 1),
+            confidence="REVIEW_REQUIRED",
+            legal_source_note="Test fixture placeholder, not verified legal research.",
+        ))
+        seed_session.commit()
+
     yield eng
     Base.metadata.drop_all(eng)
     eng.dispose()
