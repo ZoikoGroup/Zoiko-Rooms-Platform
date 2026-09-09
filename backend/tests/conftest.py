@@ -217,3 +217,18 @@ def auth_admin_cookie(admin: AdminUser) -> dict[str, str]:
 def auth_user_cookie(user: UserAccount) -> dict[str, str]:
     token = create_access_token(user.email, token_type="user")
     return {USER_COOKIE: token}
+
+
+def deliver_all_disclosures(client, admin_cookies: dict, agreement_id: int) -> None:
+    """ZR-ENG-CLR-004 AC-15: signing is blocked until every required
+    disclosure is at least DELIVERED (see crud/leasing.py:_apply_signature).
+    Test helper -- marks every disclosure this agreement was seeded with as
+    delivered, so tests whose actual concern is something else (payment,
+    effectiveness, expiry...) aren't tripped up by the unrelated gate."""
+    r = client.get(f"/api/leasing/agreements/{agreement_id}/disclosures", cookies=admin_cookies)
+    assert r.status_code == 200, r.text
+    for disclosure in r.json():
+        r = client.post(
+            f"/api/leasing/agreements/{agreement_id}/disclosures/{disclosure['id']}/deliver", cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text

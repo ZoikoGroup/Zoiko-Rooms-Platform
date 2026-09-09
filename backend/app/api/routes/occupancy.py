@@ -13,7 +13,7 @@ from app.crud.events import emit_event
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
 from app.schemas.finance import ObligationRead
-from app.schemas.occupancy import OccupancyRead
+from app.schemas.occupancy import OccupancyEndRequest, OccupancyRead, TerminationRecordRead
 from app.schemas.leasing import SubletRequestDecision, SubletRequestRead
 
 router = APIRouter(prefix="/api/occupancy", tags=["occupancy"], dependencies=[Depends(get_current_admin)])
@@ -72,16 +72,33 @@ def post_generate_rent(
 def post_end_occupancy(
     occupancy_id: int,
     request: Request,
+    payload: OccupancyEndRequest = OccupancyEndRequest(),
     admin: AdminUser = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
     occupancy = crud.get_occupancy_or_404(db, occupancy_id)
     correlation_id = get_correlation_id(request)
-    updated = crud.end_occupancy(db, occupancy, admin, correlation_id=correlation_id)
+    updated = crud.end_occupancy(
+        db, occupancy, admin, correlation_id=correlation_id,
+        notice_given_at=payload.notice_given_at, liability_end_date=payload.liability_end_date,
+        termination_effective_date=payload.termination_effective_date, move_out_date=payload.move_out_date,
+        basis=payload.basis,
+    )
     log_audit_event(db, admin, "occupancy.end", "occupancy", str(occupancy_id), correlation_id)
     emit_event(db, "occupancy.ended", "occupancy", str(occupancy_id), {})
     db.commit()
     return crud.to_occupancy_read(updated)
+
+
+@router.get("/{occupancy_id}/termination-record", response_model=TerminationRecordRead)
+def get_occupancy_termination_record(occupancy_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    from app.models.termination_record import TerminationRecord
+
+    occupancy = crud.get_occupancy_or_404(db, occupancy_id)
+    record = db.query(TerminationRecord).filter(TerminationRecord.occupancy_id == occupancy.id).order_by(TerminationRecord.id.desc()).first()
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No termination record for this occupancy")
+    return record
 
 
 @router.get("/sublet-requests", response_model=list[SubletRequestRead], dependencies=[Depends(require_super_admin)])

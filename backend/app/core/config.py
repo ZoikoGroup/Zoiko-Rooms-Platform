@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     identity_upload_dir: str = "secure_uploads/identity"
     identity_document_max_size_mb: int = 10
 
+    # ZR-ENG-CLR-004 Section 13.1/AC-08: executed agreement PDFs, stored once
+    # per AgreementVersion and never regenerated/overwritten -- same
+    # never-publicly-mounted directory convention as identity_upload_dir.
+    agreement_document_dir: str = "secure_uploads/agreements"
+
     frontend_url: str = "http://localhost:3000"
     password_reset_token_expire_minutes: int = 30
 
@@ -68,6 +73,12 @@ class Settings(BaseSettings):
     # but the renter must reach a confirmed move-in within this window or the
     # offer expires and the hold is released. Spec default is 24h.
     offer_acceptance_confirmation_hours: int = 24
+
+    # ZR-ENG-CLR-001 Rule 7 / policy key payment.checkout_lock_duration: once
+    # both signatures land on an agreement, the renter has this long to clear
+    # the initial rent+deposit obligations before the checkout session expires
+    # (see services/booking_expiry.py). Spec default is 30 minutes.
+    payment_checkout_lock_minutes: int = 30
 
     @property
     def is_production(self) -> bool:

@@ -27,6 +27,16 @@ class Occupancy(Base):
     status: Mapped[str] = mapped_column(String(20), default="PENDING_MOVE_IN")
     move_in_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     expected_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # ZR-ENG-CLR-004 AC-20/10.2: these three are legally distinct dates that
+    # can differ ("final occupancy date, rent liability end date and
+    # physical move-out date may differ and must be separately stored") --
+    # move_out_date stays the one "when did they physically leave" date
+    # end_occupancy always sets; the other two are optional refinements a
+    # caller can supply when notice/liability actually diverge from that
+    # (see crud/occupancy.py:end_occupancy).
+    notice_given_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    liability_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    termination_effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     move_out_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

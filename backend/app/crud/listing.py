@@ -6,11 +6,14 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.mailer import send_listing_published_email, send_listing_rejected_email
 from app.crud import notification as notification_crud
+from app.crud.audit import log_audit_event
+from app.crud.events import emit_event
 from app.crud.ids import new_id, slugify
 from app.crud.identity_verification import get_verified_identity_for_party
 from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
-from app.models.listing import Listing, MAX_LISTING_IMAGES, SUPPORTED_CURRENCIES
+from app.models.leasing import Agreement, Offer
+from app.models.listing import LISTING_STATES, Listing, MAX_LISTING_IMAGES, SUPPORTED_CURRENCIES
 from app.models.listing_approval import ListingApproval
 from app.models.listing_version import ListingVersion
 from app.models.market_release import MarketRelease
@@ -20,6 +23,7 @@ from app.models.room_hold import RoomHold
 from app.schemas.listing import ListingCreate, ListingUpdate, PublicListingRead
 from app.services.eligibility import jurisdiction_gates_pass, listing_publication_eligible
 from app.services.listing_versioning import build_snapshot, classify_material_change, compute_content_hash
+from app.services.policy import get_policy
 
 
 def _occupied_room_ids(db: Session) -> set[int]:
@@ -64,7 +68,21 @@ def _canonical_location(db: Session, room_id: int | None) -> dict:
 def is_listing_available(db: Session, listing: Listing) -> bool:
     """True only when the listing is published, its room (if any) is active,
     and that room has no active occupancy. Read-only -- never mutates
-    Listing.state, which stays admin-approval-workflow-only."""
+    Listing.state, which stays admin-approval-workflow-only.
+
+    Deliberately does NOT also re-check jurisdiction_gates_pass here (unlike
+    services/eligibility.py's own failed_gate_visibility_allowed, which
+    exists and is tested standalone): jurisdiction gates are checked at
+    publish/agreement/move-in time (check_publish_eligibility,
+    check_agreement_eligibility, check_move_in_eligibility) but are
+    deliberately informational-only at publish time in this codebase ("the
+    admin's decision to approve is the final authority, not an automated
+    compliance gate" -- see publish_listing). Making a PUBLISHED listing's
+    day-to-day visibility hinge on continuously-passing jurisdiction gates
+    would be a real platform-wide behavior change (most listings in this
+    codebase have no ongoing gate enforcement wired at all beyond the
+    publish-time check), not a config-wiring fix -- out of Section 1's own
+    guardrail against inventing new hard business rules."""
     if listing_publication_eligible(listing):
         return False
     if listing.room_id is None:
@@ -429,8 +447,130 @@ def duplicate_listing(db: Session, listing: Listing, owner: AdminUser) -> Listin
     return copy
 
 
-def set_listing_state(db: Session, listing: Listing, state: str) -> Listing:
-    listing.state = state
+def _guard_listing_transition(listing: Listing, action: str, allowed_from: tuple[str, ...]) -> None:
+    if listing.state not in allowed_from:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"A listing in state {listing.state} cannot be {action} (must currently be one of: {', '.join(allowed_from)})",
+        )
+
+
+def _has_unresolved_commitments(db: Session, room_id: int) -> bool:
+    """ZR-ENG-CLR-001 Section 8: archive is 'not while unresolved commitments
+    exist'. A commitment is live if some other Listing pointing at this same
+    room_id has an accepted-but-not-yet-superseded Offer, or an Agreement that
+    hasn't reached a terminal state -- both represent an obligation the
+    platform must still honor regardless of what happens to this Listing row."""
+    active_offer = db.scalar(
+        select(Offer.id)
+        .join(Listing, Listing.id == Offer.listing_id)
+        .where(Listing.room_id == room_id, Offer.status == "ACCEPTED")
+    )
+    if active_offer is not None:
+        return True
+    active_agreement = db.scalar(
+        select(Agreement.id)
+        .join(Offer, Offer.id == Agreement.offer_id)
+        .join(Listing, Listing.id == Offer.listing_id)
+        .where(
+            Listing.room_id == room_id,
+            Agreement.status.in_(("SENT", "PARTIALLY_EXECUTED", "PAYMENT_IN_PROGRESS", "PAYMENT_PENDING", "SIGNED")),
+        )
+    )
+    return active_agreement is not None
+
+
+def pause_listing(db: Session, listing: Listing) -> Listing:
+    """ZR-ENG-CLR-001 Rule 5/Section 8: 'Pause listing -- Allowed... Stops new
+    booking eligibility; future/active bookings remain accessible and valid.'
+    Only legal from PUBLISHED -- there is no new demand to stop otherwise.
+    Never touches current_public_version_id or any Application/Offer/Agreement
+    row (AC-06: pausing must never cascade into cancelling a confirmed
+    booking) -- this function does nothing but flip Listing.state/paused_at."""
+    _guard_listing_transition(listing, "paused", ("PUBLISHED",))
+    listing.state = "PAUSED"
+    listing.paused_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(listing)
+    return listing
+
+
+def resume_listing(db: Session, listing: Listing) -> Listing:
+    """Section 12.2 ResumeListing: PAUSED -> PUBLISHED, resuming new booking
+    eligibility for an already-approved, already-published listing. Distinct
+    from publish_listing (which also handles the first-time DRAFT/APPROVED
+    publish paths and can imply an approval decision) -- resume never touches
+    approval state, since a paused listing was already published once and its
+    current_public_version_id is already valid. publish_listing itself still
+    also accepts PAUSED for backward compatibility -- this is the spec's own
+    named command for the same transition, kept as a thinner, more specific
+    action."""
+    _guard_listing_transition(listing, "resumed", ("PAUSED",))
+    listing.state = "PUBLISHED"
+    listing.paused_at = None
+    db.commit()
+    db.refresh(listing)
+    return listing
+
+
+def withdraw_listing(db: Session, listing: Listing) -> Listing:
+    """Rule 5/Section 8: 'Unpublish voluntarily -- Conditional... Removes new-
+    marketplace visibility but cannot cancel confirmed commitments.' Same
+    non-cascading guarantee as pause_listing (AC-06). QUARANTINED is included
+    -- withdrawing is how a host/admin takes a quarantined listing out of
+    consideration instead of waiting for it to be resolved back to PUBLISHED."""
+    _guard_listing_transition(listing, "withdrawn", ("PUBLISHED", "PAUSED", "APPROVED", "QUARANTINED"))
+    listing.state = "WITHDRAWN"
+    db.commit()
+    db.refresh(listing)
+    return listing
+
+
+def suspend_listing(db: Session, listing: Listing, reason: str) -> Listing:
+    """Rule 5/Section 3: 'Admin/Super Admin suspension -- Allowed... May stop
+    new bookings immediately.' An enforcement action, so (unlike pause/
+    withdraw) it is legal from almost any non-terminal state; a reason is
+    mandatory (Section 3: 'Suspend/quarantine -- Reason required')."""
+    if not reason.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A suspension reason is required")
+    _guard_listing_transition(listing, "suspended", tuple(s for s in LISTING_STATES if s not in ("ARCHIVED", "SUSPENDED")))
+    listing.state = "SUSPENDED"
+    listing.suspension_reason = reason.strip()
+    db.commit()
+    db.refresh(listing)
+    return listing
+
+
+def quarantine_listing(db: Session, listing: Listing, reason: str) -> Listing:
+    """Rule 3/Section 6.2: 'If a new disclosure makes the currently published
+    version unsafe or non-compliant, system/Admin may immediately quarantine
+    or suspend the listing pending review.' Distinct from suspend_listing --
+    quarantine specifically means 'this listing's own content/disclosures are
+    now suspect, pending re-review', not a general enforcement action; only
+    legal from PUBLISHED or PAUSED (there must be live public content for a
+    disclosure to have made unsafe). A reason is mandatory, same as suspend."""
+    if not reason.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A quarantine reason is required")
+    _guard_listing_transition(listing, "quarantined", ("PUBLISHED", "PAUSED"))
+    listing.state = "QUARANTINED"
+    listing.suspension_reason = reason.strip()
+    db.commit()
+    db.refresh(listing)
+    return listing
+
+
+def archive_listing(db: Session, listing: Listing) -> Listing:
+    """Rule 5/Section 8: 'Archive listing -- Not while unresolved commitments
+    exist... Permitted only after bookings, disputes, refunds, and retention
+    obligations reach allowed terminal states.' Only legal from WITHDRAWN or
+    SUSPENDED, and only once _has_unresolved_commitments is false."""
+    _guard_listing_transition(listing, "archived", ("WITHDRAWN", "SUSPENDED"))
+    if listing.room_id is not None and _has_unresolved_commitments(db, listing.room_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This listing's room has an active offer or agreement and cannot be archived yet",
+        )
+    listing.state = "ARCHIVED"
     db.commit()
     db.refresh(listing)
     return listing
@@ -471,7 +611,7 @@ def submit_listing_for_review(db: Session, listing: Listing) -> Listing:
     review, never publish directly."""
     if listing.room_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Listing must be linked to a room before it can be submitted")
-    if listing.state not in ("DRAFT", "REJECTED"):
+    if listing.state not in ("DRAFT", "REJECTED", "CHANGES_REQUESTED"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"A listing in state {listing.state} cannot be submitted for review")
 
     listing.rejection_reason = ""
@@ -493,6 +633,15 @@ def submit_listing_for_review(db: Session, listing: Listing) -> Listing:
     db.commit()
     db.refresh(listing)
 
+    # ZR-ENG-CLR-001 Rule 3/Section 14 policy key publication.requires_approval:
+    # "Future low-risk automation may approve through the same auditable
+    # approval object." England's own MarketRelease never overrides this
+    # (the platform default is always True), so this branch is dead for
+    # England launch -- it only fires for a future market pack that
+    # explicitly sets the override to False.
+    if not get_policy(listing.market_release, "publication.requires_approval"):
+        return _auto_approve_and_publish_low_risk_market(db, listing)
+
     notification_crud.notify_all_admins(
         db,
         title="Listing pending review",
@@ -501,6 +650,58 @@ def submit_listing_for_review(db: Session, listing: Listing) -> Listing:
         related_entity_type="listing", related_entity_id=listing.id,
     )
     db.commit()
+    return listing
+
+
+def _auto_approve_and_publish_low_risk_market(db: Session, listing: Listing) -> Listing:
+    """Section 14: the publication.requires_approval=False path. Goes through
+    the exact same ListingApproval / current_public_version_id / PUBLISHED
+    transition a human admin decision would (see approve_listing/
+    publish_listing) -- just system-attributed (reviewer_authority_scope=
+    'system', actor=None) instead of admin-attributed, and both decisions
+    still get their own distinct audit + domain events (5.1: 'Approval and
+    publication must be distinct events even if executed milliseconds
+    apart'), same as publish_listing's own implicit-approval case."""
+    version = listing.current_draft_version
+    version.approval_status = "APPROVED"
+    version.approved_at = datetime.now(timezone.utc)
+    db.add(ListingApproval(
+        listing_version_id=version.id,
+        decision="APPROVED",
+        decision_reason_code="publication_requires_approval_false",
+        reviewer_authority_scope="system",
+    ))
+    listing.current_public_version_id = version.id
+    listing.state = "PUBLISHED"
+    if listing.published_at is None:
+        listing.published_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(listing)
+
+    log_audit_event(
+        db, None, "listing.approve", "listing", listing.id, reason="publication_requires_approval_false",
+        before_state="REVIEW", after_state="APPROVED", object_version=str(listing.current_public_version_id),
+    )
+    emit_event(
+        db, "listing.approved", "listing", listing.id, {"listing_version_id": listing.current_public_version_id},
+    )
+    log_audit_event(
+        db, None, "listing.publish", "listing", listing.id, reason="publication_requires_approval_false",
+        before_state="APPROVED", after_state="PUBLISHED", object_version=str(listing.current_public_version_id),
+    )
+    emit_event(db, "listing.published", "listing", listing.id, {"room_id": listing.room_id})
+
+    user = get_user_by_party_id(db, listing.party_id)
+    if user:
+        notification_crud.notify_user(
+            db, user.id,
+            title="Listing approved and published",
+            message=f'Your listing "{listing.name}" has been automatically approved and published for this market.',
+            notification_type="listing.published",
+            related_entity_type="listing", related_entity_id=listing.id,
+        )
+        db.commit()
+        send_listing_published_email(user.email, user.full_name, listing.name)
     return listing
 
 
@@ -570,10 +771,26 @@ def publish_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
     if listing.room_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Listing must be linked to a room before it can be published")
     if listing.state == "PUBLISHED":
+        listing.auto_approved_at_publish = False
         return listing
+    if listing.state in ("SUSPENDED", "QUARANTINED") and admin.role != "super_admin":
+        # Only a super admin imposed these (suspend_listing/quarantine_listing
+        # are both super-admin-gated at the route level) -- only a super
+        # admin may lift them, or a plain admin could silently undo a super
+        # admin's enforcement action by republishing.
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"Only a super admin can republish a {listing.state.lower()} listing",
+        )
 
     version = listing.current_draft_version or _create_new_version(db, listing)
-    if version.approval_status != "APPROVED":
+    # Transient (not a mapped column, same pattern as annotate_availability's
+    # `.available`) -- lets the route record the implicit approval as its own
+    # distinct audit/domain event (5.1: "Approval and publication must be
+    # distinct events even if executed milliseconds apart") without this
+    # function needing to know about audit/event plumbing itself.
+    listing.auto_approved_at_publish = version.approval_status != "APPROVED"
+    if listing.auto_approved_at_publish:
         version.approval_status = "APPROVED"
         version.approved_at = datetime.now(timezone.utc)
         _record_approval_decision(db, version, "APPROVED", admin, decision_reason_code="publish_admin_decision")
@@ -581,6 +798,7 @@ def publish_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
 
     listing.rejection_reason = ""
     listing.state = "PUBLISHED"
+    listing.paused_at = None
     if listing.published_at is None:
         listing.published_at = datetime.now(timezone.utc)
     db.commit()
@@ -634,4 +852,41 @@ def reject_listing(db: Session, listing: Listing, reason: str, admin: AdminUser)
         )
         db.commit()
         send_listing_rejected_email(user.email, user.full_name, listing.name, listing.rejection_reason)
+    return listing
+
+
+def request_changes_on_listing(db: Session, listing: Listing, reason: str, admin: AdminUser) -> Listing:
+    """Rule 2 (5.1): 'Alternative review outcomes: CHANGES_REQUESTED, REJECTED,
+    QUARANTINED, or SUSPENDED where appropriate.' Distinct from reject_listing
+    -- CHANGES_REQUESTED signals 'fix these specific things and resubmit',
+    not a full rejection; the host resubmits through the exact same
+    submit_listing_for_review path as a DRAFT/REJECTED listing (see its
+    updated guard). current_public_version_id is left untouched, same as
+    reject_listing -- any previously published content stays live."""
+    if listing.state != "REVIEW":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a listing pending review can have changes requested")
+    if not reason.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A changes-requested reason is required")
+
+    listing.state = "CHANGES_REQUESTED"
+    listing.rejection_reason = reason.strip()
+
+    version = listing.current_draft_version
+    if version is not None and version.approval_status != "APPROVED":
+        version.approval_status = "CHANGES_REQUESTED"
+        _record_approval_decision(db, version, "CHANGES_REQUESTED", admin, reason_note=listing.rejection_reason)
+
+    db.commit()
+    db.refresh(listing)
+
+    user = get_user_by_party_id(db, listing.party_id)
+    if user:
+        notification_crud.notify_user(
+            db, user.id,
+            title="Changes requested on your listing",
+            message=f'"{listing.name}" needs changes before it can be approved. Reason: {listing.rejection_reason}',
+            notification_type="listing.changes_requested",
+            related_entity_type="listing", related_entity_id=listing.id,
+        )
+        db.commit()
     return listing

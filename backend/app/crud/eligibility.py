@@ -14,6 +14,7 @@ from app.models.leasing import Agreement, Application, Offer
 from app.models.listing import Listing
 from app.models.market_release import MarketRelease
 from app.models.room import Room
+from app.services.agreement_effectiveness import is_agreement_effective
 from app.services.eligibility import jurisdiction_gates_pass, listing_publication_eligible
 
 
@@ -62,8 +63,14 @@ def check_move_in_eligibility(db, agreement: Agreement) -> list[str]:
     market_release = db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
     reasons = check_marketplace_standing(db, listing.room, market_release)
 
+    # ZR-ENG-CLR-004 AC-13/AC-14: Executed and Effective are separate states
+    # -- move-in requires the agreement to actually be effective (signed AND
+    # its own lease start_date reached), not merely "last signature
+    # received" (see services/agreement_effectiveness.py).
     if agreement.status != "SIGNED":
         reasons.append("Agreement is not signed by both parties")
+    elif not is_agreement_effective(agreement):
+        reasons.append("Agreement is signed but not yet effective (lease start date not reached)")
     reasons.extend(listing_publication_eligible(listing))
 
     unpaid = [o for o in agreement.obligations if o.status not in ("PAID", "WAIVED")]

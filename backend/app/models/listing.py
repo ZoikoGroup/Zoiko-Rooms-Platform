@@ -12,8 +12,8 @@ from app.db.base import Base
 PROPERTY_TYPES = ("private_room",)
 
 LISTING_STATES = (
-    "DRAFT", "EVIDENCE_PENDING", "REVIEW", "REJECTED", "APPROVED",
-    "PUBLISHED", "PAUSED", "SUSPENDED", "WITHDRAWN", "ARCHIVED",
+    "DRAFT", "EVIDENCE_PENDING", "REVIEW", "CHANGES_REQUESTED", "REJECTED", "APPROVED",
+    "PUBLISHED", "PAUSED", "SUSPENDED", "QUARANTINED", "WITHDRAWN", "ARCHIVED",
 )
 
 # Explicitly stored per listing rather than derived from country/market -- that
@@ -81,6 +81,14 @@ class Listing(Base):
     # Set by an admin/super admin when moving REVIEW -> REJECTED; cleared again on
     # resubmission. Empty for every other state.
     rejection_reason: Mapped[str] = mapped_column(String(1000), default="")
+    # ZR-ENG-CLR-001 Section 12.1 minimum fields. paused_at: set each time the
+    # listing enters PAUSED (crud.listing.pause_listing), cleared on the next
+    # publish/resume -- unlike published_at, this reflects the *current* pause,
+    # not "ever paused". suspension_reason: Section 3 "Suspend/quarantine --
+    # Reason required"; set by suspend_listing, cleared on any later transition
+    # out of SUSPENDED.
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suspension_reason: Mapped[str] = mapped_column(String(1000), default="")
 
     # Optional per-listing override of the owner account's contact details --
     # left blank, the public API falls back to the owner's name/email/phone.

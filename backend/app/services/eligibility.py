@@ -32,6 +32,7 @@ from app.crud.occupancy_classification import get_classification_for_room
 from app.models.listing import Listing
 from app.models.market_release import MarketRelease
 from app.models.room import Room
+from app.services.policy import get_policy
 
 
 def listing_publication_eligible(listing: Listing) -> list[str]:
@@ -66,3 +67,20 @@ def jurisdiction_gates_pass(db: Session, room: Room, market_release: MarketRelea
         reasons.append("Occupancy classification is missing or unresolved")
 
     return reasons
+
+
+def failed_gate_visibility_allowed(db: Session, room: Room, market_release: MarketRelease | None) -> bool:
+    """Section 14 policy key visibility.failed_gate_behavior: for a listing
+    whose jurisdiction gates have started failing (an authority record
+    expired, a classification was revoked, a market release was disabled --
+    anything jurisdiction_gates_pass would now flag), should it still be
+    publicly visible? Both platform defaults, 'hide' and 'quarantine', mean
+    no here -- quarantine additionally flips the listing's own state
+    elsewhere (crud/listing.py's admin-facing single-listing read); this
+    function only answers the visibility question. 'visible_unbookable'
+    means yes, relying on Rule 1's own booking-eligibility clauses (this same
+    jurisdiction_gates_pass, re-checked at every later stage) to keep it
+    unbookable regardless."""
+    if not jurisdiction_gates_pass(db, room, market_release):
+        return True
+    return get_policy(market_release, "visibility.failed_gate_behavior") == "visible_unbookable"

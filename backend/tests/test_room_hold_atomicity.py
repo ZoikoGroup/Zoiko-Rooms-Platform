@@ -196,8 +196,12 @@ class TestEndingOccupancyReleasesHold:
         offer_a = db_session.get(Offer, offer_a_id)
         leasing_crud.add_offer_terms(
             db_session, offer_a, super_admin,
+            # start_date=today, not tomorrow: ZR-ENG-CLR-004 AC-13/AC-14 --
+            # move-in now requires the agreement to be *effective*, not just
+            # signed (see services/agreement_effectiveness.py), which needs
+            # the lease's own start_date to have already arrived.
             data=OfferTermsCreate(
-                monthly_rent=500, deposit_amount=500, start_date=date.today() + timedelta(days=1), term_months=6,
+                monthly_rent=500, deposit_amount=500, start_date=date.today(), term_months=6,
             ),
         )
 
@@ -206,8 +210,10 @@ class TestEndingOccupancyReleasesHold:
 
         # Satisfy check_agreement_eligibility/check_move_in_eligibility's
         # market/authority/classification gates (unrelated to inventory holds).
+        # "England" -- the one jurisdiction the ZR-ENG-CLR-004 fail-closed
+        # agreement-profile resolver currently supports.
         listing = db_session.get(Listing, listing_id)
-        market_release = MarketRelease(jurisdiction="IN-HOLDTEST", status="active")
+        market_release = MarketRelease(jurisdiction="England", status="active")
         db_session.add(market_release)
         db_session.flush()
         listing.market_release_id = market_release.id

@@ -15,7 +15,17 @@ class MarketReleaseRead(CamelModel):
     min_stay_nights: int
     effective_from: datetime | None
     approved_at: datetime | None
+    # ZR-ENG-CLR-001 Section 14: see app/services/policy.py for the known
+    # keys/defaults. Empty means every policy uses the platform-wide default.
+    policy_overrides: dict = {}
     created_at: datetime
+
+
+class MarketReleasePolicyUpdate(CamelModel):
+    """Full replacement of policy_overrides -- keys must be a subset of
+    services.policy.POLICY_KEYS (validated server-side, not just here)."""
+
+    overrides: dict
 
 
 class PropertyCreate(CamelModel):
