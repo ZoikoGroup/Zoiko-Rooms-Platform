@@ -89,7 +89,7 @@ class TestArrangementTypeValidation:
     def test_unsupported_arrangement_type_is_rejected(self, db_session: Session):
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="badtype")
         try:
-            sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "LODGER_OR_LICENSEE")
+            sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "TEMPORARY_GUEST")
             assert False, "should have raised"
         except Exception as e:
             assert "Unsupported arrangement type" in str(e)
@@ -248,6 +248,45 @@ class TestSecondSubletOnSameOccupancyDoesNotCrash:
         second = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, second_party.id, "ASSIGNMENT_FULL")
         assert second.id != first.id
         assert second.status == "pending_admin_review"
+
+
+class TestLodgerOrLicensee:
+    def test_approving_lodger_or_licensee_creates_co_tenancy_with_licensee_liability(self, client, db_session: Session):
+        tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="lodger")
+        occupancy = db_session.get(Occupancy, occupancy_id)
+        occupancy.room.max_occupants = 2
+        db_session.commit()
+
+        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "LODGER_OR_LICENSEE")
+        super_admin = _make_admin(db_session, email="lodger-admin@test.com", role="super_admin")
+
+        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", cookies=auth_admin_cookie(super_admin))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["newOccupantLiability"] == "LICENSEE"
+        assert body["originalRenterLiability"] == "ACTIVE"
+        assert body["newAgreementId"] is not None, "lodger still gets a real agreement, unlike ADDITIONAL_OCCUPANT"
+
+
+class TestAdditionalOccupant:
+    def test_approving_additional_occupant_creates_no_agreement_and_no_new_obligation(self, client, db_session: Session):
+        tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="addlocc")
+        # Deliberately do NOT raise room capacity -- ADDITIONAL_OCCUPANT must not
+        # be gated on it at all, since it creates no occupancy/tenancy record.
+        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADDITIONAL_OCCUPANT")
+        super_admin = _make_admin(db_session, email="addlocc-admin@test.com", role="super_admin")
+
+        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", cookies=auth_admin_cookie(super_admin))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["newAgreementId"] is None
+        assert body["newOccupantLiability"] == "NONE"
+        assert body["originalRenterLiability"] == "ACTIVE"
+        assert body["depositDisposition"] == "NOT_APPLICABLE"
+
+        # The original tenant's occupancy is completely untouched.
+        occupancy = db_session.get(Occupancy, occupancy_id)
+        assert occupancy.guest_id is not None  # unchanged from before -- no swap happened
 
 
 class TestCoTenancyRequiresCapacity:

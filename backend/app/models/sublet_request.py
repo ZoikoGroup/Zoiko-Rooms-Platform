@@ -9,21 +9,33 @@ SUBLET_REQUEST_STATUSES = ("pending_verification", "pending_admin_review", "appr
 
 # India-scope MVP of ZR-ENG-CLR-003 Section 3's 10-type canonical taxonomy.
 # ASSIGNMENT_FULL / REPLACEMENT_OCCUPANT overwrite the existing tenancy.
-# SUBLEASE_PARTIAL / ADD_CO_TENANT create a real second, independent tenancy
-# alongside the existing one (gated on Room.max_occupants). The remaining types
-# (LODGER_OR_LICENSEE, ADDITIONAL_OCCUPANT, TEMPORARY_GUEST,
-# UNAUTHORIZED_OCCUPANCY, OTHER_REGULATED_TRANSFER) still aren't modeled --
-# rejecting them explicitly is the doc's own POLICY_UNCERTAIN/NOT_APPLICABLE
-# principle: don't silently approve what the platform can't actually represent.
-SUBLET_ARRANGEMENT_TYPES = ("ASSIGNMENT_FULL", "REPLACEMENT_OCCUPANT", "SUBLEASE_PARTIAL", "ADD_CO_TENANT")
+# SUBLEASE_PARTIAL / ADD_CO_TENANT / LODGER_OR_LICENSEE all create a real
+# second, independent tenancy alongside the existing one (gated on
+# Room.max_occupants) -- LODGER_OR_LICENSEE differs only in liability outcome
+# (a licensee has no tenancy rights, unlike a co-tenant). ADDITIONAL_OCCUPANT
+# is record-only: permission to reside without any contractual/financial
+# consequence at all (ZR-ENG-CLR-003 Section 3: "Person is permitted to reside
+# without becoming a contractual tenant" -- no agreement, no obligation, no
+# occupancy row). The remaining types (TEMPORARY_GUEST, UNAUTHORIZED_OCCUPANCY,
+# OTHER_REGULATED_TRANSFER) still aren't modeled -- rejecting them explicitly
+# is the doc's own POLICY_UNCERTAIN/NOT_APPLICABLE principle: don't silently
+# approve what the platform can't actually represent.
+SUBLET_ARRANGEMENT_TYPES = (
+    "ASSIGNMENT_FULL", "REPLACEMENT_OCCUPANT",
+    "SUBLEASE_PARTIAL", "ADD_CO_TENANT", "LODGER_OR_LICENSEE",
+    "ADDITIONAL_OCCUPANT",
+)
 # Arrangement types that replace the existing occupant vs. add a second one.
 REPLACING_ARRANGEMENT_TYPES = ("ASSIGNMENT_FULL", "REPLACEMENT_OCCUPANT")
-CO_TENANCY_ARRANGEMENT_TYPES = ("SUBLEASE_PARTIAL", "ADD_CO_TENANT")
+CO_TENANCY_ARRANGEMENT_TYPES = ("SUBLEASE_PARTIAL", "ADD_CO_TENANT", "LODGER_OR_LICENSEE")
+# Record-only: approving these never creates an agreement, obligation, or
+# occupancy -- just a permission on file.
+NO_TENANCY_ARRANGEMENT_TYPES = ("ADDITIONAL_OCCUPANT",)
 
 # Section 3's liability state model (14.4), trimmed to the states this MVP
 # actually drives.
 ORIGINAL_RENTER_LIABILITY_STATES = ("ACTIVE", "LIMITED", "RELEASED")
-NEW_OCCUPANT_LIABILITY_STATES = ("NONE", "SUBORDINATE", "ASSIGNEE", "JOINT")
+NEW_OCCUPANT_LIABILITY_STATES = ("NONE", "SUBORDINATE", "ASSIGNEE", "JOINT", "LICENSEE")
 
 
 class SubletRequest(Base):

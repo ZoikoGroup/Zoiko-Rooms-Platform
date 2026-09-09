@@ -10,7 +10,7 @@ from app.models.identity_verification import IdentityVerification
 from app.models.leasing import Agreement, Application, Offer, OfferTerms
 from app.models.occupancy import Occupancy
 from app.models.party import Party
-from app.models.sublet_request import CO_TENANCY_ARRANGEMENT_TYPES, SUBLET_ARRANGEMENT_TYPES, SubletRequest
+from app.models.sublet_request import CO_TENANCY_ARRANGEMENT_TYPES, NO_TENANCY_ARRANGEMENT_TYPES, SUBLET_ARRANGEMENT_TYPES, SubletRequest
 from app.models.user_account import UserAccount
 from app.models.guest import Guest
 from app.crud import guest as guest_crud
@@ -102,8 +102,8 @@ def submit_sublet_request(
     if arrangement_type not in SUBLET_ARRANGEMENT_TYPES:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"Unsupported arrangement type '{arrangement_type}' -- this platform's occupancy model "
-            "only supports ASSIGNMENT_FULL or REPLACEMENT_OCCUPANT today",
+            f"Unsupported arrangement type '{arrangement_type}' -- this platform supports "
+            f"{', '.join(SUBLET_ARRANGEMENT_TYPES)} today",
         )
 
     # Verify the user owns the current occupancy
@@ -195,6 +195,8 @@ def submit_sublet_request(
     # this platform never notified them at all, at any stage.
     if arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES:
         proposed_message = f"{user.full_name} has requested to add you as a co-tenant on their room, pending Zoiko's review."
+    elif arrangement_type in NO_TENANCY_ARRANGEMENT_TYPES:
+        proposed_message = f"{user.full_name} has requested permission for you to reside in their room, pending Zoiko's review."
     else:
         proposed_message = f"{user.full_name} has requested to hand over their room to you, pending Zoiko's review."
     notif_crud.notify_user_by_party(
@@ -323,9 +325,20 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
     listing = sublet_request.current_occupancy.listing
     proposed_guest = _guest_for_proposed_party(db, sublet_request.proposed_renter_party_id)
     is_co_tenancy = sublet_request.arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES
+    is_no_tenancy = sublet_request.arrangement_type in NO_TENANCY_ARRANGEMENT_TYPES
     policy = resolve_market_policy(db)
 
-    if is_co_tenancy:
+    if is_no_tenancy:
+        # ADDITIONAL_OCCUPANT: "permitted to reside without becoming a
+        # contractual tenant" (Section 3) -- no agreement, no obligation, no
+        # occupancy row, no capacity check (they're not counted as a tenancy).
+        # This is a record of permission only.
+        sublet_request.original_renter_liability = "ACTIVE"
+        sublet_request.new_occupant_liability = "NONE"
+        sublet_request.deposit_disposition = "NOT_APPLICABLE"
+        sublet_request.payee_model = "EXTERNAL_PAYEE_RECORDED"
+        requester_guest_id = sublet_request.current_occupancy.guest_id
+    elif is_co_tenancy:
         capacity_reasons = check_room_capacity(db, sublet_request.current_occupancy.room)
         if capacity_reasons:
             raise HTTPException(status.HTTP_409_CONFLICT, {"message": "Room cannot accept a co-tenant", "reasons": capacity_reasons})
@@ -333,9 +346,14 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
         new_agreement = _create_co_tenancy_agreement(db, sublet_request.current_occupancy, proposed_guest, negotiated_rent)
         sublet_request.new_agreement_id = new_agreement.id
         # Both tenants remain fully active and liable -- adding a co-tenant
-        # doesn't release the original renter of anything.
+        # doesn't release the original renter of anything. A licensee/lodger
+        # has no tenancy rights (Section 3's canonical meaning), unlike a true
+        # co-tenant/sublease occupant who shares equal standing -- hence the
+        # distinct liability outcome despite reusing the same agreement path.
         sublet_request.original_renter_liability = "ACTIVE"
-        sublet_request.new_occupant_liability = "JOINT"
+        sublet_request.new_occupant_liability = (
+            "LICENSEE" if sublet_request.arrangement_type == "LODGER_OR_LICENSEE" else "JOINT"
+        )
         sublet_request.deposit_disposition = "SEPARATE_DEPOSIT_CREATED"
         # ZR-ENG-CLR-003 Rule 4.5: the co-tenant funds their own agreement
         # directly -- there's no third party routing their rent through the
@@ -372,7 +390,16 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
 
     _notify_sublet_requester(db, requester_guest_id, sublet_request.id, approved=True, notes=notes)
     _notify_sublet_host(db, sublet_request.current_occupancy, sublet_request.id, approved=True)
-    if is_co_tenancy:
+    if is_no_tenancy:
+        notif_crud.notify_user_by_guest(
+            db, proposed_guest,
+            title="You've been given permission to reside",
+            message=f'You have been approved to reside at "{listing.name if listing else "this property"}" '
+                    "-- this is a residency permission, not a tenancy: no rent obligation, no occupancy record.",
+            notification_type="sublet_request.additional_occupant_approved",
+            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+        )
+    elif is_co_tenancy:
         notif_crud.notify_user_by_guest(
             db, proposed_guest,
             title="You've been added as a co-tenant",
@@ -391,14 +418,17 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
 
     # Only notified now that they're actually authorized -- never earlier in the
     # request/review flow, so a proposed occupant's involvement isn't exposed
-    # prematurely.
-    notif_crud.notify_user_by_guest(
-        db, proposed_guest,
-        title="You've been authorized as a new occupant",
-        message=f'You have been approved to take over occupancy of "{listing.name}".' if listing else "You have been approved to take over an occupancy.",
-        notification_type="sublet_request.authorized",
-        related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
-    )
+    # prematurely. Skipped for ADDITIONAL_OCCUPANT: "take over occupancy" would
+    # be factually wrong for a permission-only record with no tenancy at all --
+    # that case already got its own accurate message above.
+    if not is_no_tenancy:
+        notif_crud.notify_user_by_guest(
+            db, proposed_guest,
+            title="You've been authorized as a new occupant",
+            message=f'You have been approved to take over occupancy of "{listing.name}".' if listing else "You have been approved to take over an occupancy.",
+            notification_type="sublet_request.authorized",
+            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+        )
     if listing and listing.party_id:
         notif_crud.notify_user_by_party(
             db, listing.party_id,
