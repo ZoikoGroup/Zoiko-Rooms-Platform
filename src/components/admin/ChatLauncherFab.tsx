@@ -24,8 +24,8 @@ export function ChatLauncherFab({ open, onToggle, hasUnread = false }: ChatLaunc
     <button
       type="button"
       onClick={onToggle}
-      aria-label={open ? "Close Zoiko assistant chat" : "Open Zoiko assistant chat"}
-      title="Zoiko Assistant"
+      aria-label={open ? "Close Ask Zoiko AI assistant" : "Open Ask Zoiko AI assistant"}
+      title="Ask Zoiko · AI assistant"
       className={cn(
         // Base: fixed position, size, colors
         "fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full shadow-xl shadow-primary-900/30",

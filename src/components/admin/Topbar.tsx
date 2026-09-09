@@ -220,8 +220,8 @@ export function Topbar({
 
         <button
           onClick={onToggleChat}
-          aria-label="Open Zoiko assistant chat"
-          title="Zoiko Assistant"
+          aria-label="Open Ask Zoiko AI assistant"
+          title="Ask Zoiko · AI assistant"
           className="flex h-10 w-10 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-primary-50 hover:text-primary-700 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white"
         >
           <Image

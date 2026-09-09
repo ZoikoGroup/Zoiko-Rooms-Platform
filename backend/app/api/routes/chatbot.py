@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin
 from app.core.correlation import get_correlation_id
+from app.core.rate_limit import chat_limiter
 from app.crud.audit import log_audit_event
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
@@ -126,6 +127,11 @@ def send_message_stream(
     if not content:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Message content is required")
 
+    # Per-admin throttling of the streaming endpoint (not just relied on the
+    # Groq provider's own limit) to bound cost and abuse.
+    if not chat_limiter.allow(f"admin:{admin.id}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many requests. Please wait a moment.")
+
     # Auto-title from the first user message (ChatGPT-style).
     if conversation.title == "New conversation":
         conversation.title = content[:TITLE_MAX_LENGTH]
@@ -148,19 +154,42 @@ def send_message_stream(
                     tool_calls_made.append({"name": data["name"]})
                     yield _sse("tool", data)
                 elif event_type == "done":
-                    blocks = data["blocks"]
+                    data_obj = data
+                    blocks = data_obj["blocks"]
+                    meta = data_obj.get("meta", {})
                     text_parts = [b["text"] for b in blocks if b["type"] == "text"]
                     final_text = "\n".join(p for p in text_parts if p.strip())
+                    tool_results_made = [b for b in blocks if b["type"] == "tool_result"]
                     assistant_message = ChatMessage(
                         conversation_id=conversation.id,
                         role="assistant",
                         content=final_text,
                         tool_calls_json=json.dumps(tool_calls_made),
+                        tool_results_json=json.dumps(tool_results_made),
+                        meta_json=json.dumps(meta),
                     )
                     db.add(assistant_message)
                     db.commit()
                     audit("chat.message", f"tools={[c['name'] for c in tool_calls_made]}")
-                    yield _sse("done", {"messageId": assistant_message.id, "content": final_text})
+                    # Deterministic guardrail surfaces for the client + audit hook.
+                    guardrail = {
+                        "risk": meta.get("risk"),
+                        "risk_topic": meta.get("risk_topic"),
+                        "action_tier": meta.get("action_tier"),
+                        "determination_blocked": meta.get("determination_blocked", False),
+                    }
+                    if guardrail["determination_blocked"]:
+                        audit("chat.guardrail.determination_blocked", f"tier={guardrail['action_tier']}")
+                    yield _sse(
+                        "done",
+                        {
+                            "messageId": assistant_message.id,
+                            "content": final_text,
+                            "guardrail": guardrail,
+                        },
+                    )
+                elif event_type == "text":
+                    yield _sse("text", data)
                 else:
                     yield _sse(event_type, data)
         except RateLimitError as exc:

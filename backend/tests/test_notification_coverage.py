@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -149,12 +151,37 @@ class TestOfferNotifications:
         assert _notification(db_session, notification_type="offer.sent", recipient_user_id=host.id) is None
 
     def test_offer_accepted_notifies_renter_and_host(self, db_session: Session):
-        offer, host, renter_user = self._offer(db_session, "accepted")
+        """Updated for origin/main's _assert_renter_has_no_account: a renter who
+        has a real Zoiko account can no longer be accepted-on-behalf-of by an
+        admin -- confirm that's actually enforced (409), then confirm the
+        notification/email behavior itself (set_offer_status's ACCEPTED branch)
+        still fires correctly for the case the admin path remains legitimate
+        for: a walk-in guest with no Zoiko account. (The new self-service
+        leasing_crud.user_accept_offer path, for a renter who does have an
+        account, does not itself send a notification yet -- a separate,
+        pre-existing gap in that new code, not something to paper over here.)"""
+        offer, host, _renter_user = self._offer(db_session, "accepted")
         admin = _make_admin(db_session, email="offer-acc-admin@test.com", role="super_admin")
+        with pytest.raises(HTTPException) as excinfo:
+            leasing_crud.set_offer_status(db_session, offer, admin, "ACCEPTED")
+        assert excinfo.value.status_code == status.HTTP_409_CONFLICT
 
-        leasing_crud.set_offer_status(db_session, offer, admin, "ACCEPTED")
+        # Same host/listing, a second (walk-in, no Zoiko account) applicant --
+        # _make_host_and_listing hardcodes its listing id, so a second host must
+        # not be created in the same test; reusing this one's listing is fine
+        # since it's the guest's account status that the rule keys off of, not
+        # the listing.
+        guest = Guest(id="G-OFFER-walkin", name="Walk-in Renter", email="offer-walkin@test.com", joined_at=date.today())
+        db_session.add(guest)
+        db_session.commit()
+        application = _application_for(db_session, offer.listing_id, guest)
+        walkin_offer = Offer(application_id=application.id, listing_id=offer.listing_id, guest_id=guest.id)
+        db_session.add(walkin_offer)
+        db_session.commit()
+        db_session.refresh(walkin_offer)
 
-        assert _notification(db_session, notification_type="offer.accepted", recipient_user_id=renter_user.id) is not None
+        leasing_crud.set_offer_status(db_session, walkin_offer, admin, "ACCEPTED")
+
         assert _notification(db_session, notification_type="offer.accepted_for_host", recipient_user_id=host.id) is not None
 
 
@@ -201,9 +228,24 @@ class TestAgreementNotifications:
         assert _notification(db_session, notification_type="agreement.signed", recipient_user_id=renter_user.id) is None
 
     def test_both_signatures_notify_renter_and_host_of_executed_agreement(self, db_session: Session):
+        """Updated for origin/main's _assert_renter_has_no_account: an
+        admin-attested signature "as renter" is now rejected once the renter has
+        a real account -- confirm that's enforced (409), then confirm the
+        provider's signature is still admin-attested as before, and the
+        renter's own signature goes through the new self-service
+        leasing_crud.user_sign_agreement instead. Both paths share
+        _apply_signature, so the notification/email assertions are unchanged."""
         agreement, host, renter_user, admin = self._agreement(db_session, "both")
+
+        with pytest.raises(HTTPException) as excinfo:
+            leasing_crud.sign_agreement(db_session, agreement, "renter", admin)
+        assert excinfo.value.status_code == status.HTTP_409_CONFLICT
+
         leasing_crud.sign_agreement(db_session, agreement, "provider", admin)
-        leasing_crud.sign_agreement(db_session, agreement, "renter", admin)
+        agreement.status = "SENT"  # user_sign_agreement only accepts a sent agreement
+        db_session.commit()
+
+        leasing_crud.user_sign_agreement(db_session, renter_user, agreement)
 
         assert agreement.status == "SIGNED"
         assert _notification(db_session, notification_type="agreement.signed", recipient_user_id=renter_user.id) is not None

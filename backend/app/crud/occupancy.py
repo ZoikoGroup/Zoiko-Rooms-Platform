@@ -2,7 +2,7 @@
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.crud.eligibility import check_move_in_eligibility
 from app.crud import notification as notif_crud
@@ -13,6 +13,7 @@ from app.models.guest import Guest
 from app.models.leasing import Agreement
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
+from app.models.room import Room
 from app.schemas.occupancy import OccupancyRead
 
 
@@ -98,11 +99,29 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
 
     db.commit()
     db.refresh(occupancy)
+
+    guest = db.get(Guest, occupancy.guest_id)
+    if guest:
+        notif_crud.notify_user_by_guest(
+            db, guest,
+            title="You're moved in!",
+            message=f"Your move-in for \"{offer.listing.name}\" is confirmed.",
+            notification_type="occupancy.move_in_confirmed",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
     return occupancy
 
 
 def list_occupancies_for(db: Session, admin: AdminUser) -> list[Occupancy]:
-    query = select(Occupancy).order_by(Occupancy.created_at.desc())
+    query = (
+        select(Occupancy)
+        .options(
+            joinedload(Occupancy.listing),
+            joinedload(Occupancy.room).joinedload(Room.property),
+            joinedload(Occupancy.guest),
+        )
+        .order_by(Occupancy.created_at.desc())
+    )
     if admin.role != "super_admin":
         query = query.join(Listing, Listing.id == Occupancy.listing_id).where(Listing.owner_id == admin.id)
     return list(db.scalars(query))

@@ -15,9 +15,12 @@ from app.api.routes import (
     chatbot,
     finance,
     guests,
+    handoffs,
+    feature_flags,
     identity_verification,
     leasing,
     listings,
+    knowledge,
     market_releases,
     occupancy,
     occupancy_classification,
@@ -65,7 +68,7 @@ app.add_middleware(
 
 Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
-
+ 
 # Identity documents live in their own directory and are deliberately never
 # mounted here -- they're only reachable through the authenticated
 # /api/users/identity-verifications/{id}/document and
@@ -79,6 +82,7 @@ app.include_router(user_payments.router)
 app.include_router(user_rentals.router)
 app.include_router(user_hosting.router)
 app.include_router(listings.router)
+app.include_router(knowledge.router)
 app.include_router(bookings.router)
 app.include_router(guests.router)
 app.include_router(payments.router)
@@ -100,6 +104,8 @@ app.include_router(occupancy.router)
 app.include_router(finance.router)
 app.include_router(chatbot.router)
 app.include_router(user_chat.router)
+app.include_router(handoffs.router)
+app.include_router(feature_flags.router)
 app.include_router(user_notifications.router)
 app.include_router(admin_notifications.router)
 app.include_router(user_contact.router)

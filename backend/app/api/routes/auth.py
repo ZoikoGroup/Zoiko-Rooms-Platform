@@ -23,7 +23,7 @@ def _set_auth_cookie(response: Response, email: str) -> None:
         # (frontend and backend on different domains) -- but browsers only honor
         # None when Secure is also set, so fall back to Lax for local http dev.
         samesite="none" if settings.cookie_secure else "lax",
-        domain=settings.cookie_domain,
+        domain=settings.cookie_domain or None,
         max_age=settings.jwt_expire_minutes * 60,
         path="/",
     )

@@ -1,9 +1,16 @@
 from pathlib import Path
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Anchor .env to the backend package root so settings load regardless of the
 # working directory uvicorn (or an IDE run config) is started from.
 BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+# Placeholder secrets that must never be used beyond local development. If
+# ENVIRONMENT=production is set alongside any of these, the app refuses to boot.
+PLACEHOLDER_JWT_SECRETS = ("dev-secret-change-me", "change-me", "changeme", "secret")
+PLACEHOLDER_PASSWORDS = ("change-this-password", "change-me", "changeme", "password", "password123")
 
 
 class Settings(BaseSettings):
@@ -11,6 +18,7 @@ class Settings(BaseSettings):
         env_file=str(BACKEND_DIR / ".env"), env_file_encoding="utf-8", extra="ignore"
     )
 
+    environment: str = "development"
     database_url: str = "postgresql+psycopg://zoiko:zoiko@localhost:5432/zoiko_rooms"
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"
@@ -21,7 +29,6 @@ class Settings(BaseSettings):
     # for cross-domain setups like Vercel + Render). Set to ".zoikorooms.com" in
     # production once frontend/backend share that domain.
     cookie_domain: str | None = None
-
     seed_admin_email: str = "admin@zoikorooms.com"
     seed_admin_password: str = "change-this-password"
 
@@ -51,6 +58,35 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = True
+
+    # Chat SSE rate limiting (requests per window, per authenticated actor).
+    chat_rate_limit_max: int = 20
+    chat_rate_limit_window_seconds: int = 60
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment.strip().lower() == "production"
+
+    @model_validator(mode="after")
+    def _validate_production(self) -> "Settings":
+        if not self.is_production:
+            return self
+        problems: list[str] = []
+        if not self.cookie_secure:
+            problems.append("COOKIE_SECURE must be true in production")
+        if not self.jwt_secret or self.jwt_secret.strip().lower() in PLACEHOLDER_JWT_SECRETS:
+            problems.append("JWT_SECRET is unset or is a known placeholder")
+        if self.jwt_secret and len(self.jwt_secret) < 32:
+            problems.append("JWT_SECRET is shorter than 32 characters")
+        if not self.seed_admin_password or self.seed_admin_password.strip().lower() in PLACEHOLDER_PASSWORDS:
+            problems.append("SEED_ADMIN_PASSWORD is unset or is a known placeholder")
+        if len(self.seed_admin_password) < 12:
+            problems.append("SEED_ADMIN_PASSWORD is shorter than 12 characters")
+        if problems:
+            raise ValueError(
+                "Refusing to boot in production due to insecure configuration:\n- " + "\n- ".join(problems)
+            )
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:

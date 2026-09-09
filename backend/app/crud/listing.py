@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import HTTPException, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
@@ -116,7 +118,7 @@ def list_listings_for(db: Session, admin: AdminUser) -> list[Listing]:
     else's listing content is still owner-or-super-admin gated separately
     (see _assert_owner_or_super_admin in api/routes/listings.py); this only
     affects what an admin can see and review/approve/reject."""
-    return list(db.scalars(select(Listing).order_by(Listing.name)))
+    return list(db.scalars(select(Listing).options(joinedload(Listing.room)).order_by(Listing.name)))
 
 
 def list_public_listings(
@@ -445,6 +447,8 @@ def publish_listing(db: Session, listing: Listing) -> Listing:
 
     listing.rejection_reason = ""
     listing.state = "PUBLISHED"
+    if listing.published_at is None:
+        listing.published_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(listing)
 

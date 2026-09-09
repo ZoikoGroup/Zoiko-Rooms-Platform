@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.mailer import (
     send_deposit_status_email,
@@ -34,6 +34,7 @@ from app.models.leasing import Agreement, Offer
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.party import Party
+from app.models.room import Room
 from app.schemas.finance import (
     DepositRelease,
     DisputeCreate,
@@ -58,10 +59,13 @@ def recompute_obligation_status(db: Session, obligation: Obligation) -> None:
 
     if obligation.status in ("WAIVED", "FAILED"):
         return  # terminal states set explicitly elsewhere, not derived from allocations
+    was_refunded = any(a.amount_allocated < 0 for a in obligation.allocations)
     if allocated <= 0:
-        obligation.status = "PENDING"
+        # A refund can zero out (or overshoot past zero) what was previously paid --
+        # that's REFUNDED, not PENDING (which means "never paid at all").
+        obligation.status = "REFUNDED" if was_refunded else "PENDING"
     elif outstanding <= 0:
-        obligation.status = "REFUNDED" if allocated < 0 else "PAID"
+        obligation.status = "PAID"
     else:
         obligation.status = "PARTIALLY_PAID"
 
@@ -154,7 +158,22 @@ def annotate_payment_context(payment: SimulatedPayment) -> SimulatedPayment:
 
 
 def list_payments(db: Session, admin: AdminUser) -> list[SimulatedPayment]:
-    query = select(SimulatedPayment).order_by(SimulatedPayment.created_at.desc())
+    query = (
+        select(SimulatedPayment)
+        .options(
+            selectinload(SimulatedPayment.guest),
+            selectinload(SimulatedPayment.allocations)
+            .selectinload(PaymentAllocation.obligation)
+            .selectinload(Obligation.occupancy)
+            .selectinload(Occupancy.listing),
+            selectinload(SimulatedPayment.allocations)
+            .selectinload(PaymentAllocation.obligation)
+            .selectinload(Obligation.occupancy)
+            .selectinload(Occupancy.room)
+            .selectinload(Room.property),
+        )
+        .order_by(SimulatedPayment.created_at.desc())
+    )
     if admin.role != "super_admin":
         query = query.where(SimulatedPayment.id.in_(_owned_payment_ids(db, admin)))
     return [annotate_payment_context(p) for p in db.scalars(query)]
@@ -169,9 +188,20 @@ def get_payment_or_404(db: Session, payment_id: int) -> SimulatedPayment:
 
 def create_payment_intent(db: Session, data: SimulatedPaymentCreate) -> SimulatedPayment:
     """Get-or-create by idempotency key -- a retried request never creates a second
-    payment intent."""
+    payment intent. A reused key must describe the *same* request (guest/amount/
+    currency) -- otherwise it's a key collision between two different requests,
+    not a retry, and returning the old payment would silently discard the new one."""
     existing = db.scalar(select(SimulatedPayment).where(SimulatedPayment.idempotency_key == data.idempotency_key))
     if existing:
+        if (
+            existing.guest_id != data.guest_id
+            or _round2(existing.amount) != _round2(data.amount)
+            or existing.currency != data.currency
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This idempotency key was already used for a different payment request",
+            )
         return existing
 
     payment = SimulatedPayment(
@@ -416,6 +446,8 @@ def request_refund(db: Session, data: RefundRequestCreate, admin: AdminUser) -> 
     obligation = db.get(Obligation, data.obligation_id)
     if not payment or not obligation:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment or obligation not found")
+    if admin.role != "super_admin" and obligation.id not in _owned_obligation_ids(db, admin):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
 
     refund = RefundRequest(
         payment_id=data.payment_id,
@@ -434,6 +466,8 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
     """Approving is completing -- there's no separate money-movement step in a
     simulated system. Completing a refund creates a reversing PaymentAllocation and
     recomputes the obligation's status, so the refund actually affects the ledger."""
+    if admin.role != "super_admin" and refund.obligation_id not in _owned_obligation_ids(db, admin):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
     if refund.status != "REQUESTED":
         raise HTTPException(status.HTTP_409_CONFLICT, "Refund has already been decided")
 
@@ -524,7 +558,17 @@ def get_dispute_or_404(db: Session, dispute_id: int) -> DisputeCase:
     return dispute
 
 
+def _assert_owns_dispute_target(db: Session, admin: AdminUser, *, occupancy_id: int | None, payment_id: int | None) -> None:
+    if admin.role == "super_admin":
+        return
+    owns_occupancy = occupancy_id is not None and occupancy_id in set(db.scalars(_owned_occupancy_ids(db, admin)))
+    owns_payment = payment_id is not None and payment_id in _owned_payment_ids(db, admin)
+    if not (owns_occupancy or owns_payment):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
+
+
 def open_dispute(db: Session, data: DisputeCreate, admin: AdminUser) -> DisputeCase:
+    _assert_owns_dispute_target(db, admin, occupancy_id=data.occupancy_id, payment_id=data.payment_id)
     dispute = DisputeCase(
         payment_id=data.payment_id,
         occupancy_id=data.occupancy_id,
@@ -555,6 +599,7 @@ def open_dispute(db: Session, data: DisputeCreate, admin: AdminUser) -> DisputeC
 
 
 def resolve_dispute(db: Session, dispute: DisputeCase, admin: AdminUser, data: DisputeResolve) -> DisputeCase:
+    _assert_owns_dispute_target(db, admin, occupancy_id=dispute.occupancy_id, payment_id=dispute.payment_id)
     if data.status not in ("RESOLVED", "REJECTED"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "status must be RESOLVED or REJECTED")
 

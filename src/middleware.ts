@@ -11,7 +11,7 @@ const PUBLIC_ACCOUNT_PATHS = [
   "/account/reset-password",
 ];
 
-export function proxy(request: NextRequest) {
+export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Two independent sessions live side by side: /account is gated on the user cookie,

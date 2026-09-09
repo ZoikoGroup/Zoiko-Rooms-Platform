@@ -178,14 +178,15 @@ export function UserSidebar({
               onOpenChat();
               onCloseMobile();
             }}
-            title={collapsed ? "Support / Chat" : undefined}
+            title={collapsed ? "Ask Zoiko" : undefined}
+            aria-label="Open Ask Zoiko AI assistant"
             className={cn(
               "flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-medium text-primary-200 transition-colors hover:bg-white/10 hover:text-white",
               collapsed && "lg:justify-center"
             )}
           >
             <MessageCircle className="h-[18px] w-[18px] shrink-0" />
-            <span className={cn(collapsed && "lg:hidden")}>Support / Chat</span>
+            <span className={cn(collapsed && "lg:hidden")}>Ask Zoiko</span>
           </button>
           <button
             onClick={handleLogout}

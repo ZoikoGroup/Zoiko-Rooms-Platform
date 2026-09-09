@@ -31,6 +31,7 @@ import { AssistantAvatar } from "@/components/chat/AssistantAvatar";
 import { cn } from "@/lib/utils";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
 import { useSpeechSynthesis } from "@/hooks/useSpeechSynthesis";
+import { classifyRisk, type RiskClass } from "@/lib/risk";
 
 interface AdminChatPanelProps {
   open: boolean;
@@ -82,6 +83,11 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
 
   const [error, setError] = useState<string | null>(null);
   const [lastFailedContent, setLastFailedContent] = useState<string | null>(null);
+
+  const [pendingRisk, setPendingRisk] = useState<RiskClass>("R0");
+  const [serverRisk, setServerRisk] = useState<RiskClass | null>(null);
+  const [serverActionTier, setServerActionTier] = useState<string | null>(null);
+  const [serverDetermination, setServerDetermination] = useState(false);
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
@@ -250,6 +256,7 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
     setStreamingText("");
     setToolActivity(null);
     setToolErrors([]);
+    setPendingRisk(classifyRisk(content));
     streamBufRef.current = "";
 
     setMessages((prev) => [
@@ -281,6 +288,14 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
           setToolErrors((prev) => [...prev, event.name]);
         } else if (event.type === "done") {
           assistantDone = event.content;
+          const g = event.guardrail;
+          if (g) {
+            // Trust the server-computed classification over any client guess.
+            setServerRisk((g.risk as RiskClass) ?? null);
+            setServerActionTier(g.action_tier ?? null);
+            setServerDetermination(Boolean(g.determination_blocked));
+            if (g.risk) setPendingRisk(g.risk as RiskClass);
+          }
         } else if (event.type === "error") {
           throw new Error(event.message);
         }
@@ -347,60 +362,67 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
       />
 
       <aside
-        aria-label="Zoiko admin assistant"
+        aria-label="Ask Zoiko admin AI assistant"
         className={cn(
           "animate-chat-panel-open fixed bottom-24 right-5 z-50 flex h-[85vh] w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-2xl border border-slate-200/60 bg-white shadow-2xl shadow-primary-900/20 dark:border-white/10 dark:bg-slate-900",
           "sm:right-6 sm:max-w-[480px]"
         )}
       >
-        <header className="flex items-center justify-between border-b border-slate-100 px-4 py-3.5 dark:border-white/10">
-          <div className="flex min-w-0 items-center gap-3">
-            <AssistantAvatar size="md" />
-            <div className="min-w-0">
-              <p className="truncate text-sm font-bold text-slate-800 dark:text-slate-100">Zoiko Assistant</p>
-              <p className="truncate text-xs text-slate-400">
-                {isContinuing && activeTitle ? activeTitle : "Read-only · answers from your dashboard data"}
-              </p>
+        <header className="border-b border-slate-100 dark:border-white/10">
+          <div className="flex items-center justify-between px-4 py-3.5">
+            <div className="flex min-w-0 items-center gap-3">
+              <AssistantAvatar size="md" />
+              <div className="min-w-0">
+                <p className="truncate text-sm font-bold text-slate-800 dark:text-slate-100">
+                  Ask Zoiko <span className="font-medium text-slate-400">· AI assistant</span>
+                </p>
+                <p className="truncate text-xs text-slate-400">
+                  {isContinuing && activeTitle ? activeTitle : "Read-only · answers from your dashboard data"}
+                </p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <button
+                onClick={openEmails}
+                aria-label="Contact emails from users"
+                title="Contact Emails"
+                className="relative flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+              >
+                <Mail className="h-[18px] w-[18px]" />
+                {emailsUnread > 0 && (
+                  <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent-600 px-1 text-[10px] font-bold text-white">
+                    {emailsUnread > 99 ? "99+" : emailsUnread}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setHistoryOpen(true)}
+                aria-label="Conversation history"
+                title="History"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+              >
+                <History className="h-[18px] w-[18px]" />
+              </button>
+              <button
+                onClick={startNewChat}
+                aria-label="Start new chat"
+                title="New chat"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+              >
+                <SquarePen className="h-[18px] w-[18px]" />
+              </button>
+              <button
+                onClick={onClose}
+                aria-label="Close chat"
+                title="Close"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+              >
+                <X className="h-[18px] w-[18px]" />
+              </button>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <button
-              onClick={openEmails}
-              aria-label="Contact emails from users"
-              title="Contact Emails"
-              className="relative flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
-            >
-              <Mail className="h-[18px] w-[18px]" />
-              {emailsUnread > 0 && (
-                <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent-600 px-1 text-[10px] font-bold text-white">
-                  {emailsUnread > 99 ? "99+" : emailsUnread}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => setHistoryOpen(true)}
-              aria-label="Conversation history"
-              title="History"
-              className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
-            >
-              <History className="h-[18px] w-[18px]" />
-            </button>
-            <button
-              onClick={startNewChat}
-              aria-label="Start new chat"
-              title="New chat"
-              className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
-            >
-              <SquarePen className="h-[18px] w-[18px]" />
-            </button>
-            <button
-              onClick={onClose}
-              aria-label="Close chat"
-              title="Close"
-              className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
-            >
-              <X className="h-[18px] w-[18px]" />
-            </button>
+          <div className="border-t border-slate-100 bg-slate-50/70 px-4 py-1.5 text-[11px] leading-snug text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400">
+            Provides information and helps you use Zoiko Rooms. It does not make platform decisions.
           </div>
         </header>
 
@@ -416,9 +438,9 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
           {messages.length === 0 && !streamingText && (
             <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
               <AssistantAvatar size="lg" />
-              <p className="animate-chat-fade-slide max-w-[280px] text-sm leading-relaxed text-slate-400" style={{ animationDelay: "0.08s" }}>
-                Ask me about bookings, occupancy, payments, or guests — I can look data up, but I never
-                change anything.
+              <p className="animate-chat-fade-slide max-w-[300px] text-sm leading-relaxed text-slate-400" style={{ animationDelay: "0.08s" }}>
+                Ask Zoiko is an AI assistant. It can look data up for you in your dashboard, but it does not make
+                eligibility, compliance, ranking, application, payment, agreement, or tenancy decisions.
               </p>
               <div className="flex max-w-[320px] flex-wrap justify-center gap-2">
                 {SUGGESTED_PROMPTS.map((prompt, i) => (
@@ -476,8 +498,21 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
           )}
 
           {(streamingText || waitingForFirstToken || toolActivity || toolErrors.length > 0) && (
-            <div className="animate-chat-msg-left flex items-start gap-2.5">
-              <AssistantAvatar />
+            <div className="animate-chat-msg-left flex flex-col gap-2">
+              {(serverRisk === "R3" || serverRisk === "R4" || serverRisk === "R2" || pendingRisk === "R2") && (
+                <div className="max-w-[85%] rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs leading-relaxed text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                  For confirmed status on this topic, use the record shown in Zoiko Rooms or contact the
+                  appropriate support route. Ask Zoiko can explain status but does not determine or change it.
+                </div>
+              )}
+              {(serverActionTier === "A3" || serverDetermination) && (
+                <div className="max-w-[85%] rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs leading-relaxed text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+                  This topic requires human confirmation. A Zoiko Rooms team member should confirm the
+                  authoritative status before you act on it.
+                </div>
+              )}
+              <div className="flex items-start gap-2.5">
+                <AssistantAvatar />
               <div className="max-w-[85%] rounded-2xl rounded-tl-sm bg-white px-4 py-2.5 text-sm leading-relaxed text-slate-700 ring-1 ring-slate-200 dark:bg-white/5 dark:text-slate-200 dark:ring-white/10">
                 {streamingText && <MarkdownMessage content={streamingText} />}
                 {waitingForFirstToken && <TypingDots />}
@@ -494,6 +529,7 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
                 ))}
               </div>
             </div>
+          </div>
           )}
 
           {error && (
@@ -582,6 +618,9 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
               </button>
             )}
           </form>
+          <p className="mt-3 text-center text-[10px] leading-relaxed text-slate-300 dark:text-slate-600">
+            Zoiko Rooms is a trading name of Zoiko Realty Group.
+          </p>
         </footer>
 
         {/* Contact emails overlay */}
@@ -724,7 +763,7 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
             </svg>
           </span>
           <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
-            Zoiko Assistant connected (Groq)
+            Ask Zoiko connected (Zoiko Assist)
           </p>
         </div>
       )}

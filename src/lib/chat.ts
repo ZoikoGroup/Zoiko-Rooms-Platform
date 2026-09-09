@@ -16,11 +16,18 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+export interface ChatGuardrail {
+  risk: string;
+  risk_topic: string;
+  action_tier: string;
+  determination_blocked: boolean;
+}
+
 export type ChatStreamEvent =
   | { type: "text"; text: string }
   | { type: "tool"; name: string }
   | { type: "tool_error"; name: string }
-  | { type: "done"; messageId: number; content: string }
+  | { type: "done"; messageId: number; content: string; guardrail?: ChatGuardrail }
   | { type: "error"; message: string };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

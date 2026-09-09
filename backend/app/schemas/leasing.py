@@ -114,7 +114,12 @@ class UserApplicationSubmitRequest(CamelModel):
 
 
 class UserApplicationRead(CamelModel):
-    """User-facing application view."""
+    """User-facing application view.
+
+    offer_status/agreement_status let the applicant actually track progress
+    past "DECIDED" -- that status alone never changes again for the rest of
+    the lifecycle, so without these the applicant has no way to tell an
+    approved-but-nothing-yet-sent application apart from a signed, moved-in one."""
 
     id: int
     listing_id: str
@@ -127,6 +132,10 @@ class UserApplicationRead(CamelModel):
     desired_move_in: date | None
     submitted_at: datetime
     updated_at: datetime
+    offer_id: int | None = None
+    offer_status: str | None = None
+    agreement_id: int | None = None
+    agreement_status: str | None = None
 
 
 class UserOccupancyRead(CamelModel):
@@ -155,8 +164,22 @@ class SubletRequestCreate(CamelModel):
     authority_evidence_ref: str = ""
 
 
+class SubletRenterLookup(CamelModel):
+    """Result of resolving a proposed renter's email to a party, so the sublet
+    form never requires the current tenant to already know a raw party ID."""
+
+    found: bool
+    party_id: int | None = None
+    name: str | None = None
+    identity_verified: bool = False
+
+
 class SubletRequestRead(CamelModel):
-    """Read view for sublet request."""
+    """Read view for sublet request.
+
+    listing_*/current_tenant_name/proposed_renter_name are reviewer context --
+    the raw IDs above are meaningless to whoever has to approve or reject this
+    without knowing what room and which people are actually involved."""
 
     id: int
     current_occupancy_id: int
@@ -168,6 +191,15 @@ class SubletRequestRead(CamelModel):
     decided_by_admin_id: int | None
     created_at: datetime
     decided_at: datetime | None
+
+    listing_name: str = ""
+    listing_city: str = ""
+    room_type: str = ""
+    guests: int = 0
+    bedrooms: int = 0
+    bathrooms: int = 0
+    current_tenant_name: str = ""
+    proposed_renter_name: str = ""
 
 
 class SubletRequestDecision(CamelModel):

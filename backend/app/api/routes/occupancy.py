@@ -90,21 +90,7 @@ def list_pending_sublet_requests(
 ):
     """List all pending sublet requests for super admin review."""
     sublet_requests = sublet_crud.list_pending_sublet_requests(db, admin)
-    return [
-        SubletRequestRead(
-            id=sr.id,
-            current_occupancy_id=sr.current_occupancy_id,
-            proposed_renter_party_id=sr.proposed_renter_party_id,
-            status=sr.status,
-            authority_evidence_ref=sr.authority_evidence_ref,
-            admin_decision=sr.admin_decision,
-            admin_notes=sr.admin_notes,
-            decided_by_admin_id=sr.decided_by_admin_id,
-            created_at=sr.created_at,
-            decided_at=sr.decided_at,
-        )
-        for sr in sublet_requests
-    ]
+    return [sublet_crud.to_sublet_request_read(db, sr) for sr in sublet_requests]
 
 
 @router.post("/sublet-requests/{sublet_request_id}/approve", response_model=SubletRequestRead, dependencies=[Depends(require_super_admin)])
@@ -128,18 +114,7 @@ def approve_sublet_request(
     )
     db.commit()
 
-    return SubletRequestRead(
-        id=approved.id,
-        current_occupancy_id=approved.current_occupancy_id,
-        proposed_renter_party_id=approved.proposed_renter_party_id,
-        status=approved.status,
-        authority_evidence_ref=approved.authority_evidence_ref,
-        admin_decision=approved.admin_decision,
-        admin_notes=approved.admin_notes,
-        decided_by_admin_id=approved.decided_by_admin_id,
-        created_at=approved.created_at,
-        decided_at=approved.decided_at,
-    )
+    return sublet_crud.to_sublet_request_read(db, approved)
 
 
 @router.post("/sublet-requests/{sublet_request_id}/reject", response_model=SubletRequestRead, dependencies=[Depends(require_super_admin)])
@@ -160,15 +135,4 @@ def reject_sublet_request(
     emit_event(db, "sublet_request.rejected", "sublet_request", str(sublet_request_id), {"occupancyId": rejected.current_occupancy_id})
     db.commit()
 
-    return SubletRequestRead(
-        id=rejected.id,
-        current_occupancy_id=rejected.current_occupancy_id,
-        proposed_renter_party_id=rejected.proposed_renter_party_id,
-        status=rejected.status,
-        authority_evidence_ref=rejected.authority_evidence_ref,
-        admin_decision=rejected.admin_decision,
-        admin_notes=rejected.admin_notes,
-        decided_by_admin_id=rejected.decided_by_admin_id,
-        created_at=rejected.created_at,
-        decided_at=rejected.decided_at,
-    )
+    return sublet_crud.to_sublet_request_read(db, rejected)
