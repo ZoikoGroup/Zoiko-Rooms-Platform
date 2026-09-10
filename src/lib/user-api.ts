@@ -1,6 +1,8 @@
 import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
   Agreement,
+  BookingChangeRequest,
+  DisclosureRequirement,
   HostedListing,
   IdentityDocumentType,
   IdentityVerificationRecord,
@@ -11,6 +13,7 @@ import {
   PublishEligibility,
   Room,
   SimulatedPayment,
+  SubletArrangementType,
   SubletRenterLookup,
   SubletRequest,
   UserApplication,
@@ -147,6 +150,16 @@ export function signOwnAgreement(agreementId: number): Promise<Agreement> {
   return apiClientFetch<Agreement>(`/api/users/rentals/agreements/${agreementId}/sign`, { method: "POST" });
 }
 
+export function listOwnAgreementDisclosures(agreementId: number): Promise<DisclosureRequirement[]> {
+  return apiClientFetch<DisclosureRequirement[]>(`/api/users/rentals/agreements/${agreementId}/disclosures`);
+}
+
+export function acknowledgeOwnDisclosure(agreementId: number, disclosureId: number): Promise<DisclosureRequirement> {
+  return apiClientFetch<DisclosureRequirement>(
+    `/api/users/rentals/agreements/${agreementId}/disclosures/${disclosureId}/acknowledge`, { method: "POST" },
+  );
+}
+
 export function listOccupancies(): Promise<UserOccupancy[]> {
   return apiClientFetch<UserOccupancy[]>("/api/users/rentals/occupancies");
 }
@@ -161,7 +174,12 @@ export function lookupSubletRenter(email: string): Promise<SubletRenterLookup> {
 
 export function submitSubletRequest(
   occupancyId: number,
-  payload: { proposedRenterPartyId: number; authorityEvidenceRef?: string }
+  payload: {
+    proposedRenterPartyId: number;
+    authorityEvidenceRef?: string;
+    arrangementType?: SubletArrangementType;
+    proposedMonthlyRent?: number;
+  }
 ): Promise<SubletRequest> {
   return apiClientFetch<SubletRequest>(`/api/users/rentals/occupancies/${occupancyId}/sublet-request`, {
     method: "POST",
@@ -172,6 +190,68 @@ export function submitSubletRequest(
 
 export function listSubletRequests(): Promise<SubletRequest[]> {
   return apiClientFetch<SubletRequest[]>("/api/users/rentals/sublet-requests");
+}
+
+// --- Booking change requests (ZR-ENG-CLR-008 Section 8 MVP) ---------------
+
+export function submitDateChangeRequest(
+  agreementId: number,
+  payload: { proposedStartDate: string; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/change-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function submitExtensionRequest(
+  agreementId: number,
+  payload: { additionalTermMonths: number; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/extension-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function submitShorteningRequest(
+  agreementId: number,
+  payload: { reducedTermMonths: number; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/shortening-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function submitPremisesChangeRequest(
+  agreementId: number,
+  payload: { targetListingId: string; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/premises-change-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function submitFinancialChangeRequest(
+  agreementId: number,
+  payload: { proposedMonthlyRent: number; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/financial-change-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listMyChangeRequests(): Promise<BookingChangeRequest[]> {
+  return apiClientFetch<BookingChangeRequest[]>("/api/users/rentals/change-requests");
+}
+
+export function withdrawChangeRequest(bcrId: number): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/change-requests/${bcrId}/withdraw`, {
+    method: "POST",
+  });
 }
 
 // --- Hosting ---------------------------------------------------------------

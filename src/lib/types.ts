@@ -263,6 +263,23 @@ export interface Agreement {
   createdAt: string;
 }
 
+export type DisclosureStatus = "REQUIRED_MISSING" | "DELIVERED" | "ACKNOWLEDGED";
+
+export interface DisclosureRequirement {
+  id: number;
+  agreementId: number;
+  disclosureType: string;
+  title: string;
+  required: boolean;
+  status: DisclosureStatus;
+  deliveredAt: string | null;
+  deliveredToParty: string;
+  deliveryChannel: string;
+  acknowledgedAt: string | null;
+  documentContentHash: string;
+  createdAt: string;
+}
+
 export interface Offer {
   id: number;
   applicationId: number;
@@ -544,6 +561,38 @@ export interface UserOccupancy {
   moveOutDate: string | null;
   createdAt: string;
   endedAt: string | null;
+  agreementId: number | null;
+}
+
+export type BookingChangeType = "DATE_SHIFT" | "EXTENSION" | "SHORTENING" | "PREMISES_CHANGE" | "FINANCIAL_CHANGE";
+
+export type BookingChangeRequestStatus = "PENDING" | "APPROVED" | "DECLINED" | "EFFECTIVE" | "EXPIRED" | "WITHDRAWN";
+
+export interface BookingChangeRequest {
+  id: number;
+  agreementId: number;
+  requestedByGuestId: string;
+  changeType: BookingChangeType;
+  status: BookingChangeRequestStatus;
+  originalStartDate: string;
+  proposedStartDate: string;
+  originalEndDate: string | null;
+  proposedEndDate: string | null;
+  additionalTermMonths: number | null;
+  targetListingId: string | null;
+  resultingApplicationId: number | null;
+  originalMonthlyRent: number | null;
+  proposedMonthlyRent: number | null;
+  reason: string;
+  decisionNote: string;
+  decidedByAdminId: number | null;
+  decidedAt: string | null;
+  resultingAmendmentId: number | null;
+  createdAt: string;
+  expiresAt: string;
+  listingName: string;
+  targetListingName: string;
+  guestName: string;
 }
 
 export type SubletRequestStatus =
@@ -551,6 +600,14 @@ export type SubletRequestStatus =
   | "pending_admin_review"
   | "approved"
   | "rejected";
+
+export type SubletArrangementType =
+  | "ASSIGNMENT_FULL"
+  | "REPLACEMENT_OCCUPANT"
+  | "SUBLEASE_PARTIAL"
+  | "ADD_CO_TENANT"
+  | "LODGER_OR_LICENSEE"
+  | "ADDITIONAL_OCCUPANT";
 
 export interface SubletRequest {
   id: number;
@@ -563,6 +620,7 @@ export interface SubletRequest {
   decidedByAdminId: number | null;
   createdAt: string;
   decidedAt: string | null;
+  arrangementType: SubletArrangementType;
   listingName: string;
   listingCity: string;
   roomType: string;

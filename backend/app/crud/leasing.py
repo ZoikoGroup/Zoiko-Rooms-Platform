@@ -1103,6 +1103,8 @@ def _apply_signature(
             title="Your rental agreement is fully signed",
             notification_type="agreement.signed",
         )
+        from app.crud.booking_change_requests import _complete_premises_change_if_applicable
+        _complete_premises_change_if_applicable(db, agreement)
     elif agreement.status == "PAYMENT_IN_PROGRESS":
         _notify_offer_guest(
             db, agreement.offer,
@@ -1144,6 +1146,8 @@ def confirm_agreement_payment(db: Session, agreement: Agreement, correlation_id:
         title="Your rental agreement is fully signed",
         notification_type="agreement.signed",
     )
+    from app.crud.booking_change_requests import _complete_premises_change_if_applicable
+    _complete_premises_change_if_applicable(db, agreement)
     return agreement
 
 
@@ -1469,6 +1473,26 @@ def freeze_agreement_version(db: Session, agreement: Agreement) -> DocumentArtif
         pending_amendment.status = "EFFECTIVE"
         pending_amendment.executed_at = now
         pending_amendment.effective_at = now
+
+        # ZR-ENG-CLR-008 Section 8: if this amendment was generated from a
+        # renter-initiated BookingChangeRequest, that request is only
+        # EFFECTIVE now (fully re-signed) -- not at the earlier host-approval
+        # moment. An EXTENSION additionally has to update the *existing*
+        # Occupancy's expected_end_date here, since Occupancy already exists
+        # by this point and nothing else recomputes it after move-in.
+        from app.models.booking_change_request import BookingChangeRequest
+        from app.models.occupancy import Occupancy
+
+        bcr = db.scalar(
+            select(BookingChangeRequest).where(BookingChangeRequest.resulting_amendment_id == pending_amendment.id)
+        )
+        if bcr is not None:
+            bcr.status = "EFFECTIVE"
+            if bcr.change_type == "EXTENSION" and bcr.proposed_end_date is not None:
+                occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == pending_amendment.agreement.offer_id))
+                if occupancy is not None:
+                    occupancy.expected_end_date = bcr.proposed_end_date
+
         db.commit()
 
     return artifact

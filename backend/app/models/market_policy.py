@@ -48,4 +48,12 @@ class MarketPolicyPack(Base):
     sublet_assignment_payee_model: Mapped[str] = mapped_column(String(30), default="HOST_OR_LANDLORD_PAYEE")
     sublet_sublease_payee_model: Mapped[str] = mapped_column(String(30), default="ORIGINAL_RENTER_PAYEE")
 
+    # -- Booking-change / rent-change policy (Section 8, ZR-ENG-CLR-008 §10/AC-24) --
+    # Both the doc's own validation examples cite a minimum interval, not a
+    # blanket ban: NSW "rent increases are generally limited to once in 12
+    # months", Ontario "rent increases are subject to timing[...] rules". 365
+    # is a reasonable default, not a verified legal figure for any specific
+    # jurisdiction -- same REVIEW_REQUIRED honesty as every other field here.
+    rent_change_min_interval_days: Mapped[int] = mapped_column(default=365)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

@@ -7,6 +7,7 @@ from app.api.deps import get_current_admin, require_super_admin
 from app.core.agreement_documents import resolve_agreement_document_path
 from app.core.correlation import get_correlation_id
 from app.crud import agreement_amendments as amendment_crud
+from app.crud import booking_change_requests as bcr_crud
 from app.crud import agreement_clause_translations as translation_crud
 from app.crud import agreement_clauses as clause_crud
 from app.crud import agreement_form_templates as form_template_crud
@@ -34,6 +35,8 @@ from app.schemas.leasing import (
     ApplicationRead,
     ApplicationUpdate,
     AgreementFormTemplateRead,
+    BookingChangeDecisionRequest,
+    BookingChangeRequestRead,
     ClauseDefinitionRead,
     ClauseDraftCreate,
     ClauseTranslationCreate,
@@ -684,6 +687,38 @@ def post_approve_amendment(
     correlation_id = get_correlation_id(request)
     updated = amendment_crud.approve_amendment(db, amendment, admin, correlation_id=correlation_id)
     return updated
+
+
+@router.get("/booking-change-requests", response_model=list[BookingChangeRequestRead])
+def get_booking_change_requests(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    return [bcr_crud.to_booking_change_request_read(b) for b in bcr_crud.list_change_requests_for_admin(db, admin)]
+
+
+@router.post(
+    "/booking-change-requests/{bcr_id}/approve", response_model=BookingChangeRequestRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_approve_booking_change_request(
+    bcr_id: int, payload: BookingChangeDecisionRequest, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    bcr = bcr_crud.get_booking_change_request_or_404(db, bcr_id)
+    updated = bcr_crud.approve_change_request(db, bcr, admin, decision_note=payload.decision_note)
+    log_audit_event(db, admin, "booking_change_request.approve", "booking_change_request", str(bcr_id), get_correlation_id(request))
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(updated)
+
+
+@router.post("/booking-change-requests/{bcr_id}/decline", response_model=BookingChangeRequestRead)
+def post_decline_booking_change_request(
+    bcr_id: int, payload: BookingChangeDecisionRequest, request: Request,
+    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    bcr = bcr_crud.get_booking_change_request_or_404(db, bcr_id)
+    updated = bcr_crud.decline_change_request(db, bcr, admin, decision_note=payload.decision_note)
+    log_audit_event(db, admin, "booking_change_request.decline", "booking_change_request", str(bcr_id), get_correlation_id(request))
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(updated)
 
 
 @router.get("/agreements/{agreement_id}/signature-requests", response_model=list[SignatureRequestRead])
