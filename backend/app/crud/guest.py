@@ -27,6 +27,17 @@ def get_guest_for_user(db: Session, user: UserAccount) -> Guest | None:
     return guest
 
 
+def get_user_for_guest(db: Session, guest: Guest) -> UserAccount | None:
+    """The inverse of get_guest_for_user -- resolves the UserAccount (if any)
+    behind a Guest, by the real FK first and an email match as a fallback for a
+    guest that predates the link. Used wherever a caller needs the renter's own
+    email/name (e.g. to send a transactional email) rather than just their
+    notification recipient id."""
+    if guest.user_account_id:
+        return db.get(UserAccount, guest.user_account_id)
+    return db.scalar(select(UserAccount).where(UserAccount.email == guest.email))
+
+
 def get_or_create_guest_for_user(db: Session, user: UserAccount) -> Guest:
     """Get the Guest linked to this user, creating one (with the FK set from
     the start) if this is their first rental-lifecycle action."""

@@ -1,4 +1,4 @@
-﻿from datetime import date as date_, datetime, timezone
+from datetime import date as date_, datetime, timezone
 from io import BytesIO
 
 from fastapi import HTTPException, status
@@ -10,14 +10,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.agreement_documents import resolve_agreement_document_path, save_agreement_document
+from app.core.mailer import send_agreement_executed_email, send_application_decided_email
 from app.crud.audit import log_audit_event
 from app.crud.eligibility import check_agreement_eligibility, check_offer_eligibility
 from app.crud.events import emit_event
-from app.crud.guest import get_guest_for_user
+from app.crud.guest import get_guest_for_user, get_user_for_guest
 from app.crud.ids import dicebear_avatar, new_id
 from app.crud.listing import is_listing_available
 from app.crud import notification as notif_crud
 from app.crud.party import assert_provider_access, party_id_for_listing
+from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
 from app.models.agreement_amendment import AgreementAmendment
 from app.models.agreement_party import AgreementParty
@@ -211,6 +213,29 @@ def decide_application(db: Session, application: Application, admin: AdminUser, 
             title=f"Your rental application was {verb}",
             message=data.note or f"Your application for listing {application.listing_id} was {verb}.",
             notification_type=f"application.{verb}",
+            related_entity_type="application", related_entity_id=str(application.id),
+        )
+        renter_user = get_user_for_guest(db, guest)
+        if renter_user and application.listing:
+            send_application_decided_email(
+                renter_user.email, renter_user.full_name, application.listing.name,
+                approved=data.decision == "APPROVED",
+            )
+
+    # The host has a real stake in this decision too (an approval means they can
+    # now build an offer; a rejection means this applicant is off the table) --
+    # a separate notification_type from the renter's own, so each recipient's
+    # notification links to their own role-appropriate page, and deliberately
+    # never includes the admin's internal note/reason_code (that's a platform
+    # trust & safety detail, not something to expose to the host).
+    listing = application.listing
+    if listing and listing.party_id:
+        verb = "approved" if data.decision == "APPROVED" else "rejected"
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title=f"An application was {verb}",
+            message=f'An application for "{listing.name}" was {verb}.',
+            notification_type="application.decided",
             related_entity_type="application", related_entity_id=str(application.id),
         )
 
@@ -430,8 +455,34 @@ def set_offer_status(
             )
     db.commit()
     db.refresh(offer)
+
+    listing = offer.listing
     if new_status == "SENT":
         _notify_offer_guest(db, offer, title="You have a new rental offer", notification_type="offer.sent")
+    elif new_status == "ACCEPTED":
+        # The authoritative "accepted" state for this workflow -- both sides are
+        # told only once it's actually committed here, never earlier.
+        _notify_offer_guest(
+            db, offer, title="Your offer was accepted",
+            message=f'Your offer for "{listing.name}" has been accepted.', notification_type="offer.accepted",
+        )
+        if listing and listing.party_id:
+            notif_crud.notify_user_by_party(
+                db, listing.party_id,
+                title="An offer was accepted",
+                message=f'The offer for "{listing.name}" has been accepted.',
+                notification_type="offer.accepted_for_host",
+                related_entity_type="offer", related_entity_id=str(offer.id),
+            )
+    elif new_status == "DECLINED":
+        if listing and listing.party_id:
+            notif_crud.notify_user_by_party(
+                db, listing.party_id,
+                title="An offer was declined",
+                message=f'The offer for "{listing.name}" was declined.',
+                notification_type="offer.declined_for_host",
+                related_entity_type="offer", related_entity_id=str(offer.id),
+            )
     return offer
 
 
@@ -992,6 +1043,34 @@ def _apply_signature(
         if _all_initial_obligations_paid(agreement):
             agreement.status = "SIGNED"
             agreement.payment_session_expires_at = None
+
+            # Only the actual EXECUTED state triggers this -- a single signature
+            # (either party) is not yet an executed agreement.
+            listing = agreement.offer.listing
+            guest = db.get(Guest, agreement.offer.guest_id)
+            if guest:
+                notif_crud.notify_user_by_guest(
+                    db, guest,
+                    title="Your rental agreement is signed",
+                    message=f'Your agreement for "{listing.name}" has been fully executed.',
+                    notification_type="agreement.signed",
+                    related_entity_type="agreement", related_entity_id=str(agreement.id),
+                )
+            if listing and listing.party_id:
+                notif_crud.notify_user_by_party(
+                    db, listing.party_id,
+                    title="A rental agreement is signed",
+                    message=f'The agreement for "{listing.name}" has been fully executed.',
+                    notification_type="agreement.signed_for_host",
+                    related_entity_type="agreement", related_entity_id=str(agreement.id),
+                )
+
+            renter_user = get_user_for_guest(db, guest) if guest else None
+            if renter_user:
+                send_agreement_executed_email(renter_user.email, renter_user.full_name, listing.name)
+            host_user = get_user_by_party_id(db, listing.party_id) if listing else None
+            if host_user:
+                send_agreement_executed_email(host_user.email, host_user.full_name, listing.name)
         else:
             agreement.status = "PAYMENT_IN_PROGRESS"
             agreement.payment_session_expires_at = compute_checkout_deadline(now, agreement.offer.listing.market_release)

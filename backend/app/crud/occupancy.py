@@ -1,4 +1,4 @@
-﻿from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -84,6 +84,7 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
     db.commit()
     db.refresh(occupancy)
 
+    listing = offer.listing
     guest = db.get(Guest, occupancy.guest_id)
     if guest:
         notif_crud.notify_user_by_guest(
@@ -91,6 +92,14 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
             title="You're moved in!",
             message=f"Your move-in for \"{offer.listing.name}\" is confirmed.",
             notification_type="occupancy.move_in_confirmed",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="Move-in confirmed",
+            message=f'A tenant has moved in to "{listing.name}".',
+            notification_type="occupancy.move_in_confirmed_for_host",
             related_entity_type="occupancy", related_entity_id=str(occupancy.id),
         )
     return occupancy
@@ -203,6 +212,25 @@ def end_occupancy(
     )
     db.commit()
     db.refresh(occupancy)
+
+    listing = occupancy.listing
+    guest = db.get(Guest, occupancy.guest_id)
+    if guest:
+        notif_crud.notify_user_by_guest(
+            db, guest,
+            title="Move-out recorded",
+            message=f'Your tenancy at "{listing.name}" has ended.',
+            notification_type="occupancy.ended",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="Move-out recorded",
+            message=f'A tenancy at "{listing.name}" has ended.',
+            notification_type="occupancy.ended_for_host",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
     return occupancy
 
 

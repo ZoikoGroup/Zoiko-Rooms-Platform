@@ -1,3 +1,5 @@
+import functools
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
@@ -8,6 +10,30 @@ from app.models.admin_user import AdminUser
 from app.models.guest import Guest
 from app.models.notification import Notification
 from app.models.user_account import UserAccount
+
+logger = logging.getLogger("uvicorn.error")
+
+
+def _never_raises(fn):
+    """Notifying is always best-effort with respect to the business change that
+    triggered it -- every public notify_* entry point is wrapped so that a
+    failure anywhere in it (the recipient lookup query, not just the insert in
+    _create) is logged and swallowed rather than propagated into the caller's
+    transaction. Applied to the leaf functions (notify_user/_by_party/_by_guest,
+    notify_admin); notify_all_admins/notify_all_super_admins fan out through
+    notify_admin and are therefore already covered."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            logger.exception(
+                "notification: %s failed -- the triggering business transaction is unaffected", fn.__name__
+            )
+            return None
+
+    return wrapper
 
 
 def _create(
@@ -24,9 +50,10 @@ def _create(
 ) -> Notification | None:
     """Creates one notification row, silently no-op on an exact duplicate (same
     type/entity/recipient -- see the model's unique constraint) instead of
-    raising. Runs in a SAVEPOINT so a duplicate never aborts the caller's outer
-    transaction, which is why this is always called well before the caller's
-    own db.commit()."""
+    raising. Runs in a SAVEPOINT so neither a duplicate nor any other failure
+    here can abort the caller's outer transaction -- notifying is always
+    best-effort with respect to the business change that triggered it, which is
+    why this is always called well before the caller's own db.commit()."""
     recipient_key = f"user:{recipient_user_id}" if recipient_type == "user" else f"admin:{recipient_admin_id}"
     notification = Notification(
         recipient_type=recipient_type,
@@ -44,10 +71,22 @@ def _create(
             db.add(notification)
             db.flush()
     except IntegrityError:
+        logger.info(
+            "notification: duplicate suppressed (type=%s entity=%s:%s recipient=%s)",
+            notification_type, related_entity_type, related_entity_id, recipient_key,
+        )
+        return None
+    except Exception:
+        logger.exception(
+            "notification: failed to create (type=%s entity=%s:%s recipient=%s) -- "
+            "the triggering business transaction is unaffected",
+            notification_type, related_entity_type, related_entity_id, recipient_key,
+        )
         return None
     return notification
 
 
+@_never_raises
 def notify_user(
     db: Session, user_id: int, *, title: str, message: str, notification_type: str,
     related_entity_type: str = "", related_entity_id: str = "",
@@ -59,6 +98,7 @@ def notify_user(
     )
 
 
+@_never_raises
 def notify_user_by_party(db: Session, party_id: int | None, **kwargs) -> Notification | None:
     """Looks up the active UserAccount for a party -- the same party_id ->
     UserAccount lookup already used across hosting/sublet crud -- and notifies
@@ -74,6 +114,7 @@ def notify_user_by_party(db: Session, party_id: int | None, **kwargs) -> Notific
     return notify_user(db, user.id, **kwargs)
 
 
+@_never_raises
 def notify_user_by_guest(db: Session, guest: Guest, **kwargs) -> Notification | None:
     """Notifies the UserAccount linked to a Guest via the real
     user_account_id FK (see models/guest.py). Falls back to an email match
@@ -93,6 +134,7 @@ def notify_user_by_guest(db: Session, guest: Guest, **kwargs) -> Notification | 
     return notify_user(db, user_id, **kwargs)
 
 
+@_never_raises
 def notify_admin(
     db: Session, admin_id: int, *, title: str, message: str, notification_type: str,
     related_entity_type: str = "", related_entity_id: str = "",
