@@ -1,4 +1,5 @@
 import { apiClientFetch } from "@/lib/api-client";
+import { broadcastSessionChange } from "@/lib/session-guard";
 import { UserProfile } from "@/lib/types";
 
 /**
@@ -11,11 +12,16 @@ import { UserProfile } from "@/lib/types";
  * backend picks the right one by cookie name.
  */
 
-export function userLogin(email: string, password: string): Promise<UserProfile> {
-  return apiClientFetch<UserProfile>("/api/users/login", {
+export async function userLogin(email: string, password: string): Promise<UserProfile> {
+  const profile = await apiClientFetch<UserProfile>("/api/users/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
+  // The zoiko_user_token cookie is shared by every tab in this browser, not
+  // just this one -- tell any other open tab a different account just took it
+  // over (see @/lib/session-guard).
+  broadcastSessionChange("user", profile.id);
+  return profile;
 }
 
 export function userRegister(
@@ -32,6 +38,7 @@ export function userRegister(
 
 export async function userLogout(): Promise<void> {
   await apiClientFetch("/api/users/logout", { method: "POST" });
+  broadcastSessionChange("user", null);
 }
 
 export async function getCurrentUser(): Promise<UserProfile | null> {

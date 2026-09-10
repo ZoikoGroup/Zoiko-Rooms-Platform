@@ -12,6 +12,10 @@ def log_audit_event(
     resource_id: str,
     correlation_id: str = "",
     reason: str = "",
+    before_state: str | None = None,
+    after_state: str | None = None,
+    object_version: str | None = None,
+    policy_version: str | None = None,
 ) -> AuditEvent:
     event = AuditEvent(
         actor_admin_id=actor.id if actor else None,
@@ -21,6 +25,10 @@ def log_audit_event(
         resource_id=resource_id,
         reason=reason,
         correlation_id=correlation_id,
+        before_state=before_state,
+        after_state=after_state,
+        object_version=object_version,
+        policy_version=policy_version,
     )
     db.add(event)
     db.flush()

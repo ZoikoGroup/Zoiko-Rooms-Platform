@@ -65,9 +65,13 @@ def post_confirm_payment(
     db: Session = Depends(get_db),
 ):
     payment = crud.get_payment_or_404(db, payment_id)
+    before_state = payment.status
     updated = crud.confirm_payment(db, payment, payload, admin)
     if updated.status == "SUCCEEDED":
-        log_audit_event(db, admin, "payment.confirm", "simulated_payment", str(payment_id), get_correlation_id(request))
+        log_audit_event(
+            db, admin, "payment.confirm", "simulated_payment", str(payment_id), get_correlation_id(request),
+            before_state=before_state, after_state=updated.status,
+        )
         emit_event(
             db,
             "payment.succeeded",

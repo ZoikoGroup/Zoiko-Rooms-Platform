@@ -1,12 +1,13 @@
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.agreement_documents import resolve_agreement_document_path
 from app.core.correlation import get_correlation_id
 from app.core.identity_uploads import resolve_identity_document_path
 from app.crud import finance as finance_crud
@@ -25,15 +26,20 @@ from app.crud.user import get_user_by_email, get_user_by_party_id
 from app.db.session import get_db
 from app.models.leasing import Application
 from app.models.listing import Listing
+from app.models.listing_approval import CURRENT_POLICY_VERSION
 from app.models.occupancy import Occupancy
+from app.services.booking_expiry import expire_offer_if_overdue
 from app.models.user_account import UserAccount
 from app.schemas.finance import DepositClaimItemRead, DepositClaimItemRespond, DepositClaimRead
 from app.schemas.leasing import (
     AgreementRead,
+    DisclosureRequirementRead,
+    OfferAcceptRequest,
     OfferRead,
     SubletRenterLookup,
     SubletRequestCreate,
     SubletRequestRead,
+    UserAgreementSignRequest,
     UserApplicationRead,
     UserApplicationSubmitRequest,
     UserOccupancyRead,
@@ -137,7 +143,10 @@ def submit_rental_application(
     # Submit application using existing CRUD logic
     from app.schemas.leasing import ApplicationCreate
 
-    app_data = ApplicationCreate(listing_id=payload.listing_id, guest_id=guest.id, message=payload.message, desired_move_in=payload.desired_move_in)
+    app_data = ApplicationCreate(
+        listing_id=payload.listing_id, guest_id=guest.id, message=payload.message,
+        desired_move_in=payload.desired_move_in, named_occupant_guest_id=payload.named_occupant_guest_id,
+    )
 
     try:
         application = leasing_crud.submit_application(db, app_data)
@@ -265,6 +274,7 @@ def withdraw_application(
 @router.get("/applications/{application_id}/offer", response_model=OfferRead)
 def get_own_offer(
     application_id: int,
+    request: Request,
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -279,20 +289,36 @@ def get_own_offer(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own applications")
     if not application.offer:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No offer has been made for this application yet")
-    return application.offer
+    offer = application.offer
+    if expire_offer_if_overdue(db, offer, correlation_id=get_correlation_id(request)):
+        db.commit()
+        db.refresh(offer)
+    return offer
 
 
 @router.post("/offers/{offer_id}/accept", response_model=OfferRead)
 def accept_own_offer(
     offer_id: int,
     request: Request,
+    payload: OfferAcceptRequest = OfferAcceptRequest(),
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    offer = leasing_crud.get_offer_or_404(db, offer_id)
-    updated = leasing_crud.user_accept_offer(db, user, offer)
-    log_audit_event(db, None, "user_offer.accept", "offer", str(offer_id), get_correlation_id(request), reason=f"user:{user.id}")
-    emit_event(db, "offer.accepted", "offer", str(offer_id), {})
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
+    before_state = offer.status
+    updated = leasing_crud.user_accept_offer(
+        db, user, offer, correlation_id=correlation_id, override_reason=payload.override_reason,
+    )
+    log_audit_event(
+        db, None, "user_offer.accept", "offer", str(offer_id), correlation_id,
+        reason=payload.override_reason or f"user:{user.id}; occupant_risk_tier={updated.occupant_risk_tier}",
+        before_state=before_state, after_state=updated.status, policy_version=CURRENT_POLICY_VERSION,
+    )
+    emit_event(
+        db, "offer.accepted", "offer", str(offer_id), {}, correlation_id=correlation_id,
+        idempotency_key=f"offer.accepted:{offer_id}",
+    )
     db.commit()
     return updated
 
@@ -304,9 +330,10 @@ def decline_own_offer(
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    offer = leasing_crud.get_offer_or_404(db, offer_id)
-    updated = leasing_crud.user_decline_offer(db, user, offer)
-    log_audit_event(db, None, "user_offer.decline", "offer", str(offer_id), get_correlation_id(request), reason=f"user:{user.id}")
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
+    updated = leasing_crud.user_decline_offer(db, user, offer, correlation_id=correlation_id)
+    log_audit_event(db, None, "user_offer.decline", "offer", str(offer_id), correlation_id, reason=f"user:{user.id}")
     db.commit()
     return updated
 
@@ -315,18 +342,103 @@ def decline_own_offer(
 def sign_own_agreement(
     agreement_id: int,
     request: Request,
+    payload: UserAgreementSignRequest = UserAgreementSignRequest(),
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """The renter signing their own agreement -- previously every signature,
     including the renter's, was recorded by an admin attesting on their behalf."""
-    agreement = leasing_crud.get_agreement_or_404(db, agreement_id)
-    updated = leasing_crud.user_sign_agreement(db, user, agreement)
-    log_audit_event(db, None, "user_agreement.sign", "agreement", str(agreement_id), get_correlation_id(request), reason=f"user:{user.id}")
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    updated = leasing_crud.user_sign_agreement(db, user, agreement, method=payload.method, evidence_metadata=payload.evidence_metadata)
+    log_audit_event(db, None, "user_agreement.sign", "agreement", str(agreement_id), correlation_id, reason=f"user:{user.id}")
     if updated.status == "SIGNED":
-        emit_event(db, "agreement.signed", "agreement", str(agreement_id), {})
+        emit_event(db, "agreement.signed", "agreement", str(agreement_id), {}, correlation_id=correlation_id)
+    elif updated.status == "PAYMENT_IN_PROGRESS":
+        emit_event(
+            db, "agreement.payment_started", "agreement", str(agreement_id),
+            {"payment_session_expires_at": updated.payment_session_expires_at.isoformat()},
+            correlation_id=correlation_id,
+        )
     db.commit()
     return updated
+
+
+@router.post("/agreements/{agreement_id}/disclosures/{disclosure_id}/acknowledge", response_model=DisclosureRequirementRead)
+def acknowledge_own_disclosure(
+    agreement_id: int,
+    disclosure_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-004 Section 9.3/AC-15: the renter's own confirmation of
+    receipt for a disclosure the provider already delivered -- distinct from
+    deliver_disclosure (which only records that Zoiko made it available)."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    disclosure = leasing_crud.get_disclosure_or_404(db, agreement, disclosure_id)
+    updated = leasing_crud.user_acknowledge_disclosure(db, user, agreement, disclosure)
+    log_audit_event(
+        db, None, "user_disclosure.acknowledge", "disclosure_requirement", str(disclosure_id), correlation_id,
+        reason=f"user:{user.id}", after_state=updated.status,
+    )
+    db.commit()
+    return updated
+
+
+@router.get("/agreements/{agreement_id}/pdf")
+def download_own_agreement_pdf(
+    agreement_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-004 Section 4.10: 'All contractual parties must have
+    continuing access.' Previously only the admin route existed -- a renter
+    had no way to download their own executed agreement at all."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    guest = get_guest_for_user(db, user)
+    if not guest or guest.id != agreement.offer.guest_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This agreement does not belong to you")
+
+    log_audit_event(db, None, "user_agreement.download", "agreement", str(agreement_id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+
+    artifact = agreement.versions[-1].artifact if agreement.versions else None
+    if artifact is not None:
+        pdf_bytes = resolve_agreement_document_path(artifact.storage_ref).read_bytes()
+    else:
+        pdf_bytes = leasing_crud.generate_agreement_pdf(db, agreement)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="agreement-{agreement.id}.pdf"'},
+    )
+
+
+@router.get("/agreements/{agreement_id}/accessible-text")
+def download_own_agreement_accessible_text(
+    agreement_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-004 AC-28: the renter-facing screen-reader-friendly
+    alternative to their own PDF above."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    guest = get_guest_for_user(db, user)
+    if not guest or guest.id != agreement.offer.guest_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This agreement does not belong to you")
+
+    log_audit_event(
+        db, None, "user_agreement.download", "agreement", str(agreement_id), correlation_id,
+        reason=f"user:{user.id}:accessible_text",
+    )
+    db.commit()
+    return Response(content=leasing_crud.generate_agreement_accessible_text(agreement), media_type="text/plain; charset=utf-8")
 
 
 @router.get("/occupancies", response_model=list[UserOccupancyRead])

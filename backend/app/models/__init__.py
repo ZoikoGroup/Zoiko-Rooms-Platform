@@ -15,9 +15,29 @@ from app.models.finance import (
     RefundRequest,
     SimulatedPayment,
 )
+from app.models.agreement_clause import ClauseDefinition
+from app.models.agreement_clause_translation import ClauseTranslation
+from app.models.agreement_amendment import AgreementAmendment
+from app.models.agreement_form_template import AgreementFormTemplate
+from app.models.agreement_party import AgreementParty
+from app.models.agreement_version_detail import AgreementPremises, CommercialTermsSnapshot, ExecutionCertificate
+from app.models.disclosure_requirement import DisclosureRequirement
+from app.models.signature_provider import SignatureProviderEvent, SignatureProviderStatus, SignatureRequest
+from app.models.termination_record import TerminationRecord
 from app.models.guest import Guest
-from app.models.leasing import Agreement, Application, ApplicationDecision, Offer, OfferTerms
+from app.models.leasing import (
+    Agreement,
+    AgreementVersion,
+    Application,
+    ApplicationDecision,
+    DocumentArtifact,
+    Offer,
+    OfferTerms,
+    SignatureEvent,
+)
 from app.models.listing import Listing
+from app.models.listing_version import ListingVersion
+from app.models.listing_approval import ListingApproval
 from app.models.market_release import MarketRelease
 from app.models.market_policy import MarketPolicyPack
 from app.models.membership import Membership
@@ -28,6 +48,7 @@ from app.models.payment import Payment
 from app.models.property import Property
 from app.models.review import Review
 from app.models.room import Room
+from app.models.room_hold import RoomHold
 from app.models.room_passport import RoomPassportClaim, RoomPassportSnapshot
 from app.models.identity_verification import IdentityVerification
 from app.models.password_reset_token import PasswordResetToken
@@ -45,6 +66,8 @@ __all__ = [
     "UserAccount",
     "SubletRequest",
     "Listing",
+    "ListingVersion",
+    "ListingApproval",
     "Guest",
     "Booking",
     "Payment",
@@ -55,6 +78,7 @@ __all__ = [
     "MarketPolicyPack",
     "Property",
     "Room",
+    "RoomHold",
     "AuthorityRecord",
     "RoomPassportClaim",
     "RoomPassportSnapshot",
@@ -66,6 +90,22 @@ __all__ = [
     "Offer",
     "OfferTerms",
     "Agreement",
+    "AgreementVersion",
+    "DocumentArtifact",
+    "SignatureEvent",
+    "ClauseDefinition",
+    "ClauseTranslation",
+    "AgreementAmendment",
+    "AgreementFormTemplate",
+    "AgreementParty",
+    "AgreementPremises",
+    "CommercialTermsSnapshot",
+    "ExecutionCertificate",
+    "SignatureRequest",
+    "SignatureProviderEvent",
+    "SignatureProviderStatus",
+    "TerminationRecord",
+    "DisclosureRequirement",
     "Occupancy",
     "Obligation",
     "SimulatedPayment",

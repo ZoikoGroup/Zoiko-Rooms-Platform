@@ -1,4 +1,4 @@
-﻿from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -15,6 +15,7 @@ from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.room import Room
 from app.schemas.occupancy import OccupancyRead
+from app.services import inventory as inventory_service
 
 
 def to_occupancy_read(occupancy: Occupancy) -> OccupancyRead:
@@ -32,6 +33,9 @@ def to_occupancy_read(occupancy: Occupancy) -> OccupancyRead:
         move_in_date=occupancy.move_in_date,
         expected_end_date=occupancy.expected_end_date,
         move_out_date=occupancy.move_out_date,
+        notice_given_at=occupancy.notice_given_at,
+        liability_end_date=occupancy.liability_end_date,
+        termination_effective_date=occupancy.termination_effective_date,
         created_at=occupancy.created_at,
         ended_at=occupancy.ended_at,
     )
@@ -76,15 +80,17 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
         expected_end_date=_add_months(latest_terms.start_date, latest_terms.term_months),
     )
     db.add(occupancy)
-    db.flush()
+    inventory_service.mark_hold_occupied(db, source_type="offer", source_id=offer.id)
+    db.commit()
+    db.refresh(occupancy)
 
     listing = offer.listing
-    guest = db.get(Guest, offer.guest_id)
+    guest = db.get(Guest, occupancy.guest_id)
     if guest:
         notif_crud.notify_user_by_guest(
             db, guest,
-            title="Move-in confirmed",
-            message=f'Your move-in for "{listing.name}" has been confirmed.',
+            title="You're moved in!",
+            message=f"Your move-in for \"{offer.listing.name}\" is confirmed.",
             notification_type="occupancy.move_in_confirmed",
             related_entity_type="occupancy", related_entity_id=str(occupancy.id),
         )
@@ -94,19 +100,6 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
             title="Move-in confirmed",
             message=f'A tenant has moved in to "{listing.name}".',
             notification_type="occupancy.move_in_confirmed_for_host",
-            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
-        )
-
-    db.commit()
-    db.refresh(occupancy)
-
-    guest = db.get(Guest, occupancy.guest_id)
-    if guest:
-        notif_crud.notify_user_by_guest(
-            db, guest,
-            title="You're moved in!",
-            message=f"Your move-in for \"{offer.listing.name}\" is confirmed.",
-            notification_type="occupancy.move_in_confirmed",
             related_entity_type="occupancy", related_entity_id=str(occupancy.id),
         )
     return occupancy
@@ -172,11 +165,53 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
     return obligation
 
 
-def end_occupancy(db: Session, occupancy: Occupancy, admin: AdminUser) -> Occupancy:
+def end_occupancy(
+    db: Session, occupancy: Occupancy, admin: AdminUser, correlation_id: str = "",
+    *, notice_given_at: datetime | None = None, liability_end_date: date | None = None,
+    termination_effective_date: date | None = None, move_out_date: date | None = None, basis: str = "OTHER",
+) -> Occupancy:
+    """ZR-ENG-CLR-004 AC-20/10.2: 'Final occupancy date, rent liability end
+    date and physical move-out date may differ and must be separately
+    stored.' move_out_date always gets set (today, unless the caller
+    supplies an actual physical-departure date); liability_end_date and
+    termination_effective_date default to that same date when not given
+    explicitly -- the common case where all three dates coincide -- but a
+    caller with a genuine notice-period/early-exit workflow can pass distinct
+    values for each.
+
+    Section 13.1 termination_record: also creates the dedicated,
+    independently-queryable evidence row the spec names -- Occupancy's own
+    flat columns above stay as a denormalized convenience for reads that
+    only need the current occupancy, this is the authoritative record."""
+    from app.models.leasing import Agreement
+    from app.models.termination_record import TerminationRecord
+
     assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
+    resolved_move_out_date = move_out_date or date.today()
     occupancy.status = "ENDED"
-    occupancy.move_out_date = date.today()
+    occupancy.move_out_date = resolved_move_out_date
+    occupancy.notice_given_at = notice_given_at
+    occupancy.liability_end_date = liability_end_date or resolved_move_out_date
+    occupancy.termination_effective_date = termination_effective_date or resolved_move_out_date
     occupancy.ended_at = datetime.now(timezone.utc)
+
+    agreement = db.query(Agreement).filter(Agreement.offer_id == occupancy.offer_id).first()
+    if agreement is not None:
+        db.add(TerminationRecord(
+            occupancy_id=occupancy.id, agreement_id=agreement.id, basis=basis,
+            notice_given_at=notice_given_at, liability_end_date=occupancy.liability_end_date,
+            termination_effective_date=occupancy.termination_effective_date,
+            physical_move_out_date=resolved_move_out_date, created_by_admin_id=admin.id,
+        ))
+
+    # Frees the room's Inventory Service hold -- a new tenant can now be
+    # held/booked for this same room (see services/inventory.py).
+    inventory_service.release_hold(
+        db, source_type="offer", source_id=occupancy.offer_id, reason="occupancy_ended",
+        correlation_id=correlation_id,
+    )
+    db.commit()
+    db.refresh(occupancy)
 
     listing = occupancy.listing
     guest = db.get(Guest, occupancy.guest_id)
@@ -196,9 +231,6 @@ def end_occupancy(db: Session, occupancy: Occupancy, admin: AdminUser) -> Occupa
             notification_type="occupancy.ended_for_host",
             related_entity_type="occupancy", related_entity_id=str(occupancy.id),
         )
-
-    db.commit()
-    db.refresh(occupancy)
     return occupancy
 
 

@@ -23,9 +23,9 @@ from app.crud import leasing as leasing_crud
 from app.crud import notification as notification_module
 from app.crud import occupancy as occupancy_crud
 from app.crud import sublet as sublet_crud
-from app.models.finance import DepositRecord, Obligation, RefundRequest, SimulatedPayment
+from app.models.finance import DepositRecord, Obligation, OBLIGATION_TYPE_TO_PLANE, RefundRequest, SimulatedPayment
 from app.models.guest import Guest
-from app.models.leasing import Agreement, Application, Offer, OfferTerms
+from app.models.leasing import Agreement, AgreementVersion, Application, Offer, OfferTerms
 from app.models.listing import Listing
 from app.models.notification import Notification
 from app.models.occupancy import Occupancy
@@ -206,6 +206,26 @@ class TestAgreementNotifications:
 
         agreement = Agreement(offer_id=offer.id)
         db.add(agreement)
+        db.flush()
+        # ZR-ENG-CLR-004 requires every agreement to carry a version whose
+        # snapshot resolves required_signers (see crud/leasing.py:_apply_signature) --
+        # mirror what create_agreement builds, not a bare Agreement row.
+        listing = offer.listing
+        snapshot = {
+            "listing_name": listing.name, "listing_location": listing.location, "listing_city": listing.city,
+            "provider_name": host.full_name, "provider_email": host.email,
+            "renter_name": guest.name, "renter_email": guest.email,
+            "monthly_rent": float(terms.monthly_rent), "deposit_amount": float(terms.deposit_amount),
+            "start_date": terms.start_date.isoformat(), "term_months": terms.term_months,
+        }
+        db.add(AgreementVersion(agreement_id=agreement.id, version_no=1, status="WORKING", snapshot=snapshot))
+        # ZR-ENG-CLR-001 Rule 7: SIGNED is only reached once every initial
+        # obligation has cleared -- waived here so the "both signatures"
+        # test can assert SIGNED rather than the PAYMENT_IN_PROGRESS hold.
+        db.add(Obligation(
+            obligation_type="RENT", money_plane=OBLIGATION_TYPE_TO_PLANE["RENT"],
+            amount=terms.monthly_rent, due_date=terms.start_date, status="WAIVED", agreement_id=agreement.id,
+        ))
         db.commit()
         db.refresh(agreement)
 

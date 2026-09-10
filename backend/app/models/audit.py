@@ -19,4 +19,13 @@ class AuditEvent(Base):
     resource_id: Mapped[str] = mapped_column(String(50), nullable=False)
     reason: Mapped[str] = mapped_column(String(500), default="")
     correlation_id: Mapped[str] = mapped_column(String(64), default="")
+    # ZR-ENG-CLR-001 Section 15: "capture... before/after state, object version...
+    # and policy/ruleset version." Nullable -- most existing call sites (chat,
+    # finance, identity verification, etc.) don't have a meaningful state
+    # transition or policy version to report and are left as None rather than
+    # forced to invent one.
+    before_state: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    after_state: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    object_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    policy_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
