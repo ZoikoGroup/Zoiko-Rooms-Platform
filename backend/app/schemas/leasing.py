@@ -291,6 +291,7 @@ class OfferRead(CamelModel):
     occupant_risk_reason: str = ""
     terms: list[OfferTermsRead] = []
     agreement: AgreementRead | None = None
+    guest_has_account: bool = False
 
 
 class ApplicationRead(CamelModel):
@@ -369,7 +370,17 @@ class SubletRequestCreate(CamelModel):
 
     occupancy_id: int
     proposed_renter_party_id: int
+    # Defaults to the platform's existing behavior (a full occupant swap) so the
+    # already-shipped frontend "Request to sublet" flow keeps working unchanged --
+    # this field is additive for callers (like our own tests/API clients) that
+    # want to specify REPLACEMENT_OCCUPANT explicitly.
+    arrangement_type: str = "ASSIGNMENT_FULL"
     authority_evidence_ref: str = ""
+    # Only meaningful for SUBLEASE_PARTIAL/ADD_CO_TENANT (the co-tenant's own new
+    # agreement). Omitted -> mirrors the existing tenant's rent unchanged. When
+    # provided, validated against the market pack's resolved cap
+    # (ZR-ENG-CLR-003 Rule 4.4 / Section 6).
+    proposed_monthly_rent: float | None = None
 
 
 class SubletRenterLookup(CamelModel):
@@ -399,6 +410,15 @@ class SubletRequestRead(CamelModel):
     decided_by_admin_id: int | None
     created_at: datetime
     decided_at: datetime | None
+
+    arrangement_type: str = "ASSIGNMENT_FULL"
+    requested_by_guest_id: str | None = None
+    original_renter_liability: str = "ACTIVE"
+    new_occupant_liability: str = "NONE"
+    deposit_disposition: str = ""
+    policy_snapshot: dict = {}
+    new_agreement_id: int | None = None
+    payee_model: str = ""
 
     listing_name: str = ""
     listing_city: str = ""

@@ -14,7 +14,38 @@ OBLIGATION_TYPE_TO_PLANE = {"RENT": "OCCUPANCY", "FEE": "OCCUPANCY", "TAX": "OCC
 OBLIGATION_STATUSES = ("PENDING", "PARTIALLY_PAID", "PAID", "WAIVED", "FAILED", "REFUNDED")
 
 SIMULATED_PAYMENT_STATUSES = ("PENDING", "SUCCEEDED", "FAILED")
-DEPOSIT_STATUSES = ("HELD", "RELEASED", "FORFEITED", "PARTIALLY_RELEASED")
+# FROZEN: an unresolved claim exists against this deposit -- release/forfeit of the
+# disputed portion is blocked until the claim reaches AGREED or RESOLVED (per
+# ZR-ENG-CLR-002 Section 12.2 custody state model).
+DEPOSIT_STATUSES = ("HELD", "RELEASED", "FORFEITED", "PARTIALLY_RELEASED", "FROZEN")
+
+# India-scope MVP of the instrument taxonomy in ZR-ENG-CLR-002 Section 2.3 -- only
+# the two instruments this platform actually issues today. The other canonical
+# instruments (RENTAL_BOND, HOLDING_DEPOSIT, KEY_ACCESS_DEPOSIT, etc.) are deferred
+# until a market pack actually needs them; the field exists so they can be added
+# without a schema change.
+DEPOSIT_INSTRUMENT_TYPES = ("SECURITY_DEPOSIT", "RENT_DEPOSIT")
+# India has no statutory custody scheme for residential deposits, so the only
+# custody model this MVP implements is the host/agent holding it directly.
+DEPOSIT_CUSTODY_MODELS = ("HOST_OR_AGENT",)
+
+# Section 9.1's global deduction taxonomy, trimmed to categories with a clear
+# lawful basis under Indian tenancy practice -- OTHER_CONTRACTUAL_DAMAGE is
+# intentionally excluded from this MVP since it requires a market-pack-defined
+# legal category, which India doesn't have configured yet.
+DEPOSIT_CLAIM_CATEGORIES = (
+    "UNPAID_RENT",
+    "DAMAGE_BEYOND_NORMAL_WEAR",
+    "MISSING_ITEMS_OR_KEYS",
+    "CLEANING_REMEDIATION",
+    "UTILITIES_OR_OTHER_OCCUPANCY_CHARGES",
+)
+# Section 12.3's claim/dispute state machine, collapsed to the states this MVP
+# actually drives (no external ADR/tribunal handoff yet -- Admin resolves disputes
+# directly, which Section 10.2 permits only because no market pack designates an
+# external adjudicator for India in this build).
+DEPOSIT_CLAIM_STATUSES = ("RENTER_RESPONSE_PENDING", "AGREED", "DISPUTED", "RESOLVED")
+DEPOSIT_CLAIM_ITEM_RESPONSES = ("ACCEPT", "PARTIAL_ACCEPT", "DISPUTE")
 PAYOUT_STATUSES = ("PENDING", "PAID", "FAILED", "HELD")
 REFUND_STATUSES = ("REQUESTED", "APPROVED", "REJECTED", "COMPLETED")
 DISPUTE_CATEGORIES = ("CHARGEBACK", "COMPENSATION", "OTHER")
@@ -106,6 +137,71 @@ class DepositRecord(Base):
     notes: Mapped[str] = mapped_column(String(2000), default="")
 
     obligation: Mapped["Obligation"] = relationship(back_populates="deposit_record")
+    instrument: Mapped["DepositInstrument"] = relationship(back_populates="deposit_record", uselist=False, cascade="all, delete-orphan")
+    claims: Mapped[list["DepositClaim"]] = relationship(back_populates="deposit_record", cascade="all, delete-orphan")
+
+
+class DepositInstrument(Base):
+    """Canonical instrument classification for a deposit, kept separate from
+    DepositRecord's hold/release lifecycle (ZR-ENG-CLR-002 Section 2.3, 12).
+    `calculation_snapshot` is the immutable amount/formula basis Section 5.2
+    requires so a later rent change can't silently alter an existing obligation."""
+
+    __tablename__ = "deposit_instruments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    deposit_record_id: Mapped[int] = mapped_column(ForeignKey("deposit_records.id", ondelete="CASCADE"), unique=True, nullable=False)
+    instrument_type: Mapped[str] = mapped_column(String(30), default="SECURITY_DEPOSIT")
+    custody_model: Mapped[str] = mapped_column(String(30), default="HOST_OR_AGENT")
+    calculation_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    deposit_record: Mapped["DepositRecord"] = relationship(back_populates="instrument")
+
+
+class DepositClaim(Base):
+    """A Host-submitted itemized deduction claim against a held deposit
+    (ZR-ENG-CLR-002 Section 9-10). The Host is the claimant, never the automatic
+    adjudicator -- the renter must accept or dispute each line item before any
+    disputed amount can be released or forfeited."""
+
+    __tablename__ = "deposit_claims"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    deposit_record_id: Mapped[int] = mapped_column(ForeignKey("deposit_records.id", ondelete="CASCADE"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="RENTER_RESPONSE_PENDING")
+    submitted_by_admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id"), nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    renter_responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_notes: Mapped[str] = mapped_column(String(2000), default="")
+
+    deposit_record: Mapped["DepositRecord"] = relationship(back_populates="claims")
+    items: Mapped[list["DepositClaimItem"]] = relationship(back_populates="claim", cascade="all, delete-orphan")
+
+
+class DepositClaimItem(Base):
+    """One deduction line item on a claim (ZR-ENG-CLR-002 Section 9.3). Evidence
+    fields mirror IdentityVerification's upload pattern: only the generated
+    `evidence_filename` is ever persisted or used to build a path, never anything
+    client-supplied."""
+
+    __tablename__ = "deposit_claim_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    claim_id: Mapped[int] = mapped_column(ForeignKey("deposit_claims.id", ondelete="CASCADE"), nullable=False, index=True)
+    category_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    amount_requested: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    description: Mapped[str] = mapped_column(String(2000), default="")
+    evidence_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    evidence_original_name: Mapped[str] = mapped_column(String(255), default="")
+    evidence_content_type: Mapped[str] = mapped_column(String(100), default="")
+    tenant_response: Mapped[str] = mapped_column(String(20), default="")
+    final_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    claim: Mapped["DepositClaim"] = relationship(back_populates="items")
 
 
 class PayoutRecord(Base):

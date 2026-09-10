@@ -14,6 +14,7 @@ from app.core.mailer import (
 from app.crud.authority import get_valid_authority_for_room
 from app.crud.guest import get_user_for_guest
 from app.crud.leasing import confirm_agreement_payment
+from app.crud.market_policy import resolve_market_policy, to_policy_snapshot
 from app.crud import notification as notif_crud
 from app.crud.occupancy import generate_next_rent_obligation
 from app.crud.party import assert_provider_access, get_or_create_default_party
@@ -21,7 +22,11 @@ from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
 from app.models.guest import Guest
 from app.models.finance import (
+    DEPOSIT_CLAIM_CATEGORIES,
     PLATFORM_FEE_RATE,
+    DepositClaim,
+    DepositClaimItem,
+    DepositInstrument,
     DepositRecord,
     DisputeCase,
     Obligation,
@@ -31,12 +36,21 @@ from app.models.finance import (
     RefundRequest,
     SimulatedPayment,
 )
+from app.models.guest import Guest
 from app.models.leasing import Agreement, Offer
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.party import Party
 from app.models.room import Room
+from app.models.user_account import UserAccount
 from app.schemas.finance import (
+    DepositClaimCreate,
+    DepositClaimItemRead,
+    DepositClaimItemRespond,
+    DepositClaimRead,
+    DepositClaimResolve,
+    DepositInstrumentRead,
+    DepositRecordRead,
     DepositRelease,
     DisputeCreate,
     DisputeResolve,
@@ -251,7 +265,28 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
         recompute_obligation_status(db, obligation)
 
         if obligation.obligation_type == "DEPOSIT" and obligation.status == "PAID" and not obligation.deposit_record:
-            db.add(DepositRecord(obligation_id=obligation.id, held_amount=obligation.amount))
+            record = DepositRecord(obligation_id=obligation.id, held_amount=obligation.amount)
+            db.add(record)
+            db.flush()
+            # ZR-ENG-CLR-002 Section 2.3/5.2: instrument type is SECURITY_DEPOSIT
+            # (the only one this platform issues today); custody_model and the
+            # policy snapshot are resolved from the market policy pack, not
+            # hard-coded, so a new jurisdiction is a data row, not a code change.
+            policy = resolve_market_policy(db)
+            calculation_snapshot = to_policy_snapshot(policy)
+            calculation_snapshot.update({
+                "amount": float(obligation.amount),
+                "currency": obligation.currency,
+                "formula": "FIXED",
+            })
+            db.add(
+                DepositInstrument(
+                    deposit_record_id=record.id,
+                    instrument_type="SECURITY_DEPOSIT",
+                    custody_model=policy.deposit_custody_model,
+                    calculation_snapshot=calculation_snapshot,
+                )
+            )
 
     # ZR-ENG-CLR-001 Rule 7: this is the "payment success verified server-side
     # before confirmation" gate -- an agreement sitting in PAYMENT_IN_PROGRESS/
@@ -308,6 +343,18 @@ def get_deposit_record_or_404(db: Session, deposit_id: int) -> DepositRecord:
     return record
 
 
+def to_deposit_instrument_read(instrument: DepositInstrument | None) -> DepositInstrumentRead | None:
+    if not instrument:
+        return None
+    return DepositInstrumentRead(
+        id=instrument.id,
+        instrument_type=instrument.instrument_type,
+        custody_model=instrument.custody_model,
+        calculation_snapshot=instrument.calculation_snapshot,
+        created_at=instrument.created_at,
+    )
+
+
 def _notify_deposit_guest(db: Session, record: DepositRecord, *, released: bool) -> None:
     """Tells the renter about the deposit's actual holding-status transition
     (HELD -> RELEASED/FORFEITED) -- distinct from the generic "payment received"
@@ -332,19 +379,138 @@ def _notify_deposit_guest(db: Session, record: DepositRecord, *, released: bool)
         send_deposit_status_email(renter_user.email, renter_user.full_name, _round2(record.released_amount), released)
 
 
-def release_deposit(db: Session, record: DepositRecord, admin: AdminUser, data: DepositRelease) -> DepositRecord:
-    party_id = record.obligation.agreement.offer.listing.room.property.owner_party_id if record.obligation.agreement \
-        else record.obligation.occupancy.listing.room.property.owner_party_id
-    assert_provider_access(db, admin, party_id, roles=("provider_finance", "provider_owner_admin"))
+def to_deposit_record_read(record: DepositRecord) -> DepositRecordRead:
+    return DepositRecordRead(
+        id=record.id,
+        obligation_id=record.obligation_id,
+        status=record.status,
+        held_amount=float(record.held_amount),
+        released_amount=float(record.released_amount),
+        released_at=record.released_at,
+        notes=record.notes,
+        instrument=to_deposit_instrument_read(record.instrument),
+        claimed_amount=_deposit_committed_amount(record),
+        disputed_amount=_deposit_disputed_amount(record),
+    )
 
-    remaining = _round2(record.held_amount) - _round2(record.released_amount)
+
+def to_deposit_claim_item_read(item: DepositClaimItem) -> DepositClaimItemRead:
+    return DepositClaimItemRead(
+        id=item.id,
+        claim_id=item.claim_id,
+        category_code=item.category_code,
+        amount_requested=float(item.amount_requested),
+        description=item.description,
+        has_evidence=item.evidence_filename is not None,
+        evidence_original_name=item.evidence_original_name,
+        tenant_response=item.tenant_response,
+        final_amount=float(item.final_amount) if item.final_amount is not None else None,
+        created_at=item.created_at,
+    )
+
+
+def to_deposit_claim_read(claim: DepositClaim) -> DepositClaimRead:
+    return DepositClaimRead(
+        id=claim.id,
+        deposit_record_id=claim.deposit_record_id,
+        status=claim.status,
+        submitted_by_admin_id=claim.submitted_by_admin_id,
+        submitted_at=claim.submitted_at,
+        renter_responded_at=claim.renter_responded_at,
+        resolved_by_admin_id=claim.resolved_by_admin_id,
+        resolved_at=claim.resolved_at,
+        resolution_notes=claim.resolution_notes,
+        items=[to_deposit_claim_item_read(i) for i in claim.items],
+    )
+
+
+def _deposit_record_party_id(record: DepositRecord) -> int:
+    return record.obligation.agreement.offer.listing.room.property.owner_party_id if record.obligation.agreement \
+        else record.obligation.occupancy.listing.room.property.owner_party_id
+
+
+def _assert_deposit_record_access(db: Session, admin: AdminUser, record: DepositRecord) -> None:
+    assert_provider_access(db, admin, _deposit_record_party_id(record), roles=("provider_finance", "provider_owner_admin"))
+
+
+def _deposit_record_guest_id(record: DepositRecord) -> str | None:
+    obligation = record.obligation
+    if obligation.agreement:
+        return obligation.agreement.offer.guest_id
+    if obligation.occupancy:
+        return obligation.occupancy.guest_id
+    return None
+
+
+def _deposit_committed_amount(record: DepositRecord) -> float:
+    """Money already claimed -- whether still awaiting renter response/dispute
+    resolution, or already agreed/resolved -- is not freely releasable to the
+    renter either way. A claim reserves its amount the moment it's submitted
+    (ZR-ENG-CLR-002 Section 15.3), using amount_requested as the placeholder
+    until final_amount is set."""
+    total = 0.0
+    for claim in record.claims:
+        for item in claim.items:
+            amount = item.final_amount if item.final_amount is not None else item.amount_requested
+            total += _round2(amount)
+    return _round2(total)
+
+
+def _deposit_disputed_amount(record: DepositRecord) -> float:
+    return _round2(sum(
+        _round2(item.amount_requested)
+        for claim in record.claims for item in claim.items
+        if item.tenant_response == "DISPUTE" and item.final_amount is None
+    ))
+
+
+def _deposit_has_open_claim_items(record: DepositRecord) -> bool:
+    return any(item.final_amount is None for claim in record.claims for item in claim.items)
+
+
+def _remaining_releasable_deposit(record: DepositRecord) -> float:
+    remaining = _round2(record.held_amount) - _round2(record.released_amount) - _deposit_committed_amount(record)
+    return max(0.0, remaining)
+
+
+def _recompute_deposit_record_status(record: DepositRecord) -> None:
+    """Only ever moves the custody state between HELD/PARTIALLY_RELEASED and
+    FROZEN, driven purely by whether any claim item is still awaiting a renter
+    response or dispute resolution (ZR-ENG-CLR-002 Section 12.2). RELEASED and
+    FORFEITED are terminal states only ever set by the explicit release_deposit
+    / forfeit_deposit actions below, never by this recompute."""
+    if record.status in ("RELEASED", "FORFEITED"):
+        return
+    if _deposit_has_open_claim_items(record):
+        record.status = "FROZEN"
+    elif record.status == "FROZEN":
+        record.status = "PARTIALLY_RELEASED" if (_round2(record.released_amount) > 0 or _deposit_committed_amount(record) > 0) else "HELD"
+
+
+def release_deposit(db: Session, record: DepositRecord, admin: AdminUser, data: DepositRelease) -> DepositRecord:
+    _assert_deposit_record_access(db, admin, record)
+
+    remaining = _remaining_releasable_deposit(record)
     if data.amount > remaining:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot release more than the remaining held amount")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Cannot release more than the undisputed remaining balance of {remaining:.2f} "
+            "(amount already released, plus any open or agreed claims, is excluded)",
+        )
 
     record.released_amount = _round2(record.released_amount) + data.amount
     record.released_at = datetime.now(timezone.utc)
     record.notes = data.notes or record.notes
-    record.status = "RELEASED" if _round2(record.released_amount) >= _round2(record.held_amount) else "PARTIALLY_RELEASED"
+    if _deposit_has_open_claim_items(record):
+        # An unresolved dispute can exist even once every releasable rupee has
+        # been distributed -- the disputed portion is still open, so this can
+        # never read as a fully closed RELEASED state (Section 12.4: "authorized"
+        # and "completed" must never be conflated with a dispute still pending).
+        record.status = "FROZEN"
+    elif _round2(record.released_amount) + _deposit_committed_amount(record) >= _round2(record.held_amount):
+        record.status = "RELEASED"
+    else:
+        record.status = "PARTIALLY_RELEASED"
 
     _notify_deposit_guest(db, record, released=True)
 
@@ -354,9 +520,26 @@ def release_deposit(db: Session, record: DepositRecord, admin: AdminUser, data: 
 
 
 def forfeit_deposit(db: Session, record: DepositRecord, admin: AdminUser) -> DepositRecord:
-    party_id = record.obligation.agreement.offer.listing.room.property.owner_party_id if record.obligation.agreement \
-        else record.obligation.occupancy.listing.room.property.owner_party_id
-    assert_provider_access(db, admin, party_id, roles=("provider_finance", "provider_owner_admin"))
+    """Per ZR-ENG-CLR-002 Rule 6/7: a deposit deduction is a claim against
+    principal, not an automatic accounting adjustment. Forfeiture can only
+    finalize an amount that a submitted claim has already been agreed or
+    resolved for -- it can no longer seize the full deposit with zero
+    itemization, evidence, or renter opportunity to respond."""
+    _assert_deposit_record_access(db, admin, record)
+
+    if _deposit_disputed_amount(record) > 0:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot forfeit while a claim item is still disputed and unresolved")
+
+    remaining = _round2(record.held_amount) - _round2(record.released_amount)
+    settled = _round2(sum(
+        _round2(item.final_amount) for claim in record.claims for item in claim.items if item.final_amount is not None
+    ))
+    if settled < remaining:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Cannot forfeit without an agreed or resolved claim covering the full remaining amount -- "
+            f"submit a deposit claim for the outstanding {remaining - settled:.2f} first",
+        )
 
     record.status = "FORFEITED"
     record.released_at = datetime.now(timezone.utc)
@@ -366,6 +549,213 @@ def forfeit_deposit(db: Session, record: DepositRecord, admin: AdminUser) -> Dep
     db.commit()
     db.refresh(record)
     return record
+
+
+def submit_deposit_claim(db: Session, record: DepositRecord, admin: AdminUser, data: DepositClaimCreate) -> DepositClaim:
+    _assert_deposit_record_access(db, admin, record)
+
+    if record.status in ("RELEASED", "FORFEITED"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This deposit has already been closed out")
+    if not data.items:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A claim needs at least one line item")
+
+    remaining = _remaining_releasable_deposit(record)
+    requested_total = _round2(sum(item.amount_requested for item in data.items))
+    if requested_total > remaining:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Claimed amount {requested_total:.2f} exceeds the remaining deposit balance of {remaining:.2f}",
+        )
+
+    for item in data.items:
+        if item.category_code not in DEPOSIT_CLAIM_CATEGORIES:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported deduction category: {item.category_code}")
+        if item.amount_requested <= 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "amount_requested must be positive")
+
+    claim = DepositClaim(deposit_record_id=record.id, submitted_by_admin_id=admin.id)
+    db.add(claim)
+    db.flush()
+    for item in data.items:
+        db.add(DepositClaimItem(
+            claim_id=claim.id,
+            category_code=item.category_code,
+            amount_requested=item.amount_requested,
+            description=item.description,
+        ))
+
+    _recompute_deposit_record_status(record)
+    db.commit()
+    db.refresh(claim)
+
+    guest_id = _deposit_record_guest_id(record)
+    guest = db.get(Guest, guest_id) if guest_id else None
+    if guest:
+        notif_crud.notify_user_by_guest(
+            db, guest,
+            title="A deposit claim was submitted",
+            message=f"Your host submitted a claim of {record.obligation.currency} {requested_total:.2f} against your deposit. Review and respond.",
+            notification_type="deposit_claim.submitted",
+            related_entity_type="deposit_claim", related_entity_id=str(claim.id),
+        )
+        db.commit()
+
+    return claim
+
+
+def get_deposit_claim_or_404(db: Session, claim_id: int) -> DepositClaim:
+    claim = db.get(DepositClaim, claim_id)
+    if not claim:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Deposit claim not found")
+    return claim
+
+
+def get_deposit_claim_item_or_404(db: Session, item_id: int) -> DepositClaimItem:
+    item = db.get(DepositClaimItem, item_id)
+    if not item:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Deposit claim item not found")
+    return item
+
+
+def list_deposit_claims_for_record(db: Session, admin: AdminUser, record: DepositRecord) -> list[DepositClaim]:
+    _assert_deposit_record_access(db, admin, record)
+    return list(record.claims)
+
+
+def assert_deposit_record_access(db: Session, admin: AdminUser, record: DepositRecord) -> None:
+    _assert_deposit_record_access(db, admin, record)
+
+
+def deposit_record_guest_id(record: DepositRecord) -> str | None:
+    return _deposit_record_guest_id(record)
+
+
+def attach_deposit_claim_item_evidence(
+    db: Session, item: DepositClaimItem, admin: AdminUser,
+    stored_filename: str, original_filename: str, content_type: str,
+) -> DepositClaimItem:
+    record = item.claim.deposit_record
+    _assert_deposit_record_access(db, admin, record)
+    item.evidence_filename = stored_filename
+    item.evidence_original_name = original_filename
+    item.evidence_content_type = content_type
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+def respond_to_deposit_claim_item(
+    db: Session, item: DepositClaimItem, user: UserAccount, data: DepositClaimItemRespond,
+) -> DepositClaimItem:
+    from app.crud.guest import get_guest_for_user
+
+    record = item.claim.deposit_record
+    guest_id = _deposit_record_guest_id(record)
+    guest = db.get(Guest, guest_id) if guest_id else None
+    my_guest = get_guest_for_user(db, user)
+    if not guest or not my_guest or guest.id != my_guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This deposit claim does not belong to you")
+
+    if item.tenant_response:
+        raise HTTPException(status.HTTP_409_CONFLICT, "You have already responded to this claim item")
+    if data.response not in ("ACCEPT", "PARTIAL_ACCEPT", "DISPUTE"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid response")
+
+    item.tenant_response = data.response
+    if data.response == "ACCEPT":
+        item.final_amount = item.amount_requested
+    elif data.response == "PARTIAL_ACCEPT":
+        if data.accepted_amount is None or data.accepted_amount <= 0 or data.accepted_amount > float(item.amount_requested):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "accepted_amount must be between 0 and the requested amount")
+        item.final_amount = data.accepted_amount
+    # DISPUTE: final_amount stays None until an admin resolves the claim.
+
+    claim = item.claim
+    claim.renter_responded_at = datetime.now(timezone.utc)
+    db.flush()
+
+    if any(i.tenant_response == "" for i in claim.items):
+        claim.status = "RENTER_RESPONSE_PENDING"
+    elif any(i.tenant_response == "DISPUTE" and i.final_amount is None for i in claim.items):
+        claim.status = "DISPUTED"
+    else:
+        claim.status = "AGREED"
+
+    _recompute_deposit_record_status(record)
+    db.commit()
+    db.refresh(item)
+
+    if data.response == "DISPUTE":
+        party_id = _deposit_record_party_id(record)
+        notif_crud.notify_user_by_party(
+            db, party_id,
+            title="A deposit claim was disputed",
+            message=f"The renter disputed a {item.category_code} claim item. Zoiko will review before any further release.",
+            notification_type="deposit_claim.disputed",
+            related_entity_type="deposit_claim", related_entity_id=str(claim.id),
+        )
+        db.commit()
+
+    return item
+
+
+def resolve_deposit_claim(db: Session, claim: DepositClaim, admin: AdminUser, data: DepositClaimResolve) -> DepositClaim:
+    """India-scope MVP simplification of ZR-ENG-CLR-002 Rule 7/Section 10: no
+    external ADR/tribunal integration exists yet, so an Admin resolves disputed
+    line items directly. This is not the doc's end-state -- Section 10.3 requires
+    a market pack to explicitly authorize Zoiko as dispute resolver before this
+    is legally appropriate in a real jurisdiction."""
+    record = claim.deposit_record
+    _assert_deposit_record_access(db, admin, record)
+
+    if claim.status != "DISPUTED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a disputed claim can be resolved")
+
+    items_by_id = {item.id: item for item in claim.items}
+    for entry in data.item_final_amounts:
+        item = items_by_id.get(entry.item_id)
+        if not item:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Claim item {entry.item_id} not found on this claim")
+        if item.final_amount is not None:
+            continue  # already settled (e.g. renter accepted it) -- resolution can't override that
+        if entry.final_amount < 0 or entry.final_amount > float(item.amount_requested):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "final_amount must be between 0 and the requested amount")
+        item.final_amount = entry.final_amount
+
+    if any(item.final_amount is None for item in claim.items):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Every disputed item needs a final_amount to resolve this claim")
+
+    claim.status = "RESOLVED"
+    claim.resolved_by_admin_id = admin.id
+    claim.resolved_at = datetime.now(timezone.utc)
+    claim.resolution_notes = data.notes
+
+    _recompute_deposit_record_status(record)
+    db.commit()
+    db.refresh(claim)
+
+    guest_id = _deposit_record_guest_id(record)
+    guest = db.get(Guest, guest_id) if guest_id else None
+    if guest:
+        notif_crud.notify_user_by_guest(
+            db, guest,
+            title="Your deposit dispute was resolved",
+            message=data.notes or "Zoiko has resolved your disputed deposit claim.",
+            notification_type="deposit_claim.resolved",
+            related_entity_type="deposit_claim", related_entity_id=str(claim.id),
+        )
+        db.commit()
+
+    return claim
+
+
+def list_deposit_claims_for_guest(db: Session, guest_id: str) -> list[DepositClaim]:
+    """Every claim on a deposit belonging to this renter, across all their
+    occupancies. Filters in Python over the (small, per-test-tenant) claim set
+    rather than a joined query, since DepositRecord's guest link is derived
+    (via agreement/occupancy), not a direct column."""
+    all_claims = db.scalars(select(DepositClaim)).all()
+    return [c for c in all_claims if _deposit_record_guest_id(c.deposit_record) == guest_id]
 
 
 def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> PayoutRecord:

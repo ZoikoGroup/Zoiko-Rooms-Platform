@@ -273,6 +273,7 @@ export interface Offer {
   createdAt: string;
   terms: OfferTermsRecord[];
   agreement: Agreement | null;
+  guestHasAccount: boolean;
 }
 
 export interface Application {

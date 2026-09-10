@@ -126,6 +126,14 @@ class Offer(Base):
     terms: Mapped[list["OfferTerms"]] = relationship(back_populates="offer", cascade="all, delete-orphan", order_by="OfferTerms.version")
     agreement: Mapped["Agreement"] = relationship(back_populates="offer", uselist=False)
 
+    @property
+    def guest_has_account(self) -> bool:
+        """True if this guest has their own Zoiko login -- if so, only they can
+        accept/decline this offer (see crud/leasing.py:_assert_renter_has_no_account).
+        Exposed so the admin UI can hide/disable those buttons instead of showing
+        an action that the backend will always reject."""
+        return self.guest.user_account_id is not None
+
 
 class OfferTerms(Base):
     """Append-only versioned terms -- a new negotiation round adds a new version row,
