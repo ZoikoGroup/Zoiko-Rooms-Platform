@@ -9,7 +9,7 @@ from app.services.operational_metrics import compute_section1_metrics
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"], dependencies=[Depends(require_super_admin)])
 
-
+ 
 @router.get("/revenue-trend", response_model=list[RevenueTrendPoint])
 def get_revenue_trend(db: Session = Depends(get_db)):
     return crud.revenue_trend(db)
