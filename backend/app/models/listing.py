@@ -12,8 +12,8 @@ from app.db.base import Base
 PROPERTY_TYPES = ("private_room",)
 
 LISTING_STATES = (
-    "DRAFT", "EVIDENCE_PENDING", "REVIEW", "REJECTED", "APPROVED",
-    "PUBLISHED", "PAUSED", "SUSPENDED", "WITHDRAWN", "ARCHIVED",
+    "DRAFT", "EVIDENCE_PENDING", "REVIEW", "CHANGES_REQUESTED", "REJECTED", "APPROVED",
+    "PUBLISHED", "PAUSED", "SUSPENDED", "QUARANTINED", "WITHDRAWN", "ARCHIVED",
 )
 
 # Explicitly stored per listing rather than derived from country/market -- that
@@ -81,6 +81,14 @@ class Listing(Base):
     # Set by an admin/super admin when moving REVIEW -> REJECTED; cleared again on
     # resubmission. Empty for every other state.
     rejection_reason: Mapped[str] = mapped_column(String(1000), default="")
+    # ZR-ENG-CLR-001 Section 12.1 minimum fields. paused_at: set each time the
+    # listing enters PAUSED (crud.listing.pause_listing), cleared on the next
+    # publish/resume -- unlike published_at, this reflects the *current* pause,
+    # not "ever paused". suspension_reason: Section 3 "Suspend/quarantine --
+    # Reason required"; set by suspend_listing, cleared on any later transition
+    # out of SUSPENDED.
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suspension_reason: Mapped[str] = mapped_column(String(1000), default="")
 
     # Optional per-listing override of the owner account's contact details --
     # left blank, the public API falls back to the owner's name/email/phone.
@@ -88,9 +96,32 @@ class Listing(Base):
     contact_phone: Mapped[str] = mapped_column(String(50), default="")
     contact_email: Mapped[str] = mapped_column(String(255), default="")
 
+    # ZR-ENG-CLR-001 Section 1, Rule 2/3: the Listing row is the mutable
+    # working record (host's own edits, operational state); it is never the
+    # source of truth for what's actually public. current_public_version_id
+    # points at the immutable ListingVersion snapshot the public read path
+    # serves -- a later draft edit changes current_draft_version_id only, and
+    # can never retroactively change what current_public_version_id already
+    # points at. Nullable: a brand-new listing has no version yet until its
+    # first draft is created.
+    # use_alter=True: these FKs and listing_versions.listing_id form a cycle
+    # between the two tables. Without it, drop/create-all ordering (and the
+    # migration's constraint, matching this) can't resolve which table to
+    # emit first.
+    current_draft_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("listing_versions.id", use_alter=True, name="fk_listings_current_draft_version_id"),
+        nullable=True,
+    )
+    current_public_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("listing_versions.id", use_alter=True, name="fk_listings_current_public_version_id"),
+        nullable=True,
+    )
+
     owner: Mapped["AdminUser"] = relationship(back_populates="listings")
     party: Mapped["Party"] = relationship(back_populates="listings")
     room: Mapped["Room"] = relationship(back_populates="listings")
     market_release: Mapped["MarketRelease"] = relationship(back_populates="listings")
     bookings: Mapped[list["Booking"]] = relationship(back_populates="listing")
     reviews: Mapped[list["Review"]] = relationship(back_populates="listing")
+    current_draft_version: Mapped["ListingVersion"] = relationship(foreign_keys=[current_draft_version_id])
+    current_public_version: Mapped["ListingVersion"] = relationship(foreign_keys=[current_public_version_id])

@@ -13,6 +13,7 @@ from app.core.mailer import (
 )
 from app.crud.authority import get_valid_authority_for_room
 from app.crud.guest import get_user_for_guest
+from app.crud.leasing import confirm_agreement_payment
 from app.crud import notification as notif_crud
 from app.crud.occupancy import generate_next_rent_obligation
 from app.crud.party import assert_provider_access, get_or_create_default_party
@@ -228,11 +229,19 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
     if requested_total != _round2(payment.amount):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Allocations must sum to the full payment amount")
 
+    # Every other finance mutation (release_deposit, forfeit_deposit, run_payout,
+    # request_refund, decide_refund) scopes a non-super-admin to their own
+    # provider's records -- this one must too, or a regular admin could confirm
+    # a payment against any other provider's obligation.
+    owned_ids = None if admin.role == "super_admin" else _owned_obligation_ids(db, admin)
+
     obligations = []
     for allocation in data.allocations:
         obligation = db.get(Obligation, allocation.obligation_id)
         if not obligation:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Obligation {allocation.obligation_id} not found")
+        if owned_ids is not None and obligation.id not in owned_ids:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
         db.add(PaymentAllocation(payment_id=payment.id, obligation_id=obligation.id, amount_allocated=allocation.amount))
         obligations.append(obligation)
 
@@ -243,6 +252,16 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
 
         if obligation.obligation_type == "DEPOSIT" and obligation.status == "PAID" and not obligation.deposit_record:
             db.add(DepositRecord(obligation_id=obligation.id, held_amount=obligation.amount))
+
+    # ZR-ENG-CLR-001 Rule 7: this is the "payment success verified server-side
+    # before confirmation" gate -- an agreement sitting in PAYMENT_IN_PROGRESS/
+    # PAYMENT_PENDING only reaches the terminal SIGNED state once every
+    # initial obligation clears (confirm_agreement_payment is itself a no-op
+    # otherwise). Best-effort: an agreement not yet fully paid, or already
+    # past this state, is simply left alone.
+    touched_agreements = {o.agreement for o in obligations if o.agreement_id and o.agreement}
+    for agreement in touched_agreements:
+        confirm_agreement_payment(db, agreement)
 
     payment.status = "SUCCEEDED"
     payment.confirmed_at = datetime.now(timezone.utc)

@@ -70,6 +70,37 @@ from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler  # noqa: E402
 SQLiteTypeCompiler.visit_ARRAY = _compile_array_sqlite  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
+# Monkey-patch: SQLite drops tzinfo on DateTime(timezone=True) columns -- it
+# has no native timezone-aware storage, so a value written as e.g.
+# datetime.now(timezone.utc) reads back naive. Every timestamp in this app is
+# always UTC (see the `default=lambda: datetime.now(timezone.utc)` pattern on
+# every model), so re-attaching UTC on the way out is safe and exactly
+# mirrors what PostgreSQL actually returns. Without this, any code comparing
+# a stored datetime against datetime.now(timezone.utc) (e.g.
+# crud/password_reset.py's expiry check) raises "can't compare offset-naive
+# and offset-aware datetimes" under the SQLite test harness even though the
+# same comparison works fine against the real Postgres-backed app.
+# ---------------------------------------------------------------------------
+from sqlalchemy.dialects.sqlite.base import DATETIME as _SQLiteDATETIME  # noqa: E402
+
+_original_datetime_result_processor = _SQLiteDATETIME.result_processor
+
+
+def _datetime_result_processor_with_tz(self, dialect, coltype):
+    base_process = _original_datetime_result_processor(self, dialect, coltype)
+    if not self.timezone:
+        return base_process
+
+    def process(value):
+        result = base_process(value)
+        return result if result is None or result.tzinfo is not None else result.replace(tzinfo=dt.timezone.utc)
+
+    return process
+
+
+_SQLiteDATETIME.result_processor = _datetime_result_processor_with_tz  # type: ignore[assignment]
+
+# ---------------------------------------------------------------------------
 # SQLite engine + session factory (in-memory, isolated per test)
 # ---------------------------------------------------------------------------
 
@@ -186,3 +217,18 @@ def auth_admin_cookie(admin: AdminUser) -> dict[str, str]:
 def auth_user_cookie(user: UserAccount) -> dict[str, str]:
     token = create_access_token(user.email, token_type="user")
     return {USER_COOKIE: token}
+
+
+def deliver_all_disclosures(client, admin_cookies: dict, agreement_id: int) -> None:
+    """ZR-ENG-CLR-004 AC-15: signing is blocked until every required
+    disclosure is at least DELIVERED (see crud/leasing.py:_apply_signature).
+    Test helper -- marks every disclosure this agreement was seeded with as
+    delivered, so tests whose actual concern is something else (payment,
+    effectiveness, expiry...) aren't tripped up by the unrelated gate."""
+    r = client.get(f"/api/leasing/agreements/{agreement_id}/disclosures", cookies=admin_cookies)
+    assert r.status_code == 200, r.text
+    for disclosure in r.json():
+        r = client.post(
+            f"/api/leasing/agreements/{agreement_id}/disclosures/{disclosure['id']}/deliver", cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text

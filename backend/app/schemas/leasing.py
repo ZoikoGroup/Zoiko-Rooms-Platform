@@ -16,6 +16,11 @@ class ApplicationCreate(CamelModel):
     listing_id: str
     guest_id: str | None = None
     new_guest: NewGuestInput | None = None
+    # ZR-ENG-CLR-001 Rule 6: an existing Guest id for the person who will
+    # actually occupy the room, when that's someone other than guest_id/the
+    # applicant (see Application.occupant_guest_id). None (the common case)
+    # means the applicant is the occupant.
+    named_occupant_guest_id: str | None = None
     message: str = ""
     desired_move_in: date | None = None
 
@@ -40,6 +45,13 @@ class ApplicationDecide(CamelModel):
 class ApplicationUpdate(CamelModel):
     message: str | None = None
     desired_move_in: date | None = None
+
+
+class OfferAcceptRequest(CamelModel):
+    """ZR-ENG-CLR-001 Rule 6/Section 9: only ever needed when the occupant-
+    overlap check comes back BLOCK -- otherwise leave blank."""
+
+    override_reason: str = ""
 
 
 class OfferTermsCreate(CamelModel):
@@ -68,11 +80,197 @@ class AgreementRead(CamelModel):
     signed_by_provider_at: datetime | None
     signed_by_renter_at: datetime | None
     signature_ref: str
+    payment_session_expires_at: datetime | None = None
     created_at: datetime
 
 
 class AgreementSign(CamelModel):
     as_party: str  # "provider" | "renter"
+    # AC-11: ACKNOWLEDGMENT | SIMPLE_ESIGN | ADVANCED_ESIGN | QUALIFIED_ESIGN |
+    # WITNESSED_ESIGN | NOTARIZED -- see crud/leasing.py:METHOD_REQUIRED_EVIDENCE
+    # for which evidence_metadata keys each one requires. WET_INK has its own
+    # dedicated upload route instead (POST .../sign/wet-ink).
+    method: str = "SIMPLE_ESIGN"
+    evidence_metadata: dict = {}
+
+
+class AgreementCreateRequest(CamelModel):
+    """ZR-ENG-CLR-004 AC-17: the only optional-term input the create-agreement
+    call accepts -- ids only, each validated against the resolved profile's
+    own approved optional-clause allow-list (see crud/leasing.py:create_agreement).
+    There is no free-text field anywhere on this schema."""
+
+    selected_optional_clause_ids: list[str] = []
+
+
+class DisclosureRequirementRead(CamelModel):
+    id: int
+    agreement_id: int
+    disclosure_type: str
+    title: str
+    required: bool
+    status: str
+    delivered_at: datetime | None = None
+    delivered_to_party: str = "renter"
+    delivery_channel: str = "IN_APP"
+    acknowledged_at: datetime | None = None
+    document_content_hash: str = ""
+    created_at: datetime
+
+
+class SignatureEventRead(CamelModel):
+    id: int
+    agreement_id: int
+    signer_role: str
+    signer_identifier: str
+    method: str
+    document_hash: str
+    consented_at: datetime
+    created_at: datetime
+
+
+class ClauseDefinitionRead(CamelModel):
+    id: int
+    clause_id: str
+    jurisdiction_scope: str
+    agreement_class: str
+    mandatory_level: str
+    status: str
+    version: int
+    effective_from: date | None = None
+    effective_to: date | None = None
+    title: str
+    approval_note: str
+    created_at: datetime
+
+
+class ClauseDraftCreate(CamelModel):
+    clause_id: str
+    jurisdiction_scope: str
+    agreement_class: str
+    mandatory_level: str
+    title: str
+    approval_note: str = ""
+
+
+class DisclosureDeliverRequest(CamelModel):
+    to_party: str = "renter"
+    delivery_channel: str = "IN_APP"
+
+
+class UserAgreementSignRequest(CamelModel):
+    """AC-11: same method/evidence_metadata options as the admin-facing
+    AgreementSign, for a renter signing their own agreement."""
+
+    method: str = "SIMPLE_ESIGN"
+    evidence_metadata: dict = {}
+
+
+class AgreementAmendmentRead(CamelModel):
+    id: int
+    agreement_id: int
+    source_version_id: int
+    resulting_version_id: int | None = None
+    amendment_type: str | None = None
+    status: str
+    reason: str
+    proposed_terms: dict = {}
+    requested_by_admin_id: int
+    created_at: datetime
+    classified_at: datetime | None = None
+    terms_proposed_at: datetime | None = None
+    approvals_pending_at: datetime | None = None
+    generated_at: datetime | None = None
+    execution_pending_at: datetime | None = None
+    executed_at: datetime | None = None
+    effective_at: datetime | None = None
+
+
+class AmendmentRequestCreate(CamelModel):
+    reason: str = ""
+
+
+class AmendmentClassifyRequest(CamelModel):
+    amendment_type: str
+
+
+class AmendmentProposeTermsRequest(CamelModel):
+    proposed_terms: dict
+
+
+class SignatureRequestRead(CamelModel):
+    id: int
+    agreement_id: int
+    agreement_version_id: int
+    party_role: str
+    method: str
+    status: str
+    deadline: datetime | None = None
+    provider_transaction_id: str = ""
+    completed_at: datetime | None = None
+    created_at: datetime
+
+
+class SignatureProviderCallbackRequest(CamelModel):
+    provider_event_id: str
+    provider_transaction_id: str
+    event_type: str
+
+
+class SignatureProviderStatusRead(CamelModel):
+    healthy: bool
+    updated_at: datetime
+
+
+class SetSignatureProviderHealthRequest(CamelModel):
+    healthy: bool
+
+
+class ClauseTranslationRead(CamelModel):
+    id: int
+    clause_definition_id: int
+    language_code: str
+    translated_title: str
+    translated_content: str
+    status: str
+    created_at: datetime
+
+
+class ClauseTranslationCreate(CamelModel):
+    language_code: str
+    translated_title: str
+    translated_content: str
+
+
+class MissingTranslationRead(CamelModel):
+    clause_definition_id: int
+    clause_id: str
+    version: int
+    title: str
+
+
+class AgreementFormTemplateRead(CamelModel):
+    id: int
+    jurisdiction_scope: str
+    agreement_class: str
+    form_mode: str
+    version: int
+    status: str
+    effective_from: date | None = None
+    effective_to: date | None = None
+    title: str
+    source_document_content_hash: str = ""
+    field_anchor_map: dict = {}
+    authoritative_content_text: str = ""
+    approval_note: str = ""
+    created_at: datetime
+
+
+class HostReadinessRead(CamelModel):
+    """ZR-ENG-CLR-004 Section 5.3 host template completion states."""
+
+    state: str
+    missing_facts: list[str] = []
 
 
 class OfferRead(CamelModel):
@@ -83,6 +281,14 @@ class OfferRead(CamelModel):
     status: str
     current_version: int
     created_at: datetime
+    # ZR-ENG-CLR-001 Rule 7 (10.1): a renter-facing countdown must derive
+    # from this server timestamp directly -- never compute it client-side
+    # from accepted_at plus a hardcoded duration.
+    accepted_at: datetime | None = None
+    confirmation_expires_at: datetime | None = None
+    # ZR-ENG-CLR-001 Rule 6/Section 9: set at acceptance by services/overlap.py.
+    occupant_risk_tier: str = "NONE"
+    occupant_risk_reason: str = ""
     terms: list[OfferTermsRead] = []
     agreement: AgreementRead | None = None
 
@@ -94,6 +300,7 @@ class ApplicationRead(CamelModel):
     guest_id: str
     guest_name: str
     guest_email: str
+    named_occupant_guest_id: str | None = None
     status: str
     message: str
     desired_move_in: date | None
@@ -109,6 +316,7 @@ class UserApplicationSubmitRequest(CamelModel):
     listing_id: str
     message: str = ""
     desired_move_in: date | None = None
+    named_occupant_guest_id: str | None = None
 
     _validate_desired_move_in = field_validator("desired_move_in")(_reject_past_date)
 
