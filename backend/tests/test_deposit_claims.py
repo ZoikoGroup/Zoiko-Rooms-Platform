@@ -20,14 +20,16 @@ from app.models.listing import Listing
 from app.models.market_release import MarketRelease
 from app.models.occupancy_classification import OccupancyClassification
 from app.models.room import Room
-from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
+from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie, deliver_all_disclosures
 from tests.test_application_workflow import _make_verified_renter_with_published_listing
 
 
 def _make_agreement_eligible(db: Session, listing_id: str) -> None:
     listing = db.get(Listing, listing_id)
     room = db.get(Room, listing.room_id)
-    release = MarketRelease(jurisdiction="IN-TEST", status="active")
+    # "England" -- the one jurisdiction services/agreement_profile.py's
+    # resolver currently supports (ZR-ENG-CLR-004 fail-closed resolver).
+    release = MarketRelease(jurisdiction="England", status="active")
     db.add(release)
     db.flush()
     listing.market_release_id = release.id
@@ -81,6 +83,7 @@ def _fund_a_deposit(client, db_session: Session, *, email: str, deposit_amount: 
     agreement_id = r.json()["id"]
 
     assert client.post(f"/api/leasing/agreements/{agreement_id}/send", cookies=admin_cookies).status_code == 200
+    deliver_all_disclosures(client, admin_cookies, agreement_id)
     assert client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=user_cookies).status_code == 200
     assert client.post(
         f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies
