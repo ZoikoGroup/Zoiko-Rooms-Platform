@@ -16,6 +16,19 @@ DEPOSIT_CUSTODY_MODELS = ("STATUTORY_SCHEME", "GOVERNMENT_BOND", "REGULATED_ESCR
 CONSENT_STANDARDS = ("HOST_ABSOLUTE_DISCRETION", "REASONABLE_REFUSAL_ONLY", "NOTICE_ONLY", "STATUTORY_RESPONSE_DEADLINE")
 PAYEE_MODELS = ("ORIGINAL_RENTER_PAYEE", "HOST_OR_LANDLORD_PAYEE", "AUTHORIZED_AGENT_PAYEE", "SPLIT_PAYEE", "EXTERNAL_PAYEE_RECORDED")
 
+# ZR-ENG-CLR-005 Section 9.1/AC-20/AC-35: the named funds-flow profiles the
+# spec defines. Only DIRECT_SETTLEMENT is actually implementable end-to-end
+# in this build -- PSP_DEFERRED_PAYOUT/TRUST_ESCROW_CUSTODY need a real PSP
+# or trust partner this codebase doesn't have, and ZOIKO_REGULATED_CUSTODY is
+# "OFF by default; requires explicit licensing/perimeter approval" per spec.
+# A market pack resolving to any profile outside SUPPORTED_FUNDS_FLOW_PROFILES
+# fails closed at payout time (crud/finance.py:run_payout) rather than
+# silently defaulting to direct settlement or Zoiko custody.
+FUNDS_FLOW_PROFILES = (
+    "DIRECT_SETTLEMENT", "PSP_DEFERRED_PAYOUT", "TRUST_ESCROW_CUSTODY", "ZOIKO_REGULATED_CUSTODY", "EXTERNAL_OFF_PLATFORM",
+)
+SUPPORTED_FUNDS_FLOW_PROFILES = ("DIRECT_SETTLEMENT",)
+
 
 class MarketPolicyPack(Base):
     """One jurisdiction's resolved rule set for deposits and subletting, versioned
@@ -33,6 +46,26 @@ class MarketPolicyPack(Base):
     effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
     confidence: Mapped[str] = mapped_column(String(20), default="REVIEW_REQUIRED")
     legal_source_note: Mapped[str] = mapped_column(String(2000), default="")
+
+    # -- Payment policy (ZR-ENG-CLR-005 Section 8, AC-09: platform fees are
+    # resolved from effective-dated policy, not a hard-coded rate). Fraction,
+    # not a percentage -- 0.10 means 10%. Host-paid percentage-of-rent fee is
+    # the only fee basis this MVP implements (Section 8.1's payer/basis/
+    # tiered/hybrid dimensions are deferred until a market pack actually
+    # needs them; renter fees stay OFF by default with no toggle here yet).
+    platform_fee_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=0.10)
+    funds_flow_profile: Mapped[str] = mapped_column(String(30), default="DIRECT_SETTLEMENT")
+    # ZR-ENG-CLR-005 Section 13.1/AC-26: "Service-fee invoice issuer is the
+    # correct Zoiko legal entity and tax configuration." Resolved per
+    # jurisdiction/effective-date like every other field here, never
+    # hard-coded in the invoice-generation code itself -- see
+    # crud/finance.py:_generate_service_fee_invoice_pdf. tax_rate defaults to
+    # 0.0 (no tax registration/authority integration exists in this build);
+    # showing 0% honestly is the correct "tax configuration" for a market
+    # pack that has none, not an invented placeholder rate.
+    zoiko_legal_entity_name: Mapped[str] = mapped_column(String(200), default="Zoiko Realty Group")
+    zoiko_tax_registration_number: Mapped[str] = mapped_column(String(50), default="")
+    service_fee_tax_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=0.0)
 
     # -- Deposit policy (Section 2) --
     deposit_instrument_allowed: Mapped[str] = mapped_column(String(20), default="OPTIONAL")

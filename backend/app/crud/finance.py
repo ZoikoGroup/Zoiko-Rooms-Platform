@@ -1,6 +1,10 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from io import BytesIO
 
 from fastapi import HTTPException, status
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -11,29 +15,38 @@ from app.core.mailer import (
     send_payout_paid_email,
     send_refund_completed_email,
 )
+from app.core.payout_statement_documents import save_payout_statement_document
+from app.core.receipt_documents import save_receipt_document
+from app.core.service_fee_invoice_documents import save_service_fee_invoice_document
 from app.crud.authority import get_valid_authority_for_room
 from app.crud.guest import get_user_for_guest
-from app.crud.leasing import confirm_agreement_payment
 from app.crud.market_policy import resolve_market_policy, to_policy_snapshot
+from app.models.market_policy import SUPPORTED_FUNDS_FLOW_PROFILES
 from app.crud import notification as notif_crud
-from app.crud.occupancy import generate_next_rent_obligation
 from app.crud.party import assert_provider_access, get_or_create_default_party
 from app.crud.user import get_user_by_party_id
+from app.services import booking_orchestrator
+from app.services import ledger as ledger_service
 from app.models.admin_user import AdminUser
 from app.models.guest import Guest
 from app.models.finance import (
     DEPOSIT_CLAIM_CATEGORIES,
-    PLATFORM_FEE_RATE,
     DepositClaim,
     DepositClaimItem,
     DepositInstrument,
     DepositRecord,
     DisputeCase,
+    FinancialHold,
+    LedgerAccount,
+    LedgerEntry,
     Obligation,
     PaymentAllocation,
+    PaymentReceipt,
     PayoutRecord,
+    PayoutStatement,
     ReconciliationRun,
     RefundRequest,
+    ServiceFeeInvoice,
     SimulatedPayment,
 )
 from app.models.guest import Guest
@@ -54,6 +67,7 @@ from app.schemas.finance import (
     DepositRelease,
     DisputeCreate,
     DisputeResolve,
+    FinancialHoldResolve,
     ObligationRead,
     PaymentConfirm,
     RefundDecide,
@@ -156,6 +170,9 @@ def annotate_payment_context(payment: SimulatedPayment) -> SimulatedPayment:
     derived from the occupancy behind the payment's allocations, which is the
     only place that chain of relationships actually exists."""
     payment.guest_name = payment.guest.name if payment.guest else ""
+    payment.payer_display_name = (
+        payment.payer_guest.name if payment.payer_guest else (payment.payer_name or payment.guest_name)
+    )
     payment.listing_id = None
     payment.listing_name = ""
     payment.room_id = None
@@ -177,6 +194,7 @@ def list_payments(db: Session, admin: AdminUser) -> list[SimulatedPayment]:
         select(SimulatedPayment)
         .options(
             selectinload(SimulatedPayment.guest),
+            selectinload(SimulatedPayment.payer_guest),
             selectinload(SimulatedPayment.allocations)
             .selectinload(PaymentAllocation.obligation)
             .selectinload(Obligation.occupancy)
@@ -201,17 +219,41 @@ def get_payment_or_404(db: Session, payment_id: int) -> SimulatedPayment:
     return payment
 
 
+def _resolve_payer(db: Session, data: SimulatedPaymentCreate) -> str | None:
+    """ZR-ENG-CLR-005 AC-03: resolves the payer_guest_id to store. No payer info at
+    all -> payer is the occupant (unchanged default). payer_guest_id given -> must
+    be a real guest. Only name/email/phone given (no payer_guest_id) -> a payer
+    with no platform account, identified by at least a name."""
+    if data.payer_guest_id:
+        if not db.get(Guest, data.payer_guest_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Payer guest not found")
+        return data.payer_guest_id
+    if data.payer_name or data.payer_email or data.payer_phone:
+        if not data.payer_name:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "payerName is required to identify a payer who is not a registered guest",
+            )
+        return None
+    return data.guest_id
+
+
 def create_payment_intent(db: Session, data: SimulatedPaymentCreate) -> SimulatedPayment:
     """Get-or-create by idempotency key -- a retried request never creates a second
     payment intent. A reused key must describe the *same* request (guest/amount/
-    currency) -- otherwise it's a key collision between two different requests,
-    not a retry, and returning the old payment would silently discard the new one."""
+    currency/payer) -- otherwise it's a key collision between two different
+    requests, not a retry, and returning the old payment would silently discard
+    the new one."""
+    resolved_payer_guest_id = _resolve_payer(db, data)
+
     existing = db.scalar(select(SimulatedPayment).where(SimulatedPayment.idempotency_key == data.idempotency_key))
     if existing:
         if (
             existing.guest_id != data.guest_id
             or _round2(existing.amount) != _round2(data.amount)
             or existing.currency != data.currency
+            or existing.payer_guest_id != resolved_payer_guest_id
+            or (existing.payer_name or None) != (data.payer_name or None)
         ):
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -224,6 +266,10 @@ def create_payment_intent(db: Session, data: SimulatedPaymentCreate) -> Simulate
         amount=data.amount,
         currency=data.currency,
         idempotency_key=data.idempotency_key,
+        payer_guest_id=resolved_payer_guest_id,
+        payer_name=data.payer_name,
+        payer_email=data.payer_email,
+        payer_phone=data.payer_phone,
     )
     db.add(payment)
     db.commit()
@@ -259,6 +305,31 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
         db.add(PaymentAllocation(payment_id=payment.id, obligation_id=obligation.id, amount_allocated=allocation.amount))
         obligations.append(obligation)
 
+        # ZR-ENG-CLR-005 ledger foundation: book the cash actually received
+        # against the provider's payable/custody-liability account. Skipped
+        # for a non-positive allocation (not a normal case, but the sum-must-
+        # equal-total check above doesn't itself forbid it) since post_entry
+        # requires a positive amount and this must never turn an otherwise-
+        # valid confirm into an error.
+        if allocation.amount > 0:
+            party_id = _obligation_party_id(obligation)
+            if party_id is not None:
+                platform_clearing = ledger_service.get_platform_account(db, "PLATFORM_CLEARING", payment.currency)
+                if obligation.money_plane == "SAFEGUARDED":
+                    credit_account = ledger_service.get_party_account(db, "DEPOSIT_CUSTODY_LIABILITY", party_id, payment.currency)
+                else:
+                    credit_account = ledger_service.get_party_account(db, "HOST_PAYABLE", party_id, payment.currency)
+                ledger_service.post_entry(
+                    db,
+                    debit_account=platform_clearing,
+                    credit_account=credit_account,
+                    amount=allocation.amount,
+                    currency=payment.currency,
+                    description="Payment allocated to obligation",
+                    source_type="payment_allocation",
+                    source_id=str(obligation.id),
+                )
+
     db.flush()
     for obligation in obligations:
         db.refresh(obligation)
@@ -288,15 +359,10 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
                 )
             )
 
-    # ZR-ENG-CLR-001 Rule 7: this is the "payment success verified server-side
-    # before confirmation" gate -- an agreement sitting in PAYMENT_IN_PROGRESS/
-    # PAYMENT_PENDING only reaches the terminal SIGNED state once every
-    # initial obligation clears (confirm_agreement_payment is itself a no-op
-    # otherwise). Best-effort: an agreement not yet fully paid, or already
-    # past this state, is simply left alone.
-    touched_agreements = {o.agreement for o in obligations if o.agreement_id and o.agreement}
-    for agreement in touched_agreements:
-        confirm_agreement_payment(db, agreement)
+    # ZR-ENG-CLR-005 AC-16: Payment Service reacts to a cleared payment only
+    # through the Booking Orchestrator boundary -- it never imports
+    # crud.leasing/crud.occupancy directly. See services/booking_orchestrator.py.
+    booking_orchestrator.confirm_downstream_agreements(db, obligations)
 
     payment.status = "SUCCEEDED"
     payment.confirmed_at = datetime.now(timezone.utc)
@@ -312,21 +378,108 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
         send_payment_confirmed_email(payer.email, payer.full_name, payment.amount, payment.currency)
     db.commit()
 
-    # Auto-generate the next recurring rent obligation once a period's rent clears --
-    # the primary trigger for recurring billing in the absence of a scheduler. This is
-    # a best-effort convenience step: an ownership mismatch (e.g. a super_admin's own
-    # payment action touching another provider's occupancy) must not undo an already-
-    # committed successful payment, so it never propagates a failure back to the caller.
-    for obligation in obligations:
-        if obligation.obligation_type == "RENT" and obligation.status == "PAID" and obligation.occupancy_id:
-            db.refresh(obligation)
-            try:
-                generate_next_rent_obligation(db, obligation.occupancy, admin)
-            except HTTPException:
-                pass
+    # ZR-ENG-CLR-005 AC-16: same Booking Orchestrator boundary as above, for
+    # the post-commit best-effort recurring-rent-generation step.
+    booking_orchestrator.generate_downstream_rent(db, obligations, admin)
+
+    # ZR-ENG-CLR-005 Section 13.1/AC-25: same best-effort placement as the
+    # rent-generation step above -- a receipt-rendering failure must never
+    # undo or fail an already-committed successful payment. An admin/renter
+    # can always regenerate it on demand via get_or_create_payment_receipt
+    # (called again from the download routes) if this best-effort call
+    # somehow didn't run.
+    try:
+        get_or_create_payment_receipt(db, payment)
+    except Exception:
+        pass
 
     db.refresh(payment)
     return payment
+
+
+def _generate_payment_receipt_pdf(payment: SimulatedPayment, receipt_number: str) -> bytes:
+    """ZR-ENG-CLR-005 Section 13.2 minimum receipt data. Plain summary
+    document, not a branded/templated invoice -- same "simulated, no real
+    processor" framing as leasing.py's _generate_native_agreement_pdf; there
+    is no masked card/processor descriptor to show since nothing here is a
+    real payment method."""
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    _, height = A4
+    x = 20 * mm
+    y = height - 25 * mm
+
+    def write(text: str, size: float = 10, bold: bool = False, gap: float = 7 * mm) -> None:
+        nonlocal y
+        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+        pdf.drawString(x, y, text)
+        y -= gap
+
+    write("Zoiko Rooms -- Payment Receipt", size=16, bold=True, gap=10 * mm)
+    write(f"Receipt {receipt_number}", size=10)
+    write(f"Payment #{payment.id}  |  Status: {payment.status}", size=10)
+    issued = payment.confirmed_at or datetime.now(timezone.utc)
+    write(f"Issued {issued.strftime('%Y-%m-%d %H:%M UTC')}", size=9, gap=10 * mm)
+
+    write("Payer", size=12, bold=True)
+    guest = payment.guest
+    write(guest.name if guest else "Unknown")
+    write(guest.email if guest else "", gap=10 * mm)
+
+    write("Amount", size=12, bold=True)
+    write(f"{payment.currency} {payment.amount:.2f}", gap=10 * mm)
+
+    write("Applied to", size=12, bold=True)
+    for allocation in payment.allocations:
+        obligation_type = allocation.obligation.obligation_type if allocation.obligation else "UNKNOWN"
+        write(f"{obligation_type}: {payment.currency} {allocation.amount_allocated:.2f}", size=9, gap=6 * mm)
+
+    y -= 4 * mm
+    write("Simulated payment -- no real payment processor or card is involved.", size=8, gap=6 * mm)
+
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+def get_payment_receipt_for_admin(db: Session, payment_id: int, admin: AdminUser) -> PaymentReceipt:
+    """404 + the same provider-ownership scoping every other finance mutation
+    uses (_owned_payment_ids), then get-or-create the receipt -- the route
+    layer never reaches into ownership-check internals directly."""
+    payment = get_payment_or_404(db, payment_id)
+    if admin.role != "super_admin" and payment.id not in _owned_payment_ids(db, admin):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
+    if payment.status != "SUCCEEDED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "No receipt exists for a payment that hasn't succeeded")
+    return get_or_create_payment_receipt(db, payment)
+
+
+def get_or_create_payment_receipt(db: Session, payment: SimulatedPayment) -> PaymentReceipt:
+    """Idempotent, same render-once-then-persist discipline as
+    leasing.py:freeze_agreement_version -- the fast-path check is a
+    convenience only, PaymentReceipt.payment_id being DB-unique is the real
+    guarantee against a concurrent double-render (loser catches
+    IntegrityError and returns the winner's row)."""
+    if payment.receipt is not None:
+        return payment.receipt
+
+    receipt_number = f"RCPT-{payment.id:08d}"
+    pdf_bytes = _generate_payment_receipt_pdf(payment, receipt_number)
+    storage_ref, content_hash = save_receipt_document(pdf_bytes)
+
+    try:
+        with db.begin_nested():
+            receipt = PaymentReceipt(
+                payment_id=payment.id, receipt_number=receipt_number,
+                content_hash=content_hash, storage_ref=storage_ref,
+            )
+            db.add(receipt)
+            db.flush()
+    except IntegrityError:
+        return db.scalar(select(PaymentReceipt).where(PaymentReceipt.payment_id == payment.id))
+    db.commit()
+    db.refresh(receipt)
+    return receipt
 
 
 def list_deposit_records(db: Session, admin: AdminUser) -> list[DepositRecord]:
@@ -429,6 +582,19 @@ def _deposit_record_party_id(record: DepositRecord) -> int:
         else record.obligation.occupancy.listing.room.property.owner_party_id
 
 
+def _obligation_party_id(obligation: Obligation) -> int | None:
+    """Same agreement/occupancy->room traversal run_payout's own _room_for
+    already uses -- the provider party a ledger entry for this obligation
+    should be posted against."""
+    if obligation.agreement:
+        room = obligation.agreement.offer.listing.room
+    elif obligation.occupancy:
+        room = obligation.occupancy.room
+    else:
+        return None
+    return room.property.owner_party_id if room else None
+
+
 def _assert_deposit_record_access(db: Session, admin: AdminUser, record: DepositRecord) -> None:
     assert_provider_access(db, admin, _deposit_record_party_id(record), roles=("provider_finance", "provider_owner_admin"))
 
@@ -512,6 +678,25 @@ def release_deposit(db: Session, record: DepositRecord, admin: AdminUser, data: 
     else:
         record.status = "PARTIALLY_RELEASED"
 
+    # ZR-ENG-CLR-005 ledger foundation: released deposit money leaves custody
+    # and goes back out to the renter (as opposed to forfeit_deposit below,
+    # where it converts to what's owed to the host instead).
+    if data.amount > 0:
+        currency = record.obligation.currency
+        party_id = _deposit_record_party_id(record)
+        deposit_custody_liability = ledger_service.get_party_account(db, "DEPOSIT_CUSTODY_LIABILITY", party_id, currency)
+        platform_clearing = ledger_service.get_platform_account(db, "PLATFORM_CLEARING", currency)
+        ledger_service.post_entry(
+            db,
+            debit_account=deposit_custody_liability,
+            credit_account=platform_clearing,
+            amount=data.amount,
+            currency=currency,
+            description="Deposit released",
+            source_type="deposit_record",
+            source_id=str(record.id),
+        )
+
     _notify_deposit_guest(db, record, released=True)
 
     db.commit()
@@ -543,6 +728,28 @@ def forfeit_deposit(db: Session, record: DepositRecord, admin: AdminUser) -> Dep
 
     record.status = "FORFEITED"
     record.released_at = datetime.now(timezone.utc)
+
+    # ZR-ENG-CLR-005 ledger foundation: forfeited money converts to what's
+    # owed to the host (paid out later via run_payout), rather than leaving
+    # custody back out to the renter -- the opposite destination from
+    # release_deposit above. Reuses `remaining` as already computed for the
+    # validation above, so the ledger amount can't drift from what this
+    # function itself considers "the amount being forfeited".
+    if remaining > 0:
+        currency = record.obligation.currency
+        party_id = _deposit_record_party_id(record)
+        deposit_custody_liability = ledger_service.get_party_account(db, "DEPOSIT_CUSTODY_LIABILITY", party_id, currency)
+        host_payable = ledger_service.get_party_account(db, "HOST_PAYABLE", party_id, currency)
+        ledger_service.post_entry(
+            db,
+            debit_account=deposit_custody_liability,
+            credit_account=host_payable,
+            amount=remaining,
+            currency=currency,
+            description="Deposit forfeited to host",
+            source_type="deposit_record",
+            source_id=str(record.id),
+        )
 
     _notify_deposit_guest(db, record, released=False)
 
@@ -758,6 +965,18 @@ def list_deposit_claims_for_guest(db: Session, guest_id: str) -> list[DepositCla
     return [c for c in all_claims if _deposit_record_guest_id(c.deposit_record) == guest_id]
 
 
+def _period_as_of(period_key: str) -> date:
+    """AC-34: the effective date a "YYYY-MM" period_key resolves to for
+    market-policy lookups -- shared by run_payout (fee rate) and
+    get_or_create_service_fee_invoice (legal entity/tax rate), so both always
+    resolve the same policy for the same period. Falls back to today only if
+    period_key isn't in the expected shape, rather than ever erroring on it."""
+    try:
+        return date(int(period_key[:4]), int(period_key[5:7]), 1)
+    except (ValueError, IndexError):
+        return date.today()
+
+
 def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> PayoutRecord:
     assert_provider_access(db, admin, party.id, roles=("provider_finance", "provider_owner_admin"))
 
@@ -773,8 +992,30 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
         return obligation.occupancy.room
 
     matched = [o for o in candidates if _room_for(o).property.owner_party_id == party.id]
+    # ZR-ENG-CLR-005 AC-09/AC-34: fee rate resolved from the effective-dated
+    # market policy pack, not a hard-coded constant -- same resolver deposit
+    # collection already uses (see confirm_payment above). Resolved as of the
+    # period being paid out (period_key, "YYYY-MM"), not today -- a payout
+    # run late (after a fee-policy change) must still apply the rate that was
+    # actually in effect when this rent was earned, not retroactively apply a
+    # rate change (AC-34). See _period_as_of below.
+    policy = resolve_market_policy(db, as_of=_period_as_of(period_key))
+
+    # ZR-ENG-CLR-005 AC-20/AC-35: fail closed rather than silently defaulting
+    # to direct settlement or Zoiko custody -- a market pack resolving to a
+    # funds-flow profile this build can't actually execute (no real PSP/
+    # trust partner behind PSP_DEFERRED_PAYOUT/TRUST_ESCROW_CUSTODY;
+    # ZOIKO_REGULATED_CUSTODY is off-by-default and needs separate licensing
+    # approval) must refuse the payout outright, not create a HELD row for a
+    # configuration that was never actually supported.
+    if policy.funds_flow_profile not in SUPPORTED_FUNDS_FLOW_PROFILES:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Funds-flow profile '{policy.funds_flow_profile}' is not supported by this build -- payout blocked",
+        )
+
     gross = _round2(sum(o.amount for o in matched))
-    fee = _round2(gross * PLATFORM_FEE_RATE)
+    fee = _round2(gross * float(policy.platform_fee_rate))
     net = _round2(gross - fee)
 
     held_reason = ""
@@ -783,6 +1024,45 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
         if not get_valid_authority_for_room(db, room.id):
             held_reason = "One or more rooms no longer have a verified authority record"
             break
+
+    # ZR-ENG-CLR-005 AC-19/Section 9.2: "No active dispute, chargeback...
+    # hold blocks release." FinancialHold/DisputeCase (increments 6/7/10)
+    # were previously visibility-only -- a payout could go out even with an
+    # open chargeback against one of these obligations, or an unresolved
+    # negative balance already flagged against this party. Both checks are
+    # scoped to what's concretely queryable today (a chargeback tied to one
+    # of *these* obligations; a negative-balance hold tied to *this party's*
+    # own HOST_PAYABLE account) rather than a generic party-wide hold scan,
+    # which FinancialHold's source_type/source_id shape doesn't cleanly
+    # support across every hold kind.
+    if not held_reason and matched:
+        matched_ids = [o.id for o in matched]
+        open_chargeback = db.scalar(
+            select(DisputeCase).where(
+                DisputeCase.category == "CHARGEBACK", DisputeCase.status == "OPEN",
+                DisputeCase.obligation_id.in_(matched_ids),
+            )
+        )
+        if open_chargeback is not None:
+            held_reason = f"Obligation #{open_chargeback.obligation_id} has an open chargeback dispute"
+
+    if not held_reason:
+        payout_currency = matched[0].currency if matched else "INR"
+        existing_host_payable = db.scalar(
+            select(LedgerAccount).where(
+                LedgerAccount.account_type == "HOST_PAYABLE", LedgerAccount.party_id == party.id,
+                LedgerAccount.currency == payout_currency,
+            )
+        )
+        if existing_host_payable is not None:
+            negative_balance_hold = db.scalar(
+                select(FinancialHold).where(
+                    FinancialHold.source_type == "ledger_account", FinancialHold.source_id == str(existing_host_payable.id),
+                    FinancialHold.status == "OPEN", FinancialHold.reason_code == "NEGATIVE_ACCOUNT_BALANCE",
+                )
+            )
+            if negative_balance_hold is not None:
+                held_reason = "This provider has an unresolved negative account balance -- resolve before payout"
 
     payout = PayoutRecord(
         party_id=party.id,
@@ -802,6 +1082,37 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
         payout.paid_at = datetime.now(timezone.utc)
         for obligation in matched:
             obligation.payout_id = payout.id
+
+        # ZR-ENG-CLR-005 ledger foundation: extinguish what's owed to this host --
+        # the fee portion is recognized as platform revenue, the net portion
+        # actually leaves platform clearing. Two entries rather than a three-way
+        # split, since LedgerEntry is a simple two-sided row.
+        host_payable = ledger_service.get_party_account(db, "HOST_PAYABLE", party.id, payout.currency)
+        if fee > 0:
+            platform_fee_revenue = ledger_service.get_platform_account(db, "PLATFORM_FEE_REVENUE", payout.currency)
+            ledger_service.post_entry(
+                db,
+                debit_account=host_payable,
+                credit_account=platform_fee_revenue,
+                amount=fee,
+                currency=payout.currency,
+                description="Platform fee on payout",
+                source_type="payout_record",
+                source_id=str(payout.id),
+            )
+        if net > 0:
+            platform_clearing = ledger_service.get_platform_account(db, "PLATFORM_CLEARING", payout.currency)
+            ledger_service.post_entry(
+                db,
+                debit_account=host_payable,
+                credit_account=platform_clearing,
+                amount=net,
+                currency=payout.currency,
+                description="Payout paid to host",
+                source_type="payout_record",
+                source_id=str(payout.id),
+            )
+
         notif_crud.notify_user_by_party(
             db, party.id,
             title="Payout received",
@@ -825,6 +1136,21 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
 
     db.commit()
     db.refresh(payout)
+
+    # ZR-ENG-CLR-005 Section 6.3/13.1: best-effort, same placement/discipline
+    # as confirm_payment's receipt generation -- a rendering failure must
+    # never undo or fail an already-committed payout. Never generated for a
+    # HELD payout (nothing was actually paid out yet).
+    if payout.status == "PAID":
+        try:
+            get_or_create_payout_statement(db, payout)
+        except Exception:
+            pass
+        try:
+            get_or_create_service_fee_invoice(db, payout)
+        except Exception:
+            pass
+
     return payout
 
 
@@ -834,6 +1160,192 @@ def list_payouts_for(db: Session, admin: AdminUser) -> list[PayoutRecord]:
         party = get_or_create_default_party(db, admin)
         query = query.where(PayoutRecord.party_id == party.id)
     return list(db.scalars(query))
+
+
+def _generate_payout_statement_pdf(payout: PayoutRecord, statement_number: str) -> bytes:
+    """ZR-ENG-CLR-005 Section 6.3 Earnings & Payouts columns: gross rent,
+    Zoiko fee, net payout, shown separately -- "Net payout must never erase
+    gross economics" (Section 8.2). gross/fee are reconstructed from the
+    linked obligations and payout.amount (net) rather than stored again,
+    since run_payout already computed and ledgered them once."""
+    gross = _round2(sum(o.amount for o in payout.obligations))
+    net = _round2(payout.amount)
+    fee = _round2(gross - net)
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    _, height = A4
+    x = 20 * mm
+    y = height - 25 * mm
+
+    def write(text: str, size: float = 10, bold: bool = False, gap: float = 7 * mm) -> None:
+        nonlocal y
+        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+        pdf.drawString(x, y, text)
+        y -= gap
+
+    write("Zoiko Rooms -- Payout Statement", size=16, bold=True, gap=10 * mm)
+    write(f"Statement {statement_number}", size=10)
+    write(f"Payout #{payout.id}  |  Period {payout.period_key}  |  Status: {payout.status}", size=10)
+    paid = payout.paid_at or datetime.now(timezone.utc)
+    write(f"Paid {paid.strftime('%Y-%m-%d %H:%M UTC')}", size=9, gap=10 * mm)
+
+    write("Summary", size=12, bold=True)
+    write(f"Gross rent: {payout.currency} {gross:.2f}", size=9, gap=6 * mm)
+    write(f"Zoiko fee: {payout.currency} {fee:.2f}", size=9, gap=6 * mm)
+    write(f"Net payout: {payout.currency} {net:.2f}", size=9, gap=10 * mm)
+
+    write("Obligations included", size=12, bold=True)
+    for obligation in payout.obligations:
+        write(f"RENT due {obligation.due_date.isoformat()}: {payout.currency} {obligation.amount:.2f}", size=9, gap=6 * mm)
+
+    y -= 4 * mm
+    write("Simulated payout -- no real payment processor or bank transfer is involved.", size=8, gap=6 * mm)
+
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+def get_or_create_payout_statement(db: Session, payout: PayoutRecord) -> PayoutStatement:
+    """Idempotent, same render-once-then-persist discipline as
+    get_or_create_payment_receipt/freeze_agreement_version --
+    PayoutStatement.payout_id being DB-unique is the real guarantee against a
+    concurrent double-render."""
+    if payout.statement is not None:
+        return payout.statement
+
+    statement_number = f"STMT-{payout.id:08d}"
+    pdf_bytes = _generate_payout_statement_pdf(payout, statement_number)
+    storage_ref, content_hash = save_payout_statement_document(pdf_bytes)
+
+    try:
+        with db.begin_nested():
+            statement = PayoutStatement(
+                payout_id=payout.id, statement_number=statement_number,
+                content_hash=content_hash, storage_ref=storage_ref,
+            )
+            db.add(statement)
+            db.flush()
+    except IntegrityError:
+        return db.scalar(select(PayoutStatement).where(PayoutStatement.payout_id == payout.id))
+    db.commit()
+    db.refresh(statement)
+    return statement
+
+
+def get_payout_statement_for_admin(db: Session, payout_id: int, admin: AdminUser) -> PayoutStatement:
+    """404 + the same provider-ownership scoping list_payouts_for uses, then
+    get-or-create the statement -- the route layer never reaches into
+    ownership-check internals directly."""
+    payout = db.get(PayoutRecord, payout_id)
+    if not payout:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payout not found")
+    if admin.role != "super_admin":
+        party = get_or_create_default_party(db, admin)
+        if payout.party_id != party.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
+    if payout.status != "PAID":
+        raise HTTPException(status.HTTP_409_CONFLICT, "No statement exists for a payout that hasn't been paid")
+    return get_or_create_payout_statement(db, payout)
+
+
+def _generate_service_fee_invoice_pdf(
+    payout: PayoutRecord, invoice_number: str, *, legal_entity_name: str, tax_registration_number: str,
+    fee_amount: float, tax_rate: float, tax_amount: float,
+) -> bytes:
+    """ZR-ENG-CLR-005 AC-26: issuer is a specific Zoiko legal entity (resolved
+    from the market policy pack, never hard-coded), with tax treatment shown
+    even when the configured rate is 0% -- an honest "no tax configured" is
+    the correct answer for a market pack that has none, not an omission."""
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    _, height = A4
+    x = 20 * mm
+    y = height - 25 * mm
+
+    def write(text: str, size: float = 10, bold: bool = False, gap: float = 7 * mm) -> None:
+        nonlocal y
+        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+        pdf.drawString(x, y, text)
+        y -= gap
+
+    write(f"{legal_entity_name} -- Service Fee Invoice", size=16, bold=True, gap=10 * mm)
+    write(f"Invoice {invoice_number}", size=10)
+    write(f"Payout #{payout.id}  |  Period {payout.period_key}", size=10)
+    if tax_registration_number:
+        write(f"Tax registration: {tax_registration_number}", size=9, gap=10 * mm)
+    else:
+        y -= 3 * mm
+
+    write("Charge", size=12, bold=True)
+    write(f"Platform service fee: {payout.currency} {fee_amount:.2f}", size=9, gap=6 * mm)
+    write(f"Tax ({tax_rate * 100:.2f}%): {payout.currency} {tax_amount:.2f}", size=9, gap=6 * mm)
+    write(f"Total: {payout.currency} {_round2(fee_amount + tax_amount):.2f}", size=9, gap=10 * mm)
+
+    y -= 4 * mm
+    write("Simulated fee invoice -- no real tax authority integration is involved.", size=8, gap=6 * mm)
+
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+def get_or_create_service_fee_invoice(db: Session, payout: PayoutRecord) -> ServiceFeeInvoice:
+    """Idempotent, same render-once-then-persist discipline as
+    get_or_create_payout_statement. Resolves the market policy as of the
+    period being paid out (same _period_as_of helper run_payout itself uses
+    for the fee rate), so the legal entity/tax rate shown are the ones
+    actually in effect for this period, not whatever's current if this is
+    regenerated later (AC-34)."""
+    if payout.service_fee_invoice is not None:
+        return payout.service_fee_invoice
+
+    policy = resolve_market_policy(db, as_of=_period_as_of(payout.period_key))
+    gross = _round2(sum(o.amount for o in payout.obligations))
+    net = _round2(payout.amount)
+    fee_amount = _round2(gross - net)
+    tax_rate = float(policy.service_fee_tax_rate)
+    tax_amount = _round2(fee_amount * tax_rate)
+
+    invoice_number = f"INV-{payout.id:08d}"
+    pdf_bytes = _generate_service_fee_invoice_pdf(
+        payout, invoice_number,
+        legal_entity_name=policy.zoiko_legal_entity_name, tax_registration_number=policy.zoiko_tax_registration_number,
+        fee_amount=fee_amount, tax_rate=tax_rate, tax_amount=tax_amount,
+    )
+    storage_ref, content_hash = save_service_fee_invoice_document(pdf_bytes)
+
+    try:
+        with db.begin_nested():
+            invoice = ServiceFeeInvoice(
+                payout_id=payout.id, invoice_number=invoice_number,
+                legal_entity_name=policy.zoiko_legal_entity_name, tax_registration_number=policy.zoiko_tax_registration_number,
+                fee_amount=fee_amount, tax_rate=tax_rate, tax_amount=tax_amount,
+                content_hash=content_hash, storage_ref=storage_ref,
+            )
+            db.add(invoice)
+            db.flush()
+    except IntegrityError:
+        return db.scalar(select(ServiceFeeInvoice).where(ServiceFeeInvoice.payout_id == payout.id))
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+def get_service_fee_invoice_for_admin(db: Session, payout_id: int, admin: AdminUser) -> ServiceFeeInvoice:
+    """404 + the same provider-ownership scoping list_payouts_for/
+    get_payout_statement_for_admin use, then get-or-create the invoice."""
+    payout = db.get(PayoutRecord, payout_id)
+    if not payout:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payout not found")
+    if admin.role != "super_admin":
+        party = get_or_create_default_party(db, admin)
+        if payout.party_id != party.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
+    if payout.status != "PAID":
+        raise HTTPException(status.HTTP_409_CONFLICT, "No invoice exists for a payout that hasn't been paid")
+    return get_or_create_service_fee_invoice(db, payout)
 
 
 def list_refund_requests(db: Session, admin: AdminUser) -> list[RefundRequest]:
@@ -851,6 +1363,24 @@ def get_refund_or_404(db: Session, refund_id: int) -> RefundRequest:
 
 
 def request_refund(db: Session, data: RefundRequestCreate, admin: AdminUser) -> RefundRequest:
+    """AC-14: get-or-create by idempotency key, same pattern as
+    create_payment_intent -- a retried request never creates a second
+    RefundRequest. A reused key must describe the *same* request
+    (payment/obligation/amount), otherwise it's a key collision between two
+    different requests, not a retry."""
+    existing = db.scalar(select(RefundRequest).where(RefundRequest.idempotency_key == data.idempotency_key))
+    if existing:
+        if (
+            existing.payment_id != data.payment_id
+            or existing.obligation_id != data.obligation_id
+            or _round2(existing.amount) != _round2(data.amount)
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This idempotency key was already used for a different refund request",
+            )
+        return existing
+
     payment = db.get(SimulatedPayment, data.payment_id)
     obligation = db.get(Obligation, data.obligation_id)
     if not payment or not obligation:
@@ -864,6 +1394,7 @@ def request_refund(db: Session, data: RefundRequestCreate, admin: AdminUser) -> 
         amount=data.amount,
         reason=data.reason,
         requested_by_admin_id=admin.id,
+        idempotency_key=data.idempotency_key,
     )
     db.add(refund)
     db.commit()
@@ -893,6 +1424,49 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
     db.flush()
     db.refresh(obligation)
     recompute_obligation_status(db, obligation)
+
+    # ZR-ENG-CLR-005 ledger foundation: reverse the original collection entry --
+    # cash goes back out to the renter from whichever side originally received
+    # it. This can drive HOST_PAYABLE/DEPOSIT_CUSTODY_LIABILITY negative if the
+    # obligation was already paid out/released -- a real clawback (Section 21's
+    # "Negative Host balance" edge case) -- flagged below via FinancialHold
+    # rather than silently left invisible; the spec itself says any actual
+    # reserve/offset/collection policy needs separate approval, so this only
+    # surfaces the situation, it doesn't invent one.
+    if refund.amount > 0:
+        party_id = _obligation_party_id(obligation)
+        if party_id is not None:
+            platform_clearing = ledger_service.get_platform_account(db, "PLATFORM_CLEARING", refund.payment.currency)
+            if obligation.money_plane == "SAFEGUARDED":
+                debit_account = ledger_service.get_party_account(db, "DEPOSIT_CUSTODY_LIABILITY", party_id, refund.payment.currency)
+            else:
+                debit_account = ledger_service.get_party_account(db, "HOST_PAYABLE", party_id, refund.payment.currency)
+            ledger_service.post_entry(
+                db,
+                debit_account=debit_account,
+                credit_account=platform_clearing,
+                amount=refund.amount,
+                currency=refund.payment.currency,
+                description="Refund reversing prior collection",
+                source_type="refund_request",
+                source_id=str(refund.id),
+            )
+            db.flush()
+            # get_balance's raw debit-minus-credit convention: for a liability
+            # account like this one, a positive result means more was debited
+            # (paid out/released/refunded) than was ever credited (owed) --
+            # i.e. the account is genuinely negative in accounting terms.
+            if ledger_service.get_balance(db, debit_account) > 0.01:
+                db.add(FinancialHold(
+                    source_type="ledger_account", source_id=str(debit_account.id),
+                    reason_code="NEGATIVE_ACCOUNT_BALANCE", severity="HIGH",
+                    description=(
+                        f"Refund #{refund.id} drove {debit_account.account_type} account "
+                        f"{debit_account.id} (party {party_id}) negative -- more was already paid out/"
+                        "released than this refund leaves owed. Needs an approved reserve/offset/"
+                        "collection policy before further payouts to this party."
+                    ),
+                ))
 
     refund.status = "COMPLETED"
     refund.decided_by_admin_id = admin.id
@@ -978,9 +1552,24 @@ def _assert_owns_dispute_target(db: Session, admin: AdminUser, *, occupancy_id: 
 
 def open_dispute(db: Session, data: DisputeCreate, admin: AdminUser) -> DisputeCase:
     _assert_owns_dispute_target(db, admin, occupancy_id=data.occupancy_id, payment_id=data.payment_id)
+
+    # ZR-ENG-CLR-005 Section 20/AC-32: a chargeback needs a specific payment,
+    # obligation and amount to eventually reverse (same triple RefundRequest
+    # already requires) -- non-chargeback categories are unaffected (category
+    # isn't otherwise validated at all).
+    if data.category == "CHARGEBACK":
+        if data.payment_id is None or data.obligation_id is None or data.amount is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "A chargeback dispute requires payment_id, obligation_id and amount")
+        if not db.get(SimulatedPayment, data.payment_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
+        if not db.get(Obligation, data.obligation_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Obligation not found")
+
     dispute = DisputeCase(
         payment_id=data.payment_id,
         occupancy_id=data.occupancy_id,
+        obligation_id=data.obligation_id,
+        amount=data.amount,
         category=data.category,
         description=data.description,
     )
@@ -1002,19 +1591,98 @@ def open_dispute(db: Session, data: DisputeCreate, admin: AdminUser) -> DisputeC
         related_entity_type="dispute_case", related_entity_id=str(dispute.id),
     )
 
+    if data.category == "CHARGEBACK":
+        # Section 20: "flag disputed amount; place configured payout/
+        # negative-balance hold... do not assume renter wins." A real
+        # payout-blocking mechanism isn't built here -- this is the
+        # queryable exception record + visibility Section 19.2 asks for.
+        db.add(FinancialHold(
+            source_type="dispute_case", source_id=str(dispute.id),
+            reason_code="CHARGEBACK_OPENED", severity="HIGH",
+            description=f"Chargeback opened against obligation #{data.obligation_id} for {data.amount} -- do not assume renter wins.",
+        ))
+
     db.commit()
     db.refresh(dispute)
     return dispute
+
+
+def _resolve_chargeback_hold(db: Session, dispute: DisputeCase, admin: AdminUser, outcome: str) -> None:
+    hold = db.scalar(
+        select(FinancialHold).where(
+            FinancialHold.source_type == "dispute_case", FinancialHold.source_id == str(dispute.id),
+            FinancialHold.status == "OPEN",
+        )
+    )
+    if hold is not None:
+        hold.status = "RESOLVED"
+        hold.resolved_by_admin_id = admin.id
+        hold.resolved_at = datetime.now(timezone.utc)
+        hold.resolution_notes = f"Chargeback {outcome.lower()}"
 
 
 def resolve_dispute(db: Session, dispute: DisputeCase, admin: AdminUser, data: DisputeResolve) -> DisputeCase:
     _assert_owns_dispute_target(db, admin, occupancy_id=dispute.occupancy_id, payment_id=dispute.payment_id)
     if data.status not in ("RESOLVED", "REJECTED"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "status must be RESOLVED or REJECTED")
+    if dispute.category == "CHARGEBACK" and data.chargeback_outcome not in ("WON", "LOST"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A chargeback dispute must be resolved with chargeback_outcome WON or LOST")
 
     dispute.status = data.status
     dispute.resolution_notes = data.resolution_notes
     dispute.resolved_at = datetime.now(timezone.utc)
+
+    if dispute.category == "CHARGEBACK":
+        dispute.chargeback_outcome = data.chargeback_outcome
+
+        if data.chargeback_outcome == "LOST":
+            # Section 20 "Chargeback lost": same reversal decide_refund posts
+            # for an approved refund -- a reversing PaymentAllocation (so the
+            # obligation's own status stops reading PAID), then the ledger
+            # entry moving cash back out, then the same negative-balance
+            # check/hold (Section 21) for an obligation that was already
+            # paid out/released.
+            obligation = dispute.obligation
+            db.add(PaymentAllocation(payment_id=dispute.payment_id, obligation_id=obligation.id, amount_allocated=-dispute.amount))
+            db.flush()
+            db.refresh(obligation)
+            recompute_obligation_status(db, obligation)
+
+            if dispute.amount > 0:
+                party_id = _obligation_party_id(obligation)
+                if party_id is not None:
+                    platform_clearing = ledger_service.get_platform_account(db, "PLATFORM_CLEARING", dispute.payment.currency)
+                    if obligation.money_plane == "SAFEGUARDED":
+                        debit_account = ledger_service.get_party_account(db, "DEPOSIT_CUSTODY_LIABILITY", party_id, dispute.payment.currency)
+                    else:
+                        debit_account = ledger_service.get_party_account(db, "HOST_PAYABLE", party_id, dispute.payment.currency)
+                    ledger_service.post_entry(
+                        db,
+                        debit_account=debit_account,
+                        credit_account=platform_clearing,
+                        amount=dispute.amount,
+                        currency=dispute.payment.currency,
+                        description="Chargeback lost, reversing prior collection",
+                        source_type="dispute_case",
+                        source_id=str(dispute.id),
+                    )
+                    db.flush()
+                    if ledger_service.get_balance(db, debit_account) > 0.01:
+                        db.add(FinancialHold(
+                            source_type="ledger_account", source_id=str(debit_account.id),
+                            reason_code="NEGATIVE_ACCOUNT_BALANCE", severity="HIGH",
+                            description=(
+                                f"Chargeback #{dispute.id} drove {debit_account.account_type} account "
+                                f"{debit_account.id} (party {party_id}) negative -- more was already paid out/"
+                                "released than this chargeback leaves owed. Needs an approved reserve/offset/"
+                                "collection policy before further payouts to this party."
+                            ),
+                        ))
+
+        # Section 20 "Chargeback won": release held amount/close dispute --
+        # same close-out for "lost" too, since either way the exception is
+        # now decided, not still open.
+        _resolve_chargeback_hold(db, dispute, admin, data.chargeback_outcome)
 
     verb = "resolved" if data.status == "RESOLVED" else "closed"
     _notify_dispute_participants(
@@ -1041,11 +1709,51 @@ def run_reconciliation(db: Session, admin: AdminUser) -> ReconciliationRun:
     total_payouts = _round2(sum(p.amount for p in db.scalars(select(PayoutRecord).where(PayoutRecord.status == "PAID"))))
     total_refunds = _round2(sum(r.amount for r in db.scalars(select(RefundRequest).where(RefundRequest.status == "COMPLETED"))))
 
-    mismatches = []
+    # ZR-ENG-CLR-005 Section 19.2: each failed check becomes a (reason_code,
+    # severity, message) triple -- the message still feeds the plain-string
+    # `mismatches` list exactly as before, but each triple also becomes a real,
+    # queryable, resolvable FinancialHold row below.
+    failed_checks: list[tuple[str, str, str]] = []
     if abs(total_allocated - (total_payments - total_refunds)) > 0.01:
-        mismatches.append(
-            f"Allocated total ({total_allocated}) does not match payments minus refunds ({_round2(total_payments - total_refunds)})"
-        )
+        failed_checks.append((
+            "AGGREGATE_MISMATCH", "MEDIUM",
+            f"Allocated total ({total_allocated}) does not match payments minus refunds ({_round2(total_payments - total_refunds)})",
+        ))
+
+    # ZR-ENG-CLR-005: the ledger foundation's own two checks, layered on top of
+    # the pre-existing aggregate check above rather than replacing it.
+    #
+    # 1. Trial balance -- a LedgerEntry always debits one account and credits
+    # another for the same amount, so summing get_balance() over every account
+    # must always net to exactly zero; anything else means some code path
+    # posted an entry outside ledger_service.post_entry's discipline (or the
+    # data was hand-edited).
+    all_accounts = db.scalars(select(LedgerAccount)).all()
+    trial_balance = _round2(sum(ledger_service.get_balance(db, account) for account in all_accounts))
+    if abs(trial_balance) > 0.01:
+        failed_checks.append((
+            "TRIAL_BALANCE_MISMATCH", "CRITICAL",
+            f"Ledger trial balance is {trial_balance}, not zero -- some entry was posted unbalanced",
+        ))
+
+    # 2. Every positive (non-refund-reversal) PaymentAllocation created by
+    # confirm_payment should have a matching ledger entry -- if this drifts,
+    # the ledger wiring itself missed posting for some real collection (e.g.
+    # an obligation with no resolvable provider party, which confirm_payment
+    # silently skips rather than erroring on).
+    total_allocated_positive = _round2(
+        sum(a.amount_allocated for a in db.scalars(select(PaymentAllocation)) if a.amount_allocated > 0)
+    )
+    total_ledger_collected = _round2(
+        sum(e.amount for e in db.scalars(select(LedgerEntry).where(LedgerEntry.source_type == "payment_allocation")))
+    )
+    if abs(total_allocated_positive - total_ledger_collected) > 0.01:
+        failed_checks.append((
+            "LEDGER_ALLOCATION_MISMATCH", "HIGH",
+            f"Ledger-recorded collections ({total_ledger_collected}) do not match positive allocations ({total_allocated_positive})",
+        ))
+
+    mismatches = [message for _reason_code, _severity, message in failed_checks]
 
     run = ReconciliationRun(
         totals={
@@ -1055,11 +1763,21 @@ def run_reconciliation(db: Session, admin: AdminUser) -> ReconciliationRun:
             "totalAllocated": total_allocated,
             "totalPayouts": total_payouts,
             "totalRefunds": total_refunds,
+            "ledgerTrialBalance": trial_balance,
+            "totalLedgerCollected": total_ledger_collected,
         },
         mismatches=mismatches,
         status="DISCREPANCIES_FOUND" if mismatches else "CLEAN",
     )
     db.add(run)
+    db.flush()
+
+    for reason_code, severity, message in failed_checks:
+        db.add(FinancialHold(
+            source_type="reconciliation_run", source_id=str(run.id),
+            reason_code=reason_code, severity=severity, description=message,
+        ))
+
     db.commit()
     db.refresh(run)
     return run
@@ -1067,3 +1785,33 @@ def run_reconciliation(db: Session, admin: AdminUser) -> ReconciliationRun:
 
 def list_reconciliation_runs(db: Session) -> list[ReconciliationRun]:
     return list(db.scalars(select(ReconciliationRun).order_by(ReconciliationRun.run_at.desc())))
+
+
+def list_financial_holds(db: Session, status: str | None = None) -> list[FinancialHold]:
+    """Platform-wide finance exceptions (today, only reconciliation produces
+    them) -- no per-provider ownership scoping applies, same as reconciliation
+    itself; both are super-admin-only at the route level."""
+    query = select(FinancialHold).order_by(FinancialHold.opened_at.desc())
+    if status is not None:
+        query = query.where(FinancialHold.status == status)
+    return list(db.scalars(query))
+
+
+def get_financial_hold_or_404(db: Session, hold_id: int) -> FinancialHold:
+    hold = db.get(FinancialHold, hold_id)
+    if not hold:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Financial hold not found")
+    return hold
+
+
+def resolve_financial_hold(db: Session, hold: FinancialHold, admin: AdminUser, data: FinancialHoldResolve) -> FinancialHold:
+    if hold.status != "OPEN":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This financial hold has already been resolved")
+
+    hold.status = "RESOLVED"
+    hold.resolved_by_admin_id = admin.id
+    hold.resolved_at = datetime.now(timezone.utc)
+    hold.resolution_notes = data.notes
+    db.commit()
+    db.refresh(hold)
+    return hold

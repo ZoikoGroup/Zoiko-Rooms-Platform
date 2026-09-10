@@ -28,6 +28,12 @@ class SimulatedPaymentCreate(CamelModel):
     amount: float
     currency: str = "INR"
     idempotency_key: str
+    # ZR-ENG-CLR-005 AC-03: all optional, all default to "payer == occupant" when
+    # omitted -- see crud.finance.create_payment_intent.
+    payer_guest_id: str | None = None
+    payer_name: str | None = None
+    payer_email: str | None = None
+    payer_phone: str | None = None
 
 
 class PaymentConfirm(CamelModel):
@@ -60,6 +66,14 @@ class SimulatedPaymentRead(CamelModel):
     # a payment can in principle span more than one obligation, but in practice
     # always represents one tenant's charge for one room.
     guest_name: str = ""
+    payer_guest_id: str | None = None
+    payer_name: str | None = None
+    payer_email: str | None = None
+    payer_phone: str | None = None
+    # Populated by crud.finance.annotate_payment_context -- the payer's registered
+    # guest name when payer_guest_id is set, else payer_name, else guest_name (the
+    # payer == occupant default).
+    payer_display_name: str = ""
     listing_id: str | None = None
     listing_name: str = ""
     room_id: int | None = None
@@ -165,6 +179,7 @@ class RefundRequestCreate(CamelModel):
     obligation_id: int
     amount: float
     reason: str = ""
+    idempotency_key: str
 
 
 class RefundDecide(CamelModel):
@@ -177,6 +192,7 @@ class RefundRequestRead(CamelModel):
     obligation_id: int
     amount: float
     reason: str
+    idempotency_key: str
     status: str
     requested_by_admin_id: int
     decided_by_admin_id: int | None
@@ -187,6 +203,9 @@ class RefundRequestRead(CamelModel):
 class DisputeCreate(CamelModel):
     payment_id: int | None = None
     occupancy_id: int | None = None
+    # Required only when category == "CHARGEBACK" -- see crud/finance.py:open_dispute.
+    obligation_id: int | None = None
+    amount: float | None = None
     category: str
     description: str = ""
 
@@ -194,17 +213,40 @@ class DisputeCreate(CamelModel):
 class DisputeResolve(CamelModel):
     status: str  # "RESOLVED" | "REJECTED"
     resolution_notes: str = ""
+    # Required only when the dispute's category == "CHARGEBACK" -- "WON" | "LOST".
+    chargeback_outcome: str | None = None
 
 
 class DisputeRead(CamelModel):
     id: int
     payment_id: int | None
     occupancy_id: int | None
+    obligation_id: int | None
+    amount: float | None
     category: str
+    description: str
+    status: str
+    chargeback_outcome: str | None
+    opened_at: datetime
+    resolved_at: datetime | None
+    resolution_notes: str
+
+
+class FinancialHoldResolve(CamelModel):
+    notes: str = ""
+
+
+class FinancialHoldRead(CamelModel):
+    id: int
+    source_type: str
+    source_id: str
+    reason_code: str
+    severity: str
     description: str
     status: str
     opened_at: datetime
     resolved_at: datetime | None
+    resolved_by_admin_id: int | None
     resolution_notes: str
 
 

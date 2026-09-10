@@ -434,7 +434,10 @@ class TestFinanceNotifications:
         db_session.commit()
         db_session.refresh(payment)
 
-        refund = RefundRequest(payment_id=payment.id, obligation_id=obligation.id, amount=2000, reason="Overcharged", requested_by_admin_id=admin.id)
+        refund = RefundRequest(
+            payment_id=payment.id, obligation_id=obligation.id, amount=2000, reason="Overcharged",
+            requested_by_admin_id=admin.id, idempotency_key="refund-request-test-1",
+        )
         db_session.add(refund)
         db_session.commit()
         db_session.refresh(refund)

@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # per AgreementVersion and never regenerated/overwritten -- same
     # never-publicly-mounted directory convention as identity_upload_dir.
     agreement_document_dir: str = "secure_uploads/agreements"
+    # ZR-ENG-CLR-005 Section 13.1: one immutable PDF per successful
+    # SimulatedPayment, same never-publicly-mounted convention.
+    receipt_document_dir: str = "secure_uploads/receipts"
+    # ZR-ENG-CLR-005 Section 6.3/13.1: one immutable PDF per PAID PayoutRecord.
+    payout_statement_document_dir: str = "secure_uploads/payout_statements"
+    # ZR-ENG-CLR-005 Section 13.1/AC-26: one immutable PDF per PAID PayoutRecord's fee line.
+    service_fee_invoice_document_dir: str = "secure_uploads/service_fee_invoices"
 
     frontend_url: str = "http://localhost:3000"
     password_reset_token_expire_minutes: int = 30

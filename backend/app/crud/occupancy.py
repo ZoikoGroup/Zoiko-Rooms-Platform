@@ -8,7 +8,7 @@ from app.crud.eligibility import check_move_in_eligibility
 from app.crud import notification as notif_crud
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.models.admin_user import AdminUser
-from app.models.finance import OBLIGATION_TYPE_TO_PLANE, Obligation
+from app.models.finance import OBLIGATION_TYPE_TO_PLANE, Obligation, PaymentSchedule
 from app.models.guest import Guest
 from app.models.leasing import Agreement
 from app.models.listing import Listing
@@ -152,12 +152,30 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
     if already_exists:
         return None
 
+    # ZR-ENG-CLR-005 AC-02/AC-07: source the recurring amount from the
+    # agreement's PaymentSchedule when one exists, so this obligation is
+    # traceable to the same versioned plan the first one was -- not "whatever
+    # the last row happened to say". Behaviorally identical today (nothing in
+    # this codebase ever changes per-period rent, so schedule.amount and
+    # rent_obligations[-1].amount are always equal), but falls back to the
+    # old logic when no schedule exists (e.g. an obligation created outside
+    # the agreement path) rather than ever erroring on its absence.
+    schedule = None
+    if occupancy.offer.agreement:
+        schedule = db.scalar(
+            select(PaymentSchedule).where(
+                PaymentSchedule.agreement_id == occupancy.offer.agreement.id, PaymentSchedule.status == "ACTIVE",
+            )
+        )
+    amount = schedule.amount if schedule else rent_obligations[-1].amount
+
     obligation = Obligation(
         obligation_type="RENT",
         money_plane=OBLIGATION_TYPE_TO_PLANE["RENT"],
-        amount=rent_obligations[-1].amount,
+        amount=amount,
         due_date=next_due,
         occupancy_id=occupancy.id,
+        schedule_id=schedule.id if schedule else None,
     )
     db.add(obligation)
     db.commit()

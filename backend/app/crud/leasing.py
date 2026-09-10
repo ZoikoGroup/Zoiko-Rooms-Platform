@@ -26,7 +26,7 @@ from app.models.agreement_amendment import AgreementAmendment
 from app.models.agreement_party import AgreementParty
 from app.models.agreement_version_detail import AgreementPremises, CommercialTermsSnapshot, ExecutionCertificate
 from app.models.disclosure_requirement import DisclosureRequirement
-from app.models.finance import OBLIGATION_TYPE_TO_PLANE, Obligation
+from app.models.finance import OBLIGATION_TYPE_TO_PLANE, Obligation, PaymentSchedule
 from app.models.guest import Guest
 from app.models.leasing import (
     Agreement,
@@ -721,6 +721,19 @@ def create_agreement(
             agreement_id=agreement.id, disclosure_type=disclosure_type, title=title, required=required,
         ))
 
+    # ZR-ENG-CLR-005 AC-02/AC-07: the versioned plan this agreement's RENT
+    # obligations are traceable to -- frozen amount/first_due, same snapshot
+    # discipline as the AgreementVersion above. See models/finance.py:
+    # PaymentSchedule for why cadence/status stay single-valued in this build.
+    schedule = PaymentSchedule(
+        agreement_id=agreement.id,
+        amount=latest_terms.monthly_rent,
+        first_due=latest_terms.start_date,
+        anchor_day=latest_terms.start_date.day,
+    )
+    db.add(schedule)
+    db.flush()
+
     db.add(
         Obligation(
             obligation_type="RENT",
@@ -728,6 +741,7 @@ def create_agreement(
             amount=latest_terms.monthly_rent,
             due_date=latest_terms.start_date,
             agreement_id=agreement.id,
+            schedule_id=schedule.id,
         )
     )
     db.add(
@@ -1469,6 +1483,37 @@ def freeze_agreement_version(db: Session, agreement: Agreement) -> DocumentArtif
         pending_amendment.status = "EFFECTIVE"
         pending_amendment.executed_at = now
         pending_amendment.effective_at = now
+        _supersede_payment_schedule_if_rent_changed(db, agreement, pending_amendment)
         db.commit()
 
     return artifact
+
+
+def _supersede_payment_schedule_if_rent_changed(db: Session, agreement: Agreement, amendment: AgreementAmendment) -> None:
+    """ZR-ENG-CLR-005 Section 7.2: "Future obligations can be superseded by a
+    new schedule version once the contractual change becomes effective."
+    No-op for the common case (an amendment that doesn't touch rent -- e.g.
+    deposit-only, term-length-only, corrections). Only ever creates a new
+    PaymentSchedule row and flips the old one's status -- no existing
+    Obligation (paid or unpaid) is touched, so "already-paid obligations are
+    never silently rewritten" holds by construction. The next
+    generate_next_rent_obligation call picks up the new row automatically."""
+    if "monthlyRent" not in amendment.proposed_terms:
+        return
+
+    current = db.scalar(
+        select(PaymentSchedule).where(PaymentSchedule.agreement_id == agreement.id, PaymentSchedule.status == "ACTIVE")
+    )
+    if current is None:
+        return  # defensive -- create_agreement always creates one, so this shouldn't happen
+
+    current.status = "SUPERSEDED"
+    db.add(PaymentSchedule(
+        agreement_id=agreement.id,
+        version=current.version + 1,
+        cadence=current.cadence,
+        currency=current.currency,
+        amount=float(amendment.proposed_terms["monthlyRent"]),
+        first_due=date_.today(),
+        anchor_day=current.anchor_day,
+    ))
