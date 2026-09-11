@@ -13,6 +13,7 @@ from app.models.guest import Guest
 from app.models.leasing import Agreement
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
+from app.models.occupancy_activation import OccupancyHandoverEvent
 from app.models.room import Room
 from app.schemas.occupancy import OccupancyRead
 
@@ -93,9 +94,50 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
             related_entity_type="occupancy", related_entity_id=str(occupancy.id),
         )
 
-    db.commit()
-    db.refresh(occupancy)
+    # The route commits this state transition together with its persisted
+    # activation decision, audit row, and outbox events.
+    db.flush()
     return occupancy
+
+
+def record_handover_event(
+    db: Session, occupancy: Occupancy, *, event_type: str, actor_kind: str,
+    actor_admin_id: int | None = None, actor_user_id: int | None = None,
+    evidence_ref: str = "", notes: str = "", correlation_id: str = "",
+) -> OccupancyHandoverEvent:
+    """Create one immutable evidence event, or return an exact retry safely."""
+    existing = db.scalar(
+        select(OccupancyHandoverEvent).where(
+            OccupancyHandoverEvent.occupancy_id == occupancy.id,
+            OccupancyHandoverEvent.event_type == event_type,
+        )
+    )
+    if existing:
+        compatible = (
+            existing.actor_kind == actor_kind
+            and existing.actor_admin_id == actor_admin_id
+            and existing.actor_user_id == actor_user_id
+            and existing.evidence_ref == evidence_ref
+            and existing.notes == notes
+        )
+        if compatible:
+            return existing
+        raise HTTPException(status.HTTP_409_CONFLICT, "Conflicting handover evidence already exists")
+    if occupancy.status != "PENDING_MOVE_IN":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Handover evidence can only be recorded for pending move-in occupancy")
+    event = OccupancyHandoverEvent(
+        occupancy_id=occupancy.id,
+        event_type=event_type,
+        actor_kind=actor_kind,
+        actor_admin_id=actor_admin_id,
+        actor_user_id=actor_user_id,
+        evidence_ref=evidence_ref,
+        notes=notes,
+        correlation_id=correlation_id,
+    )
+    db.add(event)
+    db.flush()
+    return event
 
 
 def list_occupancies_for(db: Session, admin: AdminUser) -> list[Occupancy]:

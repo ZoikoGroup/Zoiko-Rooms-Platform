@@ -23,6 +23,9 @@ from app.models.leasing import Agreement
 from app.models.listing import Listing
 from app.models.notification import Notification
 from app.models.occupancy import Occupancy
+from app.models.domain_event import DomainEvent
+from app.models.finance import DisputeCase
+from app.models.occupancy_activation import OccupancyActivationDecision, OccupancyHandoverEvent
 from app.models.party import Party
 from app.models.property import Property
 from app.models.room import Room
@@ -143,14 +146,14 @@ class TestSigningCreatesPendingOccupancy:
         assert occupancy.guest_id == agreement.offer.guest_id
         assert occupancy.room_id == agreement.offer.listing.room_id
 
-    def test_expected_end_date_is_set_at_signing_and_unchanged_by_move_in(self, client, db_session: Session):
+    def test_expected_end_date_is_set_at_signing_and_unchanged_by_gate_waiting(self, client, db_session: Session):
         agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "end-date")
         occupancy = _get_occupancy(db_session, agreement)
         pending_expected_end_date = occupancy.expected_end_date
         assert pending_expected_end_date is not None
 
         r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
+        assert r.status_code == 409, r.text
 
         db_session.refresh(occupancy)
         assert occupancy.expected_end_date == pending_expected_end_date
@@ -181,44 +184,40 @@ class TestSigningCreatesPendingOccupancy:
 
 
 class TestConfirmMoveIn:
-    def test_successful_move_in_transitions_pending_to_active(self, client, db_session: Session):
+    def test_confirm_move_in_waits_for_unresolved_date_policy(self, client, db_session: Session):
         agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "success")
         occupancy = _get_occupancy(db_session, agreement)
         assert occupancy.status == "PENDING_MOVE_IN"
 
         r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
 
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["id"] == occupancy.id
-        assert body["status"] == "ACTIVE"
-        assert body["moveInDate"] == date.today().isoformat()
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["outcome"] == "WAITING_FOR_GATE"
+        assert "DATE_ELIGIBILITY_UNRESOLVED" in r.json()["detail"]["reasonCodes"]
 
         db_session.refresh(occupancy)
-        assert occupancy.status == "ACTIVE"
+        assert occupancy.status == "PENDING_MOVE_IN"
         occupancies = db_session.scalars(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id)).all()
         assert len(occupancies) == 1
 
     def test_active_occupancy_cannot_be_confirmed_again(self, client, db_session: Session):
         agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "already-active")
+        occupancy = _get_occupancy(db_session, agreement)
+        occupancy.status = "ACTIVE"
+        occupancy.move_in_date = date.today()
+        db_session.commit()
 
-        r1 = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
-        assert r1.status_code == 200, r1.text
-
-        r2 = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
-        assert r2.status_code == 409, r2.text
+        r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
+        assert r.status_code == 409, r.text
 
         occupancies = db_session.scalars(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id)).all()
         assert len(occupancies) == 1
 
     def test_ended_occupancy_cannot_be_reactivated(self, client, db_session: Session):
         agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "ended")
-        r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        occupancy_id = r.json()["id"]
-
-        r = client.post(f"/api/occupancy/{occupancy_id}/end", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
+        occupancy = _get_occupancy(db_session, agreement)
+        occupancy.status = "ENDED"
+        db_session.commit()
 
         r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
         assert r.status_code == 409, r.text
@@ -251,7 +250,7 @@ class TestConfirmMoveIn:
         r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
 
         assert r.status_code == 409, r.text
-        assert "not fully paid" in r.text.lower() or "not eligible" in r.text.lower()
+        assert "REQUIRED_PAYMENT_PENDING" in r.json()["detail"]["reasonCodes"]
         db_session.refresh(occupancy)
         assert occupancy.status == "PENDING_MOVE_IN"
 
@@ -268,12 +267,11 @@ class TestConfirmMoveIn:
         occupancy = _get_occupancy(db_session, agreement)
         assert occupancy.status == "PENDING_MOVE_IN"
 
-    def test_renter_and_host_notifications_are_generated_with_exactly_one_renter_notice(self, client, db_session: Session):
+    def test_waiting_gate_does_not_generate_activation_notifications(self, client, db_session: Session):
         agreement, host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "notify")
 
         r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        occupancy_id = r.json()["id"]
+        assert r.status_code == 409, r.text
 
         renter_notices = db_session.scalars(
             select(Notification).where(
@@ -281,8 +279,7 @@ class TestConfirmMoveIn:
                 Notification.notification_type == "occupancy.move_in_confirmed",
             )
         ).all()
-        assert len(renter_notices) == 1, "exactly one renter move-in notification must exist"
-        assert renter_notices[0].related_entity_id == str(occupancy_id)
+        assert renter_notices == []
 
         host_notice = db_session.scalar(
             select(Notification).where(
@@ -290,16 +287,172 @@ class TestConfirmMoveIn:
                 Notification.notification_type == "occupancy.move_in_confirmed_for_host",
             )
         )
-        assert host_notice is not None
-        assert host_notice.related_entity_id == str(occupancy_id)
+        assert host_notice is None
+
+
+class TestPhase2BActivationGate:
+    def _record_all_handover_evidence(self, client, db: Session, agreement: Agreement, renter, admin_cookies):
+        occupancy = _get_occupancy(db, agreement)
+        r = client.post(
+            f"/api/occupancy/{occupancy.id}/handover/prepare",
+            json={"evidenceRef": "provider-ready"}, cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        r = client.post(
+            f"/api/occupancy/{occupancy.id}/handover/events",
+            json={"evidenceRef": "provider-delivered"}, cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/handover/receipt",
+            json={"evidenceRef": "renter-received"}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 200, r.text
+        return occupancy
+
+    def test_all_determinable_checks_pass_but_date_unresolved_waits(self, client, db_session: Session):
+        agreement, _host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-date")
+        occupancy = self._record_all_handover_evidence(client, db_session, agreement, renter, admin_cookies)
+
+        r = client.post(f"/api/occupancy/{occupancy.id}/activation-gate/evaluate", cookies=admin_cookies)
+
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["outcome"] == "WAITING_FOR_GATE"
+        assert body["reasonCodes"] == ["DATE_ELIGIBILITY_UNRESOLVED"]
+        assert body["checks"]["date_eligibility"] == "UNRESOLVED"
+        assert all(value == "PASSED" for key, value in body["checks"].items() if key != "date_eligibility")
+        db_session.refresh(occupancy)
+        assert occupancy.status == "PENDING_MOVE_IN"
+
+    def test_confirm_move_in_persists_waiting_decision_without_activation_side_effects(self, client, db_session: Session):
+        agreement, host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-confirm")
+        occupancy = self._record_all_handover_evidence(client, db_session, agreement, renter, admin_cookies)
+
+        r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
+
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["outcome"] == "WAITING_FOR_GATE"
+        assert "DATE_ELIGIBILITY_UNRESOLVED" in r.json()["detail"]["reasonCodes"]
+        db_session.refresh(occupancy)
+        assert occupancy.status == "PENDING_MOVE_IN"
+        assert db_session.scalar(select(OccupancyActivationDecision).where(
+            OccupancyActivationDecision.occupancy_id == occupancy.id,
+            OccupancyActivationDecision.outcome == "WAITING_FOR_GATE",
+        )) is not None
+        assert db_session.scalar(select(Notification).where(
+            Notification.recipient_user_id.in_([host.id, renter.id]),
+            Notification.notification_type.in_(("occupancy.move_in_confirmed", "occupancy.move_in_confirmed_for_host")),
+        )) is None
+        assert db_session.scalar(select(DomainEvent).where(
+            DomainEvent.resource_type == "occupancy", DomainEvent.resource_id == str(occupancy.id),
+            DomainEvent.event_type == "occupancy.active",
+        )) is None
+
+    def test_repeated_evaluation_appends_sequential_immutable_decisions(self, client, db_session: Session):
+        agreement, _host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-versions")
+        occupancy = self._record_all_handover_evidence(client, db_session, agreement, renter, admin_cookies)
+        url = f"/api/occupancy/{occupancy.id}/activation-gate/evaluate"
+
+        first = client.post(url, cookies=admin_cookies)
+        second = client.post(url, cookies=admin_cookies)
+
+        assert first.status_code == second.status_code == 200
+        assert first.json()["decisionVersion"] == 1
+        assert second.json()["decisionVersion"] == 2
+        decisions = db_session.scalars(select(OccupancyActivationDecision).where(
+            OccupancyActivationDecision.occupancy_id == occupancy.id,
+        ).order_by(OccupancyActivationDecision.decision_version)).all()
+        assert [decision.decision_version for decision in decisions] == [1, 2]
+        assert decisions[0].reason_codes == ["DATE_ELIGIBILITY_UNRESOLVED"]
+
+    def test_unauthorized_provider_cannot_record_handover(self, client, db_session: Session):
+        agreement, _host, _renter, _listing_id, _admin_cookies = _build_signed_agreement(client, db_session, "gate-provider-auth")
+        occupancy = _get_occupancy(db_session, agreement)
+        outsider = _make_admin(db_session, email="gate-provider-outsider@test.com", role="admin")
+        db_session.commit()
+
+        r = client.post(
+            f"/api/occupancy/{occupancy.id}/handover/prepare", json={}, cookies=auth_admin_cookie(outsider),
+        )
+
+        assert r.status_code == 403, r.text
+
+    def test_handover_events_are_idempotent_and_conflicts_are_rejected(self, client, db_session: Session):
+        agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-idempotent")
+        occupancy = _get_occupancy(db_session, agreement)
+        url = f"/api/occupancy/{occupancy.id}/handover/prepare"
+
+        first = client.post(url, json={"notes": "ready"}, cookies=admin_cookies)
+        retry = client.post(url, json={"notes": "ready"}, cookies=admin_cookies)
+        conflict = client.post(url, json={"notes": "different"}, cookies=admin_cookies)
+
+        assert first.status_code == retry.status_code == 200
+        assert first.json()["id"] == retry.json()["id"]
+        assert conflict.status_code == 409
+        assert len(db_session.scalars(select(OccupancyHandoverEvent).where(
+            OccupancyHandoverEvent.occupancy_id == occupancy.id,
+        )).all()) == 1
+
+    def test_renter_cannot_record_receipt_for_another_renter(self, client, db_session: Session):
+        agreement, _host, _renter, _listing_id, _admin_cookies = _build_signed_agreement(client, db_session, "gate-receipt-auth")
+        occupancy = _get_occupancy(db_session, agreement)
+        outsider = _make_user(db_session, email="gate-other-renter@test.com")
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/handover/receipt",
+            json={}, cookies=auth_user_cookie(outsider),
+        )
+
+        assert r.status_code == 403, r.text
+
+    def test_admin_cannot_impersonate_renter_receipt(self, client, db_session: Session):
+        agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-admin-receipt")
+        occupancy = _get_occupancy(db_session, agreement)
+
+        r = client.post(f"/api/users/rentals/occupancies/{occupancy.id}/handover/receipt", json={}, cookies=admin_cookies)
+
+        assert r.status_code == 401, r.text
+
+    def test_missing_identity_and_compliance_block_or_wait_without_activation(self, client, db_session: Session):
+        agreement, _host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-compliance")
+        occupancy = self._record_all_handover_evidence(client, db_session, agreement, renter, admin_cookies)
+        renter.party_id = None
+        agreement.offer.listing.market_release.status = "disabled"
+        db_session.commit()
+
+        r = client.post(f"/api/occupancy/{occupancy.id}/activation-gate/evaluate", cookies=admin_cookies)
+
+        assert r.status_code == 200, r.text
+        assert r.json()["outcome"] == "BLOCKED"
+        assert "RENTER_IDENTITY_VERIFICATION_REQUIRED" in r.json()["reasonCodes"]
+        assert any(code.startswith("MARKETPLACE_") for code in r.json()["reasonCodes"])
+
+    def test_open_occupancy_dispute_requires_manual_review(self, client, db_session: Session):
+        agreement, _host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-dispute")
+        occupancy = self._record_all_handover_evidence(client, db_session, agreement, renter, admin_cookies)
+        db_session.add(DisputeCase(occupancy_id=occupancy.id, category="OTHER", status="OPEN"))
+        db_session.commit()
+
+        r = client.post(f"/api/occupancy/{occupancy.id}/activation-gate/evaluate", cookies=admin_cookies)
+
+        assert r.status_code == 200, r.text
+        assert r.json()["outcome"] == "MANUAL_REVIEW"
+        assert "OPEN_OCCUPANCY_DISPUTE_REQUIRES_REVIEW" in r.json()["reasonCodes"]
+        assert occupancy.status == "PENDING_MOVE_IN"
 
 
 class TestEndOccupancy:
     def _active_occupancy(self, client, db: Session, suffix: str):
         agreement, host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db, suffix)
-        r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        return r.json()["id"], host, renter, admin_cookies
+        occupancy = _get_occupancy(db, agreement)
+        # Date eligibility deliberately fails closed in Phase 2B, so the legacy
+        # move-out tests construct an already-active occupancy directly.
+        occupancy.status = "ACTIVE"
+        occupancy.move_in_date = date.today()
+        db.commit()
+        return occupancy.id, host, renter, admin_cookies
 
     def test_active_occupancy_ended_by_authorized_provider_becomes_ended(self, client, db_session: Session):
         occupancy_id, _host, _renter, admin_cookies = self._active_occupancy(client, db_session, "end-ok")
