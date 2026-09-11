@@ -539,6 +539,54 @@ class TestAmendmentsAC18:
         )
         assert r.status_code == 400, r.text
 
+    def test_amended_start_date_is_reflected_at_move_in_not_the_stale_original(self, client, db_session: Session):
+        """approve_amendment used to build its OfferTerms only in-memory, so
+        confirm_move_in's offer.terms[-1] lookup would silently keep using
+        the pre-amendment startDate/termMonths when computing
+        expected_end_date. A persisted new OfferTerms row fixes that."""
+        from app.crud.occupancy import _add_months
+        from app.models.occupancy import Occupancy
+
+        listing_id, _room_id = _make_listing_with_room(db_session)
+        super_admin = _make_admin(db_session, email="ac18-admin4@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(super_admin)
+        renter = _make_verified_renter(db_session, email="ac18-renter4@test.com")
+        original_start = date.today() - timedelta(days=20)
+        agreement_id = _full_signed_agreement(client, db_session, admin_cookies, renter, listing_id, start_date=original_start)
+        agreement = db_session.get(Agreement, agreement_id)
+        offer_id = agreement.offer_id
+        assert len(db_session.get(Offer, offer_id).terms) == 1
+
+        # Stays in the past so the amended agreement is already effective by
+        # the time confirm-move-in is called below -- this test is about
+        # expected_end_date picking up the new date, not lease-effectiveness timing.
+        new_start = original_start + timedelta(days=10)
+        r = client.post(f"/api/leasing/agreements/{agreement_id}/amendments", json={"reason": "renter asked to delay move-in"}, cookies=admin_cookies)
+        amendment_id = r.json()["id"]
+        client.post(
+            f"/api/leasing/agreements/{agreement_id}/amendments/{amendment_id}/classify",
+            json={"amendmentType": "MATERIAL_CHANGE"}, cookies=admin_cookies,
+        )
+        client.post(
+            f"/api/leasing/agreements/{agreement_id}/amendments/{amendment_id}/propose-terms",
+            json={"proposedTerms": {"startDate": new_start.isoformat(), "termMonths": 6}}, cookies=admin_cookies,
+        )
+        client.post(f"/api/leasing/agreements/{agreement_id}/amendments/{amendment_id}/approve", cookies=admin_cookies)
+
+        offer = db_session.get(Offer, offer_id)
+        db_session.refresh(offer)
+        assert len(offer.terms) == 2, "amendment must persist a new OfferTerms row, not just an in-memory snapshot"
+        assert offer.terms[-1].start_date == new_start
+
+        client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=auth_user_cookie(renter))
+        client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
+
+        r = client.post(f"/api/occupancy/agreements/{agreement_id}/confirm-move-in", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        occupancy = db_session.get(Occupancy, r.json()["id"])
+        assert occupancy.expected_end_date == _add_months(new_start, 6)
+        assert occupancy.expected_end_date != _add_months(original_start, 6)
+
 
 class TestSignatureProviderAC23AC24:
     """AC-23/24: idempotent authenticated callback ingestion + outage-safe

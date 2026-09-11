@@ -205,6 +205,56 @@ export const subletRequestStatusLabel = {
   rejected: "Rejected",
 } as const;
 
+// ZR-ENG-CLR-003 Section 3's arrangement-type taxonomy, in renter-facing (first-person) terms.
+export const subletArrangementTypeLabel = {
+  ASSIGNMENT_FULL: "Full handover — I move out, they take over completely",
+  REPLACEMENT_OCCUPANT: "Replace me as occupant — I move out, they take over completely",
+  SUBLEASE_PARTIAL: "Sublease part of the room — I stay on, they get their own agreement",
+  ADD_CO_TENANT: "Add a co-tenant — we'd both hold our own tenancy",
+  LODGER_OR_LICENSEE: "Take on a lodger/licensee — they live here without full tenancy rights",
+  ADDITIONAL_OCCUPANT: "Just let them live here — no separate tenancy or agreement",
+} as const;
+
+// Same taxonomy, third-person -- for the admin review console.
+export const subletArrangementTypeAdminLabel = {
+  ASSIGNMENT_FULL: "Full handover (tenant moves out, replacement takes over)",
+  REPLACEMENT_OCCUPANT: "Occupant replacement (tenant moves out, replacement takes over)",
+  SUBLEASE_PARTIAL: "Partial sublease (tenant stays, new occupant gets own agreement)",
+  ADD_CO_TENANT: "Add co-tenant (both hold their own tenancy)",
+  LODGER_OR_LICENSEE: "Lodger/licensee (no full tenancy rights)",
+  ADDITIONAL_OCCUPANT: "Additional occupant only (no tenancy or agreement)",
+} as const;
+
+// Types that create a second, independent tenancy alongside the existing one --
+// these are the only ones where a proposed rent for that new tenancy applies.
+export const CO_TENANCY_ARRANGEMENT_TYPES = ["SUBLEASE_PARTIAL", "ADD_CO_TENANT", "LODGER_OR_LICENSEE"] as const;
+
+export const bookingChangeRequestStatusTone = {
+  PENDING: "warning",
+  APPROVED: "success",
+  DECLINED: "danger",
+  EFFECTIVE: "success",
+  EXPIRED: "neutral",
+  WITHDRAWN: "neutral",
+} as const;
+
+export const bookingChangeRequestStatusLabel = {
+  PENDING: "Pending Review",
+  APPROVED: "Approved — awaiting re-signature",
+  DECLINED: "Declined",
+  EFFECTIVE: "Effective",
+  EXPIRED: "Expired",
+  WITHDRAWN: "Withdrawn",
+} as const;
+
+export const bookingChangeTypeLabel = {
+  DATE_SHIFT: "Move-in date change",
+  EXTENSION: "Stay extension",
+  SHORTENING: "Stay shortening",
+  PREMISES_CHANGE: "Room/property change",
+  FINANCIAL_CHANGE: "Rent change",
+} as const;
+
 // --- Trust & Safety surface ---
 
 export const authorityRecordStatusTone = {

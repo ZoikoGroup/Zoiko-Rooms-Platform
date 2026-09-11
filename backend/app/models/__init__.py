@@ -2,6 +2,7 @@ from app.models.admin_user import AdminSettings, AdminUser
 from app.models.audit import AuditEvent
 from app.models.authority_record import AuthorityRecord
 from app.models.booking import Booking
+from app.models.booking_change_request import BookingChangeRequest
 from app.models.domain_event import DomainEvent
 from app.models.user_account import UserAccount
 from app.models.sublet_request import SubletRequest
@@ -70,6 +71,7 @@ __all__ = [
     "ListingApproval",
     "Guest",
     "Booking",
+    "BookingChangeRequest",
     "Payment",
     "Review",
     "Party",

@@ -10,6 +10,7 @@ from app.api.deps import get_current_user
 from app.core.agreement_documents import resolve_agreement_document_path
 from app.core.correlation import get_correlation_id
 from app.core.identity_uploads import resolve_identity_document_path
+from app.crud import booking_change_requests as bcr_crud
 from app.crud import finance as finance_crud
 from app.crud import leasing as leasing_crud
 from app.crud import occupancy as occupancy_crud
@@ -33,7 +34,13 @@ from app.models.user_account import UserAccount
 from app.schemas.finance import DepositClaimItemRead, DepositClaimItemRespond, DepositClaimRead
 from app.schemas.leasing import (
     AgreementRead,
+    BookingChangeRequestCreate,
+    BookingChangeRequestRead,
     DisclosureRequirementRead,
+    ExtensionRequestCreate,
+    FinancialChangeRequestCreate,
+    PremisesChangeRequestCreate,
+    ShorteningRequestCreate,
     OfferAcceptRequest,
     OfferRead,
     SubletRenterLookup,
@@ -97,6 +104,7 @@ def _to_user_application_read(db: Session, application: Application) -> UserAppl
 def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyRead:
     listing = db.get(Listing, occupancy.listing_id)
     property_address, property_city, host_name = _property_and_host(db, listing)
+    agreement = occupancy.offer.agreement if occupancy.offer else None
     return UserOccupancyRead(
         id=occupancy.id,
         listing_id=occupancy.listing_id,
@@ -111,6 +119,7 @@ def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyR
         move_out_date=occupancy.move_out_date,
         created_at=occupancy.created_at,
         ended_at=occupancy.ended_at,
+        agreement_id=agreement.id if agreement else None,
     )
 
 
@@ -362,6 +371,136 @@ def sign_own_agreement(
         )
     db.commit()
     return updated
+
+
+@router.post("/agreements/{agreement_id}/change-requests", response_model=BookingChangeRequestRead, status_code=status.HTTP_201_CREATED)
+def request_own_move_in_date_change(
+    agreement_id: int,
+    payload: BookingChangeRequestCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 8 MVP: a renter requesting a new move-in date
+    before they've moved in. Only DATE_SHIFT on a fully signed agreement is
+    supported so far."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    bcr = bcr_crud.request_date_change(db, user, agreement, payload.proposed_start_date, reason=payload.reason)
+    log_audit_event(db, None, "booking_change_request.submit", "booking_change_request", str(bcr.id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(bcr)
+
+
+@router.post("/agreements/{agreement_id}/extension-requests", response_model=BookingChangeRequestRead, status_code=status.HTTP_201_CREATED)
+def request_own_extension(
+    agreement_id: int,
+    payload: ExtensionRequestCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 8 MVP: a renter requesting to extend their stay
+    on an active occupancy -- the counterpart to change-requests above, which
+    only covers a move-in date shift before move-in."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    bcr = bcr_crud.request_extension(db, user, agreement, payload.additional_term_months, reason=payload.reason)
+    log_audit_event(db, None, "booking_change_request.submit", "booking_change_request", str(bcr.id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(bcr)
+
+
+@router.post("/agreements/{agreement_id}/shortening-requests", response_model=BookingChangeRequestRead, status_code=status.HTTP_201_CREATED)
+def request_own_shortening(
+    agreement_id: int,
+    payload: ShorteningRequestCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 7.4/AC-10: only accepted before move-in -- once
+    moved in, an early end routes to ending the tenancy (Section 6), not this
+    endpoint (see crud/booking_change_requests.py:request_shortening)."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    bcr = bcr_crud.request_shortening(db, user, agreement, payload.reduced_term_months, reason=payload.reason)
+    log_audit_event(db, None, "booking_change_request.submit", "booking_change_request", str(bcr.id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(bcr)
+
+
+@router.post("/agreements/{agreement_id}/premises-change-requests", response_model=BookingChangeRequestRead, status_code=status.HTTP_201_CREATED)
+def request_own_premises_change(
+    agreement_id: int,
+    payload: PremisesChangeRequestCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 14: a renter asking to move to a different
+    listing. Available before or after move-in -- see
+    crud/booking_change_requests.py:request_premises_change."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    bcr = bcr_crud.request_premises_change(db, user, agreement, payload.target_listing_id, reason=payload.reason)
+    log_audit_event(db, None, "booking_change_request.submit", "booking_change_request", str(bcr.id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(bcr)
+
+
+@router.post("/agreements/{agreement_id}/financial-change-requests", response_model=BookingChangeRequestRead, status_code=status.HTTP_201_CREATED)
+def request_own_financial_change(
+    agreement_id: int,
+    payload: FinancialChangeRequestCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 10/AC-24: a renter requesting a new monthly
+    rent. Available before or after move-in -- see
+    crud/booking_change_requests.py:request_financial_change."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    bcr = bcr_crud.request_financial_change(db, user, agreement, payload.proposed_monthly_rent, reason=payload.reason)
+    log_audit_event(db, None, "booking_change_request.submit", "booking_change_request", str(bcr.id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(bcr)
+
+
+@router.get("/change-requests", response_model=list[BookingChangeRequestRead])
+def list_own_change_requests(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [bcr_crud.to_booking_change_request_read(b) for b in bcr_crud.list_change_requests_for_guest(db, user)]
+
+
+@router.post("/change-requests/{bcr_id}/withdraw", response_model=BookingChangeRequestRead)
+def withdraw_own_change_request(
+    bcr_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    correlation_id = get_correlation_id(request)
+    bcr = bcr_crud.get_booking_change_request_or_404(db, bcr_id)
+    updated = bcr_crud.withdraw_change_request(db, user, bcr)
+    log_audit_event(db, None, "booking_change_request.withdraw", "booking_change_request", str(bcr_id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(updated)
+
+
+@router.get("/agreements/{agreement_id}/disclosures", response_model=list[DisclosureRequirementRead])
+def list_own_agreement_disclosures(
+    agreement_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-004 Section 9.3/AC-15: the renter needs to see which
+    disclosures exist and their status before they can acknowledge any of
+    them -- previously only the admin-side list endpoint existed."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    guest = get_guest_for_user(db, user)
+    if not guest or guest.id != agreement.offer.guest_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This agreement does not belong to you")
+    return agreement.disclosures
 
 
 @router.post("/agreements/{agreement_id}/disclosures/{disclosure_id}/acknowledge", response_model=DisclosureRequirementRead)

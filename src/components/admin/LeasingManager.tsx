@@ -14,7 +14,7 @@ import {
   ThumbsUp,
   XCircle,
 } from "lucide-react";
-import { AdminRole, AdminUserSummary, Application, Listing, PublishEligibility } from "@/lib/types";
+import { AdminRole, AdminUserSummary, Application, DisclosureRequirement, Listing, PublishEligibility } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -51,6 +51,10 @@ export function LeasingManager() {
   const [applicationForm, setApplicationForm] = useState(emptyApplicationForm);
   const [rejectingId, setRejectingId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [disclosuresByAgreement, setDisclosuresByAgreement] = useState<Record<number, DisclosureRequirement[]>>({});
+  const [expandedDisclosuresAgreementId, setExpandedDisclosuresAgreementId] = useState<number | null>(null);
+  const [disclosuresLoading, setDisclosuresLoading] = useState(false);
+  const [deliveringDisclosureId, setDeliveringDisclosureId] = useState<number | null>(null);
 
   function showToast(message: string) {
     setToast(message);
@@ -313,6 +317,42 @@ export function LeasingManager() {
     }
   }
 
+  async function toggleDisclosures(agreementId: number) {
+    if (expandedDisclosuresAgreementId === agreementId) {
+      setExpandedDisclosuresAgreementId(null);
+      return;
+    }
+    setExpandedDisclosuresAgreementId(agreementId);
+    if (disclosuresByAgreement[agreementId]) return;
+    setDisclosuresLoading(true);
+    try {
+      const data = await apiClientFetch<DisclosureRequirement[]>(`/api/leasing/agreements/${agreementId}/disclosures`);
+      setDisclosuresByAgreement((prev) => ({ ...prev, [agreementId]: data }));
+    } catch {
+      showToast("Failed to load disclosures");
+    } finally {
+      setDisclosuresLoading(false);
+    }
+  }
+
+  async function deliverDisclosure(agreementId: number, disclosureId: number) {
+    setDeliveringDisclosureId(disclosureId);
+    try {
+      const updated = await apiClientFetch<DisclosureRequirement>(
+        `/api/leasing/agreements/${agreementId}/disclosures/${disclosureId}/deliver`, { method: "POST" },
+      );
+      setDisclosuresByAgreement((prev) => ({
+        ...prev,
+        [agreementId]: (prev[agreementId] ?? []).map((d) => (d.id === updated.id ? updated : d)),
+      }));
+      showToast("Disclosure delivered");
+    } catch {
+      showToast("Failed to deliver this disclosure");
+    } finally {
+      setDeliveringDisclosureId(null);
+    }
+  }
+
   async function downloadAgreementPdf(agreementId: number) {
     try {
       const res = await fetch(`${API_URL}/api/leasing/agreements/${agreementId}/pdf`, { credentials: "include" });
@@ -507,7 +547,42 @@ export function LeasingManager() {
                   <Button size="sm" variant="outline" onClick={() => downloadAgreementPdf(agreement.id)}>
                     <Download className="h-3.5 w-3.5" /> Download PDF
                   </Button>
+                  {agreement.status !== "DRAFT" && (
+                    <Button size="sm" variant="outline" onClick={() => toggleDisclosures(agreement.id)}>
+                      {expandedDisclosuresAgreementId === agreement.id ? "Hide Disclosures" : "Disclosures"}
+                    </Button>
+                  )}
                 </div>
+
+                {expandedDisclosuresAgreementId === agreement.id && (
+                  <div className="mt-2 space-y-2 rounded-xl bg-white p-2.5 ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
+                    {disclosuresLoading && !disclosuresByAgreement[agreement.id] ? (
+                      <p className="text-xs text-slate-400">Loading...</p>
+                    ) : (disclosuresByAgreement[agreement.id] ?? []).length === 0 ? (
+                      <p className="text-xs text-slate-400">No disclosures on this agreement.</p>
+                    ) : (
+                      disclosuresByAgreement[agreement.id].map((d) => (
+                        <div key={d.id} className="flex items-center justify-between gap-2">
+                          <span className="text-xs text-slate-700 dark:text-slate-200">{d.title || d.disclosureType}</span>
+                          {d.status === "REQUIRED_MISSING" ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              loading={deliveringDisclosureId === d.id}
+                              onClick={() => deliverDisclosure(agreement.id, d.id)}
+                            >
+                              Deliver
+                            </Button>
+                          ) : (
+                            <Badge tone={d.status === "ACKNOWLEDGED" ? "success" : "primary"}>
+                              {d.status === "ACKNOWLEDGED" ? "Acknowledged" : "Delivered"}
+                            </Badge>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

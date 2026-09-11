@@ -155,15 +155,24 @@ def approve_amendment(db: Session, amendment: AgreementAmendment, admin: AdminUs
     db.add(new_version)
     db.flush()
 
+    # Persist a real OfferTerms row (mirroring crud/leasing.py:add_offer_terms)
+    # rather than an in-memory-only stand-in -- confirm_move_in reads
+    # offer.terms[-1] to compute expected_end_date, so an amendment that
+    # changes startDate/termMonths but never saves a new terms row would
+    # leave that calculation silently working off the pre-amendment dates.
     from datetime import date as date_
     from app.models.leasing import OfferTerms
-    fake_terms = OfferTerms(
-        offer_id=offer.id, version=0,
+    next_terms_version = offer.current_version + 1
+    new_terms = OfferTerms(
+        offer_id=offer.id, version=next_terms_version,
         monthly_rent=new_snapshot["monthly_rent"], deposit_amount=new_snapshot["deposit_amount"],
         start_date=date_.fromisoformat(new_snapshot["start_date"]) if isinstance(new_snapshot["start_date"], str) else new_snapshot["start_date"],
         term_months=new_snapshot["term_months"],
     )
-    _populate_version_detail_rows(db, new_version, offer, fake_terms)
+    db.add(new_terms)
+    offer.current_version = next_terms_version
+    db.flush()
+    _populate_version_detail_rows(db, new_version, offer, new_terms)
 
     agreement.signed_by_provider_at = None
     agreement.signed_by_renter_at = None
