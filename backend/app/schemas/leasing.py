@@ -363,6 +363,10 @@ class UserOccupancyRead(CamelModel):
     move_out_date: date | None
     created_at: datetime
     ended_at: datetime | None
+    # ZR-ENG-CLR-008 Section 8: needed so the renter's own rentals view can
+    # link to /agreements/{id}/extension-requests etc. -- occupancy itself
+    # has no direct reference to it.
+    agreement_id: int | None = None
 
 
 class SubletRequestCreate(CamelModel):
@@ -434,3 +438,108 @@ class SubletRequestDecision(CamelModel):
     """Optional review notes recorded with a sublet approval or rejection."""
 
     notes: str = ""
+
+
+class BookingChangeRequestCreate(CamelModel):
+    """ZR-ENG-CLR-008 Section 8 MVP: renter requesting a new move-in date on
+    their own signed, not-yet-moved-into agreement."""
+
+    proposed_start_date: date
+    reason: str = ""
+
+
+class ExtensionRequestCreate(CamelModel):
+    """ZR-ENG-CLR-008 Section 8 MVP: renter requesting to extend their stay
+    on an active occupancy. Whole additional months, not an arbitrary end
+    date -- term length is the actual contractual unit (OfferTerms.term_months),
+    so this keeps the resulting agreement amendment exact rather than
+    reverse-engineering a month count from an arbitrary date."""
+
+    additional_term_months: int
+    reason: str = ""
+
+    @field_validator("additional_term_months")
+    @classmethod
+    def _validate_additional_term_months(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("additionalTermMonths must be at least 1")
+        return value
+
+
+class ShorteningRequestCreate(CamelModel):
+    """ZR-ENG-CLR-008 Section 8 MVP/AC-10: renter requesting to shorten their
+    stay -- only accepted before move-in (see crud/booking_change_requests.py:
+    request_shortening). After move-in this routes to Section 6 termination
+    instead, not this endpoint."""
+
+    reduced_term_months: int
+    reason: str = ""
+
+    @field_validator("reduced_term_months")
+    @classmethod
+    def _validate_reduced_term_months(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("reducedTermMonths must be at least 1")
+        return value
+
+
+class PremisesChangeRequestCreate(CamelModel):
+    """ZR-ENG-CLR-008 Section 14 MVP: renter requesting to move to a
+    different published listing. Unlike the other three change types this
+    never amends the current agreement -- approval opens a fresh
+    Application/Offer/Agreement on the target listing instead (see
+    crud/booking_change_requests.py:request_premises_change)."""
+
+    target_listing_id: str
+    reason: str = ""
+
+
+class FinancialChangeRequestCreate(CamelModel):
+    """ZR-ENG-CLR-008 Section 10/AC-24: renter requesting a new monthly rent
+    on their signed agreement -- available before or after move-in. Gated by
+    MarketPolicyPack.rent_change_min_interval_days (see
+    crud/booking_change_requests.py:request_financial_change)."""
+
+    proposed_monthly_rent: float
+    reason: str = ""
+
+    @field_validator("proposed_monthly_rent")
+    @classmethod
+    def _validate_proposed_monthly_rent(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("proposedMonthlyRent must be greater than zero")
+        return value
+
+
+class BookingChangeRequestRead(CamelModel):
+    id: int
+    agreement_id: int
+    requested_by_guest_id: str
+    change_type: str
+    status: str
+    original_start_date: date
+    proposed_start_date: date
+    original_end_date: date | None = None
+    proposed_end_date: date | None = None
+    additional_term_months: int | None = None
+    target_listing_id: str | None = None
+    resulting_application_id: int | None = None
+    original_monthly_rent: float | None = None
+    proposed_monthly_rent: float | None = None
+    reason: str
+    decision_note: str
+    decided_by_admin_id: int | None = None
+    decided_at: datetime | None = None
+    resulting_amendment_id: int | None = None
+    created_at: datetime
+    expires_at: datetime
+
+    listing_name: str = ""
+    target_listing_name: str = ""
+    guest_name: str = ""
+
+
+class BookingChangeDecisionRequest(CamelModel):
+    """Optional note recorded with a host/admin approval or decline."""
+
+    decision_note: str = ""
