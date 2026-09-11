@@ -787,7 +787,10 @@ class TestTerminationRecordEntity:
 
         r = client.post(
             f"/api/occupancy/{occupancy_id}/end",
-            json={"basis": "MUTUAL_SURRENDER", "liabilityEndDate": (date.today() + timedelta(days=3)).isoformat()},
+            json={
+                "basis": "MUTUAL_SURRENDER", "liabilityEndDate": (date.today() + timedelta(days=3)).isoformat(),
+                "overrideReason": "test: exercising termination record creation",
+            },
             cookies=admin_cookies,
         )
         assert r.status_code == 200, r.text

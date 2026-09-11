@@ -393,6 +393,9 @@ class TestOccupancyTerminationDates:
             json={
                 "noticeGivenAt": notice_date, "liabilityEndDate": liability_end,
                 "terminationEffectiveDate": termination_effective, "moveOutDate": physical_move_out,
+                # ZR-ENG-CLR-006 AC-05/AC-29: ending an active occupancy early with
+                # no termination_case_id needs a Super Admin's own logged reason.
+                "overrideReason": "test: exercising distinct-dates behavior",
             },
             cookies=admin_cookies,
         )
@@ -427,7 +430,11 @@ class TestOccupancyTerminationDates:
         assert r.status_code == 200, r.text
         occupancy_id = r.json()["id"]
 
-        r = client.post(f"/api/occupancy/{occupancy_id}/end", json={}, cookies=admin_cookies)
+        r = client.post(
+            f"/api/occupancy/{occupancy_id}/end",
+            json={"overrideReason": "test: exercising default-dates behavior"},
+            cookies=admin_cookies,
+        )
         assert r.status_code == 200, r.text
         body = r.json()
         today = date.today().isoformat()

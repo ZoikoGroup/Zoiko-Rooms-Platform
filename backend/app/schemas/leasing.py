@@ -59,6 +59,13 @@ class OfferTermsCreate(CamelModel):
     deposit_amount: float
     start_date: date
     term_months: int
+    # ZR-ENG-CLR-005 AC-06: one of app.models.finance.PAYMENT_SCHEDULE_CADENCES
+    # ("MONTHLY", "FORTNIGHTLY", "WEEKLY", "UPFRONT", "CUSTOM"); validated in
+    # crud/leasing.py:add_offer_terms.
+    cadence: str = "MONTHLY"
+    # Required (and only meaningful) when cadence == "CUSTOM": the admin-
+    # specified billing interval in days.
+    custom_interval_days: int | None = None
 
 
 class OfferTermsRead(CamelModel):
@@ -68,6 +75,8 @@ class OfferTermsRead(CamelModel):
     deposit_amount: float
     start_date: date
     term_months: int
+    cadence: str
+    custom_interval_days: int | None
     created_at: datetime
 
 

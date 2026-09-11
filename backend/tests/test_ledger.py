@@ -7,13 +7,13 @@ must keep passing unmodified alongside these)."""
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.authority_record import AuthorityRecord
-from app.models.finance import LedgerAccount, LedgerEntry, Obligation
+from app.models.finance import LedgerAccount, LedgerEntry, Obligation, PayoutBeneficiary
 from app.models.guest import Guest
 from app.models.leasing import Agreement, Application, Offer
 from app.models.listing import Listing
@@ -31,12 +31,15 @@ def _make_provider_rent_obligation(
     owner_party_id: int | None = None,
 ):
     """A provider-owned room/occupancy with a pending obligation of the given
-    type, plus a verified AuthorityRecord for the room (so run_payout tests
-    against it are eligible for PAID, not HELD). Returns
+    type, plus a verified AuthorityRecord for the room and a VERIFIED
+    PayoutBeneficiary for the party (so run_payout tests against it are
+    eligible for PAID, not HELD -- AC-30's beneficiary gate would otherwise
+    shadow whatever other gate a given test is targeting). Returns
     (obligation, admin, guest, owner_party_id). Pass an existing
     owner_party_id to create a second, independent obligation for the SAME
     provider party (e.g. to test something that depends on that party
-    already having other state, like an existing ledger hold)."""
+    already having other state, like an existing ledger hold) -- the
+    beneficiary is only created once per party, not duplicated."""
     admin = _make_admin(db, email=f"ledger-admin-{suffix}@test.com", role="super_admin")
 
     if owner_party_id is not None:
@@ -45,6 +48,11 @@ def _make_provider_rent_obligation(
         owner_party = Party(party_type="provider", status="active", jurisdiction="IN")
         db.add(owner_party)
         db.flush()
+        db.add(PayoutBeneficiary(
+            party_id=owner_party.id, account_holder_name="Test Landlord", bank_name="Test Bank",
+            account_number_last4="1234", ifsc_code="TEST0123456", status="VERIFIED",
+            verified_at=datetime.now(timezone.utc),
+        ))
     prop = Property(owner_party_id=owner_party.id, address=f"{suffix} Ledger St", city="Bengaluru", status="active")
     db.add(prop)
     db.flush()

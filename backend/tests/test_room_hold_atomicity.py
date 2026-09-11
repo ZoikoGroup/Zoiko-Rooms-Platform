@@ -240,7 +240,7 @@ class TestEndingOccupancyReleasesHold:
         hold = db_session.scalar(select(RoomHold).where(RoomHold.room_id == room_id, RoomHold.released_at.is_(None)))
         assert hold.status == "OCCUPIED"
 
-        occupancy_crud.end_occupancy(db_session, occupancy, super_admin)
+        occupancy_crud.end_occupancy(db_session, occupancy, super_admin, override_reason="test: exercising room hold release")
 
         db_session.expire_all()
         active_holds = db_session.scalars(

@@ -84,7 +84,10 @@ class TestCreateAgreementCreatesAPaymentSchedule:
         assert deposit_obligation.schedule_id is None  # only the recurring RENT series is scheduled
 
 
-def _make_signed_agreement_with_schedule(db: Session, *, admin, monthly_rent: float = 1000.0, term_months: int = 12):
+def _make_signed_agreement_with_schedule(
+    db: Session, *, admin, monthly_rent: float = 1000.0, term_months: int = 12, cadence: str = "MONTHLY",
+    custom_interval_days: int | None = None, listing_id: str = "L-SCHEDTEST", guest_id: str = "G-SCHEDTEST",
+):
     """Same shape as test_occupancy_crud.py's _make_signed_agreement, but also
     creates and links a PaymentSchedule -- proving generate_next_rent_obligation
     actually reads from it, rather than only ever exercising the no-schedule
@@ -107,7 +110,7 @@ def _make_signed_agreement_with_schedule(db: Session, *, admin, monthly_rent: fl
     db.flush()
 
     listing = Listing(
-        id="L-SCHEDTEST", slug="schedtest", name="Schedule Test Listing", room_type="Private room",
+        id=listing_id, slug=listing_id.lower(), name="Schedule Test Listing", room_type="Private room",
         city="Bengaluru", location="Koramangala", price_per_night=500, guests=1,
         rating=4.5, review_count=0, party_id=owner_party.id, owner_id=None, room_id=room.id, state="PUBLISHED",
         market_release_id=market_release.id,
@@ -115,7 +118,7 @@ def _make_signed_agreement_with_schedule(db: Session, *, admin, monthly_rent: fl
     db.add(listing)
     db.flush()
 
-    guest = Guest(id="G-SCHEDTEST", name="Renter", email="schedtest-renter@test.com", joined_at=date.today())
+    guest = Guest(id=guest_id, name="Renter", email=f"{guest_id.lower()}@test.com", joined_at=date.today())
     db.add(guest)
     db.flush()
 
@@ -127,14 +130,17 @@ def _make_signed_agreement_with_schedule(db: Session, *, admin, monthly_rent: fl
     db.flush()
     db.add(OfferTerms(
         offer_id=offer.id, version=1, monthly_rent=monthly_rent, deposit_amount=monthly_rent,
-        start_date=date.today(), term_months=term_months,
+        start_date=date.today(), term_months=term_months, cadence=cadence, custom_interval_days=custom_interval_days,
     ))
     db.flush()
     agreement = Agreement(offer_id=offer.id, status="SIGNED")
     db.add(agreement)
     db.flush()
 
-    schedule = PaymentSchedule(agreement_id=agreement.id, amount=monthly_rent, first_due=date.today(), anchor_day=date.today().day)
+    schedule = PaymentSchedule(
+        agreement_id=agreement.id, cadence=cadence, custom_interval_days=custom_interval_days,
+        amount=monthly_rent, first_due=date.today(), anchor_day=date.today().day,
+    )
     db.add(schedule)
     db.flush()
 
@@ -158,3 +164,241 @@ class TestGenerateNextRentObligationUsesSchedule:
         assert obligation is not None
         assert obligation.schedule_id == schedule.id
         assert float(obligation.amount) == 1750.0
+
+
+class TestMultiCadenceSchedules:
+    """ZR-ENG-CLR-005 AC-06: a schedule's cadence is no longer implicitly
+    MONTHLY -- WEEKLY/FORTNIGHTLY are real, selectable options that drive
+    generate_next_rent_obligation's own due-date math (crud/occupancy.py:
+    _next_due_date), not just a stored label."""
+
+    def test_weekly_cadence_advances_the_next_due_date_by_seven_days(self, db_session: Session):
+        admin = _make_admin(db_session, email="sched-weekly-admin@test.com", role="admin")
+        agreement, offer, listing, room, guest, schedule = _make_signed_agreement_with_schedule(
+            db_session, admin=admin, monthly_rent=500.0, cadence="WEEKLY",
+            listing_id="L-SCHEDWEEKLY", guest_id="G-SCHEDWEEKLY",
+        )
+        assert schedule.cadence == "WEEKLY"
+        occupancy = occupancy_crud.confirm_move_in(db_session, agreement, admin)
+
+        obligation = occupancy_crud.generate_next_rent_obligation(db_session, occupancy, admin)
+        assert obligation is not None
+        assert obligation.due_date == date.today() + timedelta(days=7)
+        assert float(obligation.amount) == 500.0
+
+    def test_fortnightly_cadence_advances_the_next_due_date_by_fourteen_days(self, db_session: Session):
+        admin = _make_admin(db_session, email="sched-fortnightly-admin@test.com", role="admin")
+        agreement, offer, listing, room, guest, schedule = _make_signed_agreement_with_schedule(
+            db_session, admin=admin, monthly_rent=800.0, cadence="FORTNIGHTLY",
+            listing_id="L-SCHEDFORTNIGHT", guest_id="G-SCHEDFORTNIGHT",
+        )
+        assert schedule.cadence == "FORTNIGHTLY"
+        occupancy = occupancy_crud.confirm_move_in(db_session, agreement, admin)
+
+        obligation = occupancy_crud.generate_next_rent_obligation(db_session, occupancy, admin)
+        assert obligation is not None
+        assert obligation.due_date == date.today() + timedelta(days=14)
+        assert float(obligation.amount) == 800.0
+
+    def test_add_offer_terms_rejects_an_unsupported_cadence(self, client, db_session: Session):
+        user, listing_id = _make_verified_renter_with_published_listing(db_session, email="cadence-reject-renter@test.com")
+        user_cookies = auth_user_cookie(user)
+        admin = _make_admin(db_session, email="cadence-reject-admin@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/users/rentals/applications",
+            json={"listingId": listing_id, "message": "hi", "desiredMoveIn": None},
+            cookies=user_cookies,
+        )
+        assert r.status_code == 201, r.text
+        application_id = r.json()["id"]
+        assert client.post(
+            f"/api/leasing/applications/{application_id}/decide", json={"decision": "APPROVED"}, cookies=admin_cookies,
+        ).status_code == 200
+        r = client.post(f"/api/leasing/applications/{application_id}/offers", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        offer_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/leasing/offers/{offer_id}/terms",
+            json={
+                "monthlyRent": 3000.0, "depositAmount": 3000.0,
+                "startDate": (date.today() + timedelta(days=5)).isoformat(), "termMonths": 6,
+                "cadence": "DAILY",
+            },
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 400, r.text
+
+    def test_create_agreement_carries_the_terms_cadence_into_the_schedule(self, client, db_session: Session):
+        user, listing_id = _make_verified_renter_with_published_listing(db_session, email="cadence-carry-renter@test.com")
+        user_cookies = auth_user_cookie(user)
+        admin = _make_admin(db_session, email="cadence-carry-admin@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/users/rentals/applications",
+            json={"listingId": listing_id, "message": "hi", "desiredMoveIn": None},
+            cookies=user_cookies,
+        )
+        assert r.status_code == 201, r.text
+        application_id = r.json()["id"]
+        assert client.post(
+            f"/api/leasing/applications/{application_id}/decide", json={"decision": "APPROVED"}, cookies=admin_cookies,
+        ).status_code == 200
+        r = client.post(f"/api/leasing/applications/{application_id}/offers", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        offer_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/leasing/offers/{offer_id}/terms",
+            json={
+                "monthlyRent": 3000.0, "depositAmount": 3000.0,
+                "startDate": (date.today() + timedelta(days=5)).isoformat(), "termMonths": 6,
+                "cadence": "FORTNIGHTLY",
+            },
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["cadence"] == "FORTNIGHTLY"
+        assert client.post(f"/api/leasing/offers/{offer_id}/send", cookies=admin_cookies).status_code == 200
+        assert client.post(f"/api/users/rentals/offers/{offer_id}/accept", cookies=user_cookies).status_code == 200
+
+        _make_agreement_eligible(db_session, listing_id)
+        r = client.post(f"/api/leasing/offers/{offer_id}/agreement", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        agreement_id = r.json()["id"]
+
+        schedule = db_session.scalar(select(PaymentSchedule).where(PaymentSchedule.agreement_id == agreement_id))
+        assert schedule.cadence == "FORTNIGHTLY"
+
+    def test_custom_cadence_requires_a_positive_custom_interval_days(self, client, db_session: Session):
+        user, listing_id = _make_verified_renter_with_published_listing(db_session, email="custom-missing-renter@test.com")
+        user_cookies = auth_user_cookie(user)
+        admin = _make_admin(db_session, email="custom-missing-admin@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/users/rentals/applications",
+            json={"listingId": listing_id, "message": "hi", "desiredMoveIn": None},
+            cookies=user_cookies,
+        )
+        application_id = r.json()["id"]
+        assert client.post(
+            f"/api/leasing/applications/{application_id}/decide", json={"decision": "APPROVED"}, cookies=admin_cookies,
+        ).status_code == 200
+        r = client.post(f"/api/leasing/applications/{application_id}/offers", cookies=admin_cookies)
+        offer_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/leasing/offers/{offer_id}/terms",
+            json={
+                "monthlyRent": 3000.0, "depositAmount": 3000.0,
+                "startDate": (date.today() + timedelta(days=5)).isoformat(), "termMonths": 6,
+                "cadence": "CUSTOM",
+            },
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 400, r.text
+
+    def test_custom_interval_days_rejected_for_a_non_custom_cadence(self, client, db_session: Session):
+        user, listing_id = _make_verified_renter_with_published_listing(db_session, email="custom-extra-renter@test.com")
+        user_cookies = auth_user_cookie(user)
+        admin = _make_admin(db_session, email="custom-extra-admin@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/users/rentals/applications",
+            json={"listingId": listing_id, "message": "hi", "desiredMoveIn": None},
+            cookies=user_cookies,
+        )
+        application_id = r.json()["id"]
+        assert client.post(
+            f"/api/leasing/applications/{application_id}/decide", json={"decision": "APPROVED"}, cookies=admin_cookies,
+        ).status_code == 200
+        r = client.post(f"/api/leasing/applications/{application_id}/offers", cookies=admin_cookies)
+        offer_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/leasing/offers/{offer_id}/terms",
+            json={
+                "monthlyRent": 3000.0, "depositAmount": 3000.0,
+                "startDate": (date.today() + timedelta(days=5)).isoformat(), "termMonths": 6,
+                "cadence": "MONTHLY", "customIntervalDays": 10,
+            },
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 400, r.text
+
+    def test_custom_cadence_advances_the_next_due_date_by_the_configured_interval(self, db_session: Session):
+        admin = _make_admin(db_session, email="sched-custom-admin@test.com", role="admin")
+        agreement, offer, listing, room, guest, schedule = _make_signed_agreement_with_schedule(
+            db_session, admin=admin, monthly_rent=650.0, cadence="CUSTOM", custom_interval_days=10,
+            listing_id="L-SCHEDCUSTOM", guest_id="G-SCHEDCUSTOM",
+        )
+        assert schedule.cadence == "CUSTOM"
+        assert schedule.custom_interval_days == 10
+        occupancy = occupancy_crud.confirm_move_in(db_session, agreement, admin)
+
+        obligation = occupancy_crud.generate_next_rent_obligation(db_session, occupancy, admin)
+        assert obligation is not None
+        assert obligation.due_date == date.today() + timedelta(days=10)
+        assert float(obligation.amount) == 650.0
+
+    def test_upfront_cadence_never_generates_a_recurring_obligation(self, db_session: Session):
+        admin = _make_admin(db_session, email="sched-upfront-admin@test.com", role="admin")
+        agreement, offer, listing, room, guest, schedule = _make_signed_agreement_with_schedule(
+            db_session, admin=admin, monthly_rent=6000.0, cadence="UPFRONT",
+            listing_id="L-SCHEDUPFRONT", guest_id="G-SCHEDUPFRONT",
+        )
+        assert schedule.cadence == "UPFRONT"
+        occupancy = occupancy_crud.confirm_move_in(db_session, agreement, admin)
+
+        obligation = occupancy_crud.generate_next_rent_obligation(db_session, occupancy, admin)
+        assert obligation is None
+
+    def test_create_agreement_bills_the_entire_term_upfront_as_one_obligation(self, client, db_session: Session):
+        user, listing_id = _make_verified_renter_with_published_listing(db_session, email="upfront-renter@test.com")
+        user_cookies = auth_user_cookie(user)
+        admin = _make_admin(db_session, email="upfront-admin@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/users/rentals/applications",
+            json={"listingId": listing_id, "message": "hi", "desiredMoveIn": None},
+            cookies=user_cookies,
+        )
+        application_id = r.json()["id"]
+        assert client.post(
+            f"/api/leasing/applications/{application_id}/decide", json={"decision": "APPROVED"}, cookies=admin_cookies,
+        ).status_code == 200
+        r = client.post(f"/api/leasing/applications/{application_id}/offers", cookies=admin_cookies)
+        offer_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/leasing/offers/{offer_id}/terms",
+            json={
+                "monthlyRent": 1000.0, "depositAmount": 1000.0,
+                "startDate": (date.today() + timedelta(days=5)).isoformat(), "termMonths": 6,
+                "cadence": "UPFRONT",
+            },
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        assert client.post(f"/api/leasing/offers/{offer_id}/send", cookies=admin_cookies).status_code == 200
+        assert client.post(f"/api/users/rentals/offers/{offer_id}/accept", cookies=user_cookies).status_code == 200
+
+        _make_agreement_eligible(db_session, listing_id)
+        r = client.post(f"/api/leasing/offers/{offer_id}/agreement", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        agreement_id = r.json()["id"]
+
+        schedule = db_session.scalar(select(PaymentSchedule).where(PaymentSchedule.agreement_id == agreement_id))
+        assert schedule.cadence == "UPFRONT"
+        assert float(schedule.amount) == 6000.0
+
+        rent_obligation = db_session.scalar(
+            select(Obligation).where(Obligation.agreement_id == agreement_id, Obligation.obligation_type == "RENT")
+        )
+        assert float(rent_obligation.amount) == 6000.0

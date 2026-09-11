@@ -81,4 +81,13 @@ class MarketPolicyPack(Base):
     sublet_assignment_payee_model: Mapped[str] = mapped_column(String(30), default="HOST_OR_LANDLORD_PAYEE")
     sublet_sublease_payee_model: Mapped[str] = mapped_column(String(30), default="ORIGINAL_RENTER_PAYEE")
 
+    # -- Termination policy (ZR-ENG-CLR-006 Section 6/AC-03: "No global fixed
+    # notice period is hard-coded" -- this is the configurable value the
+    # Termination Policy Resolver reads instead. Reasonable placeholder for
+    # ordinary renter-initiated early exit under common Indian rental
+    # practice -- REVIEW_REQUIRED confidence like every other field here, not
+    # counsel-validated; the only cause this MVP actually resolves a notice
+    # period for -- see models/termination_case.py:UNILATERAL_CAUSE_CODES.
+    termination_notice_days: Mapped[int] = mapped_column(default=30)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

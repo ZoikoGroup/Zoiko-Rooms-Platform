@@ -9,6 +9,7 @@ from app.models.finance import (
     DepositRecord,
     DisputeCase,
     FinancialHold,
+    HostRecovery,
     LedgerAccount,
     LedgerEntry,
     Obligation,
@@ -31,6 +32,9 @@ from app.models.agreement_version_detail import AgreementPremises, CommercialTer
 from app.models.disclosure_requirement import DisclosureRequirement
 from app.models.signature_provider import SignatureProviderEvent, SignatureProviderStatus, SignatureRequest
 from app.models.termination_record import TerminationRecord
+from app.models.termination_case import TerminationCase
+from app.models.refund_entitlement import RefundEntitlement, RefundEntitlementLineItem
+from app.models.habitability_incident import HabitabilityIncident
 from app.models.guest import Guest
 from app.models.leasing import (
     Agreement,

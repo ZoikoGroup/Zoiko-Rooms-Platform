@@ -35,6 +35,13 @@ class OccupancyEndRequest(CamelModel):
     termination_effective_date: date | None = None
     move_out_date: date | None = None
     basis: str = "OTHER"
+    # ZR-ENG-CLR-006 Section 7.1 Step 11: links this action back to the
+    # renter's own termination_case, when finalizing one.
+    termination_case_id: int | None = None
+    # ZR-ENG-CLR-006 AC-05/AC-29: required (and only meaningful) when ending
+    # an active occupancy early with no termination_case_id -- a Super
+    # Admin's own logged override reason.
+    override_reason: str = ""
 
 
 class TerminationRecordRead(CamelModel):

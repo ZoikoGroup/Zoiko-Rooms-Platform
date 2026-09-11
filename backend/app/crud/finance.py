@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 
 from fastapi import HTTPException, status
@@ -17,6 +17,7 @@ from app.core.mailer import (
 )
 from app.core.payout_statement_documents import save_payout_statement_document
 from app.core.receipt_documents import save_receipt_document
+from app.core.rent_invoice_documents import save_rent_invoice_document
 from app.core.service_fee_invoice_documents import save_service_fee_invoice_document
 from app.crud.authority import get_valid_authority_for_room
 from app.crud.guest import get_user_for_guest
@@ -24,12 +25,15 @@ from app.crud.market_policy import resolve_market_policy, to_policy_snapshot
 from app.models.market_policy import SUPPORTED_FUNDS_FLOW_PROFILES
 from app.crud import notification as notif_crud
 from app.crud.party import assert_provider_access, get_or_create_default_party
+from app.crud.habitability_incident import has_open_severe_incident_for_room
+from app.crud.payout_beneficiary import get_verified_payout_beneficiary
 from app.crud.user import get_user_by_party_id
 from app.services import booking_orchestrator
 from app.services import ledger as ledger_service
 from app.models.admin_user import AdminUser
 from app.models.guest import Guest
 from app.models.finance import (
+    CADENCE_INTERVAL_DAYS,
     DEPOSIT_CLAIM_CATEGORIES,
     DepositClaim,
     DepositClaimItem,
@@ -37,21 +41,26 @@ from app.models.finance import (
     DepositRecord,
     DisputeCase,
     FinancialHold,
+    HOST_RECOVERY_METHODS,
+    HostRecovery,
     LedgerAccount,
     LedgerEntry,
     Obligation,
     PaymentAllocation,
     PaymentReceipt,
+    PaymentSchedule,
     PayoutRecord,
     PayoutStatement,
     ReconciliationRun,
     RefundRequest,
+    RentInvoice,
     ServiceFeeInvoice,
     SimulatedPayment,
 )
 from app.models.guest import Guest
 from app.models.leasing import Agreement, Offer
 from app.models.listing import Listing
+from app.models.membership import Membership
 from app.models.occupancy import Occupancy
 from app.models.party import Party
 from app.models.room import Room
@@ -68,10 +77,14 @@ from app.schemas.finance import (
     DisputeCreate,
     DisputeResolve,
     FinancialHoldResolve,
+    HostRecoveryRecordProgress,
+    HostRecoveryWriteOff,
     ObligationRead,
     PaymentConfirm,
+    PaymentPreviewRead,
     RefundDecide,
     RefundRequestCreate,
+    ScheduledObligationPreview,
     SimulatedPaymentCreate,
 )
 
@@ -480,6 +493,202 @@ def get_or_create_payment_receipt(db: Session, payment: SimulatedPayment) -> Pay
     db.commit()
     db.refresh(receipt)
     return receipt
+
+
+def _listing_and_guest_for_obligation(obligation: Obligation) -> tuple[Listing | None, Guest | None]:
+    """Same agreement-or-occupancy resolution as to_obligation_read's
+    guest_id above, extended to also resolve the listing -- the initial RENT
+    obligation is linked via agreement_id (no Occupancy exists yet), every
+    recurring one via occupancy_id."""
+    if obligation.agreement:
+        offer = obligation.agreement.offer
+        return offer.listing, offer.guest
+    if obligation.occupancy:
+        return obligation.occupancy.listing, obligation.occupancy.guest
+    return None, None
+
+
+def _generate_rent_invoice_pdf(obligation: Obligation, invoice_number: str, *, listing: Listing | None, guest: Guest | None) -> bytes:
+    """ZR-ENG-CLR-005 Section 13.1: the host's request for payment of one RENT
+    obligation -- rendered as soon as the obligation exists, not after it's
+    paid (PaymentReceipt is the after-the-fact counterpart for that). Same
+    "simulated, no real processor" framing as _generate_payment_receipt_pdf;
+    listing name/property address stand in for the host's own identity,
+    since Party carries no display name in this build."""
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    _, height = A4
+    x = 20 * mm
+    y = height - 25 * mm
+
+    def write(text: str, size: float = 10, bold: bool = False, gap: float = 7 * mm) -> None:
+        nonlocal y
+        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+        pdf.drawString(x, y, text)
+        y -= gap
+
+    write("Zoiko Rooms -- Rent Invoice", size=16, bold=True, gap=10 * mm)
+    write(f"Invoice {invoice_number}", size=10)
+    write(f"Obligation #{obligation.id}  |  Status: {obligation.status}", size=10)
+    write(f"Due {obligation.due_date.isoformat()}", size=9, gap=10 * mm)
+
+    write("Property", size=12, bold=True)
+    write(listing.name if listing else "Unknown listing")
+    property_address = listing.room.property.address if listing and listing.room and listing.room.property else ""
+    write(property_address, gap=10 * mm)
+
+    write("Billed to", size=12, bold=True)
+    write(guest.name if guest else "Unknown")
+    write(guest.email if guest else "", gap=10 * mm)
+
+    write("Amount due", size=12, bold=True)
+    write(f"{obligation.currency} {obligation.amount:.2f}", gap=10 * mm)
+
+    y -= 4 * mm
+    write("Simulated invoice -- no real payment processor is involved.", size=8, gap=6 * mm)
+
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+def get_or_create_rent_invoice(db: Session, obligation: Obligation) -> RentInvoice:
+    """Idempotent, same render-once-then-persist discipline as
+    get_or_create_payment_receipt -- the fast-path check is a convenience
+    only, RentInvoice.obligation_id being DB-unique is the real guarantee
+    against a concurrent double-render (loser catches IntegrityError and
+    returns the winner's row)."""
+    if obligation.rent_invoice is not None:
+        return obligation.rent_invoice
+
+    listing, guest = _listing_and_guest_for_obligation(obligation)
+    invoice_number = f"RINV-{obligation.id:08d}"
+    pdf_bytes = _generate_rent_invoice_pdf(obligation, invoice_number, listing=listing, guest=guest)
+    storage_ref, content_hash = save_rent_invoice_document(pdf_bytes)
+
+    try:
+        with db.begin_nested():
+            invoice = RentInvoice(
+                obligation_id=obligation.id, invoice_number=invoice_number,
+                content_hash=content_hash, storage_ref=storage_ref,
+            )
+            db.add(invoice)
+            db.flush()
+    except IntegrityError:
+        return db.scalar(select(RentInvoice).where(RentInvoice.obligation_id == obligation.id))
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+def get_obligation_or_404(db: Session, obligation_id: int) -> Obligation:
+    obligation = db.get(Obligation, obligation_id)
+    if not obligation:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Obligation not found")
+    return obligation
+
+
+def get_rent_invoice_for_admin(db: Session, obligation_id: int, admin: AdminUser) -> RentInvoice:
+    """404 + the same provider-ownership scoping every other finance mutation
+    uses (_owned_obligation_ids), then get-or-create the invoice -- the route
+    layer never reaches into ownership-check internals directly. Unlike a
+    receipt, a rent invoice never requires the obligation to be paid -- it's
+    the request for payment, not proof one was made."""
+    obligation = get_obligation_or_404(db, obligation_id)
+    if admin.role != "super_admin" and obligation.id not in _owned_obligation_ids(db, admin):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
+    if obligation.obligation_type != "RENT":
+        raise HTTPException(status.HTTP_409_CONFLICT, "No rent invoice exists for a non-RENT obligation")
+    return get_or_create_rent_invoice(db, obligation)
+
+
+def _add_months(d: date, months: int) -> date:
+    """Same calendar-month arithmetic as crud/occupancy.py's own _add_months
+    (and services/overlap.py's) -- duplicated rather than imported, matching
+    this codebase's existing precedent for this exact small helper, to avoid
+    a cross-module import edge into crud.occupancy purely for one date
+    calculation."""
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(d.day, [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
+    return date(year, month, day)
+
+
+MAX_PAYMENT_PREVIEW_ENTRIES = 24
+
+
+def get_payment_preview(db: Session, agreement: Agreement) -> PaymentPreviewRead:
+    """ZR-ENG-CLR-005 AC-11/Section 5.2/6.1 region B+C: 'amount due now' line
+    items and the 'future schedule' preview, both computed from real rows --
+    never a separately-maintained duplicate of the obligation/schedule
+    engine. amount_due_now is every not-yet-fully-paid Obligation on this
+    agreement (rent + deposit; this build has no renter-side fee, tax or
+    credit object to add -- see models/market_policy.py's own
+    'renter fees stay OFF by default with no toggle here yet'/AC-10).
+    future_schedule is a pure projection -- it creates no Obligation rows --
+    of the RENT periods still to come after the last one that exists,
+    through the agreement's contractual end date, capped defensively at
+    MAX_PAYMENT_PREVIEW_ENTRIES (remaining_scheduled_count stays the true,
+    uncapped total)."""
+    obligations = list(agreement.obligations)
+    occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id))
+    if occupancy:
+        obligations += [o for o in occupancy.obligations if o not in obligations]
+
+    amount_due_now = [to_obligation_read(o) for o in obligations if o.status in ("PENDING", "PARTIALLY_PAID")]
+
+    schedule = db.scalar(
+        select(PaymentSchedule).where(PaymentSchedule.agreement_id == agreement.id, PaymentSchedule.status == "ACTIVE")
+    )
+    future_schedule: list[ScheduledObligationPreview] = []
+    remaining_count = 0
+    # UPFRONT's one obligation already covers the entire term -- nothing
+    # further is ever projected (mirrors crud/occupancy.py:generate_next_rent_
+    # obligation's own early return for it).
+    if schedule is not None and schedule.cadence != "UPFRONT":
+        rent_obligations = sorted([o for o in obligations if o.obligation_type == "RENT"], key=lambda o: o.due_date)
+        latest_terms = agreement.offer.terms[-1]
+        term_end = _add_months(latest_terms.start_date, latest_terms.term_months)
+        next_due = (
+            rent_obligations[-1].due_date if rent_obligations
+            else latest_terms.start_date
+        )
+        cadence = schedule.cadence
+        while True:
+            if cadence == "CUSTOM":
+                next_due = next_due + timedelta(days=schedule.custom_interval_days)
+            elif cadence in CADENCE_INTERVAL_DAYS:
+                next_due = next_due + timedelta(days=CADENCE_INTERVAL_DAYS[cadence])
+            else:
+                next_due = _add_months(next_due, 1)
+            if next_due > term_end:
+                break
+            remaining_count += 1
+            if len(future_schedule) < MAX_PAYMENT_PREVIEW_ENTRIES:
+                future_schedule.append(
+                    ScheduledObligationPreview(
+                        due_date=next_due, amount=float(schedule.amount), currency=schedule.currency, cadence=cadence,
+                    )
+                )
+
+    return PaymentPreviewRead(
+        amount_due_now=amount_due_now,
+        future_schedule=future_schedule,
+        cadence=schedule.cadence if schedule else "MONTHLY",
+        remaining_scheduled_count=remaining_count,
+    )
+
+
+def get_payment_preview_for_own_agreement(db: Session, agreement_id: int, guest_id: str) -> PaymentPreviewRead:
+    """Renter-facing entry point -- same ownership shape as every other
+    'download my own agreement X' route (guest.id == agreement.offer.guest_id)."""
+    agreement = db.get(Agreement, agreement_id)
+    if not agreement:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agreement not found")
+    if agreement.offer.guest_id != guest_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This agreement does not belong to you")
+    return get_payment_preview(db, agreement)
 
 
 def list_deposit_records(db: Session, admin: AdminUser) -> list[DepositRecord]:
@@ -1018,12 +1227,31 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
     fee = _round2(gross * float(policy.platform_fee_rate))
     net = _round2(gross - fee)
 
-    held_reason = ""
-    for obligation in matched:
-        room = _room_for(obligation)
-        if not get_valid_authority_for_room(db, room.id):
-            held_reason = "One or more rooms no longer have a verified authority record"
-            break
+    # ZR-ENG-CLR-005 AC-19/AC-30/Section 9.2: "Beneficiary identity and payout
+    # account are verified to required level" -- a party with no currently
+    # VERIFIED PayoutBeneficiary (never submitted one, or its strong-auth
+    # confirmation never happened) cannot be paid out, checked before any of
+    # the other gates below.
+    held_reason = "" if get_verified_payout_beneficiary(db, party.id) else "No verified payout beneficiary on file for this provider"
+
+    if not held_reason:
+        for obligation in matched:
+            room = _room_for(obligation)
+            if not get_valid_authority_for_room(db, room.id):
+                held_reason = "One or more rooms no longer have a verified authority record"
+                break
+
+    # ZR-ENG-CLR-006 Section 9.2: "Do not release disputed Host payout
+    # amounts while the related habitability liability is unresolved." An
+    # open H2/H3 habitability incident on a room behind one of these
+    # obligations blocks this payout the same way a missing authority record
+    # already does.
+    if not held_reason:
+        for obligation in matched:
+            room = _room_for(obligation)
+            if has_open_severe_incident_for_room(db, room.id):
+                held_reason = "One or more rooms have an open, unresolved habitability incident"
+                break
 
     # ZR-ENG-CLR-005 AC-19/Section 9.2: "No active dispute, chargeback...
     # hold blocks release." FinancialHold/DisputeCase (increments 6/7/10)
@@ -1456,8 +1684,9 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
             # account like this one, a positive result means more was debited
             # (paid out/released/refunded) than was ever credited (owed) --
             # i.e. the account is genuinely negative in accounting terms.
-            if ledger_service.get_balance(db, debit_account) > 0.01:
-                db.add(FinancialHold(
+            negative_balance = ledger_service.get_balance(db, debit_account)
+            if negative_balance > 0.01:
+                hold = FinancialHold(
                     source_type="ledger_account", source_id=str(debit_account.id),
                     reason_code="NEGATIVE_ACCOUNT_BALANCE", severity="HIGH",
                     description=(
@@ -1466,6 +1695,17 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
                         "released than this refund leaves owed. Needs an approved reserve/offset/"
                         "collection policy before further payouts to this party."
                     ),
+                )
+                db.add(hold)
+                db.flush()
+                # ZR-ENG-CLR-006 AC-22/Section 18.4: the same event that flags
+                # the FinancialHold above also opens a dedicated, queryable
+                # HostRecovery record -- see that model's own docstring for
+                # exactly how far this build automates recovery vs. leaves to
+                # an admin to log manually.
+                db.add(HostRecovery(
+                    party_id=party_id, financial_hold_id=hold.id, refund_request_id=refund.id,
+                    amount=_round2(negative_balance), currency=refund.payment.currency,
                 ))
 
     refund.status = "COMPLETED"
@@ -1487,6 +1727,42 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
     db.commit()
     db.refresh(refund)
     return refund
+
+
+def reverse_platform_fee_for_refund(db: Session, obligation: Obligation, refund: RefundRequest) -> None:
+    """ZR-ENG-CLR-006 Section 13: 'Host fee recalculated on rent ultimately
+    earned' -- every cause row in Section 13's own table agrees on this one
+    mechanical consequence regardless of cause: when rent that already went
+    through a COMPLETED Host payout is later refunded, the platform fee
+    run_payout already took on that same rent (gross * platform_fee_rate) is
+    credited back to the Host, mirroring run_payout's own HOST_PAYABLE/
+    PLATFORM_FEE_REVENUE entry in reverse. Re-resolves the rate via the same
+    _period_as_of(payout.period_key) lookup run_payout itself used (AC-34:
+    the rate actually in effect for that period, never today's). No-ops for
+    an obligation never part of a completed payout -- once refunded it will
+    simply never enter a *future* payout's gross (Obligation.status == 'PAID'
+    already excludes it), so there's nothing to reverse."""
+    if obligation.payout_id is None:
+        return
+    payout = db.get(PayoutRecord, obligation.payout_id)
+    if payout is None or payout.status != "PAID":
+        return
+    policy = resolve_market_policy(db, as_of=_period_as_of(payout.period_key))
+    fee_reversal = _round2(float(refund.amount) * float(policy.platform_fee_rate))
+    if fee_reversal <= 0:
+        return
+    host_payable = ledger_service.get_party_account(db, "HOST_PAYABLE", payout.party_id, refund.payment.currency)
+    platform_fee_revenue = ledger_service.get_platform_account(db, "PLATFORM_FEE_REVENUE", refund.payment.currency)
+    ledger_service.post_entry(
+        db,
+        debit_account=platform_fee_revenue,
+        credit_account=host_payable,
+        amount=fee_reversal,
+        currency=refund.payment.currency,
+        description=f"Platform fee reversed on refund #{refund.id} (ZR-ENG-CLR-006 Section 13)",
+        source_type="refund_request",
+        source_id=str(refund.id),
+    )
 
 
 def _dispute_participants(dispute: DisputeCase) -> tuple[Guest | None, int | None]:
@@ -1815,3 +2091,79 @@ def resolve_financial_hold(db: Session, hold: FinancialHold, admin: AdminUser, d
     db.commit()
     db.refresh(hold)
     return hold
+
+
+def list_host_recoveries(db: Session, admin: AdminUser) -> list[HostRecovery]:
+    """ZR-ENG-CLR-006 AC-22: the finance-ops queue of amounts owed back from
+    a Host whose payout already went out before a later refund. Regular
+    admins only see rows for parties they actually have an active Membership
+    on -- the same Party/Membership ownership model run_payout/decide_refund
+    already enforce for this exact party_id (assert_provider_access), rather
+    than the separate Listing.owner_id scoping list_termination_cases_for_
+    admin uses (this entity has no listing/occupancy of its own to join
+    through -- it's a party-level financial record)."""
+    query = select(HostRecovery).order_by(HostRecovery.created_at.desc())
+    if admin.role != "super_admin":
+        query = query.join(Membership, Membership.party_id == HostRecovery.party_id).where(
+            Membership.admin_user_id == admin.id, Membership.status == "active",
+        )
+    return list(db.scalars(query))
+
+
+def get_host_recovery_or_404(db: Session, recovery_id: int) -> HostRecovery:
+    recovery = db.get(HostRecovery, recovery_id)
+    if not recovery:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Host recovery not found")
+    return recovery
+
+
+def record_host_recovery_progress(db: Session, recovery: HostRecovery, admin: AdminUser, data: HostRecoveryRecordProgress) -> HostRecovery:
+    """ZR-ENG-CLR-006 Section 18.4: logs that some or all of an open
+    recovery actually came back. This build does not yet automate any of
+    Section 15's waterfall (offsetting a future payout, collecting directly)
+    -- an admin records what happened after the fact, the same honest
+    'surface, don't fabricate' discipline FinancialHold itself already
+    applies to the underlying negative balance. A future increment can wire
+    run_payout to call this automatically for FUTURE_PAYOUT_OFFSET without
+    changing this function's own contract."""
+    assert_provider_access(db, admin, recovery.party_id, roles=("provider_finance", "provider_owner_admin"))
+    if recovery.status != "OPEN":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This recovery has already been {recovery.status.lower()}")
+    if data.method not in HOST_RECOVERY_METHODS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unrecognized recovery method '{data.method}'")
+    if data.amount <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Recorded amount must be positive")
+    new_total = _round2(float(recovery.recovered_amount) + data.amount)
+    if new_total > float(recovery.amount) + 0.01:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Recorded amount would exceed the outstanding recovery balance")
+
+    recovery.recovered_amount = new_total
+    recovery.recovery_method = data.method
+    recovery.notes = data.notes
+    if new_total >= float(recovery.amount) - 0.01:
+        recovery.status = "RECOVERED"
+        recovery.resolved_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(recovery)
+    return recovery
+
+
+def write_off_host_recovery(db: Session, recovery: HostRecovery, admin: AdminUser, data: HostRecoveryWriteOff) -> HostRecovery:
+    """AC-29: a Super Admin's own logged override -- writing off money owed
+    back to the platform is a significant, non-reversible finance decision,
+    the same override tier AC-05's active-occupancy guard already reserves
+    for a comparably consequential action."""
+    if admin.role != "super_admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a Super Admin can write off a host recovery")
+    if recovery.status != "OPEN":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This recovery has already been {recovery.status.lower()}")
+    if not data.reason.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A reason is required to write off a host recovery")
+
+    recovery.status = "WRITTEN_OFF"
+    recovery.recovery_method = "WRITTEN_OFF"
+    recovery.notes = data.reason
+    recovery.resolved_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(recovery)
+    return recovery
