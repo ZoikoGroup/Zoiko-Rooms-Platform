@@ -11,12 +11,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.authority_record import AuthorityRecord
+from app.models.finance import Obligation
+from app.models.leasing import Offer
 from app.models.listing import Listing
 from app.models.market_release import MarketRelease
 from app.models.notification import Notification
 from app.models.occupancy_classification import OccupancyClassification
 from app.models.room import Room
-from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
+from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie, deliver_all_disclosures
 from tests.test_application_workflow import _make_verified_renter_with_published_listing
 
 
@@ -27,7 +29,9 @@ def _make_agreement_eligible(db: Session, listing_id: str) -> None:
     listing = db.get(Listing, listing_id)
     room = db.get(Room, listing.room_id)
 
-    release = MarketRelease(jurisdiction="IN-TEST", status="active")
+    # "England" -- the one jurisdiction services/agreement_profile.py's
+    # resolver currently supports (ZR-ENG-CLR-004 fail-closed resolver).
+    release = MarketRelease(jurisdiction="England", status="active")
     db.add(release)
     db.flush()
     listing.market_release_id = release.id
@@ -124,17 +128,59 @@ class TestRenterOfferFlow:
         )
         assert agreement_notification is not None
 
+        deliver_all_disclosures(client, admin_cookies, agreement_id)
+
         # The renter signs their own agreement.
         r = client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=user_cookies)
         assert r.status_code == 200, r.text
         assert r.json()["signedByRenterAt"] is not None
-        assert r.json()["status"] == "SENT"  # provider hasn't signed yet
+        # ZR-ENG-CLR-004 AC-12: exactly one signature -> a distinct
+        # PARTIALLY_EXECUTED state, not still "SENT" and never "SIGNED".
+        assert r.json()["status"] == "PARTIALLY_EXECUTED"  # provider hasn't signed yet
 
         r = client.post(
             f"/api/leasing/agreements/{agreement_id}/sign",
             json={"asParty": "provider"},
             cookies=admin_cookies,
         )
+        assert r.status_code == 200, r.text
+        # ZR-ENG-CLR-001 Rule 7: both signatures alone open a checkout window
+        # (PAYMENT_IN_PROGRESS) rather than confirming the agreement -- SIGNED
+        # is reached only once the initial rent+deposit obligations clear.
+        assert r.json()["status"] == "PAYMENT_IN_PROGRESS"
+        assert r.json()["paymentSessionExpiresAt"] is not None
+
+        payment_due_notification = db_session.scalar(
+            select(Notification).where(
+                Notification.recipient_user_id == user.id,
+                Notification.notification_type == "agreement.payment_due",
+            )
+        )
+        assert payment_due_notification is not None
+
+        guest_id = db_session.get(Offer, offer_id).guest_id
+        obligations = list(db_session.scalars(select(Obligation).where(Obligation.agreement_id == agreement_id)))
+        total_due = sum(float(o.amount) for o in obligations)
+
+        r = client.post(
+            "/api/finance/payments",
+            json={
+                "guestId": guest_id, "amount": total_due, "currency": "INR",
+                "idempotencyKey": f"agreement-{agreement_id}-initial",
+            },
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 201, r.text
+        payment_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/finance/payments/{payment_id}/confirm",
+            json={"allocations": [{"obligationId": o.id, "amount": float(o.amount)} for o in obligations]},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+
+        r = client.get(f"/api/leasing/agreements/{agreement_id}", cookies=admin_cookies)
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "SIGNED"
 
@@ -216,6 +262,7 @@ class TestAdminCannotActForARenterWithARealAccount:
         r = client.post(f"/api/leasing/offers/{offer_id}/agreement", cookies=admin_cookies)
         agreement_id = r.json()["id"]
         client.post(f"/api/leasing/agreements/{agreement_id}/send", cookies=admin_cookies)
+        deliver_all_disclosures(client, admin_cookies, agreement_id)
 
         r = client.post(
             f"/api/leasing/agreements/{agreement_id}/sign",

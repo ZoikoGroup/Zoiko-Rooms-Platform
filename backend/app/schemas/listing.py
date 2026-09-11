@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from app.schemas.common import CamelModel
 
 
@@ -74,6 +76,8 @@ class ListingRead(ListingBase):
     party_id: int | None = None
     state: str
     rejection_reason: str = ""
+    suspension_reason: str = ""
+    paused_at: datetime | None = None
     market_release_id: int | None = None
     contact_name: str = ""
     contact_phone: str = ""
@@ -85,6 +89,18 @@ class ListingRead(ListingBase):
 
 
 class ListingRejectRequest(CamelModel):
+    reason: str
+
+
+class ListingSuspendRequest(CamelModel):
+    reason: str
+
+
+class ListingQuarantineRequest(CamelModel):
+    reason: str
+
+
+class ListingChangesRequestedRequest(CamelModel):
     reason: str
 
 
