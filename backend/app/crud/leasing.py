@@ -14,6 +14,7 @@ from app.crud.guest import get_guest_for_user, get_user_for_guest
 from app.crud.ids import dicebear_avatar, new_id
 from app.crud.listing import is_listing_available
 from app.crud import notification as notif_crud
+from app.crud.occupancy import _add_months
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
@@ -21,6 +22,7 @@ from app.models.finance import OBLIGATION_TYPE_TO_PLANE, Obligation
 from app.models.guest import Guest
 from app.models.leasing import Agreement, Application, ApplicationDecision, Offer, OfferTerms
 from app.models.listing import Listing
+from app.models.occupancy import Occupancy
 from app.models.user_account import UserAccount
 from app.schemas.leasing import ApplicationCreate, ApplicationDecide, ApplicationRead, ApplicationUpdate, OfferTermsCreate
 
@@ -462,6 +464,24 @@ def _apply_signature(db: Session, agreement: Agreement, as_party: str) -> Agreem
         host_user = get_user_by_party_id(db, listing.party_id) if listing else None
         if host_user:
             send_agreement_executed_email(host_user.email, host_user.full_name, listing.name)
+
+        # Occupancy is committed to this offer as soon as the lease is executed --
+        # move-in itself happens later via confirm_move_in. Guarded against
+        # duplicate creation since a party can be re-signed for (see sign_agreement).
+        offer = agreement.offer
+        existing_occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
+        if not existing_occupancy:
+            latest_terms = offer.terms[-1]
+            db.add(
+                Occupancy(
+                    offer_id=offer.id,
+                    listing_id=offer.listing_id,
+                    room_id=offer.listing.room_id,
+                    guest_id=offer.guest_id,
+                    status="PENDING_MOVE_IN",
+                    expected_end_date=_add_months(latest_terms.start_date, latest_terms.term_months),
+                )
+            )
 
     db.commit()
     db.refresh(agreement)
