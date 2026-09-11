@@ -99,16 +99,6 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
 
     db.commit()
     db.refresh(occupancy)
-
-    guest = db.get(Guest, occupancy.guest_id)
-    if guest:
-        notif_crud.notify_user_by_guest(
-            db, guest,
-            title="You're moved in!",
-            message=f"Your move-in for \"{offer.listing.name}\" is confirmed.",
-            notification_type="occupancy.move_in_confirmed",
-            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
-        )
     return occupancy
 
 
