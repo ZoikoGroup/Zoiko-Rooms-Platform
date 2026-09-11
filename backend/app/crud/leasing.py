@@ -19,6 +19,7 @@ from app.crud.ids import dicebear_avatar, new_id
 from app.crud.listing import is_listing_available
 from app.crud.market_policy import resolve_market_policy
 from app.crud import notification as notif_crud
+from app.crud.occupancy import _add_months
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
@@ -39,6 +40,7 @@ from app.models.leasing import (
     SignatureEvent,
 )
 from app.models.listing import Listing
+from app.models.occupancy import Occupancy
 from app.models.listing_approval import CURRENT_POLICY_VERSION
 from app.models.signature_provider import SignatureRequest
 from app.models.user_account import UserAccount
@@ -1153,6 +1155,24 @@ def _apply_signature(
         # SENT here (see models/leasing.py:AGREEMENT_STATUSES' own note).
         agreement.status = "PARTIALLY_EXECUTED"
 
+        # Occupancy is committed to this offer as soon as the lease is executed --
+        # move-in itself happens later via confirm_move_in. Guarded against
+        # duplicate creation since a party can be re-signed for (see sign_agreement).
+        offer = agreement.offer
+        existing_occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
+        if not existing_occupancy:
+            latest_terms = offer.terms[-1]
+            db.add(
+                Occupancy(
+                    offer_id=offer.id,
+                    listing_id=offer.listing_id,
+                    room_id=offer.listing.room_id,
+                    guest_id=offer.guest_id,
+                    status="PENDING_MOVE_IN",
+                    expected_end_date=_add_months(latest_terms.start_date, latest_terms.term_months),
+                )
+            )
+
     db.commit()
     db.refresh(agreement)
     if agreement.status == "SIGNED":
@@ -1162,6 +1182,8 @@ def _apply_signature(
             title="Your rental agreement is fully signed",
             notification_type="agreement.signed",
         )
+        from app.crud.booking_change_requests import _complete_premises_change_if_applicable
+        _complete_premises_change_if_applicable(db, agreement)
     elif agreement.status == "PAYMENT_IN_PROGRESS":
         _notify_offer_guest(
             db, agreement.offer,
@@ -1203,6 +1225,8 @@ def confirm_agreement_payment(db: Session, agreement: Agreement, correlation_id:
         title="Your rental agreement is fully signed",
         notification_type="agreement.signed",
     )
+    from app.crud.booking_change_requests import _complete_premises_change_if_applicable
+    _complete_premises_change_if_applicable(db, agreement)
     return agreement
 
 
@@ -1529,6 +1553,26 @@ def freeze_agreement_version(db: Session, agreement: Agreement) -> DocumentArtif
         pending_amendment.executed_at = now
         pending_amendment.effective_at = now
         _supersede_payment_schedule_if_rent_changed(db, agreement, pending_amendment)
+
+        # ZR-ENG-CLR-008 Section 8: if this amendment was generated from a
+        # renter-initiated BookingChangeRequest, that request is only
+        # EFFECTIVE now (fully re-signed) -- not at the earlier host-approval
+        # moment. An EXTENSION additionally has to update the *existing*
+        # Occupancy's expected_end_date here, since Occupancy already exists
+        # by this point and nothing else recomputes it after move-in.
+        from app.models.booking_change_request import BookingChangeRequest
+        from app.models.occupancy import Occupancy
+
+        bcr = db.scalar(
+            select(BookingChangeRequest).where(BookingChangeRequest.resulting_amendment_id == pending_amendment.id)
+        )
+        if bcr is not None:
+            bcr.status = "EFFECTIVE"
+            if bcr.change_type == "EXTENSION" and bcr.proposed_end_date is not None:
+                occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == pending_amendment.agreement.offer_id))
+                if occupancy is not None:
+                    occupancy.expected_end_date = bcr.proposed_end_date
+
         db.commit()
 
     return artifact

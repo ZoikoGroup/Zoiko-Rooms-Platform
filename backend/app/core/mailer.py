@@ -89,11 +89,18 @@ def _send_via_smtp(to_email: str, subject: str, html_body: str, text_body: str) 
     message.add_alternative(html_body, subtype="html")
 
     try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
-            if settings.smtp_use_tls:
-                smtp.starttls()
-            smtp.login(settings.smtp_username, settings.smtp_password)
-            smtp.send_message(message)
+        if settings.smtp_use_ssl:
+            # Implicit TLS (e.g. port 465) -- the socket is SSL-wrapped before any
+            # SMTP command is sent, so STARTTLS is neither needed nor valid here.
+            with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+                smtp.login(settings.smtp_username, settings.smtp_password)
+                smtp.send_message(message)
+        else:
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+                if settings.smtp_use_tls:
+                    smtp.starttls()
+                smtp.login(settings.smtp_username, settings.smtp_password)
+                smtp.send_message(message)
         return True
     except Exception:
         # Email is always best-effort: a delivery failure must never roll back or

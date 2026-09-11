@@ -17,6 +17,7 @@ from app.models.market_release import MarketRelease
 from app.models.occupancy import Occupancy
 from app.models.room import Room
 from app.services.agreement_effectiveness import is_agreement_effective
+from app.services.agreement_profile import resolve_agreement_profile
 from app.services.eligibility import jurisdiction_gates_pass, listing_publication_eligible
 
 
@@ -72,6 +73,13 @@ def check_agreement_eligibility(db, offer: Offer) -> list[str]:
         reasons.append("Offer has not been accepted")
     if not offer.terms:
         reasons.append("Offer has no terms")
+
+    # ZR-ENG-CLR-004 Section 3.3: create_agreement itself fails closed here
+    # (resolve_agreement_profile is None -> 409) -- this pre-check used to
+    # say "eligible: true" right up until that real call failed, since it
+    # never actually resolved a profile. Same reason text as the real 409.
+    if resolve_agreement_profile(db, listing, listing.room) is None:
+        reasons.append("No approved agreement profile for this listing's jurisdiction -- routed to manual review")
 
     return reasons
 

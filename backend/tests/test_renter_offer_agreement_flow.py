@@ -31,9 +31,14 @@ def _make_agreement_eligible(db: Session, listing_id: str) -> None:
 
     # "England" -- the one jurisdiction services/agreement_profile.py's
     # resolver currently supports (ZR-ENG-CLR-004 fail-closed resolver).
-    release = MarketRelease(jurisdiction="England", status="active")
-    db.add(release)
-    db.flush()
+    # jurisdiction has a real unique constraint, so a test that calls this
+    # for a second listing (e.g. a PREMISES_CHANGE migration target) reuses
+    # the release already created for the first, rather than colliding.
+    release = db.query(MarketRelease).filter(MarketRelease.jurisdiction == "England", MarketRelease.status == "active").first()
+    if release is None:
+        release = MarketRelease(jurisdiction="England", status="active")
+        db.add(release)
+        db.flush()
     listing.market_release_id = release.id
 
     db.add(

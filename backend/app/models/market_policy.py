@@ -90,4 +90,12 @@ class MarketPolicyPack(Base):
     # period for -- see models/termination_case.py:UNILATERAL_CAUSE_CODES.
     termination_notice_days: Mapped[int] = mapped_column(default=30)
 
+    # -- Booking-change / rent-change policy (Section 8, ZR-ENG-CLR-008 §10/AC-24) --
+    # Both the doc's own validation examples cite a minimum interval, not a
+    # blanket ban: NSW "rent increases are generally limited to once in 12
+    # months", Ontario "rent increases are subject to timing[...] rules". 365
+    # is a reasonable default, not a verified legal figure for any specific
+    # jurisdiction -- same REVIEW_REQUIRED honesty as every other field here.
+    rent_change_min_interval_days: Mapped[int] = mapped_column(default=365)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

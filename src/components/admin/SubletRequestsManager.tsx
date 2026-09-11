@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { apiClientFetch } from "@/lib/api-client";
 import { getCurrentAdmin } from "@/lib/auth";
-import { subletRequestStatusLabel, subletRequestStatusTone } from "@/lib/status";
+import { subletArrangementTypeAdminLabel, subletRequestStatusLabel, subletRequestStatusTone } from "@/lib/status";
 import { formatDate } from "@/lib/utils";
 
 export function SubletRequestsManager() {
@@ -117,6 +117,9 @@ export function SubletRequestsManager() {
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
                   {request.listingName || `Occupancy #${request.currentOccupancyId}`}
                   {request.listingCity && `, ${request.listingCity}`}
+                </p>
+                <p className="mt-0.5 text-xs font-medium text-primary-700 dark:text-primary-300">
+                  {subletArrangementTypeAdminLabel[request.arrangementType] ?? request.arrangementType}
                 </p>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
                   {request.currentTenantName || "Current tenant"} → {request.proposedRenterName || "proposed renter"}

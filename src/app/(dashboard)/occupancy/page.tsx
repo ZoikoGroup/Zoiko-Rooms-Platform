@@ -1,3 +1,4 @@
+import { BookingChangeRequestsManager } from "@/components/admin/BookingChangeRequestsManager";
 import { OccupancyManager } from "@/components/admin/OccupancyManager";
 import { SubletRequestsManager } from "@/components/admin/SubletRequestsManager";
 
@@ -11,6 +12,7 @@ export default function AdminOccupancyPage() {
         </p>
       </div>
       <OccupancyManager />
+      <BookingChangeRequestsManager />
       <SubletRequestsManager />
     </div>
   );
