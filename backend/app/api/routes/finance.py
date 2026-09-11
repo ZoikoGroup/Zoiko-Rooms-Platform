@@ -1,10 +1,13 @@
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, require_super_admin
 from app.core.correlation import get_correlation_id
 from app.core.identity_uploads import resolve_identity_document_path, save_identity_document
+from app.core.payout_statement_documents import resolve_payout_statement_document_path
+from app.core.service_fee_invoice_documents import resolve_service_fee_invoice_document_path
+from app.core.receipt_documents import resolve_receipt_document_path
 from app.crud import finance as crud
 from app.crud.finance import annotate_payment_context
 from app.crud.audit import log_audit_event
@@ -21,6 +24,8 @@ from app.schemas.finance import (
     DisputeCreate,
     DisputeRead,
     DisputeResolve,
+    FinancialHoldRead,
+    FinancialHoldResolve,
     ObligationRead,
     PaymentConfirm,
     PayoutRecordRead,
@@ -81,6 +86,26 @@ def post_confirm_payment(
         )
         db.commit()
     return annotate_payment_context(updated)
+
+
+@router.get("/payments/{payment_id}/receipt")
+def get_payment_receipt(
+    payment_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 13.1/AC-25. get_or_create_payment_receipt is
+    idempotent -- safe to call again here even though confirm_payment already
+    generates the receipt best-effort, in case that best-effort step didn't
+    run for some reason."""
+    receipt = crud.get_payment_receipt_for_admin(db, payment_id, admin)
+    log_audit_event(db, admin, "payment_receipt.download", "payment_receipt", str(receipt.id), get_correlation_id(request))
+    db.commit()
+
+    pdf_bytes = resolve_receipt_document_path(receipt.storage_ref).read_bytes()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{receipt.receipt_number}.pdf"'},
+    )
 
 
 @router.get("/deposits", response_model=list[DepositRecordRead])
@@ -213,6 +238,46 @@ def get_payouts(admin: AdminUser = Depends(get_current_admin), db: Session = Dep
     return crud.list_payouts_for(db, admin)
 
 
+@router.get("/payouts/{payout_id}/statement")
+def get_payout_statement(
+    payout_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 6.3/13.1. get_or_create_payout_statement is
+    idempotent -- safe to call again here even though run_payout already
+    generates the statement best-effort, in case that best-effort step
+    didn't run for some reason."""
+    statement = crud.get_payout_statement_for_admin(db, payout_id, admin)
+    log_audit_event(db, admin, "payout_statement.download", "payout_statement", str(statement.id), get_correlation_id(request))
+    db.commit()
+
+    pdf_bytes = resolve_payout_statement_document_path(statement.storage_ref).read_bytes()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{statement.statement_number}.pdf"'},
+    )
+
+
+@router.get("/payouts/{payout_id}/service-fee-invoice")
+def get_service_fee_invoice(
+    payout_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 13.1/AC-26. get_or_create_service_fee_invoice is
+    idempotent -- safe to call again here even though run_payout already
+    generates the invoice best-effort, in case that best-effort step didn't
+    run for some reason."""
+    invoice = crud.get_service_fee_invoice_for_admin(db, payout_id, admin)
+    log_audit_event(db, admin, "service_fee_invoice.download", "service_fee_invoice", str(invoice.id), get_correlation_id(request))
+    db.commit()
+
+    pdf_bytes = resolve_service_fee_invoice_document_path(invoice.storage_ref).read_bytes()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{invoice.invoice_number}.pdf"'},
+    )
+
+
 @router.post("/refunds", response_model=RefundRequestRead, status_code=status.HTTP_201_CREATED)
 def post_request_refund(
     payload: RefundRequestCreate,
@@ -302,3 +367,25 @@ def post_run_reconciliation(
 @router.get("/reconciliation", response_model=list[ReconciliationRunRead], dependencies=[Depends(require_super_admin)])
 def get_reconciliation_runs(db: Session = Depends(get_db)):
     return crud.list_reconciliation_runs(db)
+
+
+@router.get("/financial-holds", response_model=list[FinancialHoldRead], dependencies=[Depends(require_super_admin)])
+def get_financial_holds(status: str | None = None, db: Session = Depends(get_db)):
+    return crud.list_financial_holds(db, status=status)
+
+
+@router.post(
+    "/financial-holds/{hold_id}/resolve", response_model=FinancialHoldRead, dependencies=[Depends(require_super_admin)],
+)
+def post_resolve_financial_hold(
+    hold_id: int,
+    payload: FinancialHoldResolve,
+    request: Request,
+    admin: AdminUser = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    hold = crud.get_financial_hold_or_404(db, hold_id)
+    updated = crud.resolve_financial_hold(db, hold, admin, payload)
+    log_audit_event(db, admin, "financial_hold.resolve", "financial_hold", str(hold_id), get_correlation_id(request), reason=updated.status)
+    db.commit()
+    return updated

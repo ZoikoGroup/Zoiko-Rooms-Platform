@@ -105,7 +105,10 @@ class TestFullRefundMarksObligationRefunded:
 
         r = client.post(
             "/api/finance/refunds",
-            json={"paymentId": payment_id, "obligationId": obligation.id, "amount": 500.0, "reason": "test"},
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 500.0, "reason": "test",
+                "idempotencyKey": "test-refund-request-key-1",
+            },
             cookies=admin_cookies,
         )
         assert r.status_code == 201, r.text
