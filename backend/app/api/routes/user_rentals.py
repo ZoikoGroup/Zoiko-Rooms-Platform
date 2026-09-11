@@ -51,6 +51,7 @@ from app.schemas.leasing import (
     UserApplicationSubmitRequest,
     UserOccupancyRead,
 )
+from app.schemas.activation_gate import HandoverEventCreate, HandoverEventRead
 from app.schemas.review import ReviewCreate, ReviewRead
 
 router = APIRouter(prefix="/api/users/rentals", tags=["user-rentals"], dependencies=[Depends(get_current_user)])
@@ -618,6 +619,34 @@ def get_occupancy_details(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own occupancies")
 
     return _to_user_occupancy_read(db, occupancy)
+
+
+@router.post("/occupancies/{occupancy_id}/handover/receipt", response_model=HandoverEventRead)
+def submit_handover_receipt(
+    occupancy_id: int,
+    payload: HandoverEventCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The renter alone records receipt; provider/admin cannot impersonate it."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only record receipt for your own occupancy")
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="RENTER_RECEIPT", actor_kind="renter_user", actor_user_id=user.id,
+        evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),
+    )
+    log_audit_event(
+        db, None, "occupancy.renter_receipt", "occupancy", str(occupancy_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "occupancy.renter_receipt_recorded", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
+    db.commit()
+    return event
 
 
 @router.get("/sublet-lookup", response_model=SubletRenterLookup)

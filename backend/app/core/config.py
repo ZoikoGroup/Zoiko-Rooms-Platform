@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = True
+    # Implicit TLS (the connection is SSL-wrapped from the first byte, e.g. port
+    # 465) rather than STARTTLS (plaintext connection upgraded mid-handshake,
+    # e.g. port 587). Mutually exclusive with smtp_use_tls in practice -- set
+    # this true for a 465-style provider and smtp_use_tls is then ignored.
+    smtp_use_ssl: bool = False
 
     # Chat SSE rate limiting (requests per window, per authenticated actor).
     chat_rate_limit_max: int = 20

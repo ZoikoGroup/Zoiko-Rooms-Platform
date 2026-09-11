@@ -50,6 +50,7 @@ from app.models.market_release import MarketRelease
 from app.models.market_policy import MarketPolicyPack
 from app.models.membership import Membership
 from app.models.occupancy import Occupancy
+from app.models.occupancy_activation import OccupancyActivationDecision, OccupancyHandoverEvent
 from app.models.occupancy_classification import OccupancyClassification
 from app.models.party import Party
 from app.models.payment import Payment
@@ -116,6 +117,8 @@ __all__ = [
     "TerminationRecord",
     "DisclosureRequirement",
     "Occupancy",
+    "OccupancyHandoverEvent",
+    "OccupancyActivationDecision",
     "Obligation",
     "SimulatedPayment",
     "PaymentAllocation",
