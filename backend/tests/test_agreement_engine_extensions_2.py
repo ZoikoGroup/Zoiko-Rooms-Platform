@@ -12,6 +12,7 @@ from io import BytesIO
 
 from sqlalchemy.orm import Session
 
+from app.crud import occupancy as occupancy_crud
 from app.models.agreement_form_template import AgreementFormTemplate
 from app.models.agreement_party import AgreementParty
 from app.models.agreement_version_detail import AgreementPremises, CommercialTermsSnapshot, ExecutionCertificate
@@ -581,9 +582,13 @@ class TestAmendmentsAC18:
         client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=auth_user_cookie(renter))
         client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
 
-        r = client.post(f"/api/occupancy/agreements/{agreement_id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        occupancy = db_session.get(Occupancy, r.json()["id"])
+        # The real confirm-move-in route now always waits on the Phase 2B
+        # activation gate's own DATE_ELIGIBILITY_UNRESOLVED check (no
+        # authoritative date/tolerance rule exists yet -- crud/activation_
+        # gate.py's own comment) -- not what this test exercises, so it calls
+        # the same underlying crud.confirm_move_in the route itself calls.
+        occupancy = occupancy_crud.confirm_move_in(db_session, db_session.get(Agreement, agreement_id), super_admin)
+        db_session.commit()
         assert occupancy.expected_end_date == _add_months(new_start, 6)
         assert occupancy.expected_end_date != _add_months(original_start, 6)
 
@@ -829,9 +834,14 @@ class TestTerminationRecordEntity:
         renter = _make_verified_renter(db_session, email="term-renter1@test.com")
         agreement_id = _full_signed_agreement(client, db_session, admin_cookies, renter, listing_id, start_date=date.today())
 
-        r = client.post(f"/api/occupancy/agreements/{agreement_id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        occupancy_id = r.json()["id"]
+        # The real confirm-move-in route now always waits on the Phase 2B
+        # activation gate's own DATE_ELIGIBILITY_UNRESOLVED check (no
+        # authoritative date/tolerance rule exists yet -- crud/activation_
+        # gate.py's own comment) -- not what this test exercises, so it calls
+        # the same underlying crud.confirm_move_in the route itself calls.
+        occupancy = occupancy_crud.confirm_move_in(db_session, db_session.get(Agreement, agreement_id), super_admin)
+        db_session.commit()
+        occupancy_id = occupancy.id
 
         r = client.post(
             f"/api/occupancy/{occupancy_id}/end",

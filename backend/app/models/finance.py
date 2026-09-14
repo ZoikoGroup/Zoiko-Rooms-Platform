@@ -321,6 +321,16 @@ class PayoutRecord(Base):
     currency: Mapped[str] = mapped_column(String(3), default="INR")
     status: Mapped[str] = mapped_column(String(20), default="PENDING")
     hold_reason: Mapped[str] = mapped_column(String(255), default="")
+    # ZR-ENG-CLR-006 Section 15 waterfall tier 4 ("Future Host payouts
+    # offset") -- crud/finance.py:run_payout's own automation of what used
+    # to be entirely manual (crud/finance.py:record_host_recovery_progress).
+    # `amount` above stays the full period's gross-minus-fee net (unchanged
+    # meaning, matching the obligations this payout settles 1:1); this field
+    # separately records how much of that net was withheld to pay down an
+    # OPEN HostRecovery rather than actually reaching the host -- 0.0 (the
+    # default) for the overwhelming majority of payouts, which have no open
+    # recovery to offset.
+    recovery_offset_amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

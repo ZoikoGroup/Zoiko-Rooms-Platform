@@ -55,3 +55,19 @@ class TerminationRecordRead(CamelModel):
     physical_move_out_date: date | None = None
     created_by_admin_id: int | None = None
     created_at: datetime
+
+
+class OccupancyCoTenantCreate(CamelModel):
+    """ZR-ENG-CLR-006 AC-25: adds an additional tenant to an occupancy
+    beyond its own guest_id -- see models/occupancy.py:OccupancyCoTenant's
+    own docstring for what this changes about termination routing."""
+
+    guest_id: str
+
+
+class OccupancyCoTenantRead(CamelModel):
+    id: int
+    occupancy_id: int
+    guest_id: str
+    added_by_admin_id: int | None
+    added_at: datetime

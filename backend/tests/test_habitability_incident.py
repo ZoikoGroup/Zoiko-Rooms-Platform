@@ -10,7 +10,10 @@ from sqlalchemy.orm import Session
 
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+
 from app.crud import habitability_incident as habitability_crud
+from app.models.domain_event import DomainEvent
 from app.models.finance import Obligation, PaymentAllocation, PayoutBeneficiary, SimulatedPayment
 from app.models.room import Room
 from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
@@ -66,12 +69,22 @@ class TestReportHabitabilityIncident:
             json={"severity": "H2", "description": "no working plumbing"}, cookies=auth_user_cookie(renter),
         )
         assert r.status_code == 201, r.text
+        incident_id = r.json()["id"]
 
         room = db_session.get(Room, occupancy.room_id)
         assert room.status == "inactive"
         # The active occupancy itself is untouched by a habitability incident.
         db_session.refresh(occupancy)
         assert occupancy.status == "ACTIVE"
+
+        event = db_session.scalar(
+            select(DomainEvent).where(
+                DomainEvent.event_type == "property.habitability_incident_opened",
+                DomainEvent.resource_id == str(incident_id),
+            )
+        )
+        assert event is not None
+        assert event.payload["severity"] == "H2"
 
     def test_admin_can_report_an_incident(self, client, db_session: Session):
         admin = _make_admin(db_session, email="hab-admin-report-admin@test.com", role="super_admin")
@@ -144,6 +157,16 @@ class TestResolveHabitabilityIncident:
         db_session.refresh(room)
         assert room.status == "active"
 
+        event = db_session.scalar(
+            select(DomainEvent).where(
+                DomainEvent.event_type == "booking.inventory_reopened",
+                DomainEvent.resource_type == "room",
+                DomainEvent.resource_id == str(occupancy.room_id),
+            )
+        )
+        assert event is not None
+        assert event.payload["habitabilityIncidentId"] == incident_id
+
     def test_room_stays_frozen_while_another_severe_incident_remains_open(self, client, db_session: Session):
         admin = _make_admin(db_session, email="hab-multi-admin@test.com", role="super_admin")
         occupancy, _guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="multi")
@@ -160,10 +183,19 @@ class TestResolveHabitabilityIncident:
         client.post(f"/api/occupancy/habitability-incidents/{incident1_id}/resolve", cookies=admin_cookies)
         room = db_session.get(Room, occupancy.room_id)
         assert room.status == "inactive"  # incident2 is still open
+        assert db_session.scalar(
+            select(DomainEvent).where(DomainEvent.event_type == "booking.inventory_reopened")
+        ) is None
 
         client.post(f"/api/occupancy/habitability-incidents/{incident2_id}/resolve", cookies=admin_cookies)
         db_session.refresh(room)
         assert room.status == "active"
+        assert db_session.scalar(
+            select(DomainEvent).where(
+                DomainEvent.event_type == "booking.inventory_reopened",
+                DomainEvent.resource_id == str(occupancy.room_id),
+            )
+        ) is not None
 
     def test_resolving_an_already_resolved_incident_is_rejected(self, client, db_session: Session):
         admin = _make_admin(db_session, email="hab-doubleresolve-admin@test.com", role="super_admin")

@@ -20,6 +20,7 @@ from app.core.receipt_documents import save_receipt_document
 from app.core.rent_invoice_documents import save_rent_invoice_document
 from app.core.service_fee_invoice_documents import save_service_fee_invoice_document
 from app.crud.authority import get_valid_authority_for_room
+from app.crud.events import emit_event
 from app.crud.guest import get_user_for_guest
 from app.crud.market_policy import resolve_market_policy, to_policy_snapshot
 from app.models.market_policy import SUPPORTED_FUNDS_FLOW_PROFILES
@@ -1274,6 +1275,18 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
         if open_chargeback is not None:
             held_reason = f"Obligation #{open_chargeback.obligation_id} has an open chargeback dispute"
 
+    # ZR-ENG-CLR-006 Section 15 waterfall tier 4/AC-22: if this party has an
+    # open negative-balance hold from a prior refund clawback, this payout's
+    # own net now automatically settles as much of it as this period's net
+    # allows -- full offset when net covers the outstanding balance in one
+    # shot, otherwise a partial offset (Section 2 doctrine: "Undisputed money
+    # should not be trapped unnecessarily" -- this period's own earned rent
+    # is undisputed and shouldn't be held hostage to a shortfall from an
+    # unrelated earlier period). A partial offset leaves the hold open and
+    # the recovery row(s) partially recovered, to be picked up by a later
+    # payout or a manual record_host_recovery_progress call.
+    open_recoveries: list[HostRecovery] = []
+    auto_offset_amount = 0.0
     if not held_reason:
         payout_currency = matched[0].currency if matched else "INR"
         existing_host_payable = db.scalar(
@@ -1290,7 +1303,15 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
                 )
             )
             if negative_balance_hold is not None:
-                held_reason = "This provider has an unresolved negative account balance -- resolve before payout"
+                open_recoveries = list(db.scalars(
+                    select(HostRecovery).where(
+                        HostRecovery.party_id == party.id, HostRecovery.currency == payout_currency,
+                        HostRecovery.status == "OPEN",
+                    ).order_by(HostRecovery.created_at)
+                ))
+                outstanding = _round2(sum(float(r.amount) - float(r.recovered_amount) for r in open_recoveries))
+                if open_recoveries and outstanding > 0:
+                    auto_offset_amount = min(outstanding, net)
 
     payout = PayoutRecord(
         party_id=party.id,
@@ -1298,6 +1319,7 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
         amount=net,
         status="HELD" if held_reason else "PAID",
         hold_reason=held_reason,
+        recovery_offset_amount=auto_offset_amount,
     )
     db.add(payout)
     try:
@@ -1341,16 +1363,69 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
                 source_id=str(payout.id),
             )
 
+        disbursed = net
+        if auto_offset_amount > 0:
+            # ZR-ENG-CLR-006 Section 15 tier 4: the portion of this period's
+            # net that settles a prior over-payment never actually reaches
+            # the host -- reversing the same debit/credit pair the "Payout
+            # paid to host" entry above just posted, for exactly the withheld
+            # amount, so platform_clearing's real cash outflow nets to
+            # (net - auto_offset_amount) while host_payable's balance moves
+            # back toward zero by the recovered amount (get_balance's own
+            # "positive means paid down/refunded more than owed" convention --
+            # see app/services/ledger.py).
+            ledger_service.post_entry(
+                db,
+                debit_account=platform_clearing,
+                credit_account=host_payable,
+                amount=auto_offset_amount,
+                currency=payout.currency,
+                description=f"Host recovery offset applied against payout #{payout.id}",
+                source_type="payout_record",
+                source_id=str(payout.id),
+            )
+            remaining_offset = auto_offset_amount
+            for recovery in open_recoveries:
+                if remaining_offset <= 0:
+                    break
+                owed = _round2(float(recovery.amount) - float(recovery.recovered_amount))
+                applied = min(owed, remaining_offset)
+                recovery.recovered_amount = _round2(float(recovery.recovered_amount) + applied)
+                recovery.recovery_method = "FUTURE_PAYOUT_OFFSET"
+                remaining_offset = _round2(remaining_offset - applied)
+                if recovery.recovered_amount >= float(recovery.amount) - 0.01:
+                    recovery.status = "RECOVERED"
+                    recovery.resolved_at = datetime.now(timezone.utc)
+                    emit_event(
+                        db, "host_recovery.completed", "host_recovery", str(recovery.id),
+                        {"status": recovery.status, "recoveredAmount": float(recovery.recovered_amount)},
+                    )
+                    hold = db.get(FinancialHold, recovery.financial_hold_id)
+                    if hold is not None and hold.status == "OPEN":
+                        hold.status = "RESOLVED"
+                        hold.resolved_by_admin_id = admin.id
+                        hold.resolved_at = datetime.now(timezone.utc)
+                        hold.resolution_notes = f"Automatically resolved -- fully offset against payout #{payout.id}"
+            disbursed = _round2(net - auto_offset_amount)
+
+        if auto_offset_amount > 0:
+            message = (
+                f"A payout of {payout.currency} {disbursed:.2f} for {period_key} has been paid out to you "
+                f"({payout.currency} {auto_offset_amount:.2f} of {payout.currency} {net:.2f} earned this period was "
+                "applied against a prior refund recovery)."
+            )
+        else:
+            message = f"A payout of {payout.currency} {net:.2f} for {period_key} has been paid out to you."
         notif_crud.notify_user_by_party(
             db, party.id,
             title="Payout received",
-            message=f"A payout of {payout.currency} {net:.2f} for {period_key} has been paid out to you.",
+            message=message,
             notification_type="payout.paid",
             related_entity_type="payout_record", related_entity_id=str(payout.id),
         )
         host_user = get_user_by_party_id(db, party.id)
         if host_user:
-            send_payout_paid_email(host_user.email, host_user.full_name, net, payout.currency, period_key)
+            send_payout_paid_email(host_user.email, host_user.full_name, disbursed, payout.currency, period_key)
     else:
         # Actionable, not just informational -- the host needs to resolve the
         # missing authority record before this payout can actually go out.
@@ -1395,10 +1470,20 @@ def _generate_payout_statement_pdf(payout: PayoutRecord, statement_number: str) 
     Zoiko fee, net payout, shown separately -- "Net payout must never erase
     gross economics" (Section 8.2). gross/fee are reconstructed from the
     linked obligations and payout.amount (net) rather than stored again,
-    since run_payout already computed and ledgered them once."""
+    since run_payout already computed and ledgered them once.
+
+    ZR-ENG-CLR-006 Section 15/16.2 communications honesty: `net` stays the
+    full period's gross-minus-fee earning (matches the obligations listed
+    below 1:1); `disbursed` is what actually reached the host once a
+    recovery_offset_amount (Section 15 waterfall tier 4) is subtracted --
+    shown as its own line rather than silently folded into "Net payout" so
+    the host statement never claims they received money that in fact paid
+    down a prior refund clawback."""
     gross = _round2(sum(o.amount for o in payout.obligations))
     net = _round2(payout.amount)
     fee = _round2(gross - net)
+    recovery_offset = _round2(float(payout.recovery_offset_amount))
+    disbursed = _round2(net - recovery_offset)
 
     buffer = BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=A4)
@@ -1421,7 +1506,12 @@ def _generate_payout_statement_pdf(payout: PayoutRecord, statement_number: str) 
     write("Summary", size=12, bold=True)
     write(f"Gross rent: {payout.currency} {gross:.2f}", size=9, gap=6 * mm)
     write(f"Zoiko fee: {payout.currency} {fee:.2f}", size=9, gap=6 * mm)
-    write(f"Net payout: {payout.currency} {net:.2f}", size=9, gap=10 * mm)
+    write(f"Net payout: {payout.currency} {net:.2f}", size=9, gap=6 * mm)
+    if recovery_offset > 0:
+        write(f"Applied against prior refund recovery: -{payout.currency} {recovery_offset:.2f}", size=9, gap=6 * mm)
+        write(f"Amount disbursed: {payout.currency} {disbursed:.2f}", size=9, bold=True, gap=10 * mm)
+    else:
+        y -= 4 * mm
 
     write("Obligations included", size=12, bold=True)
     for obligation in payout.obligations:
@@ -1703,10 +1793,20 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
                 # HostRecovery record -- see that model's own docstring for
                 # exactly how far this build automates recovery vs. leaves to
                 # an admin to log manually.
-                db.add(HostRecovery(
+                recovery = HostRecovery(
                     party_id=party_id, financial_hold_id=hold.id, refund_request_id=refund.id,
                     amount=_round2(negative_balance), currency=refund.payment.currency,
-                ))
+                )
+                db.add(recovery)
+                db.flush()
+                # ZR-ENG-CLR-006 Section 20.2/18.4: the one Section-15/18.4
+                # outcome that had no domain event at all -- a future
+                # recovery/collections consumer needs to know a clawback was
+                # opened just as much as it needs refund.completed above.
+                emit_event(
+                    db, "host_recovery.created", "host_recovery", str(recovery.id),
+                    {"partyId": party_id, "amount": float(recovery.amount), "refundRequestId": refund.id},
+                )
 
     refund.status = "COMPLETED"
     refund.decided_by_admin_id = admin.id
@@ -2119,13 +2219,17 @@ def get_host_recovery_or_404(db: Session, recovery_id: int) -> HostRecovery:
 
 def record_host_recovery_progress(db: Session, recovery: HostRecovery, admin: AdminUser, data: HostRecoveryRecordProgress) -> HostRecovery:
     """ZR-ENG-CLR-006 Section 18.4: logs that some or all of an open
-    recovery actually came back. This build does not yet automate any of
-    Section 15's waterfall (offsetting a future payout, collecting directly)
-    -- an admin records what happened after the fact, the same honest
-    'surface, don't fabricate' discipline FinancialHold itself already
-    applies to the underlying negative balance. A future increment can wire
-    run_payout to call this automatically for FUTURE_PAYOUT_OFFSET without
-    changing this function's own contract."""
+    recovery actually came back OUTSIDE this platform -- a direct wire/UPI
+    collection an admin confirmed happened, method=DIRECT_COLLECTION being
+    the realistic case now that run_payout (Section 15 waterfall tier 4)
+    auto-applies FUTURE_PAYOUT_OFFSET for itself whenever a later payout is
+    large enough to cover the outstanding balance in one shot -- see that
+    function's own docstring. This function stays the fallback for
+    everything run_payout can't reach on its own: a too-small later payout,
+    a party with no further rent obligations coming, or an out-of-band
+    collection -- the same honest 'surface, don't fabricate' discipline
+    FinancialHold itself already applies to the underlying negative
+    balance."""
     assert_provider_access(db, admin, recovery.party_id, roles=("provider_finance", "provider_owner_admin"))
     if recovery.status != "OPEN":
         raise HTTPException(status.HTTP_409_CONFLICT, f"This recovery has already been {recovery.status.lower()}")
@@ -2143,6 +2247,10 @@ def record_host_recovery_progress(db: Session, recovery: HostRecovery, admin: Ad
     if new_total >= float(recovery.amount) - 0.01:
         recovery.status = "RECOVERED"
         recovery.resolved_at = datetime.now(timezone.utc)
+        emit_event(
+            db, "host_recovery.completed", "host_recovery", str(recovery.id),
+            {"status": recovery.status, "recoveredAmount": float(recovery.recovered_amount)},
+        )
     db.commit()
     db.refresh(recovery)
     return recovery
@@ -2164,6 +2272,10 @@ def write_off_host_recovery(db: Session, recovery: HostRecovery, admin: AdminUse
     recovery.recovery_method = "WRITTEN_OFF"
     recovery.notes = data.reason
     recovery.resolved_at = datetime.now(timezone.utc)
+    emit_event(
+        db, "host_recovery.completed", "host_recovery", str(recovery.id),
+        {"status": recovery.status, "recoveredAmount": float(recovery.recovered_amount)},
+    )
     db.commit()
     db.refresh(recovery)
     return recovery

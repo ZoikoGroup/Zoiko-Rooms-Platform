@@ -57,7 +57,13 @@ from app.schemas.leasing import (
 )
 from app.schemas.activation_gate import HandoverEventCreate, HandoverEventRead
 from app.schemas.review import ReviewCreate, ReviewRead
-from app.schemas.termination import RefundEntitlementRead, TerminationCaseCreate, TerminationCaseRead
+from app.schemas.termination import (
+    RefundEntitlementRead,
+    TerminationCaseCreate,
+    TerminationCasePreviewRead,
+    TerminationCasePreviewRequest,
+    TerminationCaseRead,
+)
 
 router = APIRouter(prefix="/api/users/rentals", tags=["user-rentals"], dependencies=[Depends(get_current_user)])
 
@@ -659,6 +665,24 @@ def request_own_termination(
     if not guest:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to you")
     return termination_crud.open_termination_case(db, occupancy, guest, payload)
+
+
+@router.post("/occupancies/{occupancy_id}/termination-cases/preview", response_model=TerminationCasePreviewRead)
+def preview_own_termination(
+    occupancy_id: int,
+    payload: TerminationCasePreviewRequest,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-006 Section 7.1 Step 5: shows the renter the resolved
+    pathway, earliest effective date, and an estimated cost/refund range
+    BEFORE they submit a real notice -- nothing here is persisted. See
+    crud/termination.py:preview_termination_case."""
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to you")
+    return termination_crud.preview_termination_case(db, occupancy, guest, payload)
 
 
 @router.get("/occupancies/{occupancy_id}/termination-cases", response_model=list[TerminationCaseRead])

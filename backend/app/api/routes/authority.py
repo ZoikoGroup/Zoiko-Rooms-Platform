@@ -19,7 +19,7 @@ from app.models.admin_user import AdminUser
 from app.schemas.marketplace import AuthorityRecordCreate, AuthorityRecordRead
 
 router = APIRouter(prefix="/api/authority-records", tags=["authority"], dependencies=[Depends(get_current_admin)])
-
+ 
 
 @router.get("", response_model=list[AuthorityRecordRead])
 def get_records(room_id: int | None = None, db: Session = Depends(get_db)):
@@ -44,7 +44,7 @@ def verify_record(
     authority_id: int,
     request: Request,
     admin: AdminUser = Depends(require_super_admin),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db), 
 ):
     record = get_authority_record(db, authority_id)
     if not record:

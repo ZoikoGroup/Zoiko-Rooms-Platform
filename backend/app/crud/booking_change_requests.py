@@ -107,8 +107,11 @@ def request_date_change(
         )
 
     offer = agreement.offer
-    already_moved_in = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
-    if already_moved_in is not None:
+    # The occupancy row now exists from signing onward (PENDING_MOVE_IN),
+    # not just once actually moved in -- its mere existence is no longer a
+    # valid "already moved in" signal, only its status is.
+    occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
+    if occupancy is not None and occupancy.status == "ACTIVE":
         raise HTTPException(
             status.HTTP_409_CONFLICT, "You have already moved in -- this move-in date can no longer be changed this way",
         )
@@ -217,8 +220,11 @@ def request_shortening(
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a fully signed agreement's term can be shortened this way")
 
     offer = agreement.offer
-    already_moved_in = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
-    if already_moved_in is not None:
+    # The occupancy row now exists from signing onward (PENDING_MOVE_IN),
+    # not just once actually moved in -- its mere existence is no longer a
+    # valid "already moved in" signal, only its status is.
+    occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
+    if occupancy is not None and occupancy.status == "ACTIVE":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "You have already moved in -- an early end now goes through ending your tenancy, not a date-shortening request",
@@ -422,7 +428,14 @@ def _complete_premises_change_if_applicable(db: Session, new_agreement: Agreemen
     old_occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == old_agreement.offer_id))
     deciding_admin = db.get(AdminUser, bcr.decided_by_admin_id) if bcr.decided_by_admin_id else None
     if old_occupancy is not None and old_occupancy.status == "ACTIVE" and deciding_admin is not None:
-        end_occupancy(db, old_occupancy, deciding_admin, basis="PREMISES_CHANGE_MIGRATION")
+        # ZR-ENG-CLR-006 AC-05: this is an early ending (the whole point of a
+        # premises-change migration is moving before the original tenancy's
+        # natural end), but it's not Host fiat -- the renter requested this
+        # migration and an admin already approved the BookingChangeRequest
+        # that authorizes it. already_adjudicated is the dedicated, non-
+        # public-facing escape from that guard for exactly this case (see
+        # crud/occupancy.py:end_occupancy's own docstring).
+        end_occupancy(db, old_occupancy, deciding_admin, basis="PREMISES_CHANGE_MIGRATION", already_adjudicated=True)
     elif old_agreement.status not in ("VOID", "EXPIRED"):
         old_agreement.status = "VOID"
 

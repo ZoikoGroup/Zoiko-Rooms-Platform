@@ -26,6 +26,7 @@ from app.models.identity_verification import IdentityVerification
 from app.models.leasing import Offer
 from app.models.listing import Listing
 from app.models.market_release import MarketRelease
+from app.models.occupancy import Occupancy
 from app.models.occupancy_classification import OccupancyClassification
 from app.models.party import Party
 from app.models.property import Property
@@ -232,6 +233,15 @@ class TestEndingOccupancyReleasesHold:
         db_session.commit()
 
         agreement.status = "SIGNED"
+        # dev's occupancy-lifecycle change: the occupancy row itself is now
+        # created at PARTIALLY_EXECUTED (PENDING_MOVE_IN), not by
+        # confirm_move_in -- this test flips agreement.status directly
+        # (bypassing that normal signing flow), so it creates the same row
+        # confirm_move_in now expects to already exist.
+        db_session.add(Occupancy(
+            offer_id=offer_a.id, listing_id=listing_id, room_id=room_id, guest_id=offer_a.guest_id,
+            status="PENDING_MOVE_IN", expected_end_date=date.today() + timedelta(days=180),
+        ))
         db_session.commit()
 
         occupancy = occupancy_crud.confirm_move_in(db_session, agreement, super_admin)

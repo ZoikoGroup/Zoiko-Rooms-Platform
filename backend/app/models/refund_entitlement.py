@@ -6,17 +6,20 @@ only; execution (creating/approving an actual RefundRequest against Section
 5's ledger) is a deliberately separate, later step, matching the doctrine
 'Refund entitlement is not refund execution.'
 
-Scope actually implemented, honestly: this build has no renter-facing fee,
-tax, credit or mitigation/re-letting concept (see crud/finance.py:
-get_payment_preview's identical scope note for AC-11), so
-refundable_renter_fees/refundable_taxes/approved_credits/mitigation_credit
-are always zero here, never fabricated. What the engine does compute for
-real: which paid RENT obligations fall after the case's
-effective_termination_date (unearned -> refundable) versus on/before it
-(earned -> non-refundable) -- no proration of a partial period is attempted,
-since this codebase has no approved amount_rule/proration formula anywhere
-(Section 7.2 requires one to be 'versioned' before use) -- only whole
-obligations are ever classified."""
+Scope actually implemented, honestly: this build has no renter-facing fee or
+tax concept (see crud/finance.py:get_payment_preview's identical scope note
+for AC-11), so refundable_renter_fees/refundable_taxes/approved_credits are
+always zero here, never fabricated. What the engine does compute for real:
+which paid RENT obligations fall after the case's effective_termination_date
+(unearned -> refundable) versus on/before it (earned -> non-refundable) --
+no proration of a partial period is attempted, since this codebase has no
+approved amount_rule/proration formula anywhere (Section 7.2 requires one to
+be 'versioned' before use) -- only whole obligations are ever classified.
+NOTICE_LIABILITY and MITIGATION_CREDIT ARE real, nonzero-capable computed
+values (AC-12/AC-13/AC-14) -- see crud/refund_entitlement.py:
+_compute_policy_liability/_compute_mitigation_credit -- driven by the
+case's own frozen policy_snapshot liability model plus any MitigationRecord
+evidence, not fabricated formulas invented at read time."""
 
 from datetime import date, datetime, timezone
 
@@ -25,13 +28,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-# ZR-ENG-CLR-006 Section 12.2's output line items, trimmed to the ones this
-# build actually produces (EARNED_RENT, REFUNDABLE_UNEARNED_RENT) -- every
-# other named line item (NOTICE_LIABILITY, MITIGATION_CREDIT, RENTER_FEE,
-# TAX, OTHER_CREDIT) is modeled here for schema completeness but only ever
-# appears with amount 0.00, since no notice-liability-beyond-normal-rent,
-# mitigation, fee, tax or credit concept exists in this codebase to compute
-# a real nonzero value from (see module docstring).
+# ZR-ENG-CLR-006 Section 12.2's output line items. EARNED_RENT/
+# REFUNDABLE_UNEARNED_RENT/NOTICE_LIABILITY/MITIGATION_CREDIT are all real,
+# nonzero-capable computed values (see module docstring). RENTER_FEE/TAX/
+# OTHER_CREDIT remain modeled for schema completeness but only ever appear
+# with amount 0.00 -- no fee, tax or service-recovery-credit concept exists
+# in this codebase to compute a real nonzero value from.
 REFUND_LINE_ITEM_TYPES = (
     "EARNED_RENT",
     "REFUNDABLE_UNEARNED_RENT",
@@ -45,10 +47,19 @@ REFUND_LINE_ITEM_TYPES = (
 # simulated build can actually distinguish -- crud/finance.py:decide_refund's
 # own docstring already establishes 'Approving is completing -- there's no
 # separate money-movement step in a simulated system' for Section 5's own
-# RefundRequest, so the DRAFT/FUNDING_READY/SUBMITTED_TO_PSP/PROCESSING
-# distinctions have no real state to occupy here; EXECUTED is reached the
-# moment every REFUNDABLE_UNEARNED_RENT line's RefundRequest is approved.
-REFUND_ENTITLEMENT_STATUSES = ("CALCULATED", "EXECUTED")
+# RefundRequest, so the FUNDING_READY/SUBMITTED_TO_PSP/PROCESSING distinctions
+# have no real state to occupy here. APPROVED is real, though: Section 16.2
+# is explicit that "HYBRID. Deterministic, low-risk refunds may auto-approve.
+# Manual review is required for disputes, exceptional compensation,
+# insufficient Host funds, high-value thresholds, evidence-dependent
+# statutory grounds, suspected abuse/fraud, legal holds or policy ambiguity" --
+# this build has none of that risk-scoring infrastructure yet, so it fails
+# closed the same way AC-35 already does elsewhere: every entitlement
+# requires an explicit approve_refund_entitlement call (crud/
+# refund_entitlement.py) before it can be executed, rather than silently
+# auto-approving everything. EXECUTED is reached the moment every
+# REFUNDABLE_UNEARNED_RENT line's RefundRequest is approved.
+REFUND_ENTITLEMENT_STATUSES = ("CALCULATED", "APPROVED", "EXECUTED")
 
 
 class RefundEntitlement(Base):
@@ -68,6 +79,8 @@ class RefundEntitlement(Base):
     status: Mapped[str] = mapped_column(String(20), default="CALCULATED")
     calculated_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     calculated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    approved_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     executed_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

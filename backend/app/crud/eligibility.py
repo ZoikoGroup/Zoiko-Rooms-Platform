@@ -104,6 +104,11 @@ def check_move_in_eligibility(db, agreement: Agreement) -> list[str]:
     if unpaid:
         reasons.append("Initial rent and deposit obligations are not fully paid")
 
-    reasons += check_room_capacity(db, listing.room)
+    # The occupancy this very check is gating (created PENDING_MOVE_IN at
+    # signing -- see crud/leasing.py's own _apply_signature) already counts
+    # itself as a live occupant of the room; exclude it so a room's own
+    # first tenant doesn't fail its own capacity check.
+    this_occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
+    reasons += check_room_capacity(db, listing.room, exclude_occupancy_id=this_occupancy.id if this_occupancy else None)
 
     return reasons

@@ -21,6 +21,7 @@ from app.models.guest import Guest
 from app.models.leasing import Agreement, Application, Offer, OfferTerms
 from app.models.listing import Listing
 from app.models.market_release import MarketRelease
+from app.models.occupancy import Occupancy
 from app.models.occupancy_classification import OccupancyClassification
 from app.models.property import Property
 from app.models.room import Room
@@ -147,6 +148,13 @@ def _make_signed_agreement_with_schedule(
     db.add(Obligation(
         obligation_type="RENT", money_plane="OCCUPANCY", amount=monthly_rent, currency="INR",
         due_date=date.today(), status="PAID", agreement_id=agreement.id, schedule_id=schedule.id,
+    ))
+    # dev's occupancy-lifecycle change: the occupancy row is now created at
+    # PARTIALLY_EXECUTED (PENDING_MOVE_IN), not by confirm_move_in -- mirrors
+    # test_occupancy_crud.py:_make_signed_agreement's own fix.
+    db.add(Occupancy(
+        offer_id=offer.id, listing_id=listing.id, room_id=room.id, guest_id=guest.id,
+        status="PENDING_MOVE_IN", expected_end_date=occupancy_crud._add_months(date.today(), term_months),
     ))
     db.commit()
     return agreement, offer, listing, room, guest, schedule

@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.crud import notification as notif_crud
+from app.crud.events import emit_event
 from app.crud.party import assert_provider_access, party_id_for_room
 from app.models.admin_user import AdminUser
 from app.models.finance import Obligation
@@ -64,6 +65,14 @@ def report_habitability_incident(
     if data.severity in ROOM_FREEZING_SEVERITIES:
         occupancy.room.status = "inactive"
 
+    db.flush()
+    # ZR-ENG-CLR-006 Section 20.2: property.habitability_incident_opened --
+    # the one spec-named event this path had only as a notification, never
+    # as a domain event.
+    emit_event(
+        db, "property.habitability_incident_opened", "habitability_incident", str(incident.id),
+        {"roomId": occupancy.room_id, "occupancyId": occupancy.id, "severity": data.severity},
+    )
     db.commit()
     db.refresh(incident)
 
@@ -111,6 +120,15 @@ def resolve_habitability_incident(
         )
         if other_open_severe is None:
             incident.room.status = "active"
+            # ZR-ENG-CLR-006 Section 20.2: booking.inventory_reopened -- the
+            # room becoming bookable again is exactly this event, fired only
+            # from this authorized resolution path (Section 20.3: "Inventory
+            # reopening must occur only from an authorized termination/
+            # occupancy event").
+            emit_event(
+                db, "booking.inventory_reopened", "room", str(incident.room_id),
+                {"habitabilityIncidentId": incident.id},
+            )
 
     db.commit()
     db.refresh(incident)

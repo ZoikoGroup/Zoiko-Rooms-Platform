@@ -1,9 +1,9 @@
 """ZR-ENG-CLR-006 Section 12: the Refund Entitlement Calculation Engine.
-Only the two real line types this build can compute for real (EARNED_RENT,
-REFUNDABLE_UNEARNED_RENT) ever carry a nonzero amount -- every other named
-Section 12.2 line item (notice liability beyond ordinary rent, mitigation,
-renter fee, tax, other credit) is always zero (see
-models/refund_entitlement.py's own module docstring for exactly why)."""
+EARNED_RENT/REFUNDABLE_UNEARNED_RENT are always real; NOTICE_LIABILITY and
+MITIGATION_CREDIT are real whenever the resolved market pack's
+termination_liability_model calls for a nonzero amount (AC-12/13/14 -- see
+TestLiabilityModels below). RENTER_FEE/TAX/OTHER_CREDIT remain always zero
+(see models/refund_entitlement.py's own module docstring for exactly why)."""
 
 from __future__ import annotations
 
@@ -15,10 +15,12 @@ from sqlalchemy import select
 
 from app.crud import refund_entitlement as refund_entitlement_crud
 from app.crud import termination as termination_crud
+from app.models.audit import AuditEvent
 from app.models.domain_event import DomainEvent
-from app.models.finance import LedgerEntry, Obligation, PaymentAllocation, PayoutBeneficiary, SimulatedPayment
+from app.models.finance import LedgerEntry, Obligation, PaymentAllocation, PaymentSchedule, PayoutBeneficiary, SimulatedPayment
 from app.models.market_policy import MarketPolicyPack
 from app.models.notification import Notification
+from app.schemas.termination import MitigationRecordCreate
 from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
 from tests.test_termination_case import _make_active_occupancy
 
@@ -96,6 +98,30 @@ class TestCalculateRefundEntitlement:
 
         r = client.get(f"/api/occupancy/termination-cases/{case_id}/refund-entitlements", cookies=admin_cookies)
         assert len(r.json()) == 2
+
+    def test_calculation_endpoint_returns_the_latest_version(self, client, db_session: Session):
+        """ZR-ENG-CLR-006 Section 20.1 GET /termination-cases/{id}/calculation."""
+        admin = _make_admin(db_session, email="refund-calcget-admin@test.com", role="super_admin")
+        occupancy, _guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="calcget1")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            f"/api/occupancy/{occupancy.id}/termination-cases",
+            json={"causeCode": "HOST_FAULT_OR_NONPERFORMANCE"}, cookies=admin_cookies,
+        )
+        case_id = r.json()["id"]
+
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}/calculation", cookies=admin_cookies)
+        assert r.status_code == 404, r.text
+
+        r1 = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        r2 = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}/calculation", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        assert r.json()["id"] == r2.json()["id"]
+        assert r.json()["version"] == 2
+        assert r.json()["id"] != r1.json()["id"]
 
     def test_calculating_emits_a_domain_event(self, client, db_session: Session):
         """ZR-ENG-CLR-006 Section 20.2: refund.entitlement_calculated."""
@@ -239,6 +265,7 @@ class TestExecuteRefundEntitlement:
             client, db_session, suffix="exec1",
         )
 
+        client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
         r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
         assert r.status_code == 200, r.text
         body = r.json()
@@ -259,6 +286,7 @@ class TestExecuteRefundEntitlement:
         occupancy.guest.user_account_id = renter.id
         db_session.commit()
 
+        client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
         r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
         assert r.status_code == 200, r.text
 
@@ -272,12 +300,13 @@ class TestExecuteRefundEntitlement:
 
     def test_execute_emits_a_domain_event(self, client, db_session: Session):
         """ZR-ENG-CLR-006 Section 20.2 -- see crud/refund_entitlement.py's own
-        comment for why this build emits one 'executed' event rather than
-        separate submitted/settled ones."""
+        comment for why this build has no separate refund.failed event."""
         _admin, admin_cookies, _occupancy, _future_obligation, case_id, entitlement_id = self._open_case_with_unearned_rent(
             client, db_session, suffix="exec-event",
         )
-        client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
+        client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
+        r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
+        refund_request_id = next(item["refundRequestId"] for item in r.json()["lineItems"] if item["type"] == "REFUNDABLE_UNEARNED_RENT")
 
         event = db_session.scalar(
             select(DomainEvent).where(
@@ -289,10 +318,21 @@ class TestExecuteRefundEntitlement:
         assert event is not None
         assert event.payload["terminationCaseId"] == case_id
 
+        submitted_event = db_session.scalar(
+            select(DomainEvent).where(
+                DomainEvent.event_type == "refund.submitted",
+                DomainEvent.resource_type == "refund_request",
+                DomainEvent.resource_id == str(refund_request_id),
+            )
+        )
+        assert submitted_event is not None
+        assert submitted_event.payload["terminationCaseId"] == case_id
+
     def test_executing_twice_on_the_same_entitlement_is_rejected(self, client, db_session: Session):
         _admin, admin_cookies, _occupancy, _future_obligation, _case_id, entitlement_id = self._open_case_with_unearned_rent(
             client, db_session, suffix="exec2",
         )
+        client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
         r1 = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
         assert r1.status_code == 200, r1.text
 
@@ -314,10 +354,12 @@ class TestExecuteRefundEntitlement:
         second_entitlement_id = r.json()["id"]
         assert r.json()["version"] == 2
 
+        client.post(f"/api/occupancy/refund-entitlements/{second_entitlement_id}/approve", cookies=admin_cookies)
         r = client.post(f"/api/occupancy/refund-entitlements/{second_entitlement_id}/execute", cookies=admin_cookies)
         assert r.status_code == 200, r.text
         newer_refund_id = next(item for item in r.json()["lineItems"] if item["type"] == "REFUNDABLE_UNEARNED_RENT")["refundRequestId"]
 
+        client.post(f"/api/occupancy/refund-entitlements/{first_entitlement_id}/approve", cookies=admin_cookies)
         r = client.post(f"/api/occupancy/refund-entitlements/{first_entitlement_id}/execute", cookies=admin_cookies)
         assert r.status_code == 200, r.text
         older_refund_id = next(item for item in r.json()["lineItems"] if item["type"] == "REFUNDABLE_UNEARNED_RENT")["refundRequestId"]
@@ -331,6 +373,75 @@ class TestExecuteRefundEntitlement:
 
         r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=auth_admin_cookie(outsider))
         assert r.status_code == 403, r.text
+
+    def test_executing_an_unapproved_entitlement_is_rejected(self, client, db_session: Session):
+        """ZR-ENG-CLR-006 Section 16.1: CALCULATED must move to APPROVED
+        before it can be executed -- see models/refund_entitlement.py:
+        REFUND_ENTITLEMENT_STATUSES's own docstring for why this build
+        requires the step explicitly rather than auto-approving."""
+        _admin, admin_cookies, _occupancy, _future_obligation, _case_id, entitlement_id = self._open_case_with_unearned_rent(
+            client, db_session, suffix="exec5",
+        )
+
+        r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
+        assert r.status_code == 409, r.text
+
+
+class TestApproveRefundEntitlement:
+    """ZR-ENG-CLR-006 Section 16.1/20.1 POST /refund-entitlements/{id}/approve."""
+
+    def _open_case_with_unearned_rent(self, client, db_session: Session, *, suffix: str):
+        return TestExecuteRefundEntitlement()._open_case_with_unearned_rent(client, db_session, suffix=suffix)
+
+    def test_provider_owner_can_approve_and_it_unlocks_execution(self, client, db_session: Session):
+        admin, admin_cookies, _occupancy, _future_obligation, _case_id, entitlement_id = self._open_case_with_unearned_rent(
+            client, db_session, suffix="approve1",
+        )
+
+        r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "APPROVED"
+        assert body["approvedByAdminId"] == admin.id
+        assert body["approvedAt"] is not None
+
+        r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "EXECUTED"
+
+    def test_approving_twice_is_rejected(self, client, db_session: Session):
+        _admin, admin_cookies, _occupancy, _future_obligation, _case_id, entitlement_id = self._open_case_with_unearned_rent(
+            client, db_session, suffix="approve2",
+        )
+        client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
+
+        r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
+        assert r.status_code == 409, r.text
+
+    def test_an_outsider_admin_cannot_approve(self, client, db_session: Session):
+        _admin, admin_cookies, _occupancy, _future_obligation, _case_id, entitlement_id = self._open_case_with_unearned_rent(
+            client, db_session, suffix="approve3",
+        )
+        outsider = _make_admin(db_session, email="refund-approve-outsider@test.com", role="admin")
+
+        r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=auth_admin_cookie(outsider))
+        assert r.status_code == 403, r.text
+
+    def test_approving_emits_a_domain_event(self, client, db_session: Session):
+        _admin, admin_cookies, _occupancy, _future_obligation, case_id, entitlement_id = self._open_case_with_unearned_rent(
+            client, db_session, suffix="approve4",
+        )
+        client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
+
+        event = db_session.scalar(
+            select(DomainEvent).where(
+                DomainEvent.event_type == "refund.approved",
+                DomainEvent.resource_type == "refund_entitlement",
+                DomainEvent.resource_id == str(entitlement_id),
+            )
+        )
+        assert event is not None
+        assert event.payload["terminationCaseId"] == case_id
 
 
 class TestRenterViewsOwnRefundEntitlement:
@@ -433,6 +544,7 @@ class TestPlatformFeeReversal:
         r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
         entitlement_id = r.json()["id"]
 
+        client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
         r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
         assert r.status_code == 200, r.text
         refund_request_id = next(
@@ -471,6 +583,7 @@ class TestPlatformFeeReversal:
         r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
         entitlement_id = r.json()["id"]
 
+        client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
         r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
         assert r.status_code == 200, r.text
         refund_request_id = next(
@@ -557,6 +670,7 @@ class TestTribunalLiability:
         r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
         entitlement_id = r.json()["id"]
 
+        client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
         r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
         assert r.status_code == 200, r.text
         unearned_line = next(item for item in r.json()["lineItems"] if item["type"] == "REFUNDABLE_UNEARNED_RENT")
@@ -579,6 +693,57 @@ class TestTribunalLiability:
         assert r.status_code == 200, r.text
         assert float(r.json()["netRefund"]) == 0.0
 
+    def test_tribunal_liability_calculate_and_execute_are_all_audit_logged(self, client, db_session: Session):
+        """These are the highest-stakes admin actions in the whole engine --
+        a Super Admin override, a versioned money calculation and an actual
+        payment-execution trigger -- so each needs its own audit trail entry,
+        not just the generic domain-event outbox."""
+        admin, admin_cookies, _occupancy, _obligation, case_id = self._open_case_with_unearned_rent(client, db_session, suffix="audit1")
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/tribunal-liability",
+            json={"amount": 300.0, "reason": "Tribunal ordered a 300 liability"}, cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        audit = db_session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "termination_case.tribunal_liability", AuditEvent.resource_id == str(case_id),
+            )
+        )
+        assert audit is not None
+        assert audit.reason == "Tribunal ordered a 300 liability"
+
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        entitlement_id = r.json()["id"]
+        audit = db_session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "refund_entitlement.calculate", AuditEvent.resource_id == str(entitlement_id),
+            )
+        )
+        assert audit is not None
+        assert audit.object_version == "1"
+
+        r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/approve", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        audit = db_session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "refund_entitlement.approve", AuditEvent.resource_id == str(entitlement_id),
+            )
+        )
+        assert audit is not None
+        assert audit.after_state == "APPROVED"
+
+        r = client.post(f"/api/occupancy/refund-entitlements/{entitlement_id}/execute", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        audit = db_session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "refund_entitlement.execute", AuditEvent.resource_id == str(entitlement_id),
+            )
+        )
+        assert audit is not None
+        assert audit.after_state == "EXECUTED"
+
     def test_no_liability_leaves_the_notice_liability_line_at_zero(self, client, db_session: Session):
         _admin, admin_cookies, _occupancy, _obligation, case_id = self._open_case_with_unearned_rent(client, db_session, suffix="set5")
 
@@ -587,3 +752,147 @@ class TestTribunalLiability:
         notice_line = next(item for item in r.json()["lineItems"] if item["type"] == "NOTICE_LIABILITY")
         assert float(notice_line["amount"]) == 0.0
         assert float(r.json()["grossRefundable"]) == float(r.json()["netRefund"])
+
+
+class TestLiabilityModels:
+    """ZR-ENG-CLR-006 Section 11.1/AC-12: the per-market-pack liability-model
+    dispatch (crud/refund_entitlement.py:_compute_policy_liability). Each
+    test mutates the shared IN MarketPolicyPack row directly -- db_session is
+    transactional per test (tests/conftest.py), so this never leaks into
+    other tests -- and adds the PaymentSchedule row _make_active_occupancy's
+    own fixture doesn't create (it builds the agreement directly, bypassing
+    crud/leasing.py:create_agreement's normal schedule-creation step)."""
+
+    def _set_liability_model(self, db: Session, *, model: str, break_fee_multiple: float = 0.0, cap_multiple: float | None = None) -> None:
+        policy = db.query(MarketPolicyPack).filter_by(jurisdiction_code="IN").one()
+        policy.termination_liability_model = model
+        policy.termination_break_fee_rent_multiple = break_fee_multiple
+        policy.termination_liability_cap_rent_multiple = cap_multiple
+        db.commit()
+
+    def _open_case_with_schedule(self, client, db_session: Session, *, suffix: str, monthly_rent: float = 1000.0):
+        """RENTER_ORDINARY_EARLY_EXIT, not HOST_FAULT_OR_NONPERFORMANCE --
+        _compute_policy_liability always zero-liabilities the latter
+        regardless of the configured model (a Host-fault cause is always
+        the renter's own zero-liability protection, per spec), so exercising
+        STATUTORY_BREAK_FEE/CAPPED_COMPENSATION/ACTUAL_REASONABLE_LOSS needs
+        the one cause those models are actually meant to apply to."""
+        admin = _make_admin(db_session, email=f"liability-{suffix}@test.com", role="super_admin")
+        occupancy, guest, _listing, agreement = _make_active_occupancy(db_session, admin=admin, suffix=suffix, monthly_rent=monthly_rent)
+        db_session.add(PaymentSchedule(
+            agreement_id=agreement.id, cadence="MONTHLY", amount=monthly_rent, first_due=date.today(), anchor_day=date.today().day,
+            status="ACTIVE",
+        ))
+        db_session.commit()
+
+        # RENTER_ORDINARY_EARLY_EXIT resolves to today + the market pack's
+        # termination_notice_days (default 30, unchanged here) -- due_date
+        # must fall after that to land as REFUNDABLE_UNEARNED_RENT rather
+        # than EARNED_RENT.
+        future_obligation = Obligation(
+            obligation_type="RENT", money_plane="OCCUPANCY", amount=monthly_rent, currency="INR",
+            due_date=date.today() + timedelta(days=40), status="PENDING", occupancy_id=occupancy.id,
+        )
+        db_session.add(future_obligation)
+        db_session.commit()
+        _pay_obligation(db_session, guest.id, future_obligation, monthly_rent, suffix=suffix)
+
+        renter = _make_user(db_session, email=f"liability-{suffix}-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        admin_cookies = auth_admin_cookie(admin)
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        case_id = r.json()["id"]
+        return admin, admin_cookies, occupancy, case_id
+
+    def test_statutory_break_fee_charges_a_rent_multiple(self, client, db_session: Session):
+        self._set_liability_model(db_session, model="STATUTORY_BREAK_FEE", break_fee_multiple=0.5)
+        _admin, admin_cookies, _occupancy, case_id = self._open_case_with_schedule(client, db_session, suffix="sbf1", monthly_rent=1000.0)
+
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        notice_line = next(item for item in body["lineItems"] if item["type"] == "NOTICE_LIABILITY")
+        assert float(notice_line["amount"]) == 500.0
+        assert float(body["grossRefundable"]) == 1000.0
+        assert float(body["netRefund"]) == 500.0
+
+    def test_capped_compensation_caps_the_raw_break_fee(self, client, db_session: Session):
+        # A 1x-rent break fee configured, but capped at 0.25x -- the cap wins.
+        self._set_liability_model(db_session, model="CAPPED_COMPENSATION", break_fee_multiple=1.0, cap_multiple=0.25)
+        _admin, admin_cookies, _occupancy, case_id = self._open_case_with_schedule(client, db_session, suffix="cap1", monthly_rent=1000.0)
+
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        notice_line = next(item for item in r.json()["lineItems"] if item["type"] == "NOTICE_LIABILITY")
+        assert float(notice_line["amount"]) == 250.0
+
+    def test_zero_liability_model_charges_nothing_even_with_a_configured_multiple(self, client, db_session: Session):
+        self._set_liability_model(db_session, model="ZERO_LIABILITY", break_fee_multiple=1.0)
+        _admin, admin_cookies, _occupancy, case_id = self._open_case_with_schedule(client, db_session, suffix="zero1")
+
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        notice_line = next(item for item in r.json()["lineItems"] if item["type"] == "NOTICE_LIABILITY")
+        assert float(notice_line["amount"]) == 0.0
+
+    def test_actual_reasonable_loss_charges_recorded_reletting_costs(self, client, db_session: Session):
+        self._set_liability_model(db_session, model="ACTUAL_REASONABLE_LOSS")
+        admin, admin_cookies, occupancy, case_id = self._open_case_with_schedule(client, db_session, suffix="arl1")
+
+        case = termination_crud.get_termination_case_or_404(db_session, case_id)
+        termination_crud.record_mitigation(
+            db_session, case, admin, MitigationRecordCreate(reasonable_reletting_costs=150.0, notes="Advertising costs"),
+        )
+
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        notice_line = next(item for item in body["lineItems"] if item["type"] == "NOTICE_LIABILITY")
+        assert float(notice_line["amount"]) == 150.0
+        mitigation_line = next(item for item in body["lineItems"] if item["type"] == "MITIGATION_CREDIT")
+        assert float(mitigation_line["amount"]) == 0.0
+
+    def test_actual_reasonable_loss_overlap_guard_credits_replacement_rent(self, client, db_session: Session):
+        """AC-13/AC-14: a Host who re-lets promptly cannot also collect the
+        full reasonable-loss charge from the departing renter -- replacement
+        rent already recovered reduces (never below zero) the same amount."""
+        self._set_liability_model(db_session, model="ACTUAL_REASONABLE_LOSS")
+        admin, admin_cookies, occupancy, case_id = self._open_case_with_schedule(client, db_session, suffix="arl2")
+
+        case = termination_crud.get_termination_case_or_404(db_session, case_id)
+        termination_crud.record_mitigation(
+            db_session, case, admin,
+            MitigationRecordCreate(reasonable_reletting_costs=150.0, replacement_rent_amount=150.0, notes="Re-let within a week"),
+        )
+
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        notice_line = next(item for item in body["lineItems"] if item["type"] == "NOTICE_LIABILITY")
+        assert float(notice_line["amount"]) == 0.0  # fully mitigated
+        mitigation_line = next(item for item in body["lineItems"] if item["type"] == "MITIGATION_CREDIT")
+        assert float(mitigation_line["amount"]) == 150.0
+        assert "overlap_guard" in mitigation_line["basisNote"]
+
+    def test_tribunal_liability_supersedes_the_modeled_estimate_not_adds_to_it(self, client, db_session: Session):
+        """A Super Admin's own real determination replaces the policy
+        model's own estimate rather than stacking on top of it -- otherwise
+        the renter would be charged for the same early-termination event
+        twice."""
+        self._set_liability_model(db_session, model="STATUTORY_BREAK_FEE", break_fee_multiple=0.5)
+        admin, admin_cookies, _occupancy, case_id = self._open_case_with_schedule(client, db_session, suffix="sup1", monthly_rent=1000.0)
+
+        client.post(
+            f"/api/occupancy/termination-cases/{case_id}/tribunal-liability",
+            json={"amount": 100.0, "reason": "Tribunal determined a lower amount than the market pack's own formula"},
+            cookies=admin_cookies,
+        )
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        notice_line = next(item for item in r.json()["lineItems"] if item["type"] == "NOTICE_LIABILITY")
+        assert float(notice_line["amount"]) == 100.0  # not 500 (the STATUTORY_BREAK_FEE estimate) + 100

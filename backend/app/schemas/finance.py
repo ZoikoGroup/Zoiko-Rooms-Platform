@@ -196,6 +196,10 @@ class PayoutRecordRead(CamelModel):
     currency: str
     status: str
     hold_reason: str
+    # ZR-ENG-CLR-006 Section 15 waterfall tier 4: how much of `amount` was
+    # withheld to settle a prior HostRecovery -- 0.0 unless run_payout
+    # actually applied an offset. Actual cash disbursed = amount - this.
+    recovery_offset_amount: float
     created_at: datetime
     paid_at: datetime | None
 

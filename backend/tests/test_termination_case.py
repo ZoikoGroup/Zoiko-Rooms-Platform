@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.crud import occupancy as occupancy_crud
 from app.crud import termination as termination_crud
 from app.crud.party import get_or_create_default_party
+from app.models.audit import AuditEvent
 from app.models.authority_record import AuthorityRecord
 from app.models.finance import Obligation
 from app.models.guest import Guest
@@ -23,6 +24,7 @@ from app.models.leasing import Agreement, Application, Offer, OfferTerms
 from app.models.listing import Listing
 from app.models.market_release import MarketRelease
 from app.models.market_policy import MarketPolicyPack
+from app.models.occupancy import Occupancy
 from app.models.occupancy_classification import OccupancyClassification
 from app.models.domain_event import DomainEvent
 from app.models.property import Property
@@ -32,9 +34,14 @@ from app.schemas.termination import TerminationCaseCreate
 from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
 
 
-def _make_active_occupancy(db: Session, *, admin, suffix: str, monthly_rent: float = 1000.0, term_months: int = 12):
+def _make_active_occupancy(
+    db: Session, *, admin, suffix: str, monthly_rent: float = 1000.0, term_months: int = 12, jurisdiction_code: str = "IN",
+):
     owner_party = get_or_create_default_party(db, admin)
-    prop = Property(owner_party_id=owner_party.id, address=f"{suffix} Term St", city="Bengaluru", status="active")
+    prop = Property(
+        owner_party_id=owner_party.id, address=f"{suffix} Term St", city="Bengaluru", status="active",
+        jurisdiction_code=jurisdiction_code,
+    )
     db.add(prop)
     db.flush()
     room = Room(property_id=prop.id, room_type="private_room", size=100, has_ensuite=True, status="active")
@@ -81,6 +88,15 @@ def _make_active_occupancy(db: Session, *, admin, suffix: str, monthly_rent: flo
         obligation_type="RENT", money_plane="OCCUPANCY", amount=monthly_rent, currency="INR",
         due_date=date.today(), status="PAID", agreement_id=agreement.id,
     ))
+    # dev's occupancy-lifecycle change: the occupancy row itself is now
+    # created at PARTIALLY_EXECUTED (PENDING_MOVE_IN), not by confirm_move_in
+    # -- this fixture builds the agreement directly (bypassing that normal
+    # signing flow), so it creates the same row confirm_move_in now expects
+    # to already exist.
+    db.add(Occupancy(
+        offer_id=offer.id, listing_id=listing.id, room_id=room.id, guest_id=guest.id,
+        status="PENDING_MOVE_IN", expected_end_date=date.today() + timedelta(days=30 * term_months),
+    ))
     db.commit()
 
     occupancy = occupancy_crud.confirm_move_in(db, agreement, admin)
@@ -121,6 +137,88 @@ class TestOpenTerminationCase:
         )
         assert r.status_code == 201, r.text
         assert r.json()["earliestEffectiveDate"] == date.today().isoformat()
+
+    def test_casualty_or_force_event_resolves_to_immediate_effective_date_for_a_renter(self, client, db_session: Session):
+        """CASUALTY_OR_FORCE_EVENT (fire/flood/disaster) is nobody's fault --
+        added to IMMEDIATE_CAUSE_CODES alongside PROPERTY_UNINHABITABLE/
+        HOST_FAULT_OR_NONPERFORMANCE, same immediate/zero-liability treatment."""
+        admin = _make_admin(db_session, email="term-casualty-renter-admin@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="casualty1")
+        renter = _make_user(db_session, email="term-casualty-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "CASUALTY_OR_FORCE_EVENT", "notes": "Building flooded overnight"},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["status"] == "EFFECTIVE_DATE_SET"
+        assert body["earliestEffectiveDate"] == date.today().isoformat()
+
+    def test_casualty_or_force_event_resolves_to_immediate_effective_date_for_a_host(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-casualty-host-admin@test.com", role="super_admin")
+        occupancy, _guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="casualty2")
+
+        r = client.post(
+            f"/api/occupancy/{occupancy.id}/termination-cases",
+            json={"causeCode": "CASUALTY_OR_FORCE_EVENT", "notes": "Fire department condemned the building"},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["earliestEffectiveDate"] == date.today().isoformat()
+
+    def test_renter_statutory_right_without_evidence_lands_in_pending_review(self, client, db_session: Session):
+        """AC-35/Section 21.1: an unsubstantiated claim of a protected ground
+        still opens a case (never rejected outright) but can't auto-resolve
+        without evidence -- see EVIDENCE_GATED_CAUSE_CODES."""
+        admin = _make_admin(db_session, email="term-statutory-noevidence-admin@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="statutorynoevidence")
+        renter = _make_user(db_session, email="term-statutory-noevidence-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_STATUTORY_RIGHT", "notes": "Qualifying safety concern"},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["status"] == "PENDING_REVIEW"
+        assert body["earliestEffectiveDate"] is None
+
+    def test_renter_statutory_right_with_evidence_resolves_immediately(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-statutory-evidence-admin@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="statutoryevidence")
+        renter = _make_user(db_session, email="term-statutory-evidence-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_STATUTORY_RIGHT", "evidenceRefs": ["doc-123"]},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["status"] == "EFFECTIVE_DATE_SET"
+        assert body["earliestEffectiveDate"] == date.today().isoformat()
+        assert body["evidenceRefs"] == ["doc-123"]
+
+        # Section 21.1: a general Host/Admin sees the notes redacted for this
+        # sensitive cause code -- but the case itself still resolved, and
+        # evidence_refs (opaque IDs, not the sensitive narrative) are not
+        # redacted.
+        general_admin = _make_admin(db_session, email="term-statutory-evidence-generaladmin@test.com", role="admin")
+        db_session.query(Listing).filter_by(id=_listing.id).update({"owner_id": general_admin.id})
+        db_session.commit()
+        r = client.get(f"/api/occupancy/{occupancy.id}/termination-cases", cookies=auth_admin_cookie(general_admin))
+        assert r.status_code == 200, r.text
+        [case_read] = r.json()
+        assert case_read["notes"] == "[redacted -- sensitive protected-ground details, Super Admin only]"
 
     def test_a_cause_this_build_cannot_auto_resolve_lands_in_pending_review(self, client, db_session: Session):
         """ZR-ENG-CLR-006 AC-35: 'An unsupported or ambiguous required legal
@@ -257,6 +355,22 @@ class TestOpenTerminationCase:
         )
         assert event is not None
         assert event.payload["occupancyId"] == occupancy.id
+
+        policy_event = db_session.scalar(
+            select(DomainEvent).where(
+                DomainEvent.event_type == "termination.policy_resolved",
+                DomainEvent.resource_type == "termination_case",
+                DomainEvent.resource_id == str(case_id),
+            )
+        )
+        assert policy_event is not None
+        assert policy_event.payload["policyPackId"] is not None
+
+        # ZR-ENG-CLR-006 Section 19: actor/state fields on the event itself.
+        assert event.actor_kind == "guest"
+        assert event.actor_id == str(guest.id)
+        assert event.new_state == "EFFECTIVE_DATE_SET"
+        assert event.payload_hash is not None
 
     def test_a_different_renter_cannot_open_a_case_for_this_occupancy(self, client, db_session: Session):
         admin = _make_admin(db_session, email="term-owner-admin@test.com", role="super_admin")
@@ -496,6 +610,14 @@ class TestMutualSurrender:
         assert body["status"] == "EFFECTIVE_DATE_SET"
         assert body["effectiveTerminationDate"] == proposed_date
 
+        audit = db_session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "termination_case.accept_surrender", AuditEvent.resource_id == str(case_id),
+            )
+        )
+        assert audit is not None
+        assert audit.actor_admin_id == admin.id
+
     def test_renter_proposes_and_host_declines(self, client, db_session: Session):
         admin = _make_admin(db_session, email="surrender-decline-admin@test.com", role="super_admin")
         occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="surrender2")
@@ -514,6 +636,13 @@ class TestMutualSurrender:
         r = client.post(f"/api/occupancy/termination-cases/{case_id}/decline-surrender", cookies=auth_admin_cookie(admin))
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "SURRENDER_DECLINED"
+
+        audit = db_session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "termination_case.decline_surrender", AuditEvent.resource_id == str(case_id),
+            )
+        )
+        assert audit is not None
 
         # QT-07: original tenancy remains active, and a new case may be opened.
         db_session.refresh(occupancy)
@@ -736,6 +865,30 @@ class TestDecideTerminationCase:
         )
         assert event is not None
 
+    def test_deciding_logs_an_audit_event(self, client, db_session: Session):
+        """A Super Admin override this consequential needs its own entry in
+        the audit trail, not just the generic event outbox."""
+        admin, _occupancy, case_id = self._open_pending_review_case(client, db_session, suffix="decide9")
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/decision",
+            json={"approve": True, "effectiveTerminationDate": date.today().isoformat(), "reason": "Break clause verified"},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 200, r.text
+
+        audit = db_session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "termination_case.decision",
+                AuditEvent.resource_type == "termination_case",
+                AuditEvent.resource_id == str(case_id),
+            )
+        )
+        assert audit is not None
+        assert audit.reason == "Break clause verified"
+        assert audit.after_state == "EFFECTIVE_DATE_SET"
+        assert audit.actor_admin_id == admin.id
+
     def test_after_rejection_a_new_case_can_be_opened(self, client, db_session: Session):
         admin, occupancy, case_id = self._open_pending_review_case(client, db_session, suffix="decide8")
         client.post(
@@ -845,3 +998,660 @@ class TestSensitiveCausePrivacy:
         r = client.get("/api/occupancy/termination-cases", cookies=auth_admin_cookie(admin))
         assert r.status_code == 200, r.text
         assert r.json()[0]["notes"] == "moving for a new job"
+
+
+class TestPreviewTerminationCase:
+    """ZR-ENG-CLR-006 Section 7.1 Step 5: POST .../termination-cases/preview
+    -- computes the same pathway/date/cost estimate open_termination_case
+    would actually produce, but persists nothing."""
+
+    def test_preview_persists_nothing_and_matches_a_real_calculation(self, client, db_session: Session):
+        from app.models.finance import PaymentAllocation, SimulatedPayment
+
+        admin = _make_admin(db_session, email="term-preview-admin1@test.com", role="super_admin")
+        occupancy, guest, _listing, agreement = _make_active_occupancy(db_session, admin=admin, suffix="preview1")
+        renter = _make_user(db_session, email="term-preview-renter1@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        def _pay(obligation: Obligation, amount: float, suffix: str) -> None:
+            payment = SimulatedPayment(guest_id=guest.id, amount=amount, currency="INR", idempotency_key=f"preview-{suffix}", status="SUCCEEDED")
+            db_session.add(payment)
+            db_session.flush()
+            db_session.add(PaymentAllocation(payment_id=payment.id, obligation_id=obligation.id, amount_allocated=amount))
+            db_session.commit()
+
+        initial_obligation = db_session.scalar(
+            select(Obligation).where(Obligation.agreement_id == agreement.id, Obligation.obligation_type == "RENT")
+        )
+        _pay(initial_obligation, 1000.0, "initial")
+        future_obligation = Obligation(
+            obligation_type="RENT", money_plane="OCCUPANCY", amount=1000.0, currency="INR",
+            due_date=date.today() + timedelta(days=30), status="PENDING", occupancy_id=occupancy.id,
+        )
+        db_session.add(future_obligation)
+        db_session.commit()
+        _pay(future_obligation, 1000.0, "future")
+
+        assert db_session.scalars(select(termination_crud.TerminationCase)).all() == []
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases/preview",
+            json={"causeCode": "HOST_FAULT_OR_NONPERFORMANCE"},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 200, r.text
+        preview = r.json()
+        assert preview["resolvedStatus"] == "EFFECTIVE_DATE_SET"
+        assert preview["earliestEffectiveDate"] == date.today().isoformat()
+        assert preview["estimatedEarnedRent"] == 1000.0
+        assert preview["estimatedRefundableUnearnedRent"] == 1000.0
+        assert preview["estimatedLiabilityAmount"] == 0.0
+        assert preview["estimatedNetRefund"] == 1000.0
+        assert preview["requiresHostConsent"] is False
+        assert preview["requiresEvidenceToResolveNow"] is False
+        assert "deposit" in preview["depositDisclaimer"].lower()
+
+        # Nothing was persisted by the preview itself.
+        assert db_session.scalars(select(termination_crud.TerminationCase)).all() == []
+
+        # Submitting for real and calculating the actual entitlement must
+        # agree with what the preview said -- the whole point of reusing the
+        # same resolution/calculation logic.
+        r = client.post(
+            f"/api/occupancy/{occupancy.id}/termination-cases",
+            json={"causeCode": "HOST_FAULT_OR_NONPERFORMANCE"}, cookies=auth_admin_cookie(admin),
+        )
+        case_id = r.json()["id"]
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=auth_admin_cookie(admin))
+        assert float(r.json()["netRefund"]) == preview["estimatedNetRefund"]
+
+    def test_preview_of_a_cause_that_cannot_auto_resolve_has_no_estimate(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-preview-admin2@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="preview2")
+        renter = _make_user(db_session, email="term-preview-renter2@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases/preview",
+            json={"causeCode": "RENTER_CONTRACT_BREAK"},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 200, r.text
+        preview = r.json()
+        assert preview["resolvedStatus"] == "PENDING_REVIEW"
+        assert preview["earliestEffectiveDate"] is None
+        assert preview["estimatedNetRefund"] is None
+        assert preview["estimatedLiabilityNote"] != ""
+
+    def test_preview_of_statutory_right_reflects_the_evidence_gate(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-preview-admin3@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="preview3")
+        renter = _make_user(db_session, email="term-preview-renter3@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases/preview",
+            json={"causeCode": "RENTER_STATUTORY_RIGHT"},
+            cookies=auth_user_cookie(renter),
+        )
+        body = r.json()
+        assert body["resolvedStatus"] == "PENDING_REVIEW"
+        assert body["requiresEvidenceToResolveNow"] is True
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases/preview",
+            json={"causeCode": "RENTER_STATUTORY_RIGHT", "evidenceRefs": ["doc-1"]},
+            cookies=auth_user_cookie(renter),
+        )
+        body = r.json()
+        assert body["resolvedStatus"] == "EFFECTIVE_DATE_SET"
+        assert body["requiresEvidenceToResolveNow"] is False
+        assert body["estimatedLiabilityAmount"] == 0.0
+
+    def test_preview_of_mutual_surrender_shows_host_consent_is_needed(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-preview-admin4@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="preview4")
+        renter = _make_user(db_session, email="term-preview-renter4@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        proposed = date.today() + timedelta(days=10)
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases/preview",
+            json={"causeCode": "MUTUAL_SURRENDER", "proposedEffectiveDate": proposed.isoformat()},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["resolvedStatus"] == "SURRENDER_PROPOSED"
+        assert body["requiresHostConsent"] is True
+        assert body["earliestEffectiveDate"] == proposed.isoformat()
+
+    def test_a_host_only_cause_cannot_be_previewed_by_a_renter(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-preview-admin5@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="preview5")
+        renter = _make_user(db_session, email="term-preview-renter5@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases/preview",
+            json={"causeCode": "RENTER_BREACH"},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 400, r.text
+
+
+class TestGetTerminationCase:
+    """ZR-ENG-CLR-006 Section 20.1 GET /termination-cases/{id}."""
+
+    def test_provider_owner_can_fetch_their_own_case(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-get-owner@test.com", role="admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="get1")
+        renter = _make_user(db_session, email="term-get-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        case_id = r.json()["id"]
+
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}", cookies=auth_admin_cookie(admin))
+        assert r.status_code == 200, r.text
+        assert r.json()["id"] == case_id
+
+    def test_an_unrelated_provider_cannot_fetch_the_case(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-get-owner2@test.com", role="admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="get2")
+        renter = _make_user(db_session, email="term-get-renter2@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        case_id = r.json()["id"]
+
+        other_admin = _make_admin(db_session, email="term-get-other@test.com", role="admin")
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}", cookies=auth_admin_cookie(other_admin))
+        assert r.status_code == 403, r.text
+
+    def test_a_missing_case_is_404(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-get-missing@test.com", role="super_admin")
+        r = client.get("/api/occupancy/termination-cases/999999999", cookies=auth_admin_cookie(admin))
+        assert r.status_code == 404, r.text
+
+
+class TestSetAdjudicatedEffectiveDate:
+    """ZR-ENG-CLR-006 Section 10 adjudicated_effective_date/Section 20.1 --
+    a Super Admin's own entry standing in for a real court/tribunal/
+    authority decision, taking precedence over whatever date this build
+    already resolved."""
+
+    def test_super_admin_sets_the_adjudicated_date_and_it_takes_effect(self, client, db_session: Session):
+        admin, occupancy, case_id = TestDecideTerminationCase()._open_pending_review_case(client, db_session, suffix="adj1")
+        adjudicated = (date.today() + timedelta(days=14)).isoformat()
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/adjudicated-effective-date",
+            json={"effectiveDate": adjudicated, "reason": "Tribunal order #TR-4471"},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "EFFECTIVE_DATE_SET"
+        assert body["adjudicatedEffectiveDate"] == adjudicated
+        assert body["adjudicatedEffectiveDateReason"] == "Tribunal order #TR-4471"
+        assert body["effectiveTerminationDate"] == adjudicated
+
+        audit = db_session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "termination_case.adjudicated_effective_date",
+                AuditEvent.resource_id == str(case_id),
+            )
+        )
+        assert audit is not None
+        assert audit.reason == "Tribunal order #TR-4471"
+
+        events = list(db_session.scalars(
+            select(DomainEvent).where(
+                DomainEvent.event_type == "termination.effective_date_set",
+                DomainEvent.resource_id == str(case_id),
+            )
+        ))
+        assert any(e.payload.get("basis") == "adjudicated" for e in events)
+
+    def test_a_regular_admin_cannot_set_it(self, client, db_session: Session):
+        admin, _occupancy, case_id = TestDecideTerminationCase()._open_pending_review_case(client, db_session, suffix="adj2")
+        regular_admin = _make_admin(db_session, email="term-adj-regular@test.com", role="admin")
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/adjudicated-effective-date",
+            json={"effectiveDate": date.today().isoformat(), "reason": "trying anyway"},
+            cookies=auth_admin_cookie(regular_admin),
+        )
+        assert r.status_code == 403, r.text
+
+    def test_a_blank_reason_is_rejected(self, client, db_session: Session):
+        admin, _occupancy, case_id = TestDecideTerminationCase()._open_pending_review_case(client, db_session, suffix="adj3")
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/adjudicated-effective-date",
+            json={"effectiveDate": date.today().isoformat(), "reason": ""},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 400, r.text
+
+    def test_a_terminated_case_cannot_be_adjudicated(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-adj-terminated@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="adj4")
+        renter = _make_user(db_session, email="term-adj-terminated-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        case_id = r.json()["id"]
+        r = client.post(f"/api/users/rentals/termination-cases/{case_id}/withdraw", cookies=auth_user_cookie(renter))
+        assert r.status_code == 200, r.text
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/adjudicated-effective-date",
+            json={"effectiveDate": date.today().isoformat(), "reason": "N/A"},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 409, r.text
+
+
+class TestRecordMitigationRoute:
+    """ZR-ENG-CLR-006 Section 11.2/20.1 POST /termination-cases/{id}/
+    mitigation -- previously implemented only at the crud layer with no
+    reachable route; see TestLiabilityModels in test_refund_entitlement.py
+    for the resulting MITIGATION_CREDIT calculation."""
+
+    def _open_case(self, client, db_session: Session, *, suffix: str):
+        admin = _make_admin(db_session, email=f"term-mit-{suffix}@test.com", role="admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix=suffix)
+        renter = _make_user(db_session, email=f"term-mit-renter-{suffix}@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        return admin, r.json()["id"]
+
+    def test_provider_owner_can_record_mitigation_evidence(self, client, db_session: Session):
+        admin, case_id = self._open_case(client, db_session, suffix="mit1")
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/mitigation",
+            json={"reasonableRelettingCosts": 150.0, "notes": "Advertising costs"},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["terminationCaseId"] == case_id
+        assert float(body["reasonableRelettingCosts"]) == 150.0
+        assert body["notes"] == "Advertising costs"
+        assert body["recordedByAdminId"] == admin.id
+
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}/mitigation", cookies=auth_admin_cookie(admin))
+        assert r.status_code == 200, r.text
+        assert len(r.json()) == 1
+
+        audit = db_session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "termination_case.mitigation_recorded",
+                AuditEvent.resource_id == str(case_id),
+            )
+        )
+        assert audit is not None
+
+        event = db_session.scalar(
+            select(DomainEvent).where(
+                DomainEvent.event_type == "termination.mitigation_updated",
+                DomainEvent.resource_id == str(case_id),
+            )
+        )
+        assert event is not None
+
+    def test_an_unrelated_provider_cannot_record_mitigation(self, client, db_session: Session):
+        _admin, case_id = self._open_case(client, db_session, suffix="mit2")
+        other_admin = _make_admin(db_session, email="term-mit-other@test.com", role="admin")
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/mitigation",
+            json={"notes": "trying anyway"},
+            cookies=auth_admin_cookie(other_admin),
+        )
+        assert r.status_code == 403, r.text
+
+
+class TestTerminationDecisionHistory:
+    """ZR-ENG-CLR-006 Section 19's own termination_decision entity: an
+    append-only history of how effective_termination_date was actually
+    decided at each point in a case's life -- GET /termination-cases/{id}/
+    decisions."""
+
+    def test_auto_resolved_unilateral_case_records_a_decision(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-dec-auto@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="dec-auto")
+        renter = _make_user(db_session, email="term-dec-auto-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        case_id = r.json()["id"]
+
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}/decisions", cookies=auth_admin_cookie(admin))
+        assert r.status_code == 200, r.text
+        assert len(r.json()) == 1
+        assert r.json()[0]["decisionBasis"] == "AUTO_RESOLVED_UNILATERAL"
+        assert r.json()[0]["authority"] == "system"
+        assert r.json()[0]["effectiveTerminationAt"] is not None
+
+    def test_evidence_gated_case_records_a_different_basis(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-dec-evidence@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="dec-evidence")
+        renter = _make_user(db_session, email="term-dec-evidence-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_STATUTORY_RIGHT", "evidenceRefs": ["doc-1"]}, cookies=auth_user_cookie(renter),
+        )
+        case_id = r.json()["id"]
+
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}/decisions", cookies=auth_admin_cookie(admin))
+        assert r.json()[0]["decisionBasis"] == "AUTO_RESOLVED_EVIDENCE_GATED"
+
+    def test_pending_review_decision_records_an_authority_and_reason(self, client, db_session: Session):
+        admin, _occupancy, case_id = TestDecideTerminationCase()._open_pending_review_case(client, db_session, suffix="dec-pending")
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/decision",
+            json={"approve": True, "effectiveTerminationDate": date.today().isoformat(), "reason": "Verified against the lease"},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 200, r.text
+
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}/decisions", cookies=auth_admin_cookie(admin))
+        assert r.status_code == 200, r.text
+        decision = r.json()[-1]
+        assert decision["decisionBasis"] == "PENDING_REVIEW_APPROVED"
+        assert decision["authority"] == "super_admin"
+        assert decision["approvedByAdminId"] == admin.id
+        assert decision["reason"] == "Verified against the lease"
+
+    def test_rejecting_records_a_rejected_basis_with_no_effective_date(self, client, db_session: Session):
+        admin, _occupancy, case_id = TestDecideTerminationCase()._open_pending_review_case(client, db_session, suffix="dec-rejected")
+
+        client.post(
+            f"/api/occupancy/termination-cases/{case_id}/decision",
+            json={"approve": False, "reason": "No lawful ground established"},
+            cookies=auth_admin_cookie(admin),
+        )
+
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}/decisions", cookies=auth_admin_cookie(admin))
+        decision = r.json()[-1]
+        assert decision["decisionBasis"] == "PENDING_REVIEW_REJECTED"
+        assert decision["effectiveTerminationAt"] is None
+
+    def test_mutual_surrender_acceptance_records_a_decision(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-dec-surrender@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="dec-surrender")
+        renter = _make_user(db_session, email="term-dec-surrender-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "MUTUAL_SURRENDER", "proposedEffectiveDate": (date.today() + timedelta(days=5)).isoformat()},
+            cookies=auth_user_cookie(renter),
+        )
+        case_id = r.json()["id"]
+        # A proposal alone (not yet accepted) records no decision.
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}/decisions", cookies=auth_admin_cookie(admin))
+        assert r.json() == []
+
+        client.post(f"/api/occupancy/termination-cases/{case_id}/accept-surrender", cookies=auth_admin_cookie(admin))
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}/decisions", cookies=auth_admin_cookie(admin))
+        assert len(r.json()) == 1
+        assert r.json()[0]["decisionBasis"] == "MUTUAL_SURRENDER_ACCEPTED"
+        assert r.json()[0]["authority"] == "host_admin"
+        assert r.json()[0]["approvedByAdminId"] == admin.id
+
+    def test_adjudicated_date_records_a_decision(self, client, db_session: Session):
+        admin, _occupancy, case_id = TestDecideTerminationCase()._open_pending_review_case(client, db_session, suffix="dec-adj")
+        adjudicated = (date.today() + timedelta(days=21)).isoformat()
+
+        client.post(
+            f"/api/occupancy/termination-cases/{case_id}/adjudicated-effective-date",
+            json={"effectiveDate": adjudicated, "reason": "Tribunal order #TR-9911"},
+            cookies=auth_admin_cookie(admin),
+        )
+
+        r = client.get(f"/api/occupancy/termination-cases/{case_id}/decisions", cookies=auth_admin_cookie(admin))
+        decision = r.json()[-1]
+        assert decision["decisionBasis"] == "ADJUDICATED"
+        assert decision["effectiveTerminationAt"] == adjudicated
+        assert decision["reason"] == "Tribunal order #TR-9911"
+
+
+class TestJurisdictionRouting:
+    """ZR-ENG-CLR-006 Section 6: 'The Termination Policy Resolver must
+    select an effective-dated market rule set using the property
+    jurisdiction.' Every other test in this suite uses the default "IN"
+    property/pack -- these prove the resolver actually varies by the
+    occupancy's own room->property->jurisdiction_code, not a hardcoded
+    default (crud/market_policy.py:jurisdiction_code_for_occupancy)."""
+
+    def test_a_different_jurisdictions_pack_is_actually_resolved(self, client, db_session: Session):
+        # A second jurisdiction's own market pack, deliberately different
+        # from the "IN" default's termination_notice_days=30.
+        db_session.add(MarketPolicyPack(
+            jurisdiction_code="US", version=1, effective_from=date(2026, 1, 1),
+            confidence="REVIEW_REQUIRED", legal_source_note="Test fixture placeholder, not verified legal research.",
+            termination_notice_days=45,
+        ))
+        db_session.commit()
+
+        admin = _make_admin(db_session, email="term-jur-us@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="jurus", jurisdiction_code="US")
+        renter = _make_user(db_session, email="term-jur-us-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["policySnapshot"]["jurisdiction"] == "US"
+        expected = (date.today() + timedelta(days=45)).isoformat()
+        assert body["earliestEffectiveDate"] == expected
+
+    def test_default_in_property_still_resolves_the_in_pack(self, client, db_session: Session):
+        """The same occupancy fixture every other test uses, unchanged --
+        confirms the jurisdiction wiring is a no-op for this build's only
+        real jurisdiction to date."""
+        admin = _make_admin(db_session, email="term-jur-in@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="jurin")
+        renter = _make_user(db_session, email="term-jur-in-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["policySnapshot"]["jurisdiction"] == "IN"
+        assert r.json()["earliestEffectiveDate"] == (date.today() + timedelta(days=30)).isoformat()
+
+    def test_an_unsupported_jurisdiction_fails_closed(self, client, db_session: Session):
+        """AC-35: no market pack for this property's own jurisdiction ->
+        409, not a silent fallback to the "IN" default."""
+        admin = _make_admin(db_session, email="term-jur-unsupported@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(
+            db_session, admin=admin, suffix="jurzz", jurisdiction_code="ZZ",
+        )
+        renter = _make_user(db_session, email="term-jur-unsupported-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 409, r.text
+
+
+class TestJointTenancyRouting:
+    """ZR-ENG-CLR-006 AC-25: 'Joint-tenancy ... relationships route through
+    Section 3/4 relationship data instead of assuming one renter = one
+    agreement.' Adding a co-tenant to an occupancy makes a later
+    termination case fall to PENDING_REVIEW regardless of cause code,
+    instead of silently auto-resolving as if only one tenant existed."""
+
+    def test_admin_can_add_and_list_co_tenants(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-cotenant-add@test.com", role="admin")
+        occupancy, _guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="cotenant-add")
+        other_guest = Guest(id="G-COTENANT-ADD", name="Co-Tenant", email="cotenant-add@test.com", joined_at=date.today())
+        db_session.add(other_guest)
+        db_session.commit()
+
+        r = client.post(
+            f"/api/occupancy/{occupancy.id}/co-tenants", json={"guestId": other_guest.id}, cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["guestId"] == other_guest.id
+        assert r.json()["addedByAdminId"] == admin.id
+
+        r = client.get(f"/api/occupancy/{occupancy.id}/co-tenants", cookies=auth_admin_cookie(admin))
+        assert r.status_code == 200, r.text
+        assert len(r.json()) == 1
+
+    def test_adding_the_occupancys_own_tenant_is_rejected(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-cotenant-self@test.com", role="admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="cotenant-self")
+
+        r = client.post(
+            f"/api/occupancy/{occupancy.id}/co-tenants", json={"guestId": guest.id}, cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 400, r.text
+
+    def test_adding_the_same_co_tenant_twice_is_rejected(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-cotenant-dup@test.com", role="admin")
+        occupancy, _guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="cotenant-dup")
+        other_guest = Guest(id="G-COTENANT-DUP", name="Co-Tenant", email="cotenant-dup@test.com", joined_at=date.today())
+        db_session.add(other_guest)
+        db_session.commit()
+
+        client.post(f"/api/occupancy/{occupancy.id}/co-tenants", json={"guestId": other_guest.id}, cookies=auth_admin_cookie(admin))
+        r = client.post(f"/api/occupancy/{occupancy.id}/co-tenants", json={"guestId": other_guest.id}, cookies=auth_admin_cookie(admin))
+        assert r.status_code == 409, r.text
+
+    def test_an_unrelated_provider_cannot_add_a_co_tenant(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-cotenant-outsider-owner@test.com", role="admin")
+        occupancy, _guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="cotenant-outsider")
+        other_guest = Guest(id="G-COTENANT-OUTSIDER", name="Co-Tenant", email="cotenant-outsider@test.com", joined_at=date.today())
+        db_session.add(other_guest)
+        db_session.commit()
+        outsider = _make_admin(db_session, email="term-cotenant-outsider@test.com", role="admin")
+
+        r = client.post(
+            f"/api/occupancy/{occupancy.id}/co-tenants", json={"guestId": other_guest.id}, cookies=auth_admin_cookie(outsider),
+        )
+        assert r.status_code == 403, r.text
+
+    def test_an_otherwise_unilateral_cause_falls_to_pending_review_with_a_co_tenant(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-cotenant-route1@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="cotenant-route1")
+        renter = _make_user(db_session, email="term-cotenant-route1-renter@test.com")
+        guest.user_account_id = renter.id
+        other_guest = Guest(id="G-COTENANT-ROUTE1", name="Co-Tenant", email="cotenant-route1@test.com", joined_at=date.today())
+        db_session.add(other_guest)
+        db_session.commit()
+        client.post(f"/api/occupancy/{occupancy.id}/co-tenants", json={"guestId": other_guest.id}, cookies=auth_admin_cookie(admin))
+
+        # RENTER_ORDINARY_EARLY_EXIT is a UNILATERAL_CAUSE_CODES member --
+        # every other test in this suite shows it auto-resolving to
+        # EFFECTIVE_DATE_SET. With a co-tenant present, it must not.
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["status"] == "PENDING_REVIEW"
+        assert r.json()["earliestEffectiveDate"] is None
+
+    def test_a_mutual_surrender_proposal_also_falls_to_pending_review_with_a_co_tenant(self, client, db_session: Session):
+        """A single tenant + Host agreeing to a surrender is exactly the
+        'one user cannot necessarily terminate only their share' scenario
+        AC-25 warns about -- it must not reach SURRENDER_PROPOSED either."""
+        admin = _make_admin(db_session, email="term-cotenant-route2@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="cotenant-route2")
+        renter = _make_user(db_session, email="term-cotenant-route2-renter@test.com")
+        guest.user_account_id = renter.id
+        other_guest = Guest(id="G-COTENANT-ROUTE2", name="Co-Tenant", email="cotenant-route2@test.com", joined_at=date.today())
+        db_session.add(other_guest)
+        db_session.commit()
+        client.post(f"/api/occupancy/{occupancy.id}/co-tenants", json={"guestId": other_guest.id}, cookies=auth_admin_cookie(admin))
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "MUTUAL_SURRENDER", "proposedEffectiveDate": (date.today() + timedelta(days=5)).isoformat()},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["status"] == "PENDING_REVIEW"
+
+    def test_the_preview_reflects_pending_review_with_a_co_tenant(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-cotenant-preview@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="cotenant-preview")
+        renter = _make_user(db_session, email="term-cotenant-preview-renter@test.com")
+        guest.user_account_id = renter.id
+        other_guest = Guest(id="G-COTENANT-PREVIEW", name="Co-Tenant", email="cotenant-preview@test.com", joined_at=date.today())
+        db_session.add(other_guest)
+        db_session.commit()
+        client.post(f"/api/occupancy/{occupancy.id}/co-tenants", json={"guestId": other_guest.id}, cookies=auth_admin_cookie(admin))
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases/preview",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["resolvedStatus"] == "PENDING_REVIEW"
+        assert body["requiresHostConsent"] is False
+        assert body["earliestEffectiveDate"] is None
+
+    def test_without_a_co_tenant_behavior_is_unchanged(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="term-cotenant-none@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="cotenant-none")
+        renter = _make_user(db_session, email="term-cotenant-none-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["status"] == "EFFECTIVE_DATE_SET"

@@ -16,6 +16,7 @@ from io import BytesIO
 
 from sqlalchemy.orm import Session
 
+from app.crud import occupancy as occupancy_crud
 from app.models.agreement_clause import ClauseDefinition
 from app.models.leasing import Agreement, Offer, SignatureEvent
 from app.services.agreement_profile import AGREEMENT_CLASS, SUPPORTED_JURISDICTION
@@ -379,9 +380,14 @@ class TestOccupancyTerminationDates:
         from tests.test_agreement_engine_foundation import _pay_off_agreement_obligations
         _pay_off_agreement_obligations(client, db_session, admin_cookies, agreement_id)
 
-        r = client.post(f"/api/occupancy/agreements/{agreement_id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        occupancy_id = r.json()["id"]
+        # The real confirm-move-in route now always waits on the Phase 2B
+        # activation gate's own DATE_ELIGIBILITY_UNRESOLVED check (no
+        # authoritative date/tolerance rule exists yet -- crud/activation_
+        # gate.py's own comment) -- not what this test exercises, so it calls
+        # the same underlying crud.confirm_move_in the route itself calls.
+        occupancy = occupancy_crud.confirm_move_in(db_session, db_session.get(Agreement, agreement_id), super_admin)
+        db_session.commit()
+        occupancy_id = occupancy.id
 
         notice_date = "2026-01-01T00:00:00Z"
         liability_end = (date.today() + timedelta(days=10)).isoformat()
@@ -426,9 +432,14 @@ class TestOccupancyTerminationDates:
         from tests.test_agreement_engine_foundation import _pay_off_agreement_obligations
         _pay_off_agreement_obligations(client, db_session, admin_cookies, agreement_id)
 
-        r = client.post(f"/api/occupancy/agreements/{agreement_id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        occupancy_id = r.json()["id"]
+        # The real confirm-move-in route now always waits on the Phase 2B
+        # activation gate's own DATE_ELIGIBILITY_UNRESOLVED check (no
+        # authoritative date/tolerance rule exists yet -- crud/activation_
+        # gate.py's own comment) -- not what this test exercises, so it calls
+        # the same underlying crud.confirm_move_in the route itself calls.
+        occupancy = occupancy_crud.confirm_move_in(db_session, db_session.get(Agreement, agreement_id), super_admin)
+        db_session.commit()
+        occupancy_id = occupancy.id
 
         r = client.post(
             f"/api/occupancy/{occupancy_id}/end",

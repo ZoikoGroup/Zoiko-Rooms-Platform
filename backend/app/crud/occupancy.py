@@ -12,7 +12,7 @@ from app.models.finance import CADENCE_INTERVAL_DAYS, OBLIGATION_TYPE_TO_PLANE, 
 from app.models.guest import Guest
 from app.models.leasing import Agreement
 from app.models.listing import Listing
-from app.models.occupancy import Occupancy
+from app.models.occupancy import Occupancy, OccupancyCoTenant
 from app.models.occupancy_activation import OccupancyHandoverEvent
 from app.models.room import Room
 from app.schemas.occupancy import OccupancyRead
@@ -74,6 +74,49 @@ def get_occupancy_or_404(db: Session, occupancy_id: int) -> Occupancy:
     return occupancy
 
 
+def add_co_tenant(db: Session, occupancy: Occupancy, admin: AdminUser, guest_id: str) -> OccupancyCoTenant:
+    """ZR-ENG-CLR-006 AC-25 -- see models/occupancy.py:OccupancyCoTenant's
+    own docstring. Adding one changes how crud/termination.py routes a
+    later termination case for this occupancy; it does not itself alter
+    who Occupancy.guest_id is."""
+    assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
+    if guest_id == occupancy.guest_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This guest is already the occupancy's own tenant of record")
+    guest = db.get(Guest, guest_id)
+    if guest is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Guest not found")
+    existing = db.scalar(
+        select(OccupancyCoTenant).where(
+            OccupancyCoTenant.occupancy_id == occupancy.id, OccupancyCoTenant.guest_id == guest_id,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This guest is already a co-tenant on this occupancy")
+
+    co_tenant = OccupancyCoTenant(occupancy_id=occupancy.id, guest_id=guest_id, added_by_admin_id=admin.id)
+    db.add(co_tenant)
+    db.commit()
+    db.refresh(co_tenant)
+    return co_tenant
+
+
+def list_co_tenants_for_occupancy(db: Session, occupancy: Occupancy) -> list[OccupancyCoTenant]:
+    return list(
+        db.scalars(
+            select(OccupancyCoTenant).where(OccupancyCoTenant.occupancy_id == occupancy.id).order_by(OccupancyCoTenant.added_at)
+        )
+    )
+
+
+def has_co_tenants(db: Session, occupancy_id: int) -> bool:
+    """ZR-ENG-CLR-006 AC-25: read by crud/termination.py to decide whether
+    a case can auto-resolve at all -- see OccupancyCoTenant's own
+    docstring for why a joint occupancy always falls to PENDING_REVIEW."""
+    return db.scalar(
+        select(OccupancyCoTenant.id).where(OccupancyCoTenant.occupancy_id == occupancy_id).limit(1)
+    ) is not None
+
+
 def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occupancy:
     offer = agreement.offer
     assert_provider_access(db, admin, party_id_for_listing(offer.listing))
@@ -94,6 +137,20 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
 
     occupancy.status = "ACTIVE"
     occupancy.move_in_date = date.today()
+    # AC-18: expected_end_date is recomputed here from the offer's current
+    # terms, not left at whatever value was set when the occupancy row was
+    # first created (at signing) -- an amendment approved between signing
+    # and move-in (crud/agreement_amendments.py persists a new OfferTerms
+    # row precisely so this stays in sync) must be reflected, not the stale
+    # original start_date/term_months.
+    latest_terms = offer.terms[-1]
+    occupancy.expected_end_date = _add_months(latest_terms.start_date, latest_terms.term_months)
+    # The room hold moves BOOKED -> OCCUPIED only once the tenant actually
+    # moves in (mark_hold_booked already ran at offer-acceptance time) --
+    # this call used to live in the occupancy-creation step before the
+    # PENDING_MOVE_IN lifecycle change moved that step to signing, and was
+    # never carried over to confirm_move_in.
+    inventory_service.mark_hold_occupied(db, source_type="offer", source_id=offer.id)
     db.flush()
 
     listing = offer.listing
@@ -265,7 +322,7 @@ def end_occupancy(
     db: Session, occupancy: Occupancy, admin: AdminUser, correlation_id: str = "",
     *, notice_given_at: datetime | None = None, liability_end_date: date | None = None,
     termination_effective_date: date | None = None, move_out_date: date | None = None, basis: str = "OTHER",
-    termination_case_id: int | None = None, override_reason: str = "",
+    termination_case_id: int | None = None, override_reason: str = "", already_adjudicated: bool = False,
 ) -> Occupancy:
     """ZR-ENG-CLR-004 AC-20/10.2: 'Final occupancy date, rent liability end
     date and physical move-out date may differ and must be separately
@@ -295,7 +352,17 @@ def end_occupancy(
     RBAC table describes) -- see the guard below. Ending AT/AFTER the
     occupancy's own expected_end_date is not a cancellation at all (the
     tenancy simply ran its course), so it stays the ordinary admin action
-    unchanged."""
+    unchanged.
+
+    already_adjudicated is the third, narrower escape from that guard --
+    deliberately absent from OccupancyEndRequest (the public /end endpoint's
+    own schema), so no Host request body can ever set it. It exists only for
+    a trusted internal caller that already went through its own lawful,
+    renter-initiated approval process before ever reaching here -- today,
+    crud/booking_change_requests.py's PREMISES_CHANGE migration completing
+    once the replacement agreement is fully signed. That is not 'Host
+    fiat' (the renter requested the move, an admin already approved it);
+    it just isn't shaped like a termination_case either."""
     from app.models.leasing import Agreement
     from app.models.termination_case import TerminationCase
     from app.models.termination_record import TerminationRecord
@@ -309,7 +376,7 @@ def end_occupancy(
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Termination case not found for this occupancy")
         if case.status != "EFFECTIVE_DATE_SET":
             raise HTTPException(status.HTTP_409_CONFLICT, "This termination case is not ready to be finalized")
-    else:
+    elif not already_adjudicated:
         ending_early = occupancy.expected_end_date is not None and date.today() < occupancy.expected_end_date
         if ending_early:
             if admin.role != "super_admin":

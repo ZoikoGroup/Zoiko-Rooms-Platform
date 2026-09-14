@@ -29,6 +29,20 @@ FUNDS_FLOW_PROFILES = (
 )
 SUPPORTED_FUNDS_FLOW_PROFILES = ("DIRECT_SETTLEMENT",)
 
+# ZR-ENG-CLR-006 Section 11.1's full liability-model taxonomy, modeled
+# completely (same "never trim the taxonomy at the data layer" discipline as
+# TERMINATION_CAUSE_CODES) even though crud/refund_entitlement.py's
+# _compute_policy_liability only has a real formula for a subset --
+# TRIBUNAL_OR_COURT_DETERMINED is never selected here (a tribunal amount is
+# always a Super Admin's own entry, crud/termination.py:set_tribunal_liability,
+# and always takes precedence over whatever this field says once entered --
+# see _compute_policy_liability's own docstring for why that isn't additive
+# double-counting).
+TERMINATION_LIABILITY_MODELS = (
+    "NOTICE_RENT", "STATUTORY_BREAK_FEE", "CONTRACT_BREAK_AMOUNT", "ACTUAL_REASONABLE_LOSS",
+    "CAPPED_COMPENSATION", "ZERO_LIABILITY", "TRIBUNAL_OR_COURT_DETERMINED", "MIXED",
+)
+
 
 class MarketPolicyPack(Base):
     """One jurisdiction's resolved rule set for deposits and subletting, versioned
@@ -89,6 +103,32 @@ class MarketPolicyPack(Base):
     # counsel-validated; the only cause this MVP actually resolves a notice
     # period for -- see models/termination_case.py:UNILATERAL_CAUSE_CODES.
     termination_notice_days: Mapped[int] = mapped_column(default=30)
+    # ZR-ENG-CLR-006 Section 10: "rent-cycle alignment -- some markets align
+    # termination to rent cycle; others do not. Configurable." Off by
+    # default (raw notice-days date, unchanged behavior) -- when a market
+    # pack turns this on, crud/termination.py:_align_to_rent_cycle rounds
+    # the computed date up to the end of its calendar month, a reasonable
+    # placeholder cycle boundary for this build's only real cadence
+    # (MONTHLY), not a verified market rule.
+    align_termination_to_rent_cycle: Mapped[bool] = mapped_column(default=False)
+    # ZR-ENG-CLR-006 Section 11.1/AC-12: which liability model applies to an
+    # ordinary renter-initiated early exit or contract break beyond the
+    # earned/unearned rent split NOTICE_CAUSE_CODES already produces for free
+    # (see models/termination_case.py's own NOTICE_CAUSE_CODES docstring --
+    # that mechanism IS this field's NOTICE_RENT value, its default: no extra
+    # charge on top of rent through the notice period). REVIEW_REQUIRED
+    # placeholder like every field on this row, not counsel-validated.
+    termination_liability_model: Mapped[str] = mapped_column(String(30), default="NOTICE_RENT")
+    # Break-fee/contract-break/capped-compensation formula input: a multiple
+    # of one month's rent (crud/refund_entitlement.py:_monthly_rent_amount),
+    # the same "multiple of rent" idiom deposit_max_rent_multiple already
+    # uses above. 0 (default) means no extra fee even if a model other than
+    # NOTICE_RENT/ZERO_LIABILITY is selected -- a market pack must set this
+    # to actually charge one.
+    termination_break_fee_rent_multiple: Mapped[float] = mapped_column(Numeric(6, 2), default=0.0)
+    # CAPPED_COMPENSATION's own ceiling, expressed the same way. Null means
+    # uncapped (the break-fee multiple above stands unmodified).
+    termination_liability_cap_rent_multiple: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
 
     # -- Booking-change / rent-change policy (Section 8, ZR-ENG-CLR-008 §10/AC-24) --
     # Both the doc's own validation examples cite a minimum interval, not a

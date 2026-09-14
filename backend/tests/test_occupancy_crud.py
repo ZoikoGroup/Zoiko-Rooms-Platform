@@ -81,6 +81,15 @@ def _make_signed_agreement(db: Session, *, admin, monthly_rent: float = 1000.0, 
         obligation_type="RENT", money_plane="OCCUPANCY", amount=monthly_rent, currency="INR",
         due_date=date.today(), status="PAID", agreement_id=agreement.id,
     ))
+    # dev's occupancy-lifecycle change: the occupancy row is now created at
+    # PARTIALLY_EXECUTED (PENDING_MOVE_IN), not by confirm_move_in -- this
+    # fixture builds the agreement directly (bypassing that normal signing
+    # flow), so it creates the same row confirm_move_in now expects to
+    # already exist.
+    db.add(Occupancy(
+        offer_id=offer.id, listing_id=listing.id, room_id=room.id, guest_id=guest.id,
+        status="PENDING_MOVE_IN", expected_end_date=crud._add_months(date.today(), term_months),
+    ))
     db.commit()
     return agreement, offer, listing, room, guest
 
@@ -96,13 +105,16 @@ class TestConfirmMoveIn:
         assert occupancy.guest_id == guest.id
         assert occupancy.expected_end_date == crud._add_months(date.today(), 12)
 
-    def test_is_idempotent_for_the_same_offer(self, db_session: Session):
+    def test_a_second_confirmation_is_rejected_not_silently_idempotent(self, db_session: Session):
+        """dev's occupancy-lifecycle change: confirm_move_in is a one-time
+        PENDING_MOVE_IN -> ACTIVE transition now, not create-or-return."""
         admin = _make_admin(db_session, email="occ-movein-idem@test.com", role="admin")
         agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin)
 
-        first = crud.confirm_move_in(db_session, agreement, admin)
-        second = crud.confirm_move_in(db_session, agreement, admin)
-        assert first.id == second.id
+        crud.confirm_move_in(db_session, agreement, admin)
+        with pytest.raises(HTTPException) as exc:
+            crud.confirm_move_in(db_session, agreement, admin)
+        assert exc.value.status_code == 409
 
     def test_requires_provider_access(self, db_session: Session):
         owner_admin = _make_admin(db_session, email="occ-movein-owner@test.com", role="admin")
