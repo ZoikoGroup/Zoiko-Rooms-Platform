@@ -32,6 +32,7 @@ def create_admin_user(db: Session, data: AdminUserCreate) -> AdminUser:
         full_name=data.full_name,
         phone=data.phone,
         role=data.role,
+        dispute_role=data.dispute_role,
     )
     admin.settings = AdminSettings()
     db.add(admin)

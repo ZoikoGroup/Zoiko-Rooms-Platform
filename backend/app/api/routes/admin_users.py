@@ -12,7 +12,7 @@ from app.crud.admin_user import (
     update_admin_user,
 )
 from app.db.session import get_db
-from app.models.admin_user import AdminUser
+from app.models.admin_user import DISPUTE_ADMIN_ROLES, AdminUser
 from app.schemas.admin_user import AdminUserCreate, AdminUserRead, AdminUserUpdate
 
 router = APIRouter(prefix="/api/admin-users", tags=["admin-users"], dependencies=[Depends(require_super_admin)])
@@ -36,6 +36,8 @@ def post_admin_user(payload: AdminUserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status.HTTP_409_CONFLICT, "An admin with this email already exists")
     if payload.role not in ("admin", "super_admin"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Role must be 'admin' or 'super_admin'")
+    if payload.dispute_role is not None and payload.dispute_role not in DISPUTE_ADMIN_ROLES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"dispute_role must be one of {DISPUTE_ADMIN_ROLES}")
     return create_admin_user(db, payload)
 
 
@@ -48,6 +50,8 @@ def put_admin_user(
 ):
     if payload.role is not None and payload.role not in ("admin", "super_admin"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Role must be 'admin' or 'super_admin'")
+    if payload.dispute_role is not None and payload.dispute_role not in DISPUTE_ADMIN_ROLES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"dispute_role must be one of {DISPUTE_ADMIN_ROLES}")
     target = _get_or_404(db, admin_id)
     return update_admin_user(db, target, payload, acting_admin)
 

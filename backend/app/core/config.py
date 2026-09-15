@@ -56,6 +56,33 @@ class Settings(BaseSettings):
     # Obligation (the request for payment; PaymentReceipt above is its
     # after-the-fact counterpart -- proof payment was actually made).
     rent_invoice_document_dir: str = "secure_uploads/rent_invoices"
+    # ZR-ENG-CLR-010 Section 21: dispute evidence originals -- never publicly
+    # mounted, same convention as identity_upload_dir. Disclosure class (not
+    # the storage location) is what gates who can ever fetch one back out.
+    evidence_upload_dir: str = "secure_uploads/dispute_evidence"
+    evidence_document_max_size_mb: int = 10
+    # ZR-ENG-CLR-010 Section 20: "Maker-checker: Mandatory above configured
+    # thresholds or for safety/legal/manual override cases." A reasonable
+    # MVP default, not a verified regulatory figure -- same REVIEW_REQUIRED
+    # honesty every MarketPolicyPack field already carries. Flat
+    # platform-wide value (Section 20 doesn't ask for this to vary by
+    # jurisdiction the way deposit/termination policy does).
+    dispute_financial_hold_maker_checker_threshold: float = 10000.0
+    # ZR-ENG-CLR-010 Section 20/24, QA-Q19: the same "mandatory above
+    # configured thresholds or for safety/legal/manual override cases" rule
+    # Section 20 states for financial holds, applied to who may record an
+    # external proceeding's decision -- below every trigger, the admin who
+    # filed the proceeding may also record its outcome; at/above one, a
+    # second, different admin must (crud/dispute_external_proceeding.py's
+    # _requires_external_proceeding_dual_control). A reasonable MVP default,
+    # not a verified regulatory figure, same as the financial-hold threshold above.
+    dispute_external_proceeding_dual_control_threshold: float = 10000.0
+    # ZR-ENG-CLR-010 Section 20/AC-10: "time/review bounded" -- a reasonable
+    # MVP default review window for a financial hold that opens with no
+    # case-officer-supplied review_at, not a verified legal/regulatory
+    # figure (same honesty as every other fixed-window constant in this
+    # codebase, e.g. the 7-day internal review window).
+    dispute_financial_hold_default_review_days: int = 30
 
     frontend_url: str = "http://localhost:3000"
     password_reset_token_expire_minutes: int = 30

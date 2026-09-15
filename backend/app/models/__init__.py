@@ -4,6 +4,15 @@ from app.models.authority_record import AuthorityRecord
 from app.models.booking import Booking
 from app.models.booking_change_request import BookingChangeRequest
 from app.models.domain_event import DomainEvent
+from app.models.dispute import DisputeResolutionCase, DisputeResolutionClaim, DisputeResolutionHold
+from app.models.dispute_decision import DisputeDecision
+from app.models.dispute_legal_hold import DisputeLegalHold
+from app.models.dispute_evidence import DisputeEvidenceClaimLink, DisputeEvidenceItem
+from app.models.dispute_external_proceeding import DisputeExternalProceeding, DisputeExternalProceedingClaimLink
+from app.models.dispute_deadline import DisputeDeadline
+from app.models.dispute_message import DisputeCaseMessage
+from app.models.dispute_party import DisputeParty
+from app.models.dispute_settlement import DisputeSettlement, DisputeSettlementClaimLink
 from app.models.user_account import UserAccount
 from app.models.sublet_request import SubletRequest
 from app.models.finance import (
@@ -137,6 +146,20 @@ __all__ = [
     "RefundRequest",
     "DisputeCase",
     "FinancialHold",
+    "DisputeResolutionCase",
+    "DisputeResolutionClaim",
+    "DisputeResolutionHold",
+    "DisputeDecision",
+    "DisputeLegalHold",
+    "DisputeEvidenceItem",
+    "DisputeEvidenceClaimLink",
+    "DisputeExternalProceeding",
+    "DisputeExternalProceedingClaimLink",
+    "DisputeSettlement",
+    "DisputeSettlementClaimLink",
+    "DisputeDeadline",
+    "DisputeCaseMessage",
+    "DisputeParty",
     "ReconciliationRun",
     "LedgerAccount",
     "LedgerEntry",
