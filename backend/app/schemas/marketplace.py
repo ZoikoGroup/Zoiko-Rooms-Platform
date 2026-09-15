@@ -31,6 +31,12 @@ class MarketReleasePolicyUpdate(CamelModel):
 class PropertyCreate(CamelModel):
     address: str
     city: str
+    # ZR-ENG-CLR-006 Section 6: which market pack the Termination Policy
+    # Resolver (and any other jurisdiction-aware engine) uses for this
+    # property. Optional -- omitting it keeps this build's only real
+    # jurisdiction, "IN", exactly as every property already defaulted to
+    # before this field existed.
+    jurisdiction_code: str = "IN"
 
 
 class PropertyRead(CamelModel):
@@ -39,6 +45,7 @@ class PropertyRead(CamelModel):
     address: str
     city: str
     status: str
+    jurisdiction_code: str
     created_at: datetime
 
 

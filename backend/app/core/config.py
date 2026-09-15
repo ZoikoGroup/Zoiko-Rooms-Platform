@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     # per AgreementVersion and never regenerated/overwritten -- same
     # never-publicly-mounted directory convention as identity_upload_dir.
     agreement_document_dir: str = "secure_uploads/agreements"
+    # ZR-ENG-CLR-005 Section 13.1: one immutable PDF per successful
+    # SimulatedPayment, same never-publicly-mounted convention.
+    receipt_document_dir: str = "secure_uploads/receipts"
+    # ZR-ENG-CLR-005 Section 6.3/13.1: one immutable PDF per PAID PayoutRecord.
+    payout_statement_document_dir: str = "secure_uploads/payout_statements"
+    # ZR-ENG-CLR-005 Section 13.1/AC-26: one immutable PDF per PAID PayoutRecord's fee line.
+    service_fee_invoice_document_dir: str = "secure_uploads/service_fee_invoices"
+    # ZR-ENG-CLR-005 Section 13.1: one immutable, host-issued PDF per RENT
+    # Obligation (the request for payment; PaymentReceipt above is its
+    # after-the-fact counterpart -- proof payment was actually made).
+    rent_invoice_document_dir: str = "secure_uploads/rent_invoices"
 
     frontend_url: str = "http://localhost:3000"
     password_reset_token_expire_minutes: int = 30
@@ -63,6 +74,11 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = True
+    # Implicit TLS (the connection is SSL-wrapped from the first byte, e.g. port
+    # 465) rather than STARTTLS (plaintext connection upgraded mid-handshake,
+    # e.g. port 587). Mutually exclusive with smtp_use_tls in practice -- set
+    # this true for a 465-style provider and smtp_use_tls is then ignored.
+    smtp_use_ssl: bool = False
 
     # Chat SSE rate limiting (requests per window, per authenticated actor).
     chat_rate_limit_max: int = 20

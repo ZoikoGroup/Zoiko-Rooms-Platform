@@ -1,11 +1,16 @@
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, require_super_admin
 from app.core.correlation import get_correlation_id
 from app.core.identity_uploads import resolve_identity_document_path, save_identity_document
+from app.core.payout_statement_documents import resolve_payout_statement_document_path
+from app.core.service_fee_invoice_documents import resolve_service_fee_invoice_document_path
+from app.core.receipt_documents import resolve_receipt_document_path
+from app.core.rent_invoice_documents import resolve_rent_invoice_document_path
 from app.crud import finance as crud
+from app.crud import payout_beneficiary as payout_beneficiary_crud
 from app.crud.finance import annotate_payment_context
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
@@ -21,8 +26,16 @@ from app.schemas.finance import (
     DisputeCreate,
     DisputeRead,
     DisputeResolve,
+    FinancialHoldRead,
+    FinancialHoldResolve,
+    HostRecoveryRead,
+    HostRecoveryRecordProgress,
+    HostRecoveryWriteOff,
     ObligationRead,
     PaymentConfirm,
+    PayoutBeneficiaryConfirm,
+    PayoutBeneficiaryRead,
+    PayoutBeneficiarySubmit,
     PayoutRecordRead,
     PayoutRunRequest,
     ReconciliationRunRead,
@@ -81,6 +94,47 @@ def post_confirm_payment(
         )
         db.commit()
     return annotate_payment_context(updated)
+
+
+@router.get("/payments/{payment_id}/receipt")
+def get_payment_receipt(
+    payment_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 13.1/AC-25. get_or_create_payment_receipt is
+    idempotent -- safe to call again here even though confirm_payment already
+    generates the receipt best-effort, in case that best-effort step didn't
+    run for some reason."""
+    receipt = crud.get_payment_receipt_for_admin(db, payment_id, admin)
+    log_audit_event(db, admin, "payment_receipt.download", "payment_receipt", str(receipt.id), get_correlation_id(request))
+    db.commit()
+
+    pdf_bytes = resolve_receipt_document_path(receipt.storage_ref).read_bytes()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{receipt.receipt_number}.pdf"'},
+    )
+
+
+@router.get("/obligations/{obligation_id}/rent-invoice")
+def get_rent_invoice(
+    obligation_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 13.1. get_or_create_rent_invoice is idempotent --
+    safe to call again here even though the obligation-creation paths already
+    generate the invoice best-effort, in case that best-effort step didn't
+    run for some reason. Unlike the receipt above, this never requires the
+    obligation to have been paid -- it's the request for payment."""
+    invoice = crud.get_rent_invoice_for_admin(db, obligation_id, admin)
+    log_audit_event(db, admin, "rent_invoice.download", "rent_invoice", str(invoice.id), get_correlation_id(request))
+    db.commit()
+
+    pdf_bytes = resolve_rent_invoice_document_path(invoice.storage_ref).read_bytes()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{invoice.invoice_number}.pdf"'},
+    )
 
 
 @router.get("/deposits", response_model=list[DepositRecordRead])
@@ -213,6 +267,98 @@ def get_payouts(admin: AdminUser = Depends(get_current_admin), db: Session = Dep
     return crud.list_payouts_for(db, admin)
 
 
+@router.post("/payout-beneficiaries", response_model=PayoutBeneficiaryRead, status_code=status.HTTP_201_CREATED)
+def post_payout_beneficiary(
+    payload: PayoutBeneficiarySubmit, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 AC-30/Section 9.2: submits a new payout beneficiary --
+    PENDING_VERIFICATION until confirmed with the emailed one-time code below."""
+    party = db.get(Party, payload.party_id)
+    if not party:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Party not found")
+    beneficiary, _raw_code = payout_beneficiary_crud.submit_payout_beneficiary(db, party, admin, payload)
+    log_audit_event(
+        db, admin, "payout_beneficiary.submitted", "payout_beneficiary", str(beneficiary.id), get_correlation_id(request),
+        after_state=f"last4={beneficiary.account_number_last4}:status={beneficiary.status}",
+    )
+    db.commit()
+    return beneficiary
+
+
+@router.post("/payout-beneficiaries/{beneficiary_id}/resend-code", response_model=PayoutBeneficiaryRead)
+def post_resend_payout_beneficiary_code(
+    beneficiary_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    beneficiary = payout_beneficiary_crud.get_payout_beneficiary_or_404(db, beneficiary_id)
+    beneficiary, _raw_code = payout_beneficiary_crud.resend_payout_beneficiary_code(db, beneficiary, admin)
+    db.commit()
+    return beneficiary
+
+
+@router.post("/payout-beneficiaries/{beneficiary_id}/confirm", response_model=PayoutBeneficiaryRead)
+def post_confirm_payout_beneficiary(
+    beneficiary_id: int, payload: PayoutBeneficiaryConfirm, request: Request,
+    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """AC-30: the strong-auth step itself -- confirming with the correct,
+    unexpired one-time code is what moves a beneficiary to VERIFIED and
+    supersedes whatever was VERIFIED before (a payout account change)."""
+    beneficiary = payout_beneficiary_crud.get_payout_beneficiary_or_404(db, beneficiary_id)
+    before_status = beneficiary.status
+    beneficiary = payout_beneficiary_crud.confirm_payout_beneficiary(db, beneficiary, admin, payload.code)
+    log_audit_event(
+        db, admin, "payout_beneficiary.verified", "payout_beneficiary", str(beneficiary.id), get_correlation_id(request),
+        before_state=before_status, after_state=beneficiary.status,
+    )
+    db.commit()
+    return beneficiary
+
+
+@router.get("/payout-beneficiaries", response_model=list[PayoutBeneficiaryRead])
+def get_payout_beneficiaries(party_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    return payout_beneficiary_crud.list_payout_beneficiaries_for(db, admin, party_id)
+
+
+@router.get("/payouts/{payout_id}/statement")
+def get_payout_statement(
+    payout_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 6.3/13.1. get_or_create_payout_statement is
+    idempotent -- safe to call again here even though run_payout already
+    generates the statement best-effort, in case that best-effort step
+    didn't run for some reason."""
+    statement = crud.get_payout_statement_for_admin(db, payout_id, admin)
+    log_audit_event(db, admin, "payout_statement.download", "payout_statement", str(statement.id), get_correlation_id(request))
+    db.commit()
+
+    pdf_bytes = resolve_payout_statement_document_path(statement.storage_ref).read_bytes()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{statement.statement_number}.pdf"'},
+    )
+
+
+@router.get("/payouts/{payout_id}/service-fee-invoice")
+def get_service_fee_invoice(
+    payout_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 13.1/AC-26. get_or_create_service_fee_invoice is
+    idempotent -- safe to call again here even though run_payout already
+    generates the invoice best-effort, in case that best-effort step didn't
+    run for some reason."""
+    invoice = crud.get_service_fee_invoice_for_admin(db, payout_id, admin)
+    log_audit_event(db, admin, "service_fee_invoice.download", "service_fee_invoice", str(invoice.id), get_correlation_id(request))
+    db.commit()
+
+    pdf_bytes = resolve_service_fee_invoice_document_path(invoice.storage_ref).read_bytes()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{invoice.invoice_number}.pdf"'},
+    )
+
+
 @router.post("/refunds", response_model=RefundRequestRead, status_code=status.HTTP_201_CREATED)
 def post_request_refund(
     payload: RefundRequestCreate,
@@ -302,3 +448,67 @@ def post_run_reconciliation(
 @router.get("/reconciliation", response_model=list[ReconciliationRunRead], dependencies=[Depends(require_super_admin)])
 def get_reconciliation_runs(db: Session = Depends(get_db)):
     return crud.list_reconciliation_runs(db)
+
+
+@router.get("/financial-holds", response_model=list[FinancialHoldRead], dependencies=[Depends(require_super_admin)])
+def get_financial_holds(status: str | None = None, db: Session = Depends(get_db)):
+    return crud.list_financial_holds(db, status=status)
+
+
+@router.post(
+    "/financial-holds/{hold_id}/resolve", response_model=FinancialHoldRead, dependencies=[Depends(require_super_admin)],
+)
+def post_resolve_financial_hold(
+    hold_id: int,
+    payload: FinancialHoldResolve,
+    request: Request,
+    admin: AdminUser = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    hold = crud.get_financial_hold_or_404(db, hold_id)
+    updated = crud.resolve_financial_hold(db, hold, admin, payload)
+    log_audit_event(db, admin, "financial_hold.resolve", "financial_hold", str(hold_id), get_correlation_id(request), reason=updated.status)
+    db.commit()
+    return updated
+
+
+@router.get("/host-recoveries", response_model=list[HostRecoveryRead])
+def get_host_recoveries(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """ZR-ENG-CLR-006 Section 18.4/AC-22: the finance-ops queue of amounts
+    owed back from a Host whose payout already went out before a later
+    refund -- party-membership scoped for a regular admin, platform-wide for
+    a Super Admin."""
+    return crud.list_host_recoveries(db, admin)
+
+
+@router.post("/host-recoveries/{recovery_id}/record-recovery", response_model=HostRecoveryRead)
+def post_record_host_recovery_progress(
+    recovery_id: int,
+    payload: HostRecoveryRecordProgress,
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    recovery = crud.get_host_recovery_or_404(db, recovery_id)
+    updated = crud.record_host_recovery_progress(db, recovery, admin, payload)
+    log_audit_event(
+        db, admin, "host_recovery.record_progress", "host_recovery", str(recovery_id), get_correlation_id(request),
+        reason=payload.method,
+    )
+    db.commit()
+    return updated
+
+
+@router.post("/host-recoveries/{recovery_id}/write-off", response_model=HostRecoveryRead, dependencies=[Depends(require_super_admin)])
+def post_write_off_host_recovery(
+    recovery_id: int,
+    payload: HostRecoveryWriteOff,
+    request: Request,
+    admin: AdminUser = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    recovery = crud.get_host_recovery_or_404(db, recovery_id)
+    updated = crud.write_off_host_recovery(db, recovery, admin, payload)
+    log_audit_event(db, admin, "host_recovery.write_off", "host_recovery", str(recovery_id), get_correlation_id(request), reason=payload.reason)
+    db.commit()
+    return updated

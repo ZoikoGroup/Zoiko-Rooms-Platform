@@ -1,8 +1,20 @@
+import hashlib
+import json
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.domain_event import DomainEvent
+
+
+def _payload_hash(payload: dict) -> str:
+    """ZR-ENG-CLR-006 Section 21.2: 'Signed/prescribed notices and material
+    evidence are content-hashed.' Computed for every event, not just
+    termination ones -- a cheap, generic integrity check on what was
+    actually recorded."""
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def emit_event(
@@ -14,6 +26,10 @@ def emit_event(
     *,
     correlation_id: str = "",
     idempotency_key: str | None = None,
+    actor_kind: str = "",
+    actor_id: str = "",
+    previous_state: str | None = None,
+    new_state: str | None = None,
 ) -> DomainEvent:
     """Append a domain event row within the same transaction as the mutation that caused
     it, so it's only ever visible once that transaction commits. No async consumer is
@@ -27,11 +43,16 @@ def emit_event(
     actual guarantee for a genuine concurrent double-emit, same pattern as
     services/inventory.py:create_hold -- a pre-check for the fast path, the
     constraint as the backstop."""
+    resolved_payload = payload or {}
+    common_fields = dict(
+        event_type=event_type, resource_type=resource_type, resource_id=resource_id,
+        payload=resolved_payload, correlation_id=correlation_id,
+        actor_kind=actor_kind, actor_id=actor_id, previous_state=previous_state, new_state=new_state,
+        payload_hash=_payload_hash(resolved_payload),
+    )
+
     if idempotency_key is None:
-        event = DomainEvent(
-            event_type=event_type, resource_type=resource_type, resource_id=resource_id,
-            payload=payload or {}, correlation_id=correlation_id, idempotency_key=None,
-        )
+        event = DomainEvent(**common_fields, idempotency_key=None)
         db.add(event)
         db.flush()
         return event
@@ -46,10 +67,7 @@ def emit_event(
     # actually be protected by the nested rollback below.
     try:
         with db.begin_nested():
-            event = DomainEvent(
-                event_type=event_type, resource_type=resource_type, resource_id=resource_id,
-                payload=payload or {}, correlation_id=correlation_id, idempotency_key=idempotency_key,
-            )
+            event = DomainEvent(**common_fields, idempotency_key=idempotency_key)
             db.add(event)
             db.flush()
     except IntegrityError:

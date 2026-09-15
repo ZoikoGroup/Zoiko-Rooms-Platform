@@ -19,6 +19,7 @@ from app.crud.ids import dicebear_avatar, new_id
 from app.crud.listing import is_listing_available
 from app.crud.market_policy import resolve_market_policy
 from app.crud import notification as notif_crud
+from app.crud.occupancy import _add_months
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
@@ -26,7 +27,7 @@ from app.models.agreement_amendment import AgreementAmendment
 from app.models.agreement_party import AgreementParty
 from app.models.agreement_version_detail import AgreementPremises, CommercialTermsSnapshot, ExecutionCertificate
 from app.models.disclosure_requirement import DisclosureRequirement
-from app.models.finance import OBLIGATION_TYPE_TO_PLANE, Obligation
+from app.models.finance import OBLIGATION_TYPE_TO_PLANE, PAYMENT_SCHEDULE_CADENCES, Obligation, PaymentSchedule
 from app.models.guest import Guest
 from app.models.leasing import (
     Agreement,
@@ -39,6 +40,7 @@ from app.models.leasing import (
     SignatureEvent,
 )
 from app.models.listing import Listing
+from app.models.occupancy import Occupancy
 from app.models.listing_approval import CURRENT_POLICY_VERSION
 from app.models.signature_provider import SignatureRequest
 from app.models.user_account import UserAccount
@@ -313,6 +315,23 @@ def add_offer_terms(db: Session, offer: Offer, admin: AdminUser, data: OfferTerm
             f"{max_deposit:.2f} ({policy.deposit_max_rent_multiple}x monthly rent, jurisdiction={policy.jurisdiction_code})",
         )
 
+    # ZR-ENG-CLR-005 AC-06: the cadence these terms will seed a PaymentSchedule
+    # with (create_agreement) -- reject anything outside the supported set up
+    # front rather than letting an unrecognized value reach the schedule row.
+    if data.cadence not in PAYMENT_SCHEDULE_CADENCES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Unsupported cadence '{data.cadence}' -- must be one of {PAYMENT_SCHEDULE_CADENCES}",
+        )
+    # CUSTOM requires the admin's own explicit interval -- never derived or
+    # defaulted. Every other cadence has a fixed/calendar rule already, so a
+    # custom_interval_days here would be contradictory, not just unused.
+    if data.cadence == "CUSTOM":
+        if not data.custom_interval_days or data.custom_interval_days < 1:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "customIntervalDays is required (a positive integer) for CUSTOM cadence")
+    elif data.custom_interval_days is not None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "customIntervalDays only applies to CUSTOM cadence")
+
     next_version = offer.current_version + 1
     terms = OfferTerms(
         offer_id=offer.id,
@@ -321,6 +340,8 @@ def add_offer_terms(db: Session, offer: Offer, admin: AdminUser, data: OfferTerm
         deposit_amount=data.deposit_amount,
         start_date=data.start_date,
         term_months=data.term_months,
+        cadence=data.cadence,
+        custom_interval_days=data.custom_interval_days,
     )
     db.add(terms)
     offer.current_version = next_version
@@ -721,13 +742,37 @@ def create_agreement(
             agreement_id=agreement.id, disclosure_type=disclosure_type, title=title, required=required,
         ))
 
+    # ZR-ENG-CLR-005 AC-02/AC-07/AC-06: the versioned plan this agreement's
+    # RENT obligations are traceable to -- frozen amount/first_due/cadence,
+    # same snapshot discipline as the AgreementVersion above. See
+    # models/finance.py:PaymentSchedule for why status stays single-valued.
+    # UPFRONT bills the entire term as this one obligation (monthly_rent is
+    # still "amount per month" in that case -- there is no separate
+    # "total stay amount" field to introduce); every other cadence keeps
+    # monthly_rent as-is, the per-period amount, unchanged by cadence.
+    first_rent_amount = (
+        round(float(latest_terms.monthly_rent) * latest_terms.term_months, 2) if latest_terms.cadence == "UPFRONT"
+        else latest_terms.monthly_rent
+    )
+    schedule = PaymentSchedule(
+        agreement_id=agreement.id,
+        cadence=latest_terms.cadence,
+        custom_interval_days=latest_terms.custom_interval_days,
+        amount=first_rent_amount,
+        first_due=latest_terms.start_date,
+        anchor_day=latest_terms.start_date.day,
+    )
+    db.add(schedule)
+    db.flush()
+
     db.add(
         Obligation(
             obligation_type="RENT",
             money_plane=OBLIGATION_TYPE_TO_PLANE["RENT"],
-            amount=latest_terms.monthly_rent,
+            amount=first_rent_amount,
             due_date=latest_terms.start_date,
             agreement_id=agreement.id,
+            schedule_id=schedule.id,
         )
     )
     db.add(
@@ -742,6 +787,22 @@ def create_agreement(
     inventory_service.mark_hold_booked(db, source_type="offer", source_id=offer.id)
     db.commit()
     db.refresh(agreement)
+
+    # ZR-ENG-CLR-005 Section 13.1: same best-effort placement as
+    # crud/finance.py::confirm_payment's receipt hook -- an invoice-rendering
+    # failure must never undo or fail an already-committed agreement. An
+    # admin/renter can always regenerate it on demand via
+    # get_or_create_rent_invoice (called again from the download routes) if
+    # this best-effort call somehow didn't run. Imported locally -- crud.finance
+    # imports services.booking_orchestrator, which imports this module, so a
+    # module-level import here would be circular.
+    from app.crud.finance import get_or_create_rent_invoice
+    rent_obligation = next(o for o in agreement.obligations if o.obligation_type == "RENT")
+    try:
+        get_or_create_rent_invoice(db, rent_obligation)
+    except Exception:
+        pass
+
     return agreement
 
 
@@ -1093,6 +1154,24 @@ def _apply_signature(
         # itself treated as EXECUTED. AMENDMENT_PENDING behaves exactly like
         # SENT here (see models/leasing.py:AGREEMENT_STATUSES' own note).
         agreement.status = "PARTIALLY_EXECUTED"
+
+        # Occupancy is committed to this offer as soon as the lease is executed --
+        # move-in itself happens later via confirm_move_in. Guarded against
+        # duplicate creation since a party can be re-signed for (see sign_agreement).
+        offer = agreement.offer
+        existing_occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
+        if not existing_occupancy:
+            latest_terms = offer.terms[-1]
+            db.add(
+                Occupancy(
+                    offer_id=offer.id,
+                    listing_id=offer.listing_id,
+                    room_id=offer.listing.room_id,
+                    guest_id=offer.guest_id,
+                    status="PENDING_MOVE_IN",
+                    expected_end_date=_add_months(latest_terms.start_date, latest_terms.term_months),
+                )
+            )
 
     db.commit()
     db.refresh(agreement)
@@ -1473,6 +1552,7 @@ def freeze_agreement_version(db: Session, agreement: Agreement) -> DocumentArtif
         pending_amendment.status = "EFFECTIVE"
         pending_amendment.executed_at = now
         pending_amendment.effective_at = now
+        _supersede_payment_schedule_if_rent_changed(db, agreement, pending_amendment)
 
         # ZR-ENG-CLR-008 Section 8: if this amendment was generated from a
         # renter-initiated BookingChangeRequest, that request is only
@@ -1518,3 +1598,39 @@ def freeze_agreement_version(db: Session, agreement: Agreement) -> DocumentArtif
         db.commit()
 
     return artifact
+
+
+def _supersede_payment_schedule_if_rent_changed(db: Session, agreement: Agreement, amendment: AgreementAmendment) -> None:
+    """ZR-ENG-CLR-005 Section 7.2: "Future obligations can be superseded by a
+    new schedule version once the contractual change becomes effective."
+    No-op for the common case (an amendment that doesn't touch rent -- e.g.
+    deposit-only, term-length-only, corrections). Only ever creates a new
+    PaymentSchedule row and flips the old one's status -- no existing
+    Obligation (paid or unpaid) is touched, so "already-paid obligations are
+    never silently rewritten" holds by construction. The next
+    generate_next_rent_obligation call picks up the new row automatically."""
+    if "monthlyRent" not in amendment.proposed_terms:
+        return
+
+    current = db.scalar(
+        select(PaymentSchedule).where(PaymentSchedule.agreement_id == agreement.id, PaymentSchedule.status == "ACTIVE")
+    )
+    if current is None:
+        return  # defensive -- create_agreement always creates one, so this shouldn't happen
+
+    current.status = "SUPERSEDED"
+    # AC-06: a UPFRONT schedule's amount is monthly_rent * term_months, not
+    # monthly_rent alone (see create_agreement) -- a rent-changing amendment
+    # against an UPFRONT lease is an edge case this path doesn't attempt to
+    # re-derive; proposed_terms carries only the new monthlyRent, not a term
+    # length to recompute a new total from.
+    db.add(PaymentSchedule(
+        agreement_id=agreement.id,
+        version=current.version + 1,
+        cadence=current.cadence,
+        custom_interval_days=current.custom_interval_days,
+        currency=current.currency,
+        amount=float(amendment.proposed_terms["monthlyRent"]),
+        first_due=date_.today(),
+        anchor_day=current.anchor_day,
+    ))

@@ -23,11 +23,43 @@ class PaymentAllocationInput(CamelModel):
     amount: float
 
 
+class ScheduledObligationPreview(CamelModel):
+    """ZR-ENG-CLR-005 AC-11/Section 6.1 region C 'Future schedule': one
+    projected-but-not-yet-created RENT obligation -- due date, period amount
+    and cadence, no misleading 'subscription' framing since this is
+    contractual rent, not a recurring charge object."""
+
+    due_date: date
+    amount: float
+    currency: str
+    cadence: str
+
+
+class PaymentPreviewRead(CamelModel):
+    """ZR-ENG-CLR-005 AC-11: 'A payer sees complete amount-due-now line items
+    and future schedule before charge confirmation.' amount_due_now is every
+    real, currently-unpaid Obligation on the agreement (rent + deposit --
+    this build has no renter-side fee, tax or credit line items to add, see
+    crud/finance.py:get_payment_preview); future_schedule is a pure
+    projection (never persisted) of the RENT periods still to come."""
+
+    amount_due_now: list[ObligationRead]
+    future_schedule: list[ScheduledObligationPreview]
+    cadence: str
+    remaining_scheduled_count: int
+
+
 class SimulatedPaymentCreate(CamelModel):
     guest_id: str
     amount: float
     currency: str = "INR"
     idempotency_key: str
+    # ZR-ENG-CLR-005 AC-03: all optional, all default to "payer == occupant" when
+    # omitted -- see crud.finance.create_payment_intent.
+    payer_guest_id: str | None = None
+    payer_name: str | None = None
+    payer_email: str | None = None
+    payer_phone: str | None = None
 
 
 class PaymentConfirm(CamelModel):
@@ -60,6 +92,14 @@ class SimulatedPaymentRead(CamelModel):
     # a payment can in principle span more than one obligation, but in practice
     # always represents one tenant's charge for one room.
     guest_name: str = ""
+    payer_guest_id: str | None = None
+    payer_name: str | None = None
+    payer_email: str | None = None
+    payer_phone: str | None = None
+    # Populated by crud.finance.annotate_payment_context -- the payer's registered
+    # guest name when payer_guest_id is set, else payer_name, else guest_name (the
+    # payer == occupant default).
+    payer_display_name: str = ""
     listing_id: str | None = None
     listing_name: str = ""
     room_id: int | None = None
@@ -156,8 +196,36 @@ class PayoutRecordRead(CamelModel):
     currency: str
     status: str
     hold_reason: str
+    # ZR-ENG-CLR-006 Section 15 waterfall tier 4: how much of `amount` was
+    # withheld to settle a prior HostRecovery -- 0.0 unless run_payout
+    # actually applied an offset. Actual cash disbursed = amount - this.
+    recovery_offset_amount: float
     created_at: datetime
     paid_at: datetime | None
+
+
+class PayoutBeneficiarySubmit(CamelModel):
+    party_id: int
+    account_holder_name: str
+    bank_name: str
+    account_number: str
+    ifsc_code: str
+
+
+class PayoutBeneficiaryConfirm(CamelModel):
+    code: str
+
+
+class PayoutBeneficiaryRead(CamelModel):
+    id: int
+    party_id: int
+    account_holder_name: str
+    bank_name: str
+    account_number_last4: str
+    ifsc_code: str
+    status: str
+    verified_at: datetime | None
+    created_at: datetime
 
 
 class RefundRequestCreate(CamelModel):
@@ -165,6 +233,7 @@ class RefundRequestCreate(CamelModel):
     obligation_id: int
     amount: float
     reason: str = ""
+    idempotency_key: str
 
 
 class RefundDecide(CamelModel):
@@ -177,6 +246,7 @@ class RefundRequestRead(CamelModel):
     obligation_id: int
     amount: float
     reason: str
+    idempotency_key: str
     status: str
     requested_by_admin_id: int
     decided_by_admin_id: int | None
@@ -187,6 +257,9 @@ class RefundRequestRead(CamelModel):
 class DisputeCreate(CamelModel):
     payment_id: int | None = None
     occupancy_id: int | None = None
+    # Required only when category == "CHARGEBACK" -- see crud/finance.py:open_dispute.
+    obligation_id: int | None = None
+    amount: float | None = None
     category: str
     description: str = ""
 
@@ -194,18 +267,70 @@ class DisputeCreate(CamelModel):
 class DisputeResolve(CamelModel):
     status: str  # "RESOLVED" | "REJECTED"
     resolution_notes: str = ""
+    # Required only when the dispute's category == "CHARGEBACK" -- "WON" | "LOST".
+    chargeback_outcome: str | None = None
 
 
 class DisputeRead(CamelModel):
     id: int
     payment_id: int | None
     occupancy_id: int | None
+    obligation_id: int | None
+    amount: float | None
     category: str
+    description: str
+    status: str
+    chargeback_outcome: str | None
+    opened_at: datetime
+    resolved_at: datetime | None
+    resolution_notes: str
+
+
+class FinancialHoldResolve(CamelModel):
+    notes: str = ""
+
+
+class FinancialHoldRead(CamelModel):
+    id: int
+    source_type: str
+    source_id: str
+    reason_code: str
+    severity: str
     description: str
     status: str
     opened_at: datetime
     resolved_at: datetime | None
+    resolved_by_admin_id: int | None
     resolution_notes: str
+
+
+class HostRecoveryRead(CamelModel):
+    id: int
+    party_id: int
+    financial_hold_id: int
+    refund_request_id: int | None
+    amount: float
+    recovered_amount: float
+    currency: str
+    status: str
+    recovery_method: str
+    notes: str
+    created_at: datetime
+    resolved_at: datetime | None
+
+
+class HostRecoveryRecordProgress(CamelModel):
+    """ZR-ENG-CLR-006 Section 18.4: an admin logging that some or all of an
+    open recovery amount actually came back -- how (recovery_method) and how
+    much, not a mechanism this build executes automatically yet."""
+
+    amount: float
+    method: str
+    notes: str = ""
+
+
+class HostRecoveryWriteOff(CamelModel):
+    reason: str
 
 
 class ReconciliationRunRead(CamelModel):

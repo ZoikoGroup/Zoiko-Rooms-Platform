@@ -14,8 +14,11 @@ from app.crud import booking_change_requests as bcr_crud
 from app.crud import finance as finance_crud
 from app.crud import leasing as leasing_crud
 from app.crud import occupancy as occupancy_crud
+from app.crud import habitability_incident as habitability_crud
+from app.crud import refund_entitlement as refund_entitlement_crud
 from app.crud import review as review_crud
 from app.crud import sublet as sublet_crud
+from app.crud import termination as termination_crud
 from app.crud.listing import assert_party_does_not_own_listing
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
@@ -33,7 +36,8 @@ from app.models.occupancy import Occupancy
 from app.services.booking_expiry import expire_offer_if_overdue
 from app.services.verification_requirements import is_identity_required_at_application
 from app.models.user_account import UserAccount
-from app.schemas.finance import DepositClaimItemRead, DepositClaimItemRespond, DepositClaimRead
+from app.schemas.finance import DepositClaimItemRead, DepositClaimItemRespond, DepositClaimRead, PaymentPreviewRead
+from app.schemas.habitability import HabitabilityIncidentCreate, HabitabilityIncidentRead
 from app.schemas.leasing import (
     AgreementRead,
     BookingChangeRequestCreate,
@@ -55,7 +59,15 @@ from app.schemas.leasing import (
     UserApplicationSubmitRequest,
     UserOccupancyRead,
 )
+from app.schemas.activation_gate import HandoverEventCreate, HandoverEventRead
 from app.schemas.review import ReviewCreate, ReviewRead
+from app.schemas.termination import (
+    RefundEntitlementRead,
+    TerminationCaseCreate,
+    TerminationCasePreviewRead,
+    TerminationCasePreviewRequest,
+    TerminationCaseRead,
+)
 
 router = APIRouter(prefix="/api/users/rentals", tags=["user-rentals"], dependencies=[Depends(get_current_user)])
 
@@ -653,6 +665,22 @@ def download_own_agreement_accessible_text(
     return Response(content=leasing_crud.generate_agreement_accessible_text(agreement), media_type="text/plain; charset=utf-8")
 
 
+@router.get("/agreements/{agreement_id}/payment-preview", response_model=PaymentPreviewRead)
+def get_own_payment_preview(
+    agreement_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 AC-11: 'A payer sees complete amount-due-now line items
+    and future schedule before charge confirmation' -- amount_due_now (rent +
+    deposit, whatever's currently unpaid) and a projected future_schedule,
+    read directly from this agreement's real Obligation/PaymentSchedule rows."""
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This agreement does not belong to you")
+    return finance_crud.get_payment_preview_for_own_agreement(db, agreement_id, guest.id)
+
+
 @router.get("/occupancies", response_model=list[UserOccupancyRead])
 def list_user_occupancies(
     user: UserAccount = Depends(get_current_user),
@@ -691,6 +719,166 @@ def get_occupancy_details(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own occupancies")
 
     return _to_user_occupancy_read(db, occupancy)
+
+
+@router.post(
+    "/occupancies/{occupancy_id}/termination-cases", response_model=TerminationCaseRead, status_code=status.HTTP_201_CREATED,
+)
+def request_own_termination(
+    occupancy_id: int,
+    payload: TerminationCaseCreate,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-006 Section 7.1: 'Renter selects End my stay / tenancy...
+    submits notice/request.' Only models.termination_case.UNILATERAL_CAUSE_
+    CODES are accepted today (see that module's own docstring for why)."""
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to you")
+    return termination_crud.open_termination_case(db, occupancy, guest, payload)
+
+
+@router.post("/occupancies/{occupancy_id}/termination-cases/preview", response_model=TerminationCasePreviewRead)
+def preview_own_termination(
+    occupancy_id: int,
+    payload: TerminationCasePreviewRequest,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-006 Section 7.1 Step 5: shows the renter the resolved
+    pathway, earliest effective date, and an estimated cost/refund range
+    BEFORE they submit a real notice -- nothing here is persisted. See
+    crud/termination.py:preview_termination_case."""
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to you")
+    return termination_crud.preview_termination_case(db, occupancy, guest, payload)
+
+
+@router.get("/occupancies/{occupancy_id}/termination-cases", response_model=list[TerminationCaseRead])
+def list_own_termination_cases(
+    occupancy_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to you")
+    return termination_crud.list_termination_cases_for_occupancy(db, occupancy)
+
+
+@router.post(
+    "/occupancies/{occupancy_id}/habitability-incidents", response_model=HabitabilityIncidentRead, status_code=status.HTTP_201_CREATED,
+)
+def report_own_habitability_incident(
+    occupancy_id: int,
+    payload: HabitabilityIncidentCreate,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-006 Section 9: the renter's own 'report a problem' path.
+    H2/H3 freezes the room for new bookings; never touches this occupancy."""
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to you")
+    return habitability_crud.report_habitability_incident(db, occupancy, payload, guest=guest)
+
+
+@router.get("/occupancies/{occupancy_id}/habitability-incidents", response_model=list[HabitabilityIncidentRead])
+def list_own_habitability_incidents(
+    occupancy_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to you")
+    return habitability_crud.list_habitability_incidents_for_occupancy(db, occupancy)
+
+
+@router.post("/termination-cases/{case_id}/withdraw", response_model=TerminationCaseRead)
+def withdraw_own_termination_case(
+    case_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    case = termination_crud.get_termination_case_or_404(db, case_id)
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This termination case does not belong to you")
+    return termination_crud.withdraw_termination_case(db, case, guest)
+
+
+@router.post("/termination-cases/{case_id}/accept-surrender", response_model=TerminationCaseRead)
+def accept_own_mutual_surrender(case_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """ZR-ENG-CLR-006 Section 8.1 MUTUAL_SURRENDER_PROPOSAL: the renter's
+    affirmative acceptance of a Host-proposed mutual surrender."""
+    case = termination_crud.get_termination_case_or_404(db, case_id)
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This termination case does not belong to you")
+    return termination_crud.accept_mutual_surrender(db, case, guest=guest)
+
+
+@router.post("/termination-cases/{case_id}/decline-surrender", response_model=TerminationCaseRead)
+def decline_own_mutual_surrender(case_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    case = termination_crud.get_termination_case_or_404(db, case_id)
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This termination case does not belong to you")
+    return termination_crud.decline_mutual_surrender(db, case, guest=guest)
+
+
+@router.get("/termination-cases/{case_id}/refund-entitlement", response_model=RefundEntitlementRead)
+def get_own_latest_refund_entitlement(
+    case_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-006 Section 17.1 case tracker: 'refund calculation' milestone
+    -- the renter's own view of the latest itemized entitlement, whoever
+    initiated the case. Ownership is checked against the occupancy (not the
+    case's initiator), since a Host-initiated case still belongs to this
+    renter's tenancy."""
+    case = termination_crud.get_termination_case_or_404(db, case_id)
+    guest = get_guest_for_user(db, user)
+    if not guest or case.occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This termination case does not belong to you")
+    return refund_entitlement_crud.get_latest_refund_entitlement_or_404(db, case)
+
+
+@router.post("/occupancies/{occupancy_id}/handover/receipt", response_model=HandoverEventRead)
+def submit_handover_receipt(
+    occupancy_id: int,
+    payload: HandoverEventCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The renter alone records receipt; provider/admin cannot impersonate it."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only record receipt for your own occupancy")
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="RENTER_RECEIPT", actor_kind="renter_user", actor_user_id=user.id,
+        evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),
+    )
+    log_audit_event(
+        db, None, "occupancy.renter_receipt", "occupancy", str(occupancy_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "occupancy.renter_receipt_recorded", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
+    db.commit()
+    return event
 
 
 @router.get("/sublet-lookup", response_model=SubletRenterLookup)

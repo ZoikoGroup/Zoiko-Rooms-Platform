@@ -81,6 +81,15 @@ def _make_signed_agreement(db: Session, *, admin, monthly_rent: float = 1000.0, 
         obligation_type="RENT", money_plane="OCCUPANCY", amount=monthly_rent, currency="INR",
         due_date=date.today(), status="PAID", agreement_id=agreement.id,
     ))
+    # dev's occupancy-lifecycle change: the occupancy row is now created at
+    # PARTIALLY_EXECUTED (PENDING_MOVE_IN), not by confirm_move_in -- this
+    # fixture builds the agreement directly (bypassing that normal signing
+    # flow), so it creates the same row confirm_move_in now expects to
+    # already exist.
+    db.add(Occupancy(
+        offer_id=offer.id, listing_id=listing.id, room_id=room.id, guest_id=guest.id,
+        status="PENDING_MOVE_IN", expected_end_date=crud._add_months(date.today(), term_months),
+    ))
     db.commit()
     return agreement, offer, listing, room, guest
 
@@ -96,13 +105,16 @@ class TestConfirmMoveIn:
         assert occupancy.guest_id == guest.id
         assert occupancy.expected_end_date == crud._add_months(date.today(), 12)
 
-    def test_is_idempotent_for_the_same_offer(self, db_session: Session):
+    def test_a_second_confirmation_is_rejected_not_silently_idempotent(self, db_session: Session):
+        """dev's occupancy-lifecycle change: confirm_move_in is a one-time
+        PENDING_MOVE_IN -> ACTIVE transition now, not create-or-return."""
         admin = _make_admin(db_session, email="occ-movein-idem@test.com", role="admin")
         agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin)
 
-        first = crud.confirm_move_in(db_session, agreement, admin)
-        second = crud.confirm_move_in(db_session, agreement, admin)
-        assert first.id == second.id
+        crud.confirm_move_in(db_session, agreement, admin)
+        with pytest.raises(HTTPException) as exc:
+            crud.confirm_move_in(db_session, agreement, admin)
+        assert exc.value.status_code == 409
 
     def test_requires_provider_access(self, db_session: Session):
         owner_admin = _make_admin(db_session, email="occ-movein-owner@test.com", role="admin")
@@ -232,16 +244,23 @@ class TestGenerateNextRentObligation:
 
 class TestEndOccupancy:
     def test_ends_an_active_occupancy(self, db_session: Session):
-        admin = _make_admin(db_session, email="occ-end1@test.com", role="admin")
+        """ZR-ENG-CLR-006 AC-05: ending an active occupancy *early* (before
+        its own expected_end_date, as this one does -- confirm_move_in was
+        just now) is 'cancellation,' so it requires either a termination
+        case or -- exercised here -- a Super Admin's own logged override
+        reason (AC-29)."""
+        admin = _make_admin(db_session, email="occ-end1@test.com", role="super_admin")
         agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin)
         occupancy = crud.confirm_move_in(db_session, agreement, admin)
 
-        updated = crud.end_occupancy(db_session, occupancy, admin)
+        updated = crud.end_occupancy(db_session, occupancy, admin, override_reason="test: ending early for coverage")
         assert updated.status == "ENDED"
         assert updated.move_out_date == date.today()
         assert updated.ended_at is not None
 
     def test_requires_provider_access(self, db_session: Session):
+        """assert_provider_access runs before AC-05's own guard, so this
+        stays a pure ownership-check test regardless of role/override_reason."""
         owner_admin = _make_admin(db_session, email="occ-end-owner@test.com", role="admin")
         outsider_admin = _make_admin(db_session, email="occ-end-outsider@test.com", role="admin")
         agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=owner_admin)
@@ -250,6 +269,39 @@ class TestEndOccupancy:
         with pytest.raises(HTTPException) as exc:
             crud.end_occupancy(db_session, occupancy, outsider_admin)
         assert exc.value.status_code == 403
+
+    def test_a_regular_admin_cannot_end_an_active_occupancy_early_without_a_case_or_override(self, db_session: Session):
+        """ZR-ENG-CLR-006 Section 8 FINAL DECISION: 'An active occupancy is
+        not cancelable by Host fiat.' A regular provider admin (not Super
+        Admin) with no termination_case_id is refused outright, regardless
+        of override_reason."""
+        admin = _make_admin(db_session, email="occ-end-hostfiat@test.com", role="admin")
+        agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin)
+        occupancy = crud.confirm_move_in(db_session, agreement, admin)
+
+        with pytest.raises(HTTPException) as exc:
+            crud.end_occupancy(db_session, occupancy, admin, override_reason="I want to end it")
+        assert exc.value.status_code == 403
+
+    def test_super_admin_override_requires_a_non_empty_reason(self, db_session: Session):
+        admin = _make_admin(db_session, email="occ-end-noreason@test.com", role="super_admin")
+        agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin)
+        occupancy = crud.confirm_move_in(db_session, agreement, admin)
+
+        with pytest.raises(HTTPException) as exc:
+            crud.end_occupancy(db_session, occupancy, admin)
+        assert exc.value.status_code == 400
+
+    def test_ending_at_or_after_the_expected_end_date_needs_no_case_or_override(self, db_session: Session):
+        """Not a 'cancellation' -- the tenancy simply ran its course."""
+        admin = _make_admin(db_session, email="occ-end-natural@test.com", role="admin")
+        agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin, term_months=1)
+        occupancy = crud.confirm_move_in(db_session, agreement, admin)
+        occupancy.expected_end_date = date.today()
+        db_session.commit()
+
+        updated = crud.end_occupancy(db_session, occupancy, admin)
+        assert updated.status == "ENDED"
 
 
 class TestListOccupanciesMissingUpcomingRent:

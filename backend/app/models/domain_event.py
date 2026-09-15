@@ -40,3 +40,16 @@ class DomainEvent(Base):
     delivery_state: Mapped[str] = mapped_column(String(20), default="pending")
     correlation_id: Mapped[str] = mapped_column(String(64), default="")
     idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # ZR-ENG-CLR-006 Section 19's own termination_event_log entity
+    # ("case_id, event_type, actor, timestamp, previous_state, new_state,
+    # payload_hash, correlation_id") -- rather than a second, parallel
+    # logging table, this outbox already carries case_id (resource_id),
+    # event_type, timestamp (occurred_at) and correlation_id; these five
+    # columns fill the remaining gap. All nullable/blank by default -- only
+    # crud/termination.py's own emit_event calls populate them today, every
+    # other call site across the app is unaffected.
+    actor_kind: Mapped[str] = mapped_column(String(20), default="")
+    actor_id: Mapped[str] = mapped_column(String(50), default="")
+    previous_state: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    new_state: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)

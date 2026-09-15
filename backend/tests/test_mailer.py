@@ -68,13 +68,14 @@ class _FakeSMTP:
         self.sent_messages.append(message)
 
 
-def _configure_smtp(monkeypatch, *, host="smtp.test.internal"):
+def _configure_smtp(monkeypatch, *, host="smtp.test.internal", port=587, use_tls=True, use_ssl=False):
     monkeypatch.setattr(settings, "email_provider", "smtp")
     monkeypatch.setattr(settings, "smtp_host", host)
-    monkeypatch.setattr(settings, "smtp_port", 587)
+    monkeypatch.setattr(settings, "smtp_port", port)
     monkeypatch.setattr(settings, "smtp_username", "test-user")
     monkeypatch.setattr(settings, "smtp_password", "test-pass")
-    monkeypatch.setattr(settings, "smtp_use_tls", True)
+    monkeypatch.setattr(settings, "smtp_use_tls", use_tls)
+    monkeypatch.setattr(settings, "smtp_use_ssl", use_ssl)
     monkeypatch.setattr(settings, "email_from", "Zoiko Rooms <no-reply@zoikorooms.com>")
 
 
@@ -97,6 +98,36 @@ def test_smtp_path_sends_a_correctly_built_message(monkeypatch):
     message = fake.sent_messages[0]
     assert message["To"] == "renter@example.com"
     assert message["Subject"] == "Your payment has been received"
+
+
+def test_smtp_ssl_path_sends_a_correctly_built_message_without_starttls(monkeypatch):
+    """Implicit TLS (e.g. GoDaddy's smtpout.secureserver.net:465): must use
+    SMTP_SSL, must never call starttls() on it, and must not touch the plain
+    smtplib.SMTP class at all."""
+    _configure_smtp(monkeypatch, host="smtpout.secureserver.net", port=465, use_ssl=True)
+    _FakeSMTP.instances.clear()
+    monkeypatch.setattr(mailer.smtplib, "SMTP_SSL", _FakeSMTP)
+
+    class _PlainSMTPMustNotBeUsed:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("smtplib.SMTP must not be used when smtp_use_ssl is true")
+
+    monkeypatch.setattr(mailer.smtplib, "SMTP", _PlainSMTPMustNotBeUsed)
+
+    sent = mailer.send_email(
+        "renter@example.com", "Your payment has been received",
+        heading="Payment received", body_lines=["We've recorded your payment."],
+    )
+
+    assert sent is True
+    assert len(_FakeSMTP.instances) == 1
+    fake = _FakeSMTP.instances[0]
+    assert fake.host == "smtpout.secureserver.net"
+    assert fake.port == 465
+    assert fake.started_tls is False  # starttls() must never be called over implicit SSL
+    assert fake.logged_in_as == ("test-user", "test-pass")
+    assert len(fake.sent_messages) == 1
+    assert fake.sent_messages[0]["To"] == "renter@example.com"
 
 
 def test_smtp_not_configured_fails_safely_and_logs(monkeypatch, caplog):

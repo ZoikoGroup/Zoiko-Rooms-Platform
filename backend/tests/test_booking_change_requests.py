@@ -11,7 +11,11 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from fastapi import HTTPException
+
+from app.crud import occupancy as occupancy_crud
 from app.crud.occupancy import _add_months
+from app.models.admin_user import AdminUser
 from app.models.booking_change_request import BookingChangeRequest
 from app.models.leasing import Agreement, Application, Offer
 from app.models.listing import Listing
@@ -38,8 +42,17 @@ def _signed_agreement_active_occupancy(client, db_session: Session, *, email_suf
     agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
         client, db_session, email_suffix=email_suffix, start_date=start_date,
     )
-    r = client.post(f"/api/occupancy/agreements/{agreement_id}/confirm-move-in", cookies=admin_cookies)
-    assert r.status_code == 200, r.text
+    # The real confirm-move-in route now always waits on the Phase 2B
+    # activation gate's own DATE_ELIGIBILITY_UNRESOLVED check (no authoritative
+    # date/tolerance rule exists yet -- crud/activation_gate.py's own comment).
+    # Same accommodation test_occupancy_workflow.py's own legacy tests already
+    # use: construct the already-active occupancy directly rather than going
+    # through a gate these tests aren't the ones exercising.
+    agreement = db_session.get(Agreement, agreement_id)
+    occupancy = db_session.scalar(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id))
+    occupancy.status = "ACTIVE"
+    occupancy.move_in_date = date.today()
+    db_session.commit()
     return agreement_id, admin_cookies, renter
 
 
@@ -161,11 +174,9 @@ class TestRequestDateChange:
         assert r.status_code == 409, r.text
 
     def test_cannot_request_after_already_moved_in(self, client, db_session: Session):
-        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+        agreement_id, admin_cookies, renter = _signed_agreement_active_occupancy(
             client, db_session, email_suffix="3", start_date=date.today() - timedelta(days=5),
         )
-        r = client.post(f"/api/occupancy/agreements/{agreement_id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
 
         r = client.post(
             f"/api/users/rentals/agreements/{agreement_id}/change-requests",
@@ -250,8 +261,16 @@ class TestApproveDateChange:
         client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=auth_user_cookie(renter))
         client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
 
-        r = client.post(f"/api/occupancy/agreements/{agreement_id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
+        # The real confirm-move-in route now always waits on the Phase 2B
+        # activation gate's own DATE_ELIGIBILITY_UNRESOLVED check (no
+        # authoritative date/tolerance rule exists yet -- crud/activation_
+        # gate.py's own comment) -- not what this test is exercising, so it
+        # calls the same underlying crud.confirm_move_in the route itself
+        # calls once fresh signatures are in place, bypassing that gate.
+        admin = db_session.query(AdminUser).filter_by(email="bcr-admin-7@test.com").one()
+        agreement = db_session.get(Agreement, agreement_id)
+        occupancy_crud.confirm_move_in(db_session, agreement, admin)
+        db_session.commit()
 
         r = client.get("/api/users/rentals/change-requests", cookies=auth_user_cookie(renter))
         assert r.json()[0]["status"] == "EFFECTIVE", "request must move past APPROVED once re-signed, not stay stuck there"

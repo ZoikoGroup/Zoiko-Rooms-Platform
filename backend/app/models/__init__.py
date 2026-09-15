@@ -9,11 +9,19 @@ from app.models.sublet_request import SubletRequest
 from app.models.finance import (
     DepositRecord,
     DisputeCase,
+    FinancialHold,
+    HostRecovery,
+    LedgerAccount,
+    LedgerEntry,
     Obligation,
     PaymentAllocation,
+    PaymentReceipt,
+    PaymentSchedule,
     PayoutRecord,
+    PayoutStatement,
     ReconciliationRun,
     RefundRequest,
+    ServiceFeeInvoice,
     SimulatedPayment,
 )
 from app.models.agreement_clause import ClauseDefinition
@@ -25,6 +33,9 @@ from app.models.agreement_version_detail import AgreementPremises, CommercialTer
 from app.models.disclosure_requirement import DisclosureRequirement
 from app.models.signature_provider import SignatureProviderEvent, SignatureProviderStatus, SignatureRequest
 from app.models.termination_record import TerminationRecord
+from app.models.termination_case import MitigationRecord, TerminationCase, TerminationDecision
+from app.models.refund_entitlement import RefundEntitlement, RefundEntitlementLineItem
+from app.models.habitability_incident import HabitabilityIncident
 from app.models.guest import Guest
 from app.models.leasing import (
     Agreement,
@@ -42,7 +53,8 @@ from app.models.listing_approval import ListingApproval
 from app.models.market_release import MarketRelease
 from app.models.market_policy import MarketPolicyPack
 from app.models.membership import Membership
-from app.models.occupancy import Occupancy
+from app.models.occupancy import Occupancy, OccupancyCoTenant
+from app.models.occupancy_activation import OccupancyActivationDecision, OccupancyHandoverEvent
 from app.models.occupancy_classification import OccupancyClassification
 from app.models.party import Party
 from app.models.payment import Payment
@@ -113,16 +125,29 @@ __all__ = [
     "SignatureProviderEvent",
     "SignatureProviderStatus",
     "TerminationRecord",
+    "MitigationRecord",
+    "TerminationCase",
+    "TerminationDecision",
     "DisclosureRequirement",
     "Occupancy",
+    "OccupancyCoTenant",
+    "OccupancyHandoverEvent",
+    "OccupancyActivationDecision",
     "Obligation",
     "SimulatedPayment",
     "PaymentAllocation",
     "DepositRecord",
     "PayoutRecord",
+    "PayoutStatement",
+    "ServiceFeeInvoice",
     "RefundRequest",
     "DisputeCase",
+    "FinancialHold",
     "ReconciliationRun",
+    "LedgerAccount",
+    "LedgerEntry",
+    "PaymentReceipt",
+    "PaymentSchedule",
     "IdentityVerification",
     "BreakGlassAccessGrant",
     "EvidenceArtifact",

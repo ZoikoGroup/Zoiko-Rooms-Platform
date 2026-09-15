@@ -22,7 +22,7 @@ def get_property(db: Session, property_id: int) -> Property | None:
 
 def create_property(db: Session, admin: AdminUser, data: PropertyCreate) -> Property:
     party = get_or_create_default_party(db, admin)
-    prop = Property(owner_party_id=party.id, address=data.address, city=data.city)
+    prop = Property(owner_party_id=party.id, address=data.address, city=data.city, jurisdiction_code=data.jurisdiction_code)
     db.add(prop)
     db.commit()
     db.refresh(prop)

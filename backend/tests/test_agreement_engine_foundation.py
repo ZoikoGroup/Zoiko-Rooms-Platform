@@ -9,8 +9,11 @@ from __future__ import annotations
 import hashlib
 from datetime import date, timedelta
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.crud import occupancy as occupancy_crud
 from app.models.leasing import Agreement, AgreementVersion, DocumentArtifact, Offer, SignatureEvent
 from app.models.market_release import MarketRelease
 from app.services.agreement_effectiveness import is_agreement_effective
@@ -257,9 +260,17 @@ class TestExecutedVsEffective:
         assert is_agreement_effective(agreement) is False
         assert is_agreement_effective(agreement, today=date.today() + timedelta(days=10)) is True
 
-        r = client.post(f"/api/occupancy/agreements/{agreement_id}/confirm-move-in", cookies=admin_cookies)
-        assert r.status_code == 409, r.text
-        assert "not yet effective" in r.text
+        # The real confirm-move-in route now always waits on the Phase 2B
+        # activation gate's own DATE_ELIGIBILITY_UNRESOLVED check (no
+        # authoritative date/tolerance rule exists yet -- crud/activation_
+        # gate.py's own comment), which would mask the specific "not yet
+        # effective" rejection this test is actually about -- it calls the
+        # same underlying crud.confirm_move_in the route itself calls,
+        # bypassing that unrelated gate.
+        with pytest.raises(HTTPException) as exc:
+            occupancy_crud.confirm_move_in(db_session, agreement, super_admin)
+        assert exc.value.status_code == 409
+        assert "not yet effective" in str(exc.value.detail)
 
     def test_signed_agreement_with_start_date_today_is_effective(self, client, db_session: Session):
         listing_id, _room_id = _make_listing_with_room(db_session)
