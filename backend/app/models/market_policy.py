@@ -16,6 +16,33 @@ DEPOSIT_CUSTODY_MODELS = ("STATUTORY_SCHEME", "GOVERNMENT_BOND", "REGULATED_ESCR
 CONSENT_STANDARDS = ("HOST_ABSOLUTE_DISCRETION", "REASONABLE_REFUSAL_ONLY", "NOTICE_ONLY", "STATUTORY_RESPONSE_DEADLINE")
 PAYEE_MODELS = ("ORIGINAL_RENTER_PAYEE", "HOST_OR_LANDLORD_PAYEE", "AUTHORIZED_AGENT_PAYEE", "SPLIT_PAYEE", "EXTERNAL_PAYEE_RECORDED")
 
+# ZR-ENG-CLR-005 Section 9.1/AC-20/AC-35: the named funds-flow profiles the
+# spec defines. Only DIRECT_SETTLEMENT is actually implementable end-to-end
+# in this build -- PSP_DEFERRED_PAYOUT/TRUST_ESCROW_CUSTODY need a real PSP
+# or trust partner this codebase doesn't have, and ZOIKO_REGULATED_CUSTODY is
+# "OFF by default; requires explicit licensing/perimeter approval" per spec.
+# A market pack resolving to any profile outside SUPPORTED_FUNDS_FLOW_PROFILES
+# fails closed at payout time (crud/finance.py:run_payout) rather than
+# silently defaulting to direct settlement or Zoiko custody.
+FUNDS_FLOW_PROFILES = (
+    "DIRECT_SETTLEMENT", "PSP_DEFERRED_PAYOUT", "TRUST_ESCROW_CUSTODY", "ZOIKO_REGULATED_CUSTODY", "EXTERNAL_OFF_PLATFORM",
+)
+SUPPORTED_FUNDS_FLOW_PROFILES = ("DIRECT_SETTLEMENT",)
+
+# ZR-ENG-CLR-006 Section 11.1's full liability-model taxonomy, modeled
+# completely (same "never trim the taxonomy at the data layer" discipline as
+# TERMINATION_CAUSE_CODES) even though crud/refund_entitlement.py's
+# _compute_policy_liability only has a real formula for a subset --
+# TRIBUNAL_OR_COURT_DETERMINED is never selected here (a tribunal amount is
+# always a Super Admin's own entry, crud/termination.py:set_tribunal_liability,
+# and always takes precedence over whatever this field says once entered --
+# see _compute_policy_liability's own docstring for why that isn't additive
+# double-counting).
+TERMINATION_LIABILITY_MODELS = (
+    "NOTICE_RENT", "STATUTORY_BREAK_FEE", "CONTRACT_BREAK_AMOUNT", "ACTUAL_REASONABLE_LOSS",
+    "CAPPED_COMPENSATION", "ZERO_LIABILITY", "TRIBUNAL_OR_COURT_DETERMINED", "MIXED",
+)
+
 
 class MarketPolicyPack(Base):
     """One jurisdiction's resolved rule set for deposits and subletting, versioned
@@ -34,6 +61,26 @@ class MarketPolicyPack(Base):
     confidence: Mapped[str] = mapped_column(String(20), default="REVIEW_REQUIRED")
     legal_source_note: Mapped[str] = mapped_column(String(2000), default="")
 
+    # -- Payment policy (ZR-ENG-CLR-005 Section 8, AC-09: platform fees are
+    # resolved from effective-dated policy, not a hard-coded rate). Fraction,
+    # not a percentage -- 0.10 means 10%. Host-paid percentage-of-rent fee is
+    # the only fee basis this MVP implements (Section 8.1's payer/basis/
+    # tiered/hybrid dimensions are deferred until a market pack actually
+    # needs them; renter fees stay OFF by default with no toggle here yet).
+    platform_fee_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=0.10)
+    funds_flow_profile: Mapped[str] = mapped_column(String(30), default="DIRECT_SETTLEMENT")
+    # ZR-ENG-CLR-005 Section 13.1/AC-26: "Service-fee invoice issuer is the
+    # correct Zoiko legal entity and tax configuration." Resolved per
+    # jurisdiction/effective-date like every other field here, never
+    # hard-coded in the invoice-generation code itself -- see
+    # crud/finance.py:_generate_service_fee_invoice_pdf. tax_rate defaults to
+    # 0.0 (no tax registration/authority integration exists in this build);
+    # showing 0% honestly is the correct "tax configuration" for a market
+    # pack that has none, not an invented placeholder rate.
+    zoiko_legal_entity_name: Mapped[str] = mapped_column(String(200), default="Zoiko Realty Group")
+    zoiko_tax_registration_number: Mapped[str] = mapped_column(String(50), default="")
+    service_fee_tax_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=0.0)
+
     # -- Deposit policy (Section 2) --
     deposit_instrument_allowed: Mapped[str] = mapped_column(String(20), default="OPTIONAL")
     deposit_max_rent_multiple: Mapped[float] = mapped_column(Numeric(6, 2), default=3.0)
@@ -47,6 +94,41 @@ class MarketPolicyPack(Base):
     sublet_max_rent_multiple_of_original: Mapped[float] = mapped_column(Numeric(6, 2), default=1.0)
     sublet_assignment_payee_model: Mapped[str] = mapped_column(String(30), default="HOST_OR_LANDLORD_PAYEE")
     sublet_sublease_payee_model: Mapped[str] = mapped_column(String(30), default="ORIGINAL_RENTER_PAYEE")
+
+    # -- Termination policy (ZR-ENG-CLR-006 Section 6/AC-03: "No global fixed
+    # notice period is hard-coded" -- this is the configurable value the
+    # Termination Policy Resolver reads instead. Reasonable placeholder for
+    # ordinary renter-initiated early exit under common Indian rental
+    # practice -- REVIEW_REQUIRED confidence like every other field here, not
+    # counsel-validated; the only cause this MVP actually resolves a notice
+    # period for -- see models/termination_case.py:UNILATERAL_CAUSE_CODES.
+    termination_notice_days: Mapped[int] = mapped_column(default=30)
+    # ZR-ENG-CLR-006 Section 10: "rent-cycle alignment -- some markets align
+    # termination to rent cycle; others do not. Configurable." Off by
+    # default (raw notice-days date, unchanged behavior) -- when a market
+    # pack turns this on, crud/termination.py:_align_to_rent_cycle rounds
+    # the computed date up to the end of its calendar month, a reasonable
+    # placeholder cycle boundary for this build's only real cadence
+    # (MONTHLY), not a verified market rule.
+    align_termination_to_rent_cycle: Mapped[bool] = mapped_column(default=False)
+    # ZR-ENG-CLR-006 Section 11.1/AC-12: which liability model applies to an
+    # ordinary renter-initiated early exit or contract break beyond the
+    # earned/unearned rent split NOTICE_CAUSE_CODES already produces for free
+    # (see models/termination_case.py's own NOTICE_CAUSE_CODES docstring --
+    # that mechanism IS this field's NOTICE_RENT value, its default: no extra
+    # charge on top of rent through the notice period). REVIEW_REQUIRED
+    # placeholder like every field on this row, not counsel-validated.
+    termination_liability_model: Mapped[str] = mapped_column(String(30), default="NOTICE_RENT")
+    # Break-fee/contract-break/capped-compensation formula input: a multiple
+    # of one month's rent (crud/refund_entitlement.py:_monthly_rent_amount),
+    # the same "multiple of rent" idiom deposit_max_rent_multiple already
+    # uses above. 0 (default) means no extra fee even if a model other than
+    # NOTICE_RENT/ZERO_LIABILITY is selected -- a market pack must set this
+    # to actually charge one.
+    termination_break_fee_rent_multiple: Mapped[float] = mapped_column(Numeric(6, 2), default=0.0)
+    # CAPPED_COMPENSATION's own ceiling, expressed the same way. Null means
+    # uncapped (the break-fee multiple above stands unmodified).
+    termination_liability_cap_rent_multiple: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
 
     # -- Booking-change / rent-change policy (Section 8, ZR-ENG-CLR-008 §10/AC-24) --
     # Both the doc's own validation examples cite a minimum interval, not a

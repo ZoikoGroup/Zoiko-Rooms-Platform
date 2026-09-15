@@ -7,8 +7,18 @@ from sqlalchemy.orm import Session
 from app.crud.audit import log_audit_event
 from app.models.admin_user import AdminUser
 from app.models.market_policy import MARKET_POLICY_CONFIDENCE_LEVELS, MarketPolicyPack
+from app.models.occupancy import Occupancy
 
 DEFAULT_JURISDICTION = "IN"
+
+
+def jurisdiction_code_for_occupancy(occupancy: Occupancy) -> str:
+    """ZR-ENG-CLR-006 Section 6: 'The Termination Policy Resolver must
+    select an effective-dated market rule set using the property
+    jurisdiction.' The one call site this build resolves a *real* property
+    jurisdiction from, rather than the platform-wide DEFAULT_JURISDICTION
+    -- see crud/termination.py's own call sites."""
+    return occupancy.room.property.jurisdiction_code
 
 
 def resolve_market_policy(db: Session, jurisdiction_code: str = DEFAULT_JURISDICTION, *, as_of: date | None = None) -> MarketPolicyPack:
@@ -47,6 +57,30 @@ def to_policy_snapshot(policy: MarketPolicyPack) -> dict:
         "policy_pack_version": policy.version,
         "confidence": policy.confidence,
     }
+
+
+def to_termination_policy_snapshot(policy: MarketPolicyPack) -> dict:
+    """ZR-ENG-CLR-006 Section 6/19's termination_policy_snapshot -- the same
+    'immutable per calculation' discipline as to_policy_snapshot above, widened
+    to also freeze every field the Termination/Refund engine actually reads
+    (notice, liability model, fee) rather than just the four bookkeeping keys.
+    A later refund_entitlement calculation always reads case.policy_snapshot,
+    never re-resolves the (possibly since-changed) live MarketPolicyPack row
+    -- AC-02's own 'reproducible from the policy_snapshot_id, not from
+    whatever policy happens to be current' rule, now covering every dimension
+    this engine actually uses instead of only notice_days."""
+    snapshot = to_policy_snapshot(policy)
+    snapshot.update({
+        "termination_notice_days": policy.termination_notice_days,
+        "align_termination_to_rent_cycle": policy.align_termination_to_rent_cycle,
+        "termination_liability_model": policy.termination_liability_model,
+        "termination_break_fee_rent_multiple": float(policy.termination_break_fee_rent_multiple),
+        "termination_liability_cap_rent_multiple": (
+            float(policy.termination_liability_cap_rent_multiple)
+            if policy.termination_liability_cap_rent_multiple is not None else None
+        ),
+    })
+    return snapshot
 
 
 def list_market_policy_packs(db: Session, jurisdiction_code: str | None = None) -> list[MarketPolicyPack]:
