@@ -40,6 +40,16 @@ export function formatDate(date: string) {
   });
 }
 
+/** Client-side-only preview helper for the shortening/extension request
+ * modals -- mirrors the backend's crud/occupancy.py:_add_months calendar-month
+ * add closely enough for a "current vs proposed" display; the server remains
+ * the source of truth for the actual committed date. */
+export function addMonths(isoDate: string, months: number): string {
+  const d = new Date(isoDate + "T00:00:00");
+  d.setMonth(d.getMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
+
 /** Today as a "YYYY-MM-DD" string in the browser's local timezone -- matches
  *  what `<input type="date">` both displays and compares against, so this is
  *  the right "today" for a `min` attribute or a client-side past-date check

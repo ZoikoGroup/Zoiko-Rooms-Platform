@@ -204,6 +204,16 @@ export function submitDateChangeRequest(
   });
 }
 
+export function submitTermShiftRequest(
+  agreementId: number,
+  payload: { proposedStartDate: string; newTermMonths: number; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/term-shift-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function submitExtensionRequest(
   agreementId: number,
   payload: { additionalTermMonths: number; reason?: string }
@@ -250,6 +260,28 @@ export function listMyChangeRequests(): Promise<BookingChangeRequest[]> {
 
 export function withdrawChangeRequest(bcrId: number): Promise<BookingChangeRequest> {
   return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/change-requests/${bcrId}/withdraw`, {
+    method: "POST",
+  });
+}
+
+export function submitDepositChangeRequest(
+  agreementId: number,
+  payload: { proposedDepositAmount: number; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/deposit-change-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function acceptAlternativeChangeTerms(bcrId: number): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/change-requests/${bcrId}/accept-alternative`, {
+    method: "POST",
+  });
+}
+
+export function declineAlternativeChangeTerms(bcrId: number): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/change-requests/${bcrId}/decline-alternative`, {
     method: "POST",
   });
 }

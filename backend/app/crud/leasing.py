@@ -1477,21 +1477,43 @@ def freeze_agreement_version(db: Session, agreement: Agreement) -> DocumentArtif
         # ZR-ENG-CLR-008 Section 8: if this amendment was generated from a
         # renter-initiated BookingChangeRequest, that request is only
         # EFFECTIVE now (fully re-signed) -- not at the earlier host-approval
-        # moment. An EXTENSION additionally has to update the *existing*
-        # Occupancy's expected_end_date here, since Occupancy already exists
-        # by this point and nothing else recomputes it after move-in.
+        # moment (AWAITING_AGREEMENT_ACTION). An EXTENSION additionally has to
+        # update the *existing* Occupancy's expected_end_date here, since
+        # Occupancy already exists by this point and nothing else recomputes
+        # it after move-in.
+        from app.crud.audit import log_audit_event
+        from app.crud.notification import notify_user_by_guest
         from app.models.booking_change_request import BookingChangeRequest
         from app.models.occupancy import Occupancy
+        from app.services.booking_change_state_machine import transition as bcr_transition
 
         bcr = db.scalar(
-            select(BookingChangeRequest).where(BookingChangeRequest.resulting_amendment_id == pending_amendment.id)
+            select(BookingChangeRequest).where(
+                BookingChangeRequest.resulting_amendment_id == pending_amendment.id,
+                BookingChangeRequest.status == "AWAITING_AGREEMENT_ACTION",
+            )
         )
         if bcr is not None:
-            bcr.status = "EFFECTIVE"
+            bcr_transition(bcr, "EFFECTIVE")
             if bcr.change_type == "EXTENSION" and bcr.proposed_end_date is not None:
                 occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == pending_amendment.agreement.offer_id))
                 if occupancy is not None:
                     occupancy.expected_end_date = bcr.proposed_end_date
+
+            change_label = {
+                "EXTENSION": "stay extension", "SHORTENING": "stay shortening", "FINANCIAL_CHANGE": "rent change",
+            }.get(bcr.change_type, "move-in date change")
+            log_audit_event(
+                db, None, "booking_change.effective", "booking_change_request", str(bcr.id),
+                reason="Amendment fully re-signed", before_state="AWAITING_AGREEMENT_ACTION", after_state="EFFECTIVE",
+            )
+            notify_user_by_guest(
+                db, bcr.requested_by,
+                title=f"Your {change_label} is now effective",
+                message=f"Your {change_label} is fully signed and now in effect.",
+                notification_type="booking_change_request.effective",
+                related_entity_type="booking_change_request", related_entity_id=str(bcr.id),
+            )
 
         db.commit()
 

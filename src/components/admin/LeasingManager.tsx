@@ -55,6 +55,13 @@ export function LeasingManager() {
   const [expandedDisclosuresAgreementId, setExpandedDisclosuresAgreementId] = useState<number | null>(null);
   const [disclosuresLoading, setDisclosuresLoading] = useState(false);
   const [deliveringDisclosureId, setDeliveringDisclosureId] = useState<number | null>(null);
+  const [legalOrderAgreementId, setLegalOrderAgreementId] = useState<number | null>(null);
+  const [legalOrderStartDate, setLegalOrderStartDate] = useState("");
+  const [legalOrderTermMonths, setLegalOrderTermMonths] = useState("");
+  const [legalOrderRent, setLegalOrderRent] = useState("");
+  const [legalOrderEvidenceRef, setLegalOrderEvidenceRef] = useState("");
+  const [legalOrderReason, setLegalOrderReason] = useState("");
+  const [legalOrderSubmitting, setLegalOrderSubmitting] = useState(false);
 
   function showToast(message: string) {
     setToast(message);
@@ -353,6 +360,49 @@ export function LeasingManager() {
     }
   }
 
+  function openLegalOrder(agreementId: number) {
+    setLegalOrderAgreementId(agreementId);
+    setLegalOrderStartDate("");
+    setLegalOrderTermMonths("");
+    setLegalOrderRent("");
+    setLegalOrderEvidenceRef("");
+    setLegalOrderReason("");
+  }
+
+  async function submitLegalOrderChange() {
+    if (!legalOrderAgreementId) return;
+    if (!legalOrderEvidenceRef.trim()) return showToast("An authority evidence reference is required");
+    const payload: Record<string, unknown> = { authorityEvidenceRef: legalOrderEvidenceRef.trim(), reason: legalOrderReason.trim() };
+    if (legalOrderStartDate) payload.proposedStartDate = legalOrderStartDate;
+    if (legalOrderTermMonths) {
+      const months = Number(legalOrderTermMonths);
+      if (!Number.isInteger(months) || months < 1) return showToast("Enter a whole number of months (at least 1)");
+      payload.newTermMonths = months;
+    }
+    if (legalOrderRent) {
+      const rent = Number(legalOrderRent);
+      if (!Number.isFinite(rent) || rent <= 0) return showToast("Enter a valid monthly rent");
+      payload.proposedMonthlyRent = rent;
+    }
+    if (!payload.proposedStartDate && !payload.newTermMonths && !payload.proposedMonthlyRent) {
+      return showToast("Provide at least one of: new move-in date, new term, or new rent");
+    }
+
+    setLegalOrderSubmitting(true);
+    try {
+      await apiClientFetch(`/api/leasing/agreements/${legalOrderAgreementId}/legal-order-changes`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      showToast("Legal order change applied — the tenant needs to re-sign the updated agreement.");
+      setLegalOrderAgreementId(null);
+    } catch {
+      showToast("Failed to apply this legal order change");
+    } finally {
+      setLegalOrderSubmitting(false);
+    }
+  }
+
   async function downloadAgreementPdf(agreementId: number) {
     try {
       const res = await fetch(`${API_URL}/api/leasing/agreements/${agreementId}/pdf`, { credentials: "include" });
@@ -550,6 +600,11 @@ export function LeasingManager() {
                   {agreement.status !== "DRAFT" && (
                     <Button size="sm" variant="outline" onClick={() => toggleDisclosures(agreement.id)}>
                       {expandedDisclosuresAgreementId === agreement.id ? "Hide Disclosures" : "Disclosures"}
+                    </Button>
+                  )}
+                  {role === "super_admin" && agreement.status === "SIGNED" && (
+                    <Button size="sm" variant="outline" onClick={() => openLegalOrder(agreement.id)}>
+                      Legal Order Change
                     </Button>
                   )}
                 </div>
@@ -776,6 +831,76 @@ export function LeasingManager() {
             Save Terms
           </Button>
         </form>
+      </Modal>
+
+      <Modal
+        open={Boolean(legalOrderAgreementId)}
+        onClose={() => setLegalOrderAgreementId(null)}
+        title="Apply a legal/regulatory order change"
+      >
+        <div className="space-y-3.5">
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            No tenant approval is required — a court/regulator order is its own authority. This amends the agreement
+            immediately; the tenant will need to re-sign. Provide at least one of the fields below.
+          </p>
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">New move-in date (optional)</label>
+            <input
+              type="date"
+              value={legalOrderStartDate}
+              onChange={(e) => setLegalOrderStartDate(e.target.value)}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">New term in months (optional)</label>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={legalOrderTermMonths}
+              onChange={(e) => setLegalOrderTermMonths(e.target.value)}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">New monthly rent (optional, ₹)</label>
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              value={legalOrderRent}
+              onChange={(e) => setLegalOrderRent(e.target.value)}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Authority evidence reference (required)</label>
+            <input
+              value={legalOrderEvidenceRef}
+              onChange={(e) => setLegalOrderEvidenceRef(e.target.value)}
+              placeholder="e.g. Rent Tribunal Order RT-2026-0091"
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Reason / note (optional)</label>
+            <textarea
+              value={legalOrderReason}
+              onChange={(e) => setLegalOrderReason(e.target.value)}
+              rows={3}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setLegalOrderAgreementId(null)}>
+              Cancel
+            </Button>
+            <Button variant="primary" loading={legalOrderSubmitting} onClick={submitLegalOrderChange}>
+              Apply change
+            </Button>
+          </div>
+        </div>
       </Modal>
 
       {toast && (

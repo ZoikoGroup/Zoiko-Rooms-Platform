@@ -132,7 +132,7 @@ class TestRequestDateChange:
         )
         assert r.status_code == 201, r.text
         body = r.json()
-        assert body["status"] == "PENDING"
+        assert body["status"] == "AWAITING_HOST"
         assert body["proposedStartDate"] == new_start.isoformat()
         assert body["changeType"] == "DATE_SHIFT"
 
@@ -233,7 +233,7 @@ class TestApproveDateChange:
         r = client.post(f"/api/leasing/booking-change-requests/{bcr_id}/approve", json={}, cookies=admin_cookies)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["status"] == "APPROVED"
+        assert body["status"] == "AWAITING_AGREEMENT_ACTION"
         assert body["resultingAmendmentId"] is not None
 
         agreement = db_session.get(Agreement, agreement_id)
@@ -292,7 +292,7 @@ class TestApproveDateChange:
             json={"decisionNote": "room needed for another confirmed tenant on those dates"}, cookies=admin_cookies,
         )
         assert r.status_code == 200, r.text
-        assert r.json()["status"] == "DECLINED"
+        assert r.json()["status"] == "REJECTED"
 
         agreement = db_session.get(Agreement, agreement_id)
         db_session.refresh(agreement)
@@ -374,7 +374,7 @@ class TestRequestExtension:
         )
         assert r.status_code == 201, r.text
         body = r.json()
-        assert body["status"] == "PENDING"
+        assert body["status"] == "AWAITING_HOST"
         assert body["changeType"] == "EXTENSION"
         assert body["additionalTermMonths"] == 3
         assert body["proposedEndDate"] == _add_months(start, 6 + 3).isoformat()
@@ -419,7 +419,7 @@ class TestApproveExtension:
 
         r = client.post(f"/api/leasing/booking-change-requests/{bcr_id}/approve", json={}, cookies=admin_cookies)
         assert r.status_code == 200, r.text
-        assert r.json()["status"] == "APPROVED"
+        assert r.json()["status"] == "AWAITING_AGREEMENT_ACTION"
 
         db_session.refresh(agreement)
         assert agreement.status == "AMENDMENT_PENDING"
@@ -453,7 +453,7 @@ class TestRequestShortening:
         )
         assert r.status_code == 201, r.text
         body = r.json()
-        assert body["status"] == "PENDING"
+        assert body["status"] == "AWAITING_HOST"
         assert body["changeType"] == "SHORTENING"
         assert body["additionalTermMonths"] == -2
         assert body["proposedEndDate"] == _add_months(start, 6 - 2).isoformat()
@@ -504,7 +504,7 @@ class TestApproveShortening:
 
         r = client.post(f"/api/leasing/booking-change-requests/{bcr_id}/approve", json={}, cookies=admin_cookies)
         assert r.status_code == 200, r.text
-        assert r.json()["status"] == "APPROVED"
+        assert r.json()["status"] == "AWAITING_AGREEMENT_ACTION"
 
         agreement = db_session.get(Agreement, agreement_id)
         db_session.refresh(agreement)
@@ -532,7 +532,7 @@ class TestRequestPremisesChange:
         )
         assert r.status_code == 201, r.text
         body = r.json()
-        assert body["status"] == "PENDING"
+        assert body["status"] == "AWAITING_HOST"
         assert body["changeType"] == "PREMISES_CHANGE"
         assert body["targetListingId"] == target_id
 
@@ -574,7 +574,7 @@ class TestApprovePremisesChange:
         r = client.post(f"/api/leasing/booking-change-requests/{bcr_id}/approve", json={}, cookies=admin_cookies)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["status"] == "APPROVED"
+        assert body["status"] == "AWAITING_AGREEMENT_ACTION"
         assert body["resultingApplicationId"] is not None
 
         application = db_session.get(Application, body["resultingApplicationId"])
@@ -668,7 +668,7 @@ class TestRequestFinancialChange:
         )
         assert r.status_code == 201, r.text
         body = r.json()
-        assert body["status"] == "PENDING"
+        assert body["status"] == "AWAITING_HOST"
         assert body["changeType"] == "FINANCIAL_CHANGE"
         assert body["originalMonthlyRent"] == 500.0
         assert body["proposedMonthlyRent"] == 450.0
@@ -718,7 +718,7 @@ class TestApproveFinancialChange:
 
         r = client.post(f"/api/leasing/booking-change-requests/{bcr_id}/approve", json={}, cookies=admin_cookies)
         assert r.status_code == 200, r.text
-        assert r.json()["status"] == "APPROVED"
+        assert r.json()["status"] == "AWAITING_AGREEMENT_ACTION"
 
         agreement = db_session.get(Agreement, agreement_id)
         db_session.refresh(agreement)

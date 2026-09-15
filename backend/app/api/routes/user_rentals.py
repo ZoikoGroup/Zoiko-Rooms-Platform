@@ -36,6 +36,7 @@ from app.schemas.leasing import (
     AgreementRead,
     BookingChangeRequestCreate,
     BookingChangeRequestRead,
+    DepositChangeRequestCreate,
     DisclosureRequirementRead,
     ExtensionRequestCreate,
     FinancialChangeRequestCreate,
@@ -46,6 +47,7 @@ from app.schemas.leasing import (
     SubletRenterLookup,
     SubletRequestCreate,
     SubletRequestRead,
+    TermShiftRequestCreate,
     UserAgreementSignRequest,
     UserApplicationRead,
     UserApplicationSubmitRequest,
@@ -392,6 +394,26 @@ def request_own_move_in_date_change(
     return bcr_crud.to_booking_change_request_read(bcr)
 
 
+@router.post("/agreements/{agreement_id}/term-shift-requests", response_model=BookingChangeRequestRead, status_code=status.HTTP_201_CREATED)
+def request_own_term_shift(
+    agreement_id: int,
+    payload: TermShiftRequestCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 4: a renter requesting both a new move-in date
+    and a new term length together, before they've moved in."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    bcr = bcr_crud.request_term_shift(
+        db, user, agreement, payload.proposed_start_date, payload.new_term_months, reason=payload.reason,
+    )
+    log_audit_event(db, None, "booking_change_request.submit", "booking_change_request", str(bcr.id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(bcr)
+
+
 @router.post("/agreements/{agreement_id}/extension-requests", response_model=BookingChangeRequestRead, status_code=status.HTTP_201_CREATED)
 def request_own_extension(
     agreement_id: int,
@@ -468,6 +490,25 @@ def request_own_financial_change(
     return bcr_crud.to_booking_change_request_read(bcr)
 
 
+@router.post("/agreements/{agreement_id}/deposit-change-requests", response_model=BookingChangeRequestRead, status_code=status.HTTP_201_CREATED)
+def request_own_deposit_change(
+    agreement_id: int,
+    payload: DepositChangeRequestCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 4/11/DEPOSIT_CHANGE: a renter asking for a
+    deposit change. See crud/booking_change_requests.py:request_deposit_change
+    for why approving this never itself moves deposit money."""
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
+    bcr = bcr_crud.request_deposit_change(db, user, agreement, payload.proposed_deposit_amount, reason=payload.reason)
+    log_audit_event(db, None, "booking_change_request.submit", "booking_change_request", str(bcr.id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(bcr)
+
+
 @router.get("/change-requests", response_model=list[BookingChangeRequestRead])
 def list_own_change_requests(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     return [bcr_crud.to_booking_change_request_read(b) for b in bcr_crud.list_change_requests_for_guest(db, user)]
@@ -482,6 +523,26 @@ def withdraw_own_change_request(
     updated = bcr_crud.withdraw_change_request(db, user, bcr)
     log_audit_event(db, None, "booking_change_request.withdraw", "booking_change_request", str(bcr_id), correlation_id, reason=f"user:{user.id}")
     db.commit()
+    return bcr_crud.to_booking_change_request_read(updated)
+
+
+@router.post("/change-requests/{bcr_id}/accept-alternative", response_model=BookingChangeRequestRead)
+def accept_own_alternative_change_terms(
+    bcr_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 18: renter's fresh consent to the host's
+    counter-proposal (see crud/booking_change_requests.py:propose_alternative_terms)."""
+    bcr = bcr_crud.get_booking_change_request_or_404(db, bcr_id)
+    updated = bcr_crud.accept_alternative_terms(db, user, bcr)
+    return bcr_crud.to_booking_change_request_read(updated)
+
+
+@router.post("/change-requests/{bcr_id}/decline-alternative", response_model=BookingChangeRequestRead)
+def decline_own_alternative_change_terms(
+    bcr_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    bcr = bcr_crud.get_booking_change_request_or_404(db, bcr_id)
+    updated = bcr_crud.decline_alternative_terms(db, user, bcr)
     return bcr_crud.to_booking_change_request_read(updated)
 
 

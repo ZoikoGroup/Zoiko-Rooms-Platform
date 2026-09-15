@@ -564,9 +564,26 @@ export interface UserOccupancy {
   agreementId: number | null;
 }
 
-export type BookingChangeType = "DATE_SHIFT" | "EXTENSION" | "SHORTENING" | "PREMISES_CHANGE" | "FINANCIAL_CHANGE";
+export type BookingChangeType =
+  | "DATE_SHIFT"
+  | "EXTENSION"
+  | "SHORTENING"
+  | "PREMISES_CHANGE"
+  | "FINANCIAL_CHANGE"
+  | "TERM_SHIFT"
+  | "LEGAL_ORDER_CHANGE"
+  | "DEPOSIT_CHANGE";
 
-export type BookingChangeRequestStatus = "PENDING" | "APPROVED" | "DECLINED" | "EFFECTIVE" | "EXPIRED" | "WITHDRAWN";
+export type BookingChangeRequestStatus =
+  | "AWAITING_HOST"
+  | "AWAITING_RENTER"
+  | "AWAITING_AGREEMENT_ACTION"
+  | "EFFECTIVE"
+  | "REJECTED"
+  | "WITHDRAWN"
+  | "EXPIRED"
+  | "CONFLICT"
+  | "FAILED";
 
 export interface BookingChangeRequest {
   id: number;
@@ -593,6 +610,9 @@ export interface BookingChangeRequest {
   listingName: string;
   targetListingName: string;
   guestName: string;
+  authorityEvidenceRef: string;
+  originalDepositAmount: number | null;
+  proposedDepositAmount: number | null;
 }
 
 export type SubletRequestStatus =
