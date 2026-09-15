@@ -110,6 +110,10 @@ class IdentityVerificationReject(CamelModel):
     notes: str = ""
 
 
+class BreakGlassAccessRequest(CamelModel):
+    reason: str
+
+
 class IdentityVerificationUserRead(CamelModel):
     """User-facing identity verification response. Built from a hand-assembled
     dict rather than ORM passthrough, so field names here are independent of the

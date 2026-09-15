@@ -150,7 +150,7 @@ async def post_deposit_claim_item_evidence(
     db: Session = Depends(get_db),
 ):
     item = crud.get_deposit_claim_item_or_404(db, item_id)
-    stored_filename, original_filename, content_type, _ = await save_identity_document(file)
+    stored_filename, original_filename, content_type, _, _ = await save_identity_document(file)
     crud.attach_deposit_claim_item_evidence(db, item, admin, stored_filename, original_filename, content_type)
     log_audit_event(db, admin, "deposit_claim_item.evidence_attach", "deposit_claim_item", str(item_id), get_correlation_id(request))
     db.commit()

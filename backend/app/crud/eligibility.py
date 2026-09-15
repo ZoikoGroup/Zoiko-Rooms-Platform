@@ -11,6 +11,7 @@ already-shipped crud/listing.py code path, but that duplication is exactly
 the cross-domain drift risk Section 1 calls out."""
 
 from sqlalchemy import func, select
+from app.crud.occupancy_eligibility import get_valid_occupancy_eligibility_credential
 from app.models.leasing import Agreement, Application, Offer
 from app.models.listing import Listing
 from app.models.market_release import MarketRelease
@@ -19,6 +20,7 @@ from app.models.room import Room
 from app.services.agreement_effectiveness import is_agreement_effective
 from app.services.agreement_profile import resolve_agreement_profile
 from app.services.eligibility import jurisdiction_gates_pass, listing_publication_eligible
+from app.services.verification_requirements import resolve_verification_requirements
 
 
 def check_room_capacity(db, room: Room, *, exclude_occupancy_id: int | None = None) -> list[str]:
@@ -64,6 +66,32 @@ def check_offer_eligibility(db, application: Application) -> list[str]:
     return reasons
 
 
+def _check_occupancy_eligibility_requirements(db, listing: Listing, guest) -> list[str]:
+    """ZR-ENG-CLR-012 Section 9/AC-04/AC-05: shared by both
+    check_agreement_eligibility (the 'CONFIRMED booking' gate) and
+    check_move_in_eligibility (the 'occupancy activation' gate) below --
+    the doc requires BOTH stages to re-check this, not just the first one a
+    credential could have been revoked or expired between them. Resolves
+    to nothing for jurisdictions with no verification policy configured
+    (see resolve_verification_requirements), so it never blocks existing
+    flows unless a jurisdiction has actually opted in."""
+    market_release = db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
+    jurisdiction_code = market_release.jurisdiction if market_release else None
+    party_id = guest.user_account.party_id if guest and guest.user_account else None
+    if not (jurisdiction_code and party_id):
+        return []
+
+    reasons: list[str] = []
+    for requirement in resolve_verification_requirements(db, jurisdiction_code):
+        credential = get_valid_occupancy_eligibility_credential(db, party_id, jurisdiction_code)
+        if credential is None:
+            reasons.append(
+                f"{requirement.requirement_code} check has not been completed for this jurisdiction "
+                "-- routed to manual review"
+            )
+    return reasons
+
+
 def check_agreement_eligibility(db, offer: Offer) -> list[str]:
     listing: Listing = offer.listing
     market_release = db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
@@ -80,6 +108,10 @@ def check_agreement_eligibility(db, offer: Offer) -> list[str]:
     # never actually resolved a profile. Same reason text as the real 409.
     if resolve_agreement_profile(db, listing, listing.room) is None:
         reasons.append("No approved agreement profile for this listing's jurisdiction -- routed to manual review")
+
+    # ZR-ENG-CLR-012 AC-04: "CONFIRMED booking cannot occur while a mandatory
+    # confirmation-stage verification requirement is unresolved."
+    reasons += _check_occupancy_eligibility_requirements(db, listing, offer.guest)
 
     return reasons
 
@@ -105,5 +137,13 @@ def check_move_in_eligibility(db, agreement: Agreement) -> list[str]:
         reasons.append("Initial rent and deposit obligations are not fully paid")
 
     reasons += check_room_capacity(db, listing.room)
+
+    # ZR-ENG-CLR-012 AC-05: "Occupancy cannot activate while a mandatory
+    # occupancy-stage verification requirement is unresolved." A credential
+    # valid at agreement-confirmation time could have since expired or been
+    # revoked (e.g. FAIL_INELIGIBLE re-check, or simple time-limited
+    # expiry) -- re-checked here independently, not assumed still valid
+    # from check_agreement_eligibility's earlier pass.
+    reasons += _check_occupancy_eligibility_requirements(db, listing, offer.guest)
 
     return reasons

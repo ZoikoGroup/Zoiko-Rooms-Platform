@@ -29,10 +29,12 @@ from sqlalchemy.orm import Session
 
 from app.crud.authority import get_valid_authority_for_room
 from app.crud.occupancy_classification import get_classification_for_room
+from app.crud.property_compliance import get_valid_property_compliance_credential
 from app.models.listing import Listing
 from app.models.market_release import MarketRelease
 from app.models.room import Room
 from app.services.policy import get_policy
+from app.services.verification_requirements import resolve_property_compliance_requirements
 
 
 def listing_publication_eligible(listing: Listing) -> list[str]:
@@ -65,6 +67,16 @@ def jurisdiction_gates_pass(db: Session, room: Room, market_release: MarketRelea
     classification = get_classification_for_room(db, room.id)
     if not classification or classification.review_state in ("UNKNOWN", "UNSUPPORTED"):
         reasons.append("Occupancy classification is missing or unresolved")
+
+    # ZR-ENG-CLR-012 Section 14/AC-15: expired/missing mandatory property
+    # compliance credentials block publication/booking the same way a
+    # lapsed authority record or classification does above -- re-checked at
+    # every pipeline stage this function already gates, not just at publish.
+    jurisdiction_code = market_release.jurisdiction if market_release else None
+    if jurisdiction_code:
+        for requirement_code in resolve_property_compliance_requirements(db, jurisdiction_code):
+            if get_valid_property_compliance_credential(db, room.id, requirement_code) is None:
+                reasons.append(f"Missing or expired property compliance credential: {requirement_code}")
 
     return reasons
 

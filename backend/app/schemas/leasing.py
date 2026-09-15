@@ -175,6 +175,7 @@ class AgreementAmendmentRead(CamelModel):
     status: str
     reason: str
     proposed_terms: dict = {}
+    proposed_guarantor: dict = {}
     requested_by_admin_id: int
     created_at: datetime
     classified_at: datetime | None = None
@@ -196,6 +197,28 @@ class AmendmentClassifyRequest(CamelModel):
 
 class AmendmentProposeTermsRequest(CamelModel):
     proposed_terms: dict
+
+
+class AmendmentProposeGuarantorRequest(CamelModel):
+    legal_name: str
+    contact_email: str = ""
+
+
+class GuarantorConsentRequest(CamelModel):
+    evidence_ref: str
+    method: str = "WET_INK"
+
+
+class AgreementPartyRead(CamelModel):
+    id: int
+    agreement_id: int
+    role: str
+    legal_name: str
+    contact_email: str
+    party_id: int | None = None
+    consent_method: str = ""
+    consent_evidence_ref: str = ""
+    consented_at: datetime | None = None
 
 
 class SignatureRequestRead(CamelModel):

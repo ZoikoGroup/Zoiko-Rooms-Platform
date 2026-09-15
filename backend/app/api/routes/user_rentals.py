@@ -28,8 +28,10 @@ from app.db.session import get_db
 from app.models.leasing import Application
 from app.models.listing import Listing
 from app.models.listing_approval import CURRENT_POLICY_VERSION
+from app.models.market_release import MarketRelease
 from app.models.occupancy import Occupancy
 from app.services.booking_expiry import expire_offer_if_overdue
+from app.services.verification_requirements import is_identity_required_at_application
 from app.models.user_account import UserAccount
 from app.schemas.finance import DepositClaimItemRead, DepositClaimItemRespond, DepositClaimRead
 from app.schemas.leasing import (
@@ -133,18 +135,28 @@ def submit_rental_application(
     db: Session = Depends(get_db),
 ):
     """User submits a rental application for a listing.
-    Requires verified identity before application can proceed.
+
+    ZR-ENG-CLR-012 AC-03: identity verification is only required before
+    application if the listing's own jurisdiction market pack explicitly
+    opts into that earlier gate (identity_required_at_application) --
+    progressive verification is the default; most listings need no
+    identity at all until confirmation (see check_agreement_eligibility).
     """
-    # Check identity verification
-    if not user.party_id or not get_verified_identity_for_party(db, user.party_id):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "You must complete identity verification before submitting applications",
-        )
+    listing = db.get(Listing, payload.listing_id)
+
+    jurisdiction_code = None
+    if listing and listing.market_release_id:
+        market_release = db.get(MarketRelease, listing.market_release_id)
+        jurisdiction_code = market_release.jurisdiction if market_release else None
+    if jurisdiction_code and is_identity_required_at_application(db, jurisdiction_code):
+        if not user.party_id or not get_verified_identity_for_party(db, user.party_id):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "You must complete identity verification before submitting applications for this listing",
+            )
 
     # A host cannot apply to their own listing -- enforced here regardless of
     # what the frontend shows, so it can't be bypassed by calling the API directly.
-    listing = db.get(Listing, payload.listing_id)
     if listing and user.party_id:
         assert_party_does_not_own_listing(listing, user.party_id)
 

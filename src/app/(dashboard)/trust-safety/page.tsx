@@ -1,5 +1,10 @@
 import { IdentityVerificationsManager } from "@/components/admin/IdentityVerificationsManager";
+import { MarketPolicyPackManager } from "@/components/admin/MarketPolicyPackManager";
+import { OccupancyEligibilityManager } from "@/components/admin/OccupancyEligibilityManager";
+import { PropertyComplianceManager } from "@/components/admin/PropertyComplianceManager";
+import { ScreeningManager } from "@/components/admin/ScreeningManager";
 import { TrustSafetyManager } from "@/components/admin/TrustSafetyManager";
+import { VerificationOperationsPanel } from "@/components/admin/VerificationOperationsPanel";
 import { requireSuperAdmin } from "@/lib/api";
 
 export default async function AdminTrustSafetyPage() {
@@ -13,7 +18,12 @@ export default async function AdminTrustSafetyPage() {
           Manage market releases, verify provider authority, resolve occupancy classification, and review USER identity verifications — the checks every listing and account must clear.
         </p>
       </div>
+      <VerificationOperationsPanel />
+      <MarketPolicyPackManager />
       <IdentityVerificationsManager />
+      <OccupancyEligibilityManager />
+      <ScreeningManager />
+      <PropertyComplianceManager />
       <TrustSafetyManager />
     </div>
   );
