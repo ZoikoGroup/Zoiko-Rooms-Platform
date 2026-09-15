@@ -230,21 +230,27 @@ export const subletArrangementTypeAdminLabel = {
 export const CO_TENANCY_ARRANGEMENT_TYPES = ["SUBLEASE_PARTIAL", "ADD_CO_TENANT", "LODGER_OR_LICENSEE"] as const;
 
 export const bookingChangeRequestStatusTone = {
-  PENDING: "warning",
-  APPROVED: "success",
-  DECLINED: "danger",
+  AWAITING_HOST: "warning",
+  AWAITING_RENTER: "warning",
+  AWAITING_AGREEMENT_ACTION: "warning",
   EFFECTIVE: "success",
-  EXPIRED: "neutral",
+  REJECTED: "danger",
   WITHDRAWN: "neutral",
+  EXPIRED: "neutral",
+  CONFLICT: "danger",
+  FAILED: "danger",
 } as const;
 
 export const bookingChangeRequestStatusLabel = {
-  PENDING: "Pending Review",
-  APPROVED: "Approved — awaiting re-signature",
-  DECLINED: "Declined",
+  AWAITING_HOST: "Pending Review",
+  AWAITING_RENTER: "Host proposed different terms",
+  AWAITING_AGREEMENT_ACTION: "Approved — awaiting re-signature",
   EFFECTIVE: "Effective",
-  EXPIRED: "Expired",
+  REJECTED: "Declined",
   WITHDRAWN: "Withdrawn",
+  EXPIRED: "Expired",
+  CONFLICT: "Conflict — please submit a new request",
+  FAILED: "Failed — please submit a new request",
 } as const;
 
 export const bookingChangeTypeLabel = {
@@ -253,6 +259,9 @@ export const bookingChangeTypeLabel = {
   SHORTENING: "Stay shortening",
   PREMISES_CHANGE: "Room/property change",
   FINANCIAL_CHANGE: "Rent change",
+  TERM_SHIFT: "Move-in date & term change",
+  LEGAL_ORDER_CHANGE: "Legal/regulatory order change",
+  DEPOSIT_CHANGE: "Deposit change",
 } as const;
 
 // --- Trust & Safety surface ---

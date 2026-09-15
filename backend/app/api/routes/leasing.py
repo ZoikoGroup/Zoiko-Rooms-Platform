@@ -35,7 +35,10 @@ from app.schemas.leasing import (
     ApplicationRead,
     ApplicationUpdate,
     AgreementFormTemplateRead,
+    BookingChangeAdminCorrectionCreate,
+    BookingChangeAlternativeProposalCreate,
     BookingChangeDecisionRequest,
+    LegalOrderChangeCreate,
     BookingChangeRequestRead,
     ClauseDefinitionRead,
     ClauseDraftCreate,
@@ -719,6 +722,74 @@ def post_decline_booking_change_request(
     log_audit_event(db, admin, "booking_change_request.decline", "booking_change_request", str(bcr_id), get_correlation_id(request))
     db.commit()
     return bcr_crud.to_booking_change_request_read(updated)
+
+
+@router.post(
+    "/booking-change-requests/{bcr_id}/propose-alternative", response_model=BookingChangeRequestRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_propose_alternative_booking_change_terms(
+    bcr_id: int, payload: BookingChangeAlternativeProposalCreate, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 18: host counter-proposal instead of a flat
+    approve/decline. See crud/booking_change_requests.py:propose_alternative_terms."""
+    bcr = bcr_crud.get_booking_change_request_or_404(db, bcr_id)
+    updated = bcr_crud.propose_alternative_terms(
+        db, bcr, admin,
+        proposed_start_date=payload.proposed_start_date, additional_term_months=payload.additional_term_months,
+        proposed_monthly_rent=payload.proposed_monthly_rent, decision_note=payload.decision_note,
+    )
+    log_audit_event(
+        db, admin, "booking_change_request.propose_alternative", "booking_change_request", str(bcr_id),
+        get_correlation_id(request), reason=payload.decision_note,
+    )
+    db.commit()
+    return bcr_crud.to_booking_change_request_read(updated)
+
+
+@router.post(
+    "/booking-change-requests/{bcr_id}/admin-correction", response_model=BookingChangeRequestRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_admin_correct_booking_change_request(
+    bcr_id: int, payload: BookingChangeAdminCorrectionCreate,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 9/ADMIN_CORRECTION -- narrowly-scoped,
+    fully-audited free-text correction only. See
+    crud/booking_change_requests.py:correct_change_request_metadata; that
+    function itself logs the audit event (with the actual before/after
+    diff), so this route does not log a second, generic one."""
+    bcr = bcr_crud.get_booking_change_request_or_404(db, bcr_id)
+    updated = bcr_crud.correct_change_request_metadata(
+        db, bcr, admin,
+        corrected_reason=payload.corrected_reason, corrected_decision_note=payload.corrected_decision_note,
+        evidence_ref=payload.evidence_ref, correction_note=payload.correction_note,
+    )
+    return bcr_crud.to_booking_change_request_read(updated)
+
+
+@router.post(
+    "/agreements/{agreement_id}/legal-order-changes", response_model=BookingChangeRequestRead,
+    dependencies=[Depends(require_super_admin)], status_code=status.HTTP_201_CREATED,
+)
+def post_admin_create_legal_order_change(
+    agreement_id: int, payload: LegalOrderChangeCreate,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-008 Section 4/LEGAL_ORDER_CHANGE: admin-initiated amendment
+    driven by a court/regulator/statutory order -- no renter approval gate;
+    the authority evidence itself is the recorded gate. See
+    crud/booking_change_requests.py:admin_create_legal_order_change (which
+    logs its own audit event, so this route does not log a second one)."""
+    agreement = crud.get_agreement_or_404(db, agreement_id)
+    return bcr_crud.to_booking_change_request_read(bcr_crud.admin_create_legal_order_change(
+        db, admin, agreement,
+        proposed_start_date=payload.proposed_start_date, new_term_months=payload.new_term_months,
+        proposed_monthly_rent=payload.proposed_monthly_rent,
+        authority_evidence_ref=payload.authority_evidence_ref, reason=payload.reason,
+    ))
 
 
 @router.get("/agreements/{agreement_id}/signature-requests", response_model=list[SignatureRequestRead])

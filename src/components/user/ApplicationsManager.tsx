@@ -9,10 +9,12 @@ import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
 import { BookingChangeRequest, DisclosureRequirement, Offer, PublicListing, UserApplication } from "@/lib/types";
 import { applicationStatusTone, bookingChangeRequestStatusTone, bookingChangeTypeLabel } from "@/lib/status";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { addMonths, formatCurrency, formatDate } from "@/lib/utils";
 import {
+  acceptAlternativeChangeTerms,
   acceptOwnOffer,
   acknowledgeOwnDisclosure,
+  declineAlternativeChangeTerms,
   declineOwnOffer,
   errorMessage,
   getOwnOffer,
@@ -25,6 +27,7 @@ import {
   submitFinancialChangeRequest,
   submitPremisesChangeRequest,
   submitShorteningRequest,
+  submitTermShiftRequest,
   withdrawChangeRequest,
   withdrawRentalApplication,
 } from "@/lib/user-api";
@@ -53,9 +56,10 @@ export function ApplicationsManager() {
   const [acknowledgingId, setAcknowledgingId] = useState<number | null>(null);
 
   const [changeRequests, setChangeRequests] = useState<BookingChangeRequest[]>([]);
-  const [changeType, setChangeType] = useState<"date" | "shorten" | "premises" | "financial" | null>(null);
+  const [changeType, setChangeType] = useState<"date" | "shorten" | "premises" | "financial" | "termShift" | null>(null);
   const [newStartDate, setNewStartDate] = useState("");
   const [reducedMonths, setReducedMonths] = useState("1");
+  const [newTermMonths, setNewTermMonths] = useState("6");
   const [availableListings, setAvailableListings] = useState<PublicListing[]>([]);
   const [listingsLoading, setListingsLoading] = useState(false);
   const [targetListingId, setTargetListingId] = useState("");
@@ -82,13 +86,16 @@ export function ApplicationsManager() {
 
   function pendingChangeRequestFor(agreementId: number | undefined): BookingChangeRequest | undefined {
     if (!agreementId) return undefined;
-    return changeRequests.find((cr) => cr.agreementId === agreementId && cr.status === "PENDING");
+    return changeRequests.find(
+      (cr) => cr.agreementId === agreementId && (cr.status === "AWAITING_HOST" || cr.status === "AWAITING_RENTER"),
+    );
   }
 
-  async function openChangeRequest(type: "date" | "shorten" | "premises" | "financial", application: UserApplication) {
+  async function openChangeRequest(type: "date" | "shorten" | "premises" | "financial" | "termShift", application: UserApplication) {
     setChangeType(type);
     setNewStartDate("");
     setReducedMonths("1");
+    setNewTermMonths("6");
     setTargetListingId("");
     setProposedRent("");
     setChangeReason("");
@@ -152,6 +159,21 @@ export function ApplicationsManager() {
         await submitFinancialChangeRequest(offer.agreement.id, {
           proposedMonthlyRent: rent, reason: changeReason.trim(),
         });
+      } else if (changeType === "termShift") {
+        const months = Number(newTermMonths);
+        if (!newStartDate) {
+          setChangeError("Pick a new move-in date.");
+          setChangeSubmitting(false);
+          return;
+        }
+        if (!Number.isInteger(months) || months < 1) {
+          setChangeError("Enter a whole number of months (at least 1) for the new term.");
+          setChangeSubmitting(false);
+          return;
+        }
+        await submitTermShiftRequest(offer.agreement.id, {
+          proposedStartDate: newStartDate, newTermMonths: months, reason: changeReason.trim(),
+        });
       }
       setChangeType(null);
       showToast("Request submitted for host review.");
@@ -171,6 +193,32 @@ export function ApplicationsManager() {
       await load();
     } catch (err) {
       showToast(errorMessage(err, "Could not withdraw this request."), "error");
+    } finally {
+      setWithdrawingChangeId(null);
+    }
+  }
+
+  async function handleAcceptAlternativeChangeTerms(bcrId: number) {
+    setWithdrawingChangeId(bcrId);
+    try {
+      await acceptAlternativeChangeTerms(bcrId);
+      showToast("Accepted — please review and re-sign the updated agreement.");
+      await load();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not accept these terms."), "error");
+    } finally {
+      setWithdrawingChangeId(null);
+    }
+  }
+
+  async function handleDeclineAlternativeChangeTerms(bcrId: number) {
+    setWithdrawingChangeId(bcrId);
+    try {
+      await declineAlternativeChangeTerms(bcrId);
+      showToast("Declined — the request has been withdrawn.");
+      await load();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not decline these terms."), "error");
     } finally {
       setWithdrawingChangeId(null);
     }
@@ -443,7 +491,9 @@ export function ApplicationsManager() {
                     return (
                       <div className="space-y-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
                         <Badge tone={bookingChangeRequestStatusTone[pending.status] ?? "neutral"}>
-                          {bookingChangeTypeLabel[pending.changeType] ?? pending.changeType} request pending
+                          {bookingChangeTypeLabel[pending.changeType] ?? pending.changeType}
+                          {" — "}
+                          {pending.status === "AWAITING_RENTER" ? "host proposed different terms" : "request pending"}
                         </Badge>
                         <p className="text-xs text-slate-500 dark:text-slate-400">
                           {pending.changeType === "PREMISES_CHANGE" ? (
@@ -458,14 +508,37 @@ export function ApplicationsManager() {
                             </>
                           )}
                         </p>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          loading={withdrawingChangeId === pending.id}
-                          onClick={() => handleWithdrawChangeRequest(pending.id)}
-                        >
-                          Withdraw request
-                        </Button>
+                        {pending.status === "AWAITING_RENTER" ? (
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              className="flex-1"
+                              loading={withdrawingChangeId === pending.id}
+                              onClick={() => handleAcceptAlternativeChangeTerms(pending.id)}
+                            >
+                              Accept
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="flex-1"
+                              loading={withdrawingChangeId === pending.id}
+                              onClick={() => handleDeclineAlternativeChangeTerms(pending.id)}
+                            >
+                              Decline
+                            </Button>
+                          </div>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            loading={withdrawingChangeId === pending.id}
+                            onClick={() => handleWithdrawChangeRequest(pending.id)}
+                          >
+                            Withdraw request
+                          </Button>
+                        )}
                       </div>
                     );
                   }
@@ -474,6 +547,9 @@ export function ApplicationsManager() {
                     <div className="flex flex-wrap gap-2">
                       <Button size="sm" variant="outline" onClick={() => openChangeRequest("date", offerFor)}>
                         Request move-in date change
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => openChangeRequest("termShift", offerFor)}>
+                        Request date &amp; term change together
                       </Button>
                       <Button size="sm" variant="outline" onClick={() => openChangeRequest("shorten", offerFor)}>
                         Request to shorten stay
@@ -507,7 +583,9 @@ export function ApplicationsManager() {
               ? "Request a different room/property"
               : changeType === "financial"
                 ? "Request a rent change"
-                : "Request a new move-in date"
+                : changeType === "termShift"
+                  ? "Request a new move-in date and term"
+                  : "Request a new move-in date"
         }
       >
         <div className="space-y-4">
@@ -517,50 +595,163 @@ export function ApplicationsManager() {
               : "Your host has to approve this, and you'll both need to re-sign the updated agreement before it takes effect."}
           </p>
 
-          {changeType === "date" && (
-            <Field label="New move-in date">
-              <input
-                type="date"
-                value={newStartDate}
-                onChange={(e) => setNewStartDate(e.target.value)}
-                className={inputClass}
-              />
-            </Field>
-          )}
+          {changeType === "date" && (() => {
+            const currentStart = offer?.terms.length ? offer.terms[offer.terms.length - 1].startDate : null;
+            const showDelta = Boolean(currentStart && newStartDate);
+            return (
+              <>
+                <Field label="New move-in date">
+                  <input
+                    type="date"
+                    value={newStartDate}
+                    onChange={(e) => setNewStartDate(e.target.value)}
+                    className={inputClass}
+                  />
+                </Field>
+                {/* Section 1 doctrine: show old vs proposed before consent. */}
+                {showDelta && (
+                  <div className="rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500 dark:text-slate-400">Current move-in</span>
+                      <span className="font-semibold text-primary-900 dark:text-white">{formatDate(currentStart!)}</span>
+                    </div>
+                    <div className="mt-1 flex items-center justify-between">
+                      <span className="text-slate-500 dark:text-slate-400">Proposed move-in</span>
+                      <span className="font-semibold text-primary-900 dark:text-white">{formatDate(newStartDate)}</span>
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
 
-          {changeType === "shorten" && (
-            <Field label="Reduce term by (months)" hint="Whole months to remove from your current term.">
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={reducedMonths}
-                onChange={(e) => setReducedMonths(e.target.value)}
-                className={inputClass}
-              />
-            </Field>
-          )}
+          {changeType === "termShift" && (() => {
+            const terms = offer?.terms.length ? offer.terms[offer.terms.length - 1] : null;
+            const months = Number(newTermMonths);
+            const currentEnd = terms ? addMonths(terms.startDate, terms.termMonths) : null;
+            const proposedEnd = newStartDate && Number.isInteger(months) && months >= 1 ? addMonths(newStartDate, months) : null;
+            return (
+              <>
+                <Field label="New move-in date">
+                  <input
+                    type="date"
+                    value={newStartDate}
+                    onChange={(e) => setNewStartDate(e.target.value)}
+                    className={inputClass}
+                  />
+                </Field>
+                <Field label="New term (months)">
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={newTermMonths}
+                    onChange={(e) => setNewTermMonths(e.target.value)}
+                    className={inputClass}
+                  />
+                </Field>
+                {terms && (
+                  <div className="rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500 dark:text-slate-400">Current move-in / end</span>
+                      <span className="font-semibold text-primary-900 dark:text-white">
+                        {formatDate(terms.startDate)} → {currentEnd ? formatDate(currentEnd) : "—"}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex items-center justify-between">
+                      <span className="text-slate-500 dark:text-slate-400">Proposed move-in / end</span>
+                      <span className="font-semibold text-primary-900 dark:text-white">
+                        {newStartDate ? formatDate(newStartDate) : "—"} → {proposedEnd ? formatDate(proposedEnd) : "—"}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
 
-          {changeType === "premises" && (
-            <Field label="Move to">
-              {listingsLoading ? (
-                <p className="text-xs text-slate-400">Loading listings...</p>
-              ) : (
-                <select
-                  value={targetListingId}
-                  onChange={(e) => setTargetListingId(e.target.value)}
-                  className={inputClass}
-                >
-                  <option value="">Choose a listing...</option>
-                  {availableListings.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.name} — {l.city}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </Field>
-          )}
+          {changeType === "shorten" && (() => {
+            const terms = offer?.terms.length ? offer.terms[offer.terms.length - 1] : null;
+            const months = Number(reducedMonths);
+            const currentEnd = terms ? addMonths(terms.startDate, terms.termMonths) : null;
+            const proposedEnd = terms && Number.isInteger(months) && months >= 1 && months < terms.termMonths
+              ? addMonths(terms.startDate, terms.termMonths - months) : null;
+            return (
+              <>
+                <Field label="Reduce term by (months)" hint="Whole months to remove from your current term.">
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={reducedMonths}
+                    onChange={(e) => setReducedMonths(e.target.value)}
+                    className={inputClass}
+                  />
+                </Field>
+                {currentEnd && (
+                  <div className="rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500 dark:text-slate-400">Current lease end</span>
+                      <span className="font-semibold text-primary-900 dark:text-white">{formatDate(currentEnd)}</span>
+                    </div>
+                    <div className="mt-1 flex items-center justify-between">
+                      <span className="text-slate-500 dark:text-slate-400">Proposed lease end</span>
+                      <span className="font-semibold text-primary-900 dark:text-white">
+                        {proposedEnd ? formatDate(proposedEnd) : "—"}
+                      </span>
+                    </div>
+                  </div>
+                )}
+                {/* Section 2/11 doctrine: "A shortening must not automatically
+                    release part of a deposit unless the lawful deposit
+                    instrument and custody model support a partial release."
+                    This platform has no partial-release flow yet, so the
+                    honest disclosure is that none happens here. */}
+                <p className="text-xs text-slate-400">
+                  Your security deposit is not affected by this change.
+                </p>
+              </>
+            );
+          })()}
+
+          {changeType === "premises" && (() => {
+            const target = availableListings.find((l) => l.id === targetListingId);
+            return (
+              <>
+                <Field label="Move to">
+                  {listingsLoading ? (
+                    <p className="text-xs text-slate-400">Loading listings...</p>
+                  ) : (
+                    <select
+                      value={targetListingId}
+                      onChange={(e) => setTargetListingId(e.target.value)}
+                      className={inputClass}
+                    >
+                      <option value="">Choose a listing...</option>
+                      {availableListings.map((l) => (
+                        <option key={l.id} value={l.id}>
+                          {l.name} — {l.city}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </Field>
+                {target && (
+                  <div className="rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500 dark:text-slate-400">Listed reference price</span>
+                      <span className="font-semibold text-primary-900 dark:text-white">
+                        {formatCurrency(target.pricePerNight)}/night
+                      </span>
+                    </div>
+                    <p className="mt-1 text-slate-400">
+                      Not your final rent -- your host sets fresh monthly terms once this request is approved.
+                    </p>
+                  </div>
+                )}
+              </>
+            );
+          })()}
 
           {changeType === "financial" && (() => {
             const currentRent = offer?.terms.length ? offer.terms[offer.terms.length - 1].monthlyRent : null;
@@ -602,6 +793,9 @@ export function ApplicationsManager() {
                     </div>
                   </div>
                 )}
+                <p className="text-xs text-slate-400">
+                  Your security deposit is not automatically changed by a rent change.
+                </p>
               </>
             );
           })()}

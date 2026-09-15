@@ -15,13 +15,16 @@ import {
   occupancyStatusTone,
   subletArrangementTypeLabel,
 } from "@/lib/status";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { addMonths, formatCurrency, formatDate } from "@/lib/utils";
 import {
+  acceptAlternativeChangeTerms,
+  declineAlternativeChangeTerms,
   errorMessage,
   listMyChangeRequests,
   listOccupancies,
   listPublicListings,
   lookupSubletRenter,
+  submitDepositChangeRequest,
   submitExtensionRequest,
   submitFinancialChangeRequest,
   submitPremisesChangeRequest,
@@ -67,6 +70,12 @@ export function RentalsManager() {
   const [financialSubmitting, setFinancialSubmitting] = useState(false);
   const [financialError, setFinancialError] = useState("");
 
+  const [depositFor, setDepositFor] = useState<UserOccupancy | null>(null);
+  const [depositProposedAmount, setDepositProposedAmount] = useState("");
+  const [depositReason, setDepositReason] = useState("");
+  const [depositSubmitting, setDepositSubmitting] = useState(false);
+  const [depositError, setDepositError] = useState("");
+
   const load = useCallback(async () => {
     try {
       const [occupanciesData, changeRequestsData] = await Promise.all([listOccupancies(), listMyChangeRequests()]);
@@ -85,7 +94,9 @@ export function RentalsManager() {
 
   function pendingRequestFor(occupancy: UserOccupancy): BookingChangeRequest | undefined {
     if (!occupancy.agreementId) return undefined;
-    return changeRequests.find((cr) => cr.agreementId === occupancy.agreementId && cr.status === "PENDING");
+    return changeRequests.find(
+      (cr) => cr.agreementId === occupancy.agreementId && (cr.status === "AWAITING_HOST" || cr.status === "AWAITING_RENTER"),
+    );
   }
 
   function openSublet(occupancy: UserOccupancy) {
@@ -201,6 +212,37 @@ export function RentalsManager() {
     }
   }
 
+  function openDeposit(occupancy: UserOccupancy) {
+    setDepositFor(occupancy);
+    setDepositProposedAmount("");
+    setDepositReason("");
+    setDepositError("");
+  }
+
+  async function handleDepositChange(e: FormEvent) {
+    e.preventDefault();
+    if (!depositFor?.agreementId) return;
+    const amount = Number(depositProposedAmount);
+    if (!Number.isFinite(amount) || amount < 0) {
+      setDepositError("Enter a valid deposit amount.");
+      return;
+    }
+    setDepositError("");
+    setDepositSubmitting(true);
+    try {
+      await submitDepositChangeRequest(depositFor.agreementId, {
+        proposedDepositAmount: amount, reason: depositReason.trim(),
+      });
+      setDepositFor(null);
+      showToast("Deposit change request submitted for host review.");
+      await load();
+    } catch (err) {
+      setDepositError(errorMessage(err, "Could not submit this request."));
+    } finally {
+      setDepositSubmitting(false);
+    }
+  }
+
   async function handleWithdraw(bcrId: number) {
     setWithdrawingId(bcrId);
     try {
@@ -209,6 +251,32 @@ export function RentalsManager() {
       await load();
     } catch (err) {
       showToast(errorMessage(err, "Could not withdraw this request."), "error");
+    } finally {
+      setWithdrawingId(null);
+    }
+  }
+
+  async function handleAcceptAlternative(bcrId: number) {
+    setWithdrawingId(bcrId);
+    try {
+      await acceptAlternativeChangeTerms(bcrId);
+      showToast("Accepted — please review and re-sign the updated agreement.");
+      await load();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not accept these terms."), "error");
+    } finally {
+      setWithdrawingId(null);
+    }
+  }
+
+  async function handleDeclineAlternative(bcrId: number) {
+    setWithdrawingId(bcrId);
+    try {
+      await declineAlternativeChangeTerms(bcrId);
+      showToast("Declined — the request has been withdrawn.");
+      await load();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not decline these terms."), "error");
     } finally {
       setWithdrawingId(null);
     }
@@ -324,7 +392,11 @@ export function RentalsManager() {
                   <div className="mt-4 space-y-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
                     <div className="flex items-center justify-between gap-2">
                       <Badge tone={bookingChangeRequestStatusTone[pending.status] ?? "neutral"}>
-                        {bookingChangeTypeLabel[pending.changeType] ?? pending.changeType} pending
+                        {bookingChangeTypeLabel[pending.changeType] ?? pending.changeType}
+                        {" — "}
+                        {pending.status === "AWAITING_RENTER"
+                          ? "host proposed different terms"
+                          : "pending"}
                       </Badge>
                     </div>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -336,15 +408,43 @@ export function RentalsManager() {
                         `+${pending.additionalTermMonths} month${pending.additionalTermMonths === 1 ? "" : "s"} — new end date ${pending.proposedEndDate ? formatDate(pending.proposedEndDate) : "—"}`
                       )}
                     </p>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="w-full"
-                      loading={withdrawingId === pending.id}
-                      onClick={() => handleWithdraw(pending.id)}
-                    >
-                      Withdraw request
-                    </Button>
+                    {pending.status === "AWAITING_RENTER" ? (
+                      <>
+                        <p className="text-xs font-medium text-primary-900 dark:text-white">
+                          Your host proposed different terms — review above and respond.
+                        </p>
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            className="flex-1"
+                            loading={withdrawingId === pending.id}
+                            onClick={() => handleAcceptAlternative(pending.id)}
+                          >
+                            Accept
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="flex-1"
+                            loading={withdrawingId === pending.id}
+                            onClick={() => handleDeclineAlternative(pending.id)}
+                          >
+                            Decline
+                          </Button>
+                        </div>
+                      </>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="w-full"
+                        loading={withdrawingId === pending.id}
+                        onClick={() => handleWithdraw(pending.id)}
+                      >
+                        Withdraw request
+                      </Button>
+                    )}
                   </div>
                 );
               }
@@ -364,6 +464,9 @@ export function RentalsManager() {
                       </Button>
                       <Button size="sm" variant="outline" onClick={() => openFinancial(occupancy)}>
                         Request a rent change
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => openDeposit(occupancy)}>
+                        Request a deposit change
                       </Button>
                     </>
                   )}
@@ -488,6 +591,32 @@ export function RentalsManager() {
             />
           </Field>
 
+          {(() => {
+            const months = Number(additionalMonths);
+            if (!extensionFor?.expectedEndDate || !Number.isInteger(months) || months < 1) return null;
+            const proposedEnd = addMonths(extensionFor.expectedEndDate, months);
+            return (
+              <div className="rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500 dark:text-slate-400">Current lease end</span>
+                  <span className="font-semibold text-primary-900 dark:text-white">{formatDate(extensionFor.expectedEndDate)}</span>
+                </div>
+                <div className="mt-1 flex items-center justify-between">
+                  <span className="text-slate-500 dark:text-slate-400">Proposed lease end</span>
+                  <span className="font-semibold text-primary-900 dark:text-white">{formatDate(proposedEnd)}</span>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Section 2/11 doctrine: "An extension must not automatically
+              charge an increased security deposit merely because rent or
+              term increased." -- this platform has no deposit top-up flow at
+              all yet, so the honest disclosure is that none happens here. */}
+          <p className="text-xs text-slate-400">
+            Your security deposit is not affected by this change.
+          </p>
+
           <Field label="Reason (optional)">
             <textarea
               value={extensionReason}
@@ -541,6 +670,24 @@ export function RentalsManager() {
             )}
           </Field>
 
+          {(() => {
+            const target = availableListings.find((l) => l.id === targetListingId);
+            if (!target) return null;
+            return (
+              <div className="rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500 dark:text-slate-400">Listed reference price</span>
+                  <span className="font-semibold text-primary-900 dark:text-white">
+                    {formatCurrency(target.pricePerNight)}/night
+                  </span>
+                </div>
+                <p className="mt-1 text-slate-400">
+                  Not your final rent -- your host sets fresh monthly terms once this request is approved.
+                </p>
+              </div>
+            );
+          })()}
+
           <Field label="Reason (optional)">
             <textarea
               value={premisesReason}
@@ -585,6 +732,10 @@ export function RentalsManager() {
             />
           </Field>
 
+          <p className="text-xs text-slate-400">
+            Your security deposit is not automatically changed by a rent change.
+          </p>
+
           <Field label="Reason (optional)">
             <textarea
               value={financialReason}
@@ -605,6 +756,50 @@ export function RentalsManager() {
               Cancel
             </Button>
             <Button type="submit" loading={financialSubmitting}>
+              Submit request
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal open={Boolean(depositFor)} onClose={() => setDepositFor(null)} title="Request a deposit change">
+        <form onSubmit={handleDepositChange} className="space-y-4">
+          <p className="rounded-xl bg-slate-50 px-4 py-3 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+            Your host has to approve this. Approval alone doesn&apos;t change the amount held — the actual deposit
+            adjustment is processed separately under your market&apos;s deposit rules.
+          </p>
+
+          <Field label="Proposed deposit amount (₹)">
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              value={depositProposedAmount}
+              onChange={(e) => setDepositProposedAmount(e.target.value)}
+              className={inputClass}
+            />
+          </Field>
+
+          <Field label="Reason (optional)">
+            <textarea
+              value={depositReason}
+              onChange={(e) => setDepositReason(e.target.value)}
+              rows={3}
+              className={inputClass}
+            />
+          </Field>
+
+          {depositError && (
+            <p className="rounded-lg bg-accent-50 px-3 py-2 text-xs font-medium text-accent-700 ring-1 ring-accent-200">
+              {depositError}
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={() => setDepositFor(null)}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={depositSubmitting}>
               Submit request
             </Button>
           </div>

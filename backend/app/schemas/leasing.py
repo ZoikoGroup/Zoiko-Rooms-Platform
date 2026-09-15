@@ -457,6 +457,23 @@ class BookingChangeRequestCreate(CamelModel):
     reason: str = ""
 
 
+class TermShiftRequestCreate(CamelModel):
+    """ZR-ENG-CLR-008 Section 4: 'TERM_SHIFT | Both start and end move.'
+    new_term_months is the new term's absolute length, not a delta -- see
+    models/booking_change_request.py."""
+
+    proposed_start_date: date
+    new_term_months: int
+    reason: str = ""
+
+    @field_validator("new_term_months")
+    @classmethod
+    def _validate_new_term_months(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("newTermMonths must be at least 1")
+        return value
+
+
 class ExtensionRequestCreate(CamelModel):
     """ZR-ENG-CLR-008 Section 8 MVP: renter requesting to extend their stay
     on an active occupancy. Whole additional months, not an arbitrary end
@@ -535,6 +552,8 @@ class BookingChangeRequestRead(CamelModel):
     resulting_application_id: int | None = None
     original_monthly_rent: float | None = None
     proposed_monthly_rent: float | None = None
+    original_deposit_amount: float | None = None
+    proposed_deposit_amount: float | None = None
     reason: str
     decision_note: str
     decided_by_admin_id: int | None = None
@@ -542,6 +561,7 @@ class BookingChangeRequestRead(CamelModel):
     resulting_amendment_id: int | None = None
     created_at: datetime
     expires_at: datetime
+    authority_evidence_ref: str = ""
 
     listing_name: str = ""
     target_listing_name: str = ""
@@ -551,4 +571,57 @@ class BookingChangeRequestRead(CamelModel):
 class BookingChangeDecisionRequest(CamelModel):
     """Optional note recorded with a host/admin approval or decline."""
 
+    decision_note: str = ""
+
+
+class DepositChangeRequestCreate(CamelModel):
+    """ZR-ENG-CLR-008 Section 4/11/DEPOSIT_CHANGE: request/decide only --
+    see crud/booking_change_requests.py:request_deposit_change for why
+    approval never itself moves deposit money."""
+
+    proposed_deposit_amount: float
+    reason: str = ""
+
+    @field_validator("proposed_deposit_amount")
+    @classmethod
+    def _validate_proposed_deposit_amount(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("proposedDepositAmount cannot be negative")
+        return value
+
+
+class LegalOrderChangeCreate(CamelModel):
+    """ZR-ENG-CLR-008 Section 4/LEGAL_ORDER_CHANGE: admin-initiated amendment
+    driven by a court/regulator/statutory order. At least one of the three
+    proposed fields must be given; authority_evidence_ref is mandatory."""
+
+    proposed_start_date: date | None = None
+    new_term_months: int | None = None
+    proposed_monthly_rent: float | None = None
+    authority_evidence_ref: str
+    reason: str = ""
+
+
+class BookingChangeAdminCorrectionCreate(CamelModel):
+    """ZR-ENG-CLR-008 Section 9/ADMIN_CORRECTION: a narrowly-scoped,
+    fully-audited fix to this BCR's own free-text fields only -- see
+    crud/booking_change_requests.py:correct_change_request_metadata for why
+    material fields (dates, term, rent, target listing, status) are never
+    reachable through this endpoint."""
+
+    corrected_reason: str | None = None
+    corrected_decision_note: str | None = None
+    evidence_ref: str
+    correction_note: str = ""
+
+
+class BookingChangeAlternativeProposalCreate(CamelModel):
+    """ZR-ENG-CLR-008 Section 18: a host counter-proposal against a pending
+    request -- exactly one of these fields applies, depending on the BCR's
+    change_type (crud/booking_change_requests.py:propose_alternative_terms
+    validates which). Not offered for PREMISES_CHANGE."""
+
+    proposed_start_date: date | None = None
+    additional_term_months: int | None = None
+    proposed_monthly_rent: float | None = None
     decision_note: str = ""
