@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     payout_statement_document_dir: str = "secure_uploads/payout_statements"
     # ZR-ENG-CLR-005 Section 13.1/AC-26: one immutable PDF per PAID PayoutRecord's fee line.
     service_fee_invoice_document_dir: str = "secure_uploads/service_fee_invoices"
+    # ZR-ENG-CLR-005 Section 13.1: one immutable, host-issued PDF per RENT
+    # Obligation (the request for payment; PaymentReceipt above is its
+    # after-the-fact counterpart -- proof payment was actually made).
+    rent_invoice_document_dir: str = "secure_uploads/rent_invoices"
 
     frontend_url: str = "http://localhost:3000"
     password_reset_token_expire_minutes: int = 30

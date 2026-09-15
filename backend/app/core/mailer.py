@@ -306,6 +306,20 @@ def send_refund_completed_email(to_email: str, full_name: str, amount: float, cu
     )
 
 
+def send_payout_beneficiary_verification_code_email(to_email: str, full_name: str, code: str, expires_minutes: int) -> None:
+    send_email(
+        to_email,
+        "Confirm your payout account",
+        heading="Confirm your payout account",
+        body_lines=[
+            f"Hi {full_name},",
+            f"Use this code to confirm your payout account: {code}",
+            f"This code is valid for {expires_minutes} minutes and can only be used once.",
+            "If you didn't request this change, contact support immediately -- do not share this code with anyone.",
+        ],
+    )
+
+
 def send_payout_paid_email(to_email: str, full_name: str, amount: float, currency: str, period_key: str) -> None:
     send_email(
         to_email,

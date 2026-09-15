@@ -70,11 +70,25 @@ FINANCIAL_HOLD_STATUSES = ("OPEN", "RESOLVED")
 # released/forfeited, refund completed), not when an Obligation is created.
 LEDGER_ACCOUNT_TYPES = ("PLATFORM_CLEARING", "HOST_PAYABLE", "DEPOSIT_CUSTODY_LIABILITY", "PLATFORM_FEE_REVENUE")
 
-# ZR-ENG-CLR-005 Section 7.1: intentionally single-valued today -- OfferTerms
-# has no cadence field and no product surface lets a host pick anything but
-# implicit monthly, so WEEKLY/FORTNIGHTLY/BIWEEKLY/UPFRONT/CUSTOM stay
-# undefined until something can actually select them.
-PAYMENT_SCHEDULE_CADENCES = ("MONTHLY",)
+# ZR-ENG-CLR-005 Section 7.1: AC-06. OfferTerms now carries its own cadence
+# (schemas/leasing.py:OfferTermsCreate), so a host can pick any of these at
+# offer-terms time; the schedule created in crud/leasing.py:create_agreement
+# just carries that choice forward.
+# UPFRONT: the entire term's rent (monthly_rent * term_months) is billed as
+# the one and only obligation -- see crud/leasing.py:create_agreement and
+# crud/occupancy.py:generate_next_rent_obligation's own early-return for it.
+# CUSTOM: a fixed, admin-specified interval in days (OfferTerms/PaymentSchedule
+# .custom_interval_days) -- not a computed/invented cadence, the same
+# "admin sets the number, we never derive it" discipline this build already
+# uses for the per-period amount itself (monthly_rent is charged as-is every
+# period regardless of cadence; there is no proration formula anywhere here).
+PAYMENT_SCHEDULE_CADENCES = ("MONTHLY", "FORTNIGHTLY", "WEEKLY", "UPFRONT", "CUSTOM")
+# crud/occupancy.py:_next_due_date's fixed-interval-day map for the two
+# constant-interval cadences; MONTHLY stays calendar-month arithmetic
+# (_add_months), CUSTOM reads its interval from the schedule/terms row
+# itself (custom_interval_days) since it isn't a fixed constant, and UPFRONT
+# never computes a next due date at all (nothing left to schedule).
+CADENCE_INTERVAL_DAYS = {"FORTNIGHTLY": 14, "WEEKLY": 7}
 # ZR-ENG-CLR-005 Section 7.2: a rent-changing agreement amendment reaching
 # EFFECTIVE (crud/leasing.py:freeze_agreement_version) supersedes the
 # current schedule with a new ACTIVE version -- see
@@ -113,6 +127,7 @@ class Obligation(Base):
     payout: Mapped["PayoutRecord"] = relationship(back_populates="obligations")
     allocations: Mapped[list["PaymentAllocation"]] = relationship(back_populates="obligation")
     deposit_record: Mapped["DepositRecord"] = relationship(back_populates="obligation", uselist=False)
+    rent_invoice: Mapped["RentInvoice"] = relationship(back_populates="obligation", uselist=False)
 
 
 class SimulatedPayment(Base):
@@ -165,6 +180,28 @@ class PaymentReceipt(Base):
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     payment: Mapped["SimulatedPayment"] = relationship(back_populates="receipt")
+
+
+class RentInvoice(Base):
+    """ZR-ENG-CLR-005 Section 13.1: the immutable, host-issued invoice for one
+    RENT Obligation -- the request for payment, rendered as soon as the
+    obligation exists (see crud/leasing.py:create_agreement,
+    crud/occupancy.py:generate_next_rent_obligation), not after payment.
+    PaymentReceipt above is this document's after-the-fact counterpart --
+    proof a payment against it was actually made. Same render-once-then-
+    persist discipline, reusing core/rent_invoice_documents.py's identical
+    on-disk storage pattern."""
+
+    __tablename__ = "rent_invoices"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    obligation_id: Mapped[int] = mapped_column(ForeignKey("obligations.id", ondelete="CASCADE"), unique=True, nullable=False)
+    invoice_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    obligation: Mapped["Obligation"] = relationship(back_populates="rent_invoice")
 
 
 class PaymentAllocation(Base):
@@ -284,6 +321,16 @@ class PayoutRecord(Base):
     currency: Mapped[str] = mapped_column(String(3), default="INR")
     status: Mapped[str] = mapped_column(String(20), default="PENDING")
     hold_reason: Mapped[str] = mapped_column(String(255), default="")
+    # ZR-ENG-CLR-006 Section 15 waterfall tier 4 ("Future Host payouts
+    # offset") -- crud/finance.py:run_payout's own automation of what used
+    # to be entirely manual (crud/finance.py:record_host_recovery_progress).
+    # `amount` above stays the full period's gross-minus-fee net (unchanged
+    # meaning, matching the obligations this payout settles 1:1); this field
+    # separately records how much of that net was withheld to pay down an
+    # OPEN HostRecovery rather than actually reaching the host -- 0.0 (the
+    # default) for the overwhelming majority of payouts, which have no open
+    # recovery to offset.
+    recovery_offset_amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -291,6 +338,51 @@ class PayoutRecord(Base):
     obligations: Mapped[list["Obligation"]] = relationship(back_populates="payout")
     statement: Mapped["PayoutStatement"] = relationship(back_populates="payout", uselist=False)
     service_fee_invoice: Mapped["ServiceFeeInvoice"] = relationship(back_populates="payout", uselist=False)
+
+
+# ZR-ENG-CLR-005 AC-30/Section 9.2: PENDING_VERIFICATION -- submitted, awaiting
+# the emailed one-time code (crud/payout_beneficiary.py:confirm_payout_beneficiary).
+# VERIFIED -- strong-authed, currently the party's payout destination. SUPERSEDED
+# -- a prior VERIFIED row displaced by a later verified change (a "payout account
+# change" per AC-30, never edited in place).
+PAYOUT_BENEFICIARY_STATUSES = ("PENDING_VERIFICATION", "VERIFIED", "SUPERSEDED")
+
+
+class PayoutBeneficiary(Base):
+    """ZR-ENG-CLR-005 Section 9.2 'Beneficiary identity and payout account are
+    verified to required level' / AC-30 'Payout account change is strongly
+    authenticated and audited'. Same create-then-confirm split as
+    SimulatedPayment's PENDING->SUCCEEDED shape, but the confirming step here
+    is a mailed one-time code rather than an admin action -- the strong-auth
+    control itself. Only account_number_last4 is ever persisted; the full
+    account number is never stored (AC-33's masking discipline, extended past
+    card/bank credentials to this simulated equivalent). At most one VERIFIED
+    row per party at a time (partial unique index below) -- run_payout reads
+    that one row as its payout destination gate."""
+
+    __tablename__ = "payout_beneficiaries"
+    __table_args__ = (
+        Index(
+            "uq_payout_beneficiaries_verified_party", "party_id", unique=True,
+            postgresql_where=text("status = 'VERIFIED'"),
+            sqlite_where=text("status = 'VERIFIED'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    party_id: Mapped[int] = mapped_column(ForeignKey("parties.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_holder_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    bank_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    account_number_last4: Mapped[str] = mapped_column(String(4), nullable=False)
+    ifsc_code: Mapped[str] = mapped_column(String(11), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING_VERIFICATION")
+    verification_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    verification_code_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verification_attempts: Mapped[int] = mapped_column(default=0)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    party: Mapped["Party"] = relationship()
 
 
 class PayoutStatement(Base):
@@ -416,6 +508,48 @@ class FinancialHold(Base):
     resolution_notes: Mapped[str] = mapped_column(String(2000), default="")
 
 
+# ZR-ENG-CLR-006 Section 18.4's own host_recovery state machine is
+# NOT_REQUIRED/RECOVERABLE -> OFFSET_PENDING -> PARTIALLY_RECOVERED ->
+# RECOVERED, with DIRECT_COLLECTION/DISPUTED/WRITEOFF_REVIEW/LEGAL_RECOVERY
+# alternatives -- this build trims that to the one distinction it can
+# actually track without inventing a collections process: OPEN (something is
+# owed back), RECOVERED (fully offset/collected) or WRITTEN_OFF (a Super
+# Admin decided to stop pursuing it). recovery_method is an honest label for
+# how it actually happened, recorded after the fact, not a workflow this
+# build automates end-to-end yet (see crud/finance.py:record_host_recovery_
+# progress's own docstring for exactly what's automated today vs. manual).
+HOST_RECOVERY_STATUSES = ("OPEN", "RECOVERED", "WRITTEN_OFF")
+HOST_RECOVERY_METHODS = ("FUTURE_PAYOUT_OFFSET", "DIRECT_COLLECTION", "WRITTEN_OFF")
+
+
+class HostRecovery(Base):
+    """ZR-ENG-CLR-006 Section 15/18.4/19/AC-22: 'Already-paid Host funds can
+    generate a Host recovery object without blocking creation of the
+    renter's entitlement record.' One row per refund that drove a party's
+    HOST_PAYABLE/DEPOSIT_CUSTODY_LIABILITY balance negative (crud/finance.py:
+    decide_refund creates this alongside the existing FinancialHold, not
+    instead of it -- financial_hold_id links back to that same flagged
+    event). amount is the negative-balance amount discovered at that moment;
+    recovered_amount accumulates as recoveries are logged, never decreases."""
+
+    __tablename__ = "host_recoveries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    party_id: Mapped[int] = mapped_column(ForeignKey("parties.id", ondelete="CASCADE"), nullable=False, index=True)
+    financial_hold_id: Mapped[int] = mapped_column(ForeignKey("financial_holds.id", ondelete="CASCADE"), nullable=False)
+    refund_request_id: Mapped[int | None] = mapped_column(ForeignKey("refund_requests.id"), nullable=True)
+    amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    recovered_amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0.0)
+    currency: Mapped[str] = mapped_column(String(3), default="INR")
+    status: Mapped[str] = mapped_column(String(20), default="OPEN")
+    recovery_method: Mapped[str] = mapped_column(String(30), default="")
+    notes: Mapped[str] = mapped_column(String(2000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    party: Mapped["Party"] = relationship()
+
+
 class PaymentSchedule(Base):
     """ZR-ENG-CLR-005 Section 7.1/15.1: the versioned plan a RENT obligation
     series is generated from -- created once, alongside the agreement's own
@@ -447,6 +581,11 @@ class PaymentSchedule(Base):
     agreement_id: Mapped[int] = mapped_column(ForeignKey("agreements.id", ondelete="CASCADE"), nullable=False, index=True)
     version: Mapped[int] = mapped_column(default=1)
     cadence: Mapped[str] = mapped_column(String(20), default="MONTHLY")
+    # ZR-ENG-CLR-005 AC-06: only meaningful when cadence == "CUSTOM" -- the
+    # admin-specified interval in days crud/occupancy.py:_next_due_date reads
+    # instead of a fixed CADENCE_INTERVAL_DAYS constant. Null for every other
+    # cadence.
+    custom_interval_days: Mapped[int | None] = mapped_column(nullable=True)
     currency: Mapped[str] = mapped_column(String(3), default="INR")
     amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     first_due: Mapped[date] = mapped_column(Date, nullable=False)

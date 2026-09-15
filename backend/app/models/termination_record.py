@@ -23,6 +23,11 @@ class TerminationRecord(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     occupancy_id: Mapped[int] = mapped_column(ForeignKey("occupancies.id", ondelete="CASCADE"), nullable=False)
     agreement_id: Mapped[int] = mapped_column(ForeignKey("agreements.id", ondelete="CASCADE"), nullable=False)
+    # ZR-ENG-CLR-006 Section 19: links this evidence row back to the
+    # termination_case (cause code, initiator, notice) that led to it, when
+    # one exists -- null for an end_occupancy call made outside the Section 6
+    # case flow (e.g. today's still-existing direct admin action).
+    termination_case_id: Mapped[int | None] = mapped_column(ForeignKey("termination_cases.id", ondelete="SET NULL"), nullable=True)
     basis: Mapped[str] = mapped_column(String(30), default="OTHER")
     notice_given_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     liability_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)

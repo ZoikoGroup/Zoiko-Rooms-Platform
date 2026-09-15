@@ -11,7 +11,7 @@ into a notification meant for the other side.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException, status
@@ -23,7 +23,7 @@ from app.crud import leasing as leasing_crud
 from app.crud import notification as notification_module
 from app.crud import occupancy as occupancy_crud
 from app.crud import sublet as sublet_crud
-from app.models.finance import DepositRecord, Obligation, OBLIGATION_TYPE_TO_PLANE, RefundRequest, SimulatedPayment
+from app.models.finance import DepositRecord, Obligation, OBLIGATION_TYPE_TO_PLANE, PayoutBeneficiary, RefundRequest, SimulatedPayment
 from app.models.guest import Guest
 from app.models.leasing import Agreement, AgreementVersion, Application, Offer, OfferTerms
 from app.models.listing import Listing
@@ -300,7 +300,7 @@ class TestOccupancyNotifications:
         occupancy, host, renter_user = self._active_occupancy(db_session, "end")
         admin = _make_admin(db_session, email="occ-end-admin@test.com", role="super_admin")
 
-        occupancy_crud.end_occupancy(db_session, occupancy, admin)
+        occupancy_crud.end_occupancy(db_session, occupancy, admin, override_reason="test: exercising notification behavior")
 
         assert occupancy.status == "ENDED"
         assert _notification(db_session, notification_type="occupancy.ended", recipient_user_id=renter_user.id) is not None
@@ -411,10 +411,15 @@ class TestFinanceNotifications:
             occupancy_id=occupancy.id,
         )
         db_session.add(obligation)
+        db_session.add(PayoutBeneficiary(
+            party_id=party.id, account_holder_name="Test Landlord", bank_name="Test Bank",
+            account_number_last4="1234", ifsc_code="TEST0123456", status="VERIFIED",
+            verified_at=datetime.now(timezone.utc),
+        ))
         db_session.commit()
 
         admin = _make_admin(db_session, email="payout-admin@test.com", role="super_admin")
-        # No AuthorityRecord exists for this room -> held_reason is set -> HELD.
+        # A verified beneficiary exists but no AuthorityRecord for this room -> held_reason is set -> HELD.
         payout = finance_crud.run_payout(db_session, party, admin, "2026-09")
 
         assert payout.status == "HELD"

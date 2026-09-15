@@ -6,6 +6,7 @@ actual payout-blocking teeth, not just visibility."""
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from tests.conftest import auth_admin_cookie
@@ -49,8 +50,16 @@ class TestOpenChargebackBlocksPayout:
         assert "chargeback" in payout["holdReason"].lower()
 
 
-class TestExistingNegativeBalanceBlocksPayout:
-    def test_a_new_payout_is_held_while_the_party_has_an_unresolved_negative_balance(self, client, db_session: Session):
+class TestExistingNegativeBalancePartiallyOffsetsPayout:
+    """ZR-ENG-CLR-006 Section 15 waterfall tier 4: a too-small later payout
+    used to block entirely (see git history) -- it now applies whatever
+    partial offset this period's own net allows and still pays it out
+    (Section 2 doctrine: 'Undisputed money should not be trapped
+    unnecessarily' -- this period's own earned rent is undisputed and
+    unrelated to the shortfall from an earlier period), leaving the
+    recovery/hold open for the remainder."""
+
+    def test_a_too_small_payout_partially_offsets_and_still_pays_out(self, client, db_session: Session):
         # Reproduce the increment-7 clawback scenario first: pay, pay out,
         # then refund -- driving HOST_PAYABLE negative and opening a hold.
         obligation1, admin, guest, party_id = _make_provider_rent_obligation(db_session, suffix="gateneg1", amount=1000.0)
@@ -88,8 +97,9 @@ class TestExistingNegativeBalanceBlocksPayout:
         assert r.status_code == 200, r.text
 
         # Now a second, otherwise-perfectly-normal obligation/payment for the
-        # SAME party -- a *new* payout run must still be held because the
-        # negative-balance hold from the refund above is still OPEN.
+        # SAME party -- gross 500 @ 10% fee -> net 450, far less than the
+        # 1000 still outstanding on the recovery from above. The payout still
+        # goes out (PAID), but its entire net is retained as a partial offset.
         obligation2, _admin2, guest2, _party_id2 = _make_provider_rent_obligation(
             db_session, suffix="gateneg2", amount=500.0, owner_party_id=party_id,
         )
@@ -111,5 +121,44 @@ class TestExistingNegativeBalanceBlocksPayout:
         )
         assert r.status_code == 200, r.text
         payout = r.json()
-        assert payout["status"] == "HELD"
-        assert "negative" in payout["holdReason"].lower()
+        assert payout["status"] == "PAID"
+        assert float(payout["amount"]) == 450.0
+        assert float(payout["recoveryOffsetAmount"]) == 450.0
+
+        from app.models.finance import FinancialHold, HostRecovery
+
+        recovery = db_session.scalar(select(HostRecovery).where(HostRecovery.party_id == party_id))
+        assert recovery.status == "OPEN"
+        assert float(recovery.recovered_amount) == 450.0
+        hold = db_session.get(FinancialHold, recovery.financial_hold_id)
+        assert hold.status == "OPEN"
+
+        # A third period, generous enough to cover the remaining 550, fully
+        # settles the recovery and resolves the hold.
+        obligation3, _admin3, guest3, _party_id3 = _make_provider_rent_obligation(
+            db_session, suffix="gateneg3", amount=1000.0, owner_party_id=party_id,
+        )
+        r = client.post(
+            "/api/finance/payments",
+            json={"guestId": guest3.id, "amount": 1000.0, "currency": "INR", "idempotencyKey": "gate-neg-3"},
+            cookies=admin_cookies,
+        )
+        payment_id3 = r.json()["id"]
+        client.post(
+            f"/api/finance/payments/{payment_id3}/confirm",
+            json={"allocations": [{"obligationId": obligation3.id, "amount": 1000.0}]},
+            cookies=admin_cookies,
+        )
+        r = client.post(
+            "/api/finance/payouts/run", json={"partyId": party_id, "periodKey": "2026-10"}, cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        payout3 = r.json()
+        assert payout3["status"] == "PAID"
+        assert float(payout3["recoveryOffsetAmount"]) == 550.0
+
+        db_session.refresh(recovery)
+        db_session.refresh(hold)
+        assert recovery.status == "RECOVERED"
+        assert float(recovery.recovered_amount) == 1000.0
+        assert hold.status == "RESOLVED"

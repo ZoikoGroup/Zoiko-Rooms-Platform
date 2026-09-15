@@ -148,6 +148,13 @@ class OfferTerms(Base):
     deposit_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     term_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    # ZR-ENG-CLR-005 AC-06: the PaymentSchedule cadence these terms will seed
+    # (see crud/leasing.py:create_agreement) -- one of finance.py's
+    # PAYMENT_SCHEDULE_CADENCES, validated in crud/leasing.py:add_offer_terms.
+    cadence: Mapped[str] = mapped_column(String(20), default="MONTHLY")
+    # ZR-ENG-CLR-005 AC-06: only meaningful when cadence == "CUSTOM" -- carried
+    # into the PaymentSchedule's own identically-named column. Null otherwise.
+    custom_interval_days: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     offer: Mapped["Offer"] = relationship(back_populates="terms")

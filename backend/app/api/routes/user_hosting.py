@@ -78,6 +78,7 @@ def create_user_property(
         address=payload.address,
         city=payload.city,
         status="active",
+        jurisdiction_code=payload.jurisdiction_code,
     )
     db.add(prop)
     db.commit()
@@ -101,6 +102,7 @@ def update_user_property(
     
     prop.address = payload.address
     prop.city = payload.city
+    prop.jurisdiction_code = payload.jurisdiction_code
     db.commit()
     db.refresh(prop)
 

@@ -29,7 +29,8 @@ from app.models.occupancy_activation import OccupancyActivationDecision, Occupan
 from app.models.party import Party
 from app.models.property import Property
 from app.models.room import Room
-from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
+from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie, deliver_all_disclosures
+from tests.test_agreement_engine_foundation import _pay_off_agreement_obligations
 from tests.test_renter_offer_agreement_flow import _make_agreement_eligible, _submit_and_approve_application
 
 
@@ -110,19 +111,26 @@ def _build_signed_agreement(client, db: Session, suffix: str, *, pay_obligations
 
     r = client.post(f"/api/leasing/agreements/{agreement_id}/send", cookies=admin_cookies)
     assert r.status_code == 200, r.text
+    deliver_all_disclosures(client, admin_cookies, agreement_id)
 
     r = client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=renter_cookies)
     assert r.status_code == 200, r.text
 
+    # ZR-ENG-CLR-005's payment flow (already on dev via the anil merge) gates
+    # SIGNED on paid obligations at the moment of the second signature --
+    # an agreement with obligations still unpaid lands in PAYMENT_IN_PROGRESS
+    # instead, exactly the state pay_obligations=False's own eligibility-
+    # rejection test wants to exercise.
     r = client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
     assert r.status_code == 200, r.text
-    assert r.json()["status"] == "SIGNED"
 
     agreement = db.get(Agreement, agreement_id)
     if pay_obligations:
-        for obligation in agreement.obligations:
-            obligation.status = "PAID"
-        db.commit()
+        _pay_off_agreement_obligations(client, db, admin_cookies, agreement_id)
+        db.refresh(agreement)
+        assert agreement.status == "SIGNED", agreement.status
+    else:
+        assert agreement.status == "PAYMENT_IN_PROGRESS", agreement.status
         db.refresh(agreement)
 
     return agreement, host_user, renter_user, listing_id, admin_cookies
@@ -457,7 +465,9 @@ class TestEndOccupancy:
     def test_active_occupancy_ended_by_authorized_provider_becomes_ended(self, client, db_session: Session):
         occupancy_id, _host, _renter, admin_cookies = self._active_occupancy(client, db_session, "end-ok")
 
-        r = client.post(f"/api/occupancy/{occupancy_id}/end", cookies=admin_cookies)
+        # ZR-ENG-CLR-006 AC-05/AC-29: ending an active occupancy early with no
+        # termination_case_id needs a Super Admin's own logged reason.
+        r = client.post(f"/api/occupancy/{occupancy_id}/end", json={"overrideReason": "test: exercising legacy end path"}, cookies=admin_cookies)
 
         assert r.status_code == 200, r.text
         body = r.json()
@@ -472,7 +482,7 @@ class TestEndOccupancy:
     def test_end_occupancy_notifies_renter_and_host(self, client, db_session: Session):
         occupancy_id, host, renter, admin_cookies = self._active_occupancy(client, db_session, "end-notify")
 
-        r = client.post(f"/api/occupancy/{occupancy_id}/end", cookies=admin_cookies)
+        r = client.post(f"/api/occupancy/{occupancy_id}/end", json={"overrideReason": "test: exercising legacy end path"}, cookies=admin_cookies)
         assert r.status_code == 200, r.text
 
         assert db_session.scalar(

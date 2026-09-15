@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -8,11 +8,11 @@ from app.crud.eligibility import check_move_in_eligibility
 from app.crud import notification as notif_crud
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.models.admin_user import AdminUser
-from app.models.finance import OBLIGATION_TYPE_TO_PLANE, Obligation, PaymentSchedule
+from app.models.finance import CADENCE_INTERVAL_DAYS, OBLIGATION_TYPE_TO_PLANE, Obligation, PaymentSchedule
 from app.models.guest import Guest
 from app.models.leasing import Agreement
 from app.models.listing import Listing
-from app.models.occupancy import Occupancy
+from app.models.occupancy import Occupancy, OccupancyCoTenant
 from app.models.occupancy_activation import OccupancyHandoverEvent
 from app.models.room import Room
 from app.schemas.occupancy import OccupancyRead
@@ -50,11 +50,71 @@ def _add_months(d: date, months: int) -> date:
     return date(year, month, day)
 
 
+def _next_due_date(last_due: date, cadence: str, custom_interval_days: int | None = None) -> date:
+    """ZR-ENG-CLR-005 AC-06: the next RENT obligation's due date, one full
+    period after `last_due`, per the schedule's cadence. MONTHLY keeps the
+    exact calendar-month arithmetic this codebase already used before AC-06
+    (day-of-month preserved, clamped at month end); FORTNIGHTLY/WEEKLY are a
+    fixed number of days later (models/finance.py:CADENCE_INTERVAL_DAYS);
+    CUSTOM reads its interval from the schedule row itself rather than a
+    fixed constant. Never called for UPFRONT -- callers must short-circuit
+    before reaching here, since an UPFRONT schedule has nothing left to
+    schedule after its one lump-sum obligation."""
+    if cadence == "CUSTOM":
+        return last_due + timedelta(days=custom_interval_days)
+    if cadence in CADENCE_INTERVAL_DAYS:
+        return last_due + timedelta(days=CADENCE_INTERVAL_DAYS[cadence])
+    return _add_months(last_due, 1)
+
+
 def get_occupancy_or_404(db: Session, occupancy_id: int) -> Occupancy:
     occupancy = db.get(Occupancy, occupancy_id)
     if not occupancy:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
     return occupancy
+
+
+def add_co_tenant(db: Session, occupancy: Occupancy, admin: AdminUser, guest_id: str) -> OccupancyCoTenant:
+    """ZR-ENG-CLR-006 AC-25 -- see models/occupancy.py:OccupancyCoTenant's
+    own docstring. Adding one changes how crud/termination.py routes a
+    later termination case for this occupancy; it does not itself alter
+    who Occupancy.guest_id is."""
+    assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
+    if guest_id == occupancy.guest_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This guest is already the occupancy's own tenant of record")
+    guest = db.get(Guest, guest_id)
+    if guest is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Guest not found")
+    existing = db.scalar(
+        select(OccupancyCoTenant).where(
+            OccupancyCoTenant.occupancy_id == occupancy.id, OccupancyCoTenant.guest_id == guest_id,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This guest is already a co-tenant on this occupancy")
+
+    co_tenant = OccupancyCoTenant(occupancy_id=occupancy.id, guest_id=guest_id, added_by_admin_id=admin.id)
+    db.add(co_tenant)
+    db.commit()
+    db.refresh(co_tenant)
+    return co_tenant
+
+
+def list_co_tenants_for_occupancy(db: Session, occupancy: Occupancy) -> list[OccupancyCoTenant]:
+    return list(
+        db.scalars(
+            select(OccupancyCoTenant).where(OccupancyCoTenant.occupancy_id == occupancy.id).order_by(OccupancyCoTenant.added_at)
+        )
+    )
+
+
+def has_co_tenants(db: Session, occupancy_id: int) -> bool:
+    """ZR-ENG-CLR-006 AC-25: read by crud/termination.py to decide whether
+    a case can auto-resolve at all -- see OccupancyCoTenant's own
+    docstring for why a joint occupancy always falls to PENDING_REVIEW."""
+    return db.scalar(
+        select(OccupancyCoTenant.id).where(OccupancyCoTenant.occupancy_id == occupancy_id).limit(1)
+    ) is not None
 
 
 def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occupancy:
@@ -77,6 +137,20 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
 
     occupancy.status = "ACTIVE"
     occupancy.move_in_date = date.today()
+    # AC-18: expected_end_date is recomputed here from the offer's current
+    # terms, not left at whatever value was set when the occupancy row was
+    # first created (at signing) -- an amendment approved between signing
+    # and move-in (crud/agreement_amendments.py persists a new OfferTerms
+    # row precisely so this stays in sync) must be reflected, not the stale
+    # original start_date/term_months.
+    latest_terms = offer.terms[-1]
+    occupancy.expected_end_date = _add_months(latest_terms.start_date, latest_terms.term_months)
+    # The room hold moves BOOKED -> OCCUPIED only once the tenant actually
+    # moves in (mark_hold_booked already ran at offer-acceptance time) --
+    # this call used to live in the occupancy-creation step before the
+    # PENDING_MOVE_IN lifecycle change moved that step to signing, and was
+    # never carried over to confirm_move_in.
+    inventory_service.mark_hold_occupied(db, source_type="offer", source_id=offer.id)
     db.flush()
 
     listing = offer.listing
@@ -182,23 +256,15 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
         raise HTTPException(status.HTTP_409_CONFLICT, "Occupancy has no initial rent obligation to schedule from")
 
     last_due = rent_obligations[-1].due_date
-    next_due = _add_months(last_due, 1)
 
-    if occupancy.expected_end_date and next_due > occupancy.expected_end_date:
-        return None
-
-    already_exists = any(o.due_date == next_due for o in rent_obligations)
-    if already_exists:
-        return None
-
-    # ZR-ENG-CLR-005 AC-02/AC-07: source the recurring amount from the
-    # agreement's PaymentSchedule when one exists, so this obligation is
-    # traceable to the same versioned plan the first one was -- not "whatever
-    # the last row happened to say". Behaviorally identical today (nothing in
-    # this codebase ever changes per-period rent, so schedule.amount and
-    # rent_obligations[-1].amount are always equal), but falls back to the
-    # old logic when no schedule exists (e.g. an obligation created outside
-    # the agreement path) rather than ever erroring on its absence.
+    # ZR-ENG-CLR-005 AC-02/AC-07/AC-06: source both the recurring amount and
+    # the cadence from the agreement's PaymentSchedule when one exists, so
+    # this obligation is traceable to the same versioned plan the first one
+    # was generated from -- not "whatever the last row happened to say" and
+    # not an assumed calendar month. Falls back to the old
+    # every-calendar-month-at-the-last-amount logic when no schedule exists
+    # (e.g. an obligation created outside the agreement path) rather than
+    # ever erroring on its absence.
     schedule = None
     if occupancy.offer.agreement:
         schedule = db.scalar(
@@ -206,7 +272,22 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
                 PaymentSchedule.agreement_id == occupancy.offer.agreement.id, PaymentSchedule.status == "ACTIVE",
             )
         )
+    # ZR-ENG-CLR-005 AC-06: an UPFRONT schedule's one obligation already
+    # covers the entire term -- there is nothing left to schedule, ever.
+    if schedule and schedule.cadence == "UPFRONT":
+        return None
+
     amount = schedule.amount if schedule else rent_obligations[-1].amount
+    next_due = _next_due_date(
+        last_due, schedule.cadence if schedule else "MONTHLY", schedule.custom_interval_days if schedule else None,
+    )
+
+    if occupancy.expected_end_date and next_due > occupancy.expected_end_date:
+        return None
+
+    already_exists = any(o.due_date == next_due for o in rent_obligations)
+    if already_exists:
+        return None
 
     obligation = Obligation(
         obligation_type="RENT",
@@ -219,6 +300,21 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
     db.add(obligation)
     db.commit()
     db.refresh(obligation)
+
+    # ZR-ENG-CLR-005 Section 13.1: same best-effort placement as
+    # crud/finance.py::confirm_payment's receipt hook -- an invoice-rendering
+    # failure must never undo or fail an already-committed obligation. An
+    # admin/renter can always regenerate it on demand via
+    # get_or_create_rent_invoice (called again from the download routes) if
+    # this best-effort call somehow didn't run. Imported locally -- crud.finance
+    # imports services.booking_orchestrator, which imports this module, so a
+    # module-level import here would be circular.
+    from app.crud.finance import get_or_create_rent_invoice
+    try:
+        get_or_create_rent_invoice(db, obligation)
+    except Exception:
+        pass
+
     return obligation
 
 
@@ -226,6 +322,7 @@ def end_occupancy(
     db: Session, occupancy: Occupancy, admin: AdminUser, correlation_id: str = "",
     *, notice_given_at: datetime | None = None, liability_end_date: date | None = None,
     termination_effective_date: date | None = None, move_out_date: date | None = None, basis: str = "OTHER",
+    termination_case_id: int | None = None, override_reason: str = "", already_adjudicated: bool = False,
 ) -> Occupancy:
     """ZR-ENG-CLR-004 AC-20/10.2: 'Final occupancy date, rent liability end
     date and physical move-out date may differ and must be separately
@@ -239,11 +336,61 @@ def end_occupancy(
     Section 13.1 termination_record: also creates the dedicated,
     independently-queryable evidence row the spec names -- Occupancy's own
     flat columns above stay as a denormalized convenience for reads that
-    only need the current occupancy, this is the authoritative record."""
+    only need the current occupancy, this is the authoritative record.
+
+    ZR-ENG-CLR-006 Section 7.1 Step 11/AC-05: termination_case_id, when
+    given, links this evidence row back to the renter's own termination_case
+    (and flips that case to TERMINATED) -- 'Move-out/vacant possession is
+    confirmed separately' from the case itself, this is that confirmation
+    step. Ending an occupancy EARLY (before its own expected_end_date) is
+    'cancellation' under Section 6's own scope note and the spec's FINAL
+    DECISION is explicit: 'An active occupancy is not cancelable by Host
+    fiat.' So an early ending with no termination_case_id is only permitted
+    as a Super Admin's own logged, reasoned override (AC-29's 'manual
+    overrides require role authorization, reason... ' -- exactly the
+    'Super Admin: exceptional controlled override' role this spec's own
+    RBAC table describes) -- see the guard below. Ending AT/AFTER the
+    occupancy's own expected_end_date is not a cancellation at all (the
+    tenancy simply ran its course), so it stays the ordinary admin action
+    unchanged.
+
+    already_adjudicated is the third, narrower escape from that guard --
+    deliberately absent from OccupancyEndRequest (the public /end endpoint's
+    own schema), so no Host request body can ever set it. It exists only for
+    a trusted internal caller that already went through its own lawful,
+    renter-initiated approval process before ever reaching here -- today,
+    crud/booking_change_requests.py's PREMISES_CHANGE migration completing
+    once the replacement agreement is fully signed. That is not 'Host
+    fiat' (the renter requested the move, an admin already approved it);
+    it just isn't shaped like a termination_case either."""
     from app.models.leasing import Agreement
+    from app.models.termination_case import TerminationCase
     from app.models.termination_record import TerminationRecord
 
     assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
+
+    case = None
+    if termination_case_id is not None:
+        case = db.get(TerminationCase, termination_case_id)
+        if not case or case.occupancy_id != occupancy.id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Termination case not found for this occupancy")
+        if case.status != "EFFECTIVE_DATE_SET":
+            raise HTTPException(status.HTTP_409_CONFLICT, "This termination case is not ready to be finalized")
+    elif not already_adjudicated:
+        ending_early = occupancy.expected_end_date is not None and date.today() < occupancy.expected_end_date
+        if ending_early:
+            if admin.role != "super_admin":
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    "Ending an active occupancy early requires a termination case (ZR-ENG-CLR-006 Section 8) -- "
+                    "ordinary Host/Admin accounts cannot end it directly",
+                )
+            if not override_reason.strip():
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "A reason is required to end an active occupancy early without a termination case (AC-29)",
+                )
+
     resolved_move_out_date = move_out_date or date.today()
     occupancy.status = "ENDED"
     occupancy.move_out_date = resolved_move_out_date
@@ -256,10 +403,13 @@ def end_occupancy(
     if agreement is not None:
         db.add(TerminationRecord(
             occupancy_id=occupancy.id, agreement_id=agreement.id, basis=basis,
+            termination_case_id=case.id if case else None,
             notice_given_at=notice_given_at, liability_end_date=occupancy.liability_end_date,
             termination_effective_date=occupancy.termination_effective_date,
             physical_move_out_date=resolved_move_out_date, created_by_admin_id=admin.id,
         ))
+    if case is not None:
+        case.status = "TERMINATED"
 
     # Frees the room's Inventory Service hold -- a new tenant can now be
     # held/booked for this same room (see services/inventory.py).
