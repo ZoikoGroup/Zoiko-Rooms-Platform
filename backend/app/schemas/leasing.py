@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from app.schemas.booking import NewGuestInput
 from app.schemas.common import CamelModel
@@ -21,7 +21,10 @@ class ApplicationCreate(CamelModel):
     # applicant (see Application.occupant_guest_id). None (the common case)
     # means the applicant is the occupant.
     named_occupant_guest_id: str | None = None
-    message: str = ""
+    # Matches models.leasing.Application.message's real String(2000) column --
+    # an over-length value here would otherwise crash with a raw 500 at
+    # insert time instead of a clean 422.
+    message: str = Field(default="", max_length=2000)
     desired_move_in: date | None = None
 
     _validate_desired_move_in = field_validator("desired_move_in")(_reject_past_date)

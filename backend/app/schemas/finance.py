@@ -1,6 +1,15 @@
 from datetime import date, datetime
 
+from pydantic import Field
+
 from app.schemas.common import CamelModel
+
+# Numeric(12, 2) columns (SimulatedPayment.amount, RefundRequest.amount, etc.)
+# can hold at most 10 digits before the decimal point -- an amount above this
+# would crash with a raw DB error at insert time rather than a clean 422, since
+# plain `float` has no upper bound of its own. Comfortably above any real
+# rent/deposit/refund figure this platform would ever see.
+MAX_MONEY_AMOUNT = 9_999_999_999.99
 
 
 class ObligationRead(CamelModel):
@@ -20,7 +29,13 @@ class ObligationRead(CamelModel):
 
 class PaymentAllocationInput(CamelModel):
     obligation_id: int
-    amount: float
+    # A negative or zero allocation here would let a confirmed payment
+    # silently reverse or no-op an obligation's paid status -- refund
+    # reversals are a real, legitimate negative-amount PaymentAllocation,
+    # but those are constructed directly via the ORM in
+    # crud/finance.py:decide_refund, never through this external-input
+    # schema, so this constraint can't block that path.
+    amount: float = Field(gt=0, le=MAX_MONEY_AMOUNT)
 
 
 class ScheduledObligationPreview(CamelModel):
@@ -51,7 +66,7 @@ class PaymentPreviewRead(CamelModel):
 
 class SimulatedPaymentCreate(CamelModel):
     guest_id: str
-    amount: float
+    amount: float = Field(gt=0, le=MAX_MONEY_AMOUNT)
     currency: str = "INR"
     idempotency_key: str
     # ZR-ENG-CLR-005 AC-03: all optional, all default to "payer == occupant" when
@@ -128,13 +143,13 @@ class DepositRecordRead(CamelModel):
 
 
 class DepositRelease(CamelModel):
-    amount: float
+    amount: float = Field(gt=0, le=MAX_MONEY_AMOUNT)
     notes: str = ""
 
 
 class DepositClaimItemCreate(CamelModel):
     category_code: str
-    amount_requested: float
+    amount_requested: float = Field(gt=0, le=MAX_MONEY_AMOUNT)
     description: str = ""
 
 
@@ -231,7 +246,7 @@ class PayoutBeneficiaryRead(CamelModel):
 class RefundRequestCreate(CamelModel):
     payment_id: int
     obligation_id: int
-    amount: float
+    amount: float = Field(gt=0, le=MAX_MONEY_AMOUNT)
     reason: str = ""
     idempotency_key: str
 
