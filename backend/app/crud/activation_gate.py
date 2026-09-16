@@ -13,6 +13,7 @@ from app.models.identity_verification import IdentityVerification
 from app.models.occupancy import Occupancy
 from app.models.market_release import MarketRelease
 from app.models.occupancy_activation import OccupancyActivationDecision, OccupancyHandoverEvent
+from app.services.agreement_effectiveness import is_agreement_effective
 
 GATE_RULE_VERSION = 1
 
@@ -139,9 +140,19 @@ def evaluate_activation_gate(db: Session, occupancy: Occupancy) -> GateEvaluatio
     else:
         checks["occupancy_dispute"] = "PASSED"
 
-    # No authoritative rule exists for activation date, tolerance, or timezone.
-    waiting.append("DATE_ELIGIBILITY_UNRESOLVED")
-    checks["date_eligibility"] = "UNRESOLVED"
+    # AC-13/AC-14 (services/agreement_effectiveness.py): Executed and
+    # Effective are separate states -- a fully signed agreement whose lease
+    # hasn't started yet must wait, not activate early. Reuses the same
+    # is_agreement_effective() rule crud/eligibility.py:check_move_in_eligibility
+    # already gates real move-in confirmation on, rather than a second,
+    # unreconciled date rule. When agreement/agreement.status isn't even
+    # SIGNED yet, the "agreement" check above has already blocked -- this
+    # only has an opinion once that's no longer in question.
+    if agreement and agreement.status == "SIGNED" and not is_agreement_effective(agreement):
+        waiting.append("LEASE_START_DATE_NOT_REACHED")
+        checks["date_eligibility"] = "WAITING"
+    else:
+        checks["date_eligibility"] = "PASSED"
 
     reasons = blocked + review + waiting
     if blocked:

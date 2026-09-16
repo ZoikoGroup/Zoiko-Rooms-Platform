@@ -229,7 +229,7 @@ def request_term_shift(
 
     offer = agreement.offer
     already_moved_in = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
-    if already_moved_in is not None:
+    if already_moved_in is not None and already_moved_in.status == "ACTIVE":
         raise HTTPException(
             status.HTTP_409_CONFLICT, "You have already moved in -- this can no longer be changed this way",
         )

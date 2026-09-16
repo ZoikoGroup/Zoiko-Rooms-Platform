@@ -13,7 +13,7 @@ occupancy-creation side effect and confirm_move_in's state machine.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -75,14 +75,20 @@ def _make_host_and_verified_renter_with_published_listing(db: Session, *, suffix
     return host_user, renter_user, listing.id
 
 
-def _build_signed_agreement(client, db: Session, suffix: str, *, pay_obligations: bool = True):
+def _build_signed_agreement(client, db: Session, suffix: str, *, pay_obligations: bool = True, start_date: date | None = None):
     """Drives the real API from a published listing through a SIGNED agreement,
     mirroring test_renter_offer_agreement_flow.py's own end-to-end path exactly
     (offer sent/accepted by the renter's own session, agreement sent/signed by
-    both sides). Signing itself is what creates the PENDING_MOVE_IN occupancy
-    (see _apply_signature in crud/leasing.py) -- pay_obligations=False leaves
-    the initial RENT+DEPOSIT obligations PENDING, for the eligibility-rejection
-    test, without affecting occupancy creation itself."""
+    both sides). Both signing paths to true SIGNED now create the
+    PENDING_MOVE_IN occupancy (see _ensure_pending_move_in_occupancy in
+    crud/leasing.py, called from both _apply_signature and
+    confirm_agreement_payment) -- pay_obligations=False leaves the initial
+    RENT+DEPOSIT obligations PENDING, landing the agreement in
+    PAYMENT_IN_PROGRESS instead of SIGNED (ZR-ENG-CLR-001 Rule 7), so no
+    occupancy exists yet either. start_date defaults to today (the lease is
+    already effective the moment it's signed); pass a future date to exercise
+    the activation gate's own date-eligibility wait."""
+    start_date = start_date or date.today()
     host_user, renter_user, listing_id = _make_host_and_verified_renter_with_published_listing(db, suffix=suffix)
     renter_cookies = auth_user_cookie(renter_user)
     application_id, admin_cookies = _submit_and_approve_application(client, db, renter_user, listing_id)
@@ -93,7 +99,7 @@ def _build_signed_agreement(client, db: Session, suffix: str, *, pay_obligations
 
     r = client.post(
         f"/api/leasing/offers/{offer_id}/terms",
-        json={"monthlyRent": 500, "depositAmount": 500, "startDate": date.today().isoformat(), "termMonths": 6},
+        json={"monthlyRent": 500, "depositAmount": 500, "startDate": start_date.isoformat(), "termMonths": 6},
         cookies=admin_cookies,
     )
     assert r.status_code == 200, r.text
@@ -143,7 +149,7 @@ def _get_occupancy(db: Session, agreement: Agreement) -> Occupancy | None:
 class TestSigningCreatesPendingOccupancy:
     def test_signing_creates_exactly_one_pending_move_in_occupancy(self, client, db_session: Session):
         agreement, _host, _renter, _listing_id, _admin_cookies = _build_signed_agreement(
-            client, db_session, "sign-pending", pay_obligations=False,
+            client, db_session, "sign-pending",
         )
 
         occupancies = db_session.scalars(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id)).all()
@@ -153,6 +159,66 @@ class TestSigningCreatesPendingOccupancy:
         assert occupancy.move_in_date is None
         assert occupancy.guest_id == agreement.offer.guest_id
         assert occupancy.room_id == agreement.offer.listing.room_id
+
+    def test_unpaid_obligations_leave_agreement_in_payment_in_progress_with_no_occupancy_yet(
+        self, client, db_session: Session,
+    ):
+        # ZR-ENG-CLR-001 Rule 7: unpaid initial obligations at the moment of
+        # the second signature land the agreement in PAYMENT_IN_PROGRESS, not
+        # SIGNED -- and occupancy is only ever committed once the lease is
+        # actually executed, so none exists yet either.
+        agreement, _host, _renter, _listing_id, _admin_cookies = _build_signed_agreement(
+            client, db_session, "sign-unpaid", pay_obligations=False,
+        )
+
+        assert agreement.status == "PAYMENT_IN_PROGRESS"
+        occupancies = db_session.scalars(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id)).all()
+        assert occupancies == []
+
+    def test_payment_after_signing_creates_the_occupancy_that_signing_alone_did_not(
+        self, client, db_session: Session,
+    ):
+        # The dominant real-world order (sign first, pay via checkout after)
+        # reaches SIGNED through confirm_agreement_payment, not
+        # _apply_signature's own already-paid shortcut -- confirming both
+        # paths converge on the same PENDING_MOVE_IN result.
+        agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(
+            client, db_session, "sign-then-pay", pay_obligations=False,
+        )
+        assert agreement.status == "PAYMENT_IN_PROGRESS"
+        assert db_session.scalar(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id)) is None
+
+        _pay_off_agreement_obligations(client, db_session, admin_cookies, agreement.id)
+
+        db_session.expire_all()
+        agreement = db_session.get(Agreement, agreement.id)
+        assert agreement.status == "SIGNED"
+        occupancies = db_session.scalars(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id)).all()
+        assert len(occupancies) == 1
+        assert occupancies[0].status == "PENDING_MOVE_IN"
+
+    def test_repeated_payment_confirmation_does_not_duplicate_occupancy(self, client, db_session: Session):
+        agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(
+            client, db_session, "pay-retry", pay_obligations=False,
+        )
+
+        _pay_off_agreement_obligations(client, db_session, admin_cookies, agreement.id)
+        db_session.expire_all()
+        agreement = db_session.get(Agreement, agreement.id)
+        assert agreement.status == "SIGNED"
+        first_occupancy = db_session.scalar(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id))
+        assert first_occupancy is not None
+
+        # A retried/duplicate payment-confirmation call (e.g. a provider
+        # webhook replay) must not create a second occupancy. confirm_payment
+        # itself is idempotent per obligation; calling confirm_agreement_payment
+        # again directly exercises this function's own idempotency guarantee.
+        from app.crud.leasing import confirm_agreement_payment
+        confirm_agreement_payment(db_session, agreement)
+
+        occupancies = db_session.scalars(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id)).all()
+        assert len(occupancies) == 1
+        assert occupancies[0].id == first_occupancy.id
 
     def test_expected_end_date_is_set_at_signing_and_unchanged_by_gate_waiting(self, client, db_session: Session):
         agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "end-date")
@@ -182,7 +248,7 @@ class TestSigningCreatesPendingOccupancy:
 
     def test_pending_move_in_occupancy_makes_room_unavailable(self, client, db_session: Session):
         agreement, _host, _renter, listing_id, _admin_cookies = _build_signed_agreement(
-            client, db_session, "unavailable", pay_obligations=False,
+            client, db_session, "unavailable",
         )
         occupancy = _get_occupancy(db_session, agreement)
         assert occupancy.status == "PENDING_MOVE_IN"
@@ -192,7 +258,11 @@ class TestSigningCreatesPendingOccupancy:
 
 
 class TestConfirmMoveIn:
-    def test_confirm_move_in_waits_for_unresolved_date_policy(self, client, db_session: Session):
+    def test_confirm_move_in_waits_when_handover_evidence_missing(self, client, db_session: Session):
+        # Lease start_date defaults to today, so date-eligibility already
+        # passes (see TestPhase2BActivationGate's own dedicated coverage for
+        # a future start_date) -- the gate still waits here because no
+        # handover evidence has been recorded at all.
         agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "success")
         occupancy = _get_occupancy(db_session, agreement)
         assert occupancy.status == "PENDING_MOVE_IN"
@@ -201,7 +271,7 @@ class TestConfirmMoveIn:
 
         assert r.status_code == 409, r.text
         assert r.json()["detail"]["outcome"] == "WAITING_FOR_GATE"
-        assert "DATE_ELIGIBILITY_UNRESOLVED" in r.json()["detail"]["reasonCodes"]
+        assert "HANDOVER_READY_REQUIRED" in r.json()["detail"]["reasonCodes"]
 
         db_session.refresh(occupancy)
         assert occupancy.status == "PENDING_MOVE_IN"
@@ -246,19 +316,27 @@ class TestConfirmMoveIn:
         assert r.status_code == 404, r.text
         assert db_session.scalar(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id)) is None
 
-    def test_move_in_rejected_when_eligibility_fails(self, client, db_session: Session):
-        # Obligations left PENDING (never paid) -> check_move_in_eligibility must reject,
-        # even though the PENDING_MOVE_IN occupancy already exists from signing.
-        agreement, _host, _renter, _listing_id, admin_cookies = _build_signed_agreement(
-            client, db_session, "ineligible", pay_obligations=False,
+    def test_move_in_rejected_when_listing_unpublished_after_signing(self, client, db_session: Session):
+        # Eligibility can still fail after a PENDING_MOVE_IN occupancy exists --
+        # any of the standing checks can lapse between signing and move-in.
+        # (Obligations-unpaid is no longer a reachable rejection case here: an
+        # agreement can't reach true SIGNED -- and therefore no occupancy is
+        # ever created -- while initial obligations remain unpaid; see
+        # TestSigningCreatesPendingOccupancy's own coverage of that state.)
+        agreement, _host, _renter, listing_id, admin_cookies = _build_signed_agreement(
+            client, db_session, "ineligible",
         )
         occupancy = _get_occupancy(db_session, agreement)
         assert occupancy.status == "PENDING_MOVE_IN"
 
+        listing = db_session.get(Listing, listing_id)
+        listing.state = "DRAFT"
+        db_session.commit()
+
         r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
 
         assert r.status_code == 409, r.text
-        assert "REQUIRED_PAYMENT_PENDING" in r.json()["detail"]["reasonCodes"]
+        assert "LISTING_NOT_PUBLISHED" in r.json()["detail"]["reasonCodes"]
         db_session.refresh(occupancy)
         assert occupancy.status == "PENDING_MOVE_IN"
 
@@ -318,8 +396,11 @@ class TestPhase2BActivationGate:
         assert r.status_code == 200, r.text
         return occupancy
 
-    def test_all_determinable_checks_pass_but_date_unresolved_waits(self, client, db_session: Session):
-        agreement, _host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-date")
+    def test_future_start_date_waits_on_date_eligibility(self, client, db_session: Session):
+        future_start = date.today() + timedelta(days=10)
+        agreement, _host, renter, _listing_id, admin_cookies = _build_signed_agreement(
+            client, db_session, "gate-future-date", start_date=future_start,
+        )
         occupancy = self._record_all_handover_evidence(client, db_session, agreement, renter, admin_cookies)
 
         r = client.post(f"/api/occupancy/{occupancy.id}/activation-gate/evaluate", cookies=admin_cookies)
@@ -327,35 +408,59 @@ class TestPhase2BActivationGate:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["outcome"] == "WAITING_FOR_GATE"
-        assert body["reasonCodes"] == ["DATE_ELIGIBILITY_UNRESOLVED"]
-        assert body["checks"]["date_eligibility"] == "UNRESOLVED"
+        assert body["reasonCodes"] == ["LEASE_START_DATE_NOT_REACHED"]
+        assert body["checks"]["date_eligibility"] == "WAITING"
         assert all(value == "PASSED" for key, value in body["checks"].items() if key != "date_eligibility")
         db_session.refresh(occupancy)
         assert occupancy.status == "PENDING_MOVE_IN"
 
-    def test_confirm_move_in_persists_waiting_decision_without_activation_side_effects(self, client, db_session: Session):
+    def test_all_determinable_checks_pass_and_start_date_reached_activates(self, client, db_session: Session):
+        agreement, _host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-date")
+        occupancy = self._record_all_handover_evidence(client, db_session, agreement, renter, admin_cookies)
+
+        r = client.post(f"/api/occupancy/{occupancy.id}/activation-gate/evaluate", cookies=admin_cookies)
+
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["outcome"] == "ACTIVATE"
+        assert body["reasonCodes"] == []
+        assert all(value == "PASSED" for value in body["checks"].values())
+        db_session.refresh(occupancy)
+        # Evaluating the gate alone never activates anything -- only
+        # confirm_move_in does, see the next test.
+        assert occupancy.status == "PENDING_MOVE_IN"
+
+    def test_confirm_move_in_activates_once_the_gate_passes(self, client, db_session: Session):
         agreement, host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-confirm")
         occupancy = self._record_all_handover_evidence(client, db_session, agreement, renter, admin_cookies)
 
         r = client.post(f"/api/occupancy/agreements/{agreement.id}/confirm-move-in", cookies=admin_cookies)
 
-        assert r.status_code == 409, r.text
-        assert r.json()["detail"]["outcome"] == "WAITING_FOR_GATE"
-        assert "DATE_ELIGIBILITY_UNRESOLVED" in r.json()["detail"]["reasonCodes"]
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "ACTIVE"
+        assert body["moveInDate"] == date.today().isoformat()
         db_session.refresh(occupancy)
-        assert occupancy.status == "PENDING_MOVE_IN"
+        assert occupancy.status == "ACTIVE"
+
+        # Existing persisted-decision/audit/event/notification behavior is
+        # unchanged by fixing the date check -- only the outcome differs.
         assert db_session.scalar(select(OccupancyActivationDecision).where(
             OccupancyActivationDecision.occupancy_id == occupancy.id,
-            OccupancyActivationDecision.outcome == "WAITING_FOR_GATE",
+            OccupancyActivationDecision.outcome == "ACTIVATE",
         )) is not None
         assert db_session.scalar(select(Notification).where(
-            Notification.recipient_user_id.in_([host.id, renter.id]),
-            Notification.notification_type.in_(("occupancy.move_in_confirmed", "occupancy.move_in_confirmed_for_host")),
-        )) is None
+            Notification.recipient_user_id == renter.id,
+            Notification.notification_type == "occupancy.move_in_confirmed",
+        )) is not None
+        assert db_session.scalar(select(Notification).where(
+            Notification.recipient_user_id == host.id,
+            Notification.notification_type == "occupancy.move_in_confirmed_for_host",
+        )) is not None
         assert db_session.scalar(select(DomainEvent).where(
             DomainEvent.resource_type == "occupancy", DomainEvent.resource_id == str(occupancy.id),
             DomainEvent.event_type == "occupancy.active",
-        )) is None
+        )) is not None
 
     def test_repeated_evaluation_appends_sequential_immutable_decisions(self, client, db_session: Session):
         agreement, _host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-versions")
@@ -372,7 +477,8 @@ class TestPhase2BActivationGate:
             OccupancyActivationDecision.occupancy_id == occupancy.id,
         ).order_by(OccupancyActivationDecision.decision_version)).all()
         assert [decision.decision_version for decision in decisions] == [1, 2]
-        assert decisions[0].reason_codes == ["DATE_ELIGIBILITY_UNRESOLVED"]
+        assert decisions[0].reason_codes == []
+        assert decisions[0].outcome == "ACTIVATE"
 
     def test_unauthorized_provider_cannot_record_handover(self, client, db_session: Session):
         agreement, _host, _renter, _listing_id, _admin_cookies = _build_signed_agreement(client, db_session, "gate-provider-auth")
@@ -506,3 +612,129 @@ class TestEndOccupancy:
         assert r.status_code == 403, r.text
         occupancy = db_session.get(Occupancy, occupancy_id)
         assert occupancy.status == "ACTIVE"
+
+
+def _prepare_sent_agreement_ready_to_sign(client, db: Session, suffix: str):
+    """Builds a SENT agreement with every required disclosure already
+    delivered -- the precondition _apply_signature enforces before it will
+    accept any signature at all (ZR-ENG-CLR-004 AC-15). Stops short of any
+    signature so each test below can drive the signing state machine itself."""
+    host_user, renter_user, listing_id = _make_host_and_verified_renter_with_published_listing(db, suffix=suffix)
+    renter_cookies = auth_user_cookie(renter_user)
+    application_id, admin_cookies = _submit_and_approve_application(client, db, renter_user, listing_id)
+
+    r = client.post(f"/api/leasing/applications/{application_id}/offers", cookies=admin_cookies)
+    assert r.status_code == 200, r.text
+    offer_id = r.json()["id"]
+
+    r = client.post(
+        f"/api/leasing/offers/{offer_id}/terms",
+        json={"monthlyRent": 500, "depositAmount": 500, "startDate": date.today().isoformat(), "termMonths": 6},
+        cookies=admin_cookies,
+    )
+    assert r.status_code == 200, r.text
+
+    r = client.post(f"/api/leasing/offers/{offer_id}/send", cookies=admin_cookies)
+    assert r.status_code == 200, r.text
+
+    r = client.post(f"/api/users/rentals/offers/{offer_id}/accept", cookies=renter_cookies)
+    assert r.status_code == 200, r.text
+
+    _make_agreement_eligible(db, listing_id)
+    r = client.post(f"/api/leasing/offers/{offer_id}/agreement", cookies=admin_cookies)
+    assert r.status_code == 200, r.text
+    agreement_id = r.json()["id"]
+
+    r = client.post(f"/api/leasing/agreements/{agreement_id}/send", cookies=admin_cookies)
+    assert r.status_code == 200, r.text
+
+    deliver_all_disclosures(client, admin_cookies, agreement_id)
+
+    return agreement_id, offer_id, renter_cookies, admin_cookies, renter_user, host_user
+
+
+class TestApplySignatureOccupancyCreationRegression:
+    """Regression coverage for a post-merge bug: _apply_signature's
+    PENDING_MOVE_IN occupancy-creation logic had landed in the
+    PARTIALLY_EXECUTED (only one signature received) branch instead of the
+    true SIGNED (both signatures AND all initial obligations paid) branch --
+    meaning a room was committed/made unavailable after just one signature."""
+
+    def test_one_signature_reaches_partially_executed_and_creates_no_occupancy(self, client, db_session: Session):
+        agreement_id, offer_id, renter_cookies, _admin_cookies, _renter, _host = _prepare_sent_agreement_ready_to_sign(
+            client, db_session, "sig-one",
+        )
+
+        r = client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=renter_cookies)
+
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "PARTIALLY_EXECUTED"
+        assert db_session.scalar(select(Occupancy).where(Occupancy.offer_id == offer_id)) is None
+
+    def test_both_signatures_with_obligations_already_paid_reaches_signed_and_creates_exactly_one_occupancy(
+        self, client, db_session: Session,
+    ):
+        agreement_id, offer_id, renter_cookies, admin_cookies, _renter, _host = _prepare_sent_agreement_ready_to_sign(
+            client, db_session, "sig-both",
+        )
+        agreement = db_session.get(Agreement, agreement_id)
+        for obligation in agreement.obligations:
+            obligation.status = "PAID"
+        db_session.commit()
+
+        r = client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=renter_cookies)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "PARTIALLY_EXECUTED"
+        assert db_session.scalar(select(Occupancy).where(Occupancy.offer_id == offer_id)) is None
+
+        # NOTE: as of this dev merge, this call 500s rather than returning 200
+        # -- a pre-existing, unrelated defect: freeze_agreement_version (called
+        # right after this state transition, once agreement.status == "SIGNED")
+        # -> generate_agreement_pdf unconditionally imports
+        # app.services.agreement_form_rendering, which unconditionally imports
+        # the "pypdf" package at module load time; it is not installed and not
+        # declared in requirements.txt, so ANY agreement reaching true SIGNED
+        # status 500s in this environment regardless of form_mode (confirmed
+        # independently: test_renter_offer_agreement_flow.py's own
+        # SIGNED-via-payment test now fails the same way, untouched by this
+        # fix). That crash happens AFTER this function's own db.commit(), so
+        # the state transition and occupancy creation this test actually cares
+        # about are already durably persisted by the time the 500 is raised --
+        # verified below via direct DB state rather than the HTTP response.
+        client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
+
+        db_session.expire_all()
+        assert db_session.get(Agreement, agreement_id).status == "SIGNED"
+        occupancies = db_session.scalars(select(Occupancy).where(Occupancy.offer_id == offer_id)).all()
+        assert len(occupancies) == 1
+        assert occupancies[0].status == "PENDING_MOVE_IN"
+
+    def test_repeated_signature_after_signed_does_not_duplicate_occupancy(self, client, db_session: Session):
+        agreement_id, offer_id, renter_cookies, admin_cookies, _renter, _host = _prepare_sent_agreement_ready_to_sign(
+            client, db_session, "sig-retry",
+        )
+        agreement = db_session.get(Agreement, agreement_id)
+        for obligation in agreement.obligations:
+            obligation.status = "PAID"
+        db_session.commit()
+
+        r = client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=renter_cookies)
+        assert r.status_code == 200, r.text
+
+        # See test_both_signatures_...: this 500s on an unrelated, pre-existing
+        # missing-"pypdf" defect in freeze_agreement_version, AFTER the state
+        # transition and occupancy creation this test cares about are already
+        # committed -- asserted via DB state, not the HTTP response.
+        client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
+        db_session.expire_all()
+        assert db_session.get(Agreement, agreement_id).status == "SIGNED"
+        first_occupancy = db_session.scalar(select(Occupancy).where(Occupancy.offer_id == offer_id))
+        assert first_occupancy is not None
+
+        # Re-attest the provider's signature (e.g. an admin retry/webhook replay).
+        client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
+
+        db_session.expire_all()
+        occupancies = db_session.scalars(select(Occupancy).where(Occupancy.offer_id == offer_id)).all()
+        assert len(occupancies) == 1
+        assert occupancies[0].id == first_occupancy.id

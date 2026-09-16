@@ -970,6 +970,32 @@ def _all_initial_obligations_paid(agreement: Agreement) -> bool:
     return bool(agreement.obligations) and all(o.status in ("PAID", "WAIVED") for o in agreement.obligations)
 
 
+def _ensure_pending_move_in_occupancy(db: Session, agreement: Agreement) -> None:
+    """Occupancy is committed to this offer as soon as the lease is actually
+    executed (SIGNED) -- move-in itself happens later via confirm_move_in.
+    Reachable from both paths to SIGNED: _apply_signature's already-paid
+    shortcut (signature completed after obligations already cleared) and
+    confirm_agreement_payment (the normal sign-first-pay-after order, once
+    payment clears). Guarded against duplicate creation regardless of which
+    path fires, or fires more than once (a re-signed party; a retried
+    payment confirmation)."""
+    offer = agreement.offer
+    existing_occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
+    if existing_occupancy:
+        return
+    latest_terms = offer.terms[-1]
+    db.add(
+        Occupancy(
+            offer_id=offer.id,
+            listing_id=offer.listing_id,
+            room_id=offer.listing.room_id,
+            guest_id=offer.guest_id,
+            status="PENDING_MOVE_IN",
+            expected_end_date=_add_months(latest_terms.start_date, latest_terms.term_months),
+        )
+    )
+
+
 # ZR-ENG-CLR-004 AC-11: every method the spec's own 4.4 table names.
 # METHOD_REQUIRED_EVIDENCE lists exactly which evidence_metadata keys each
 # one requires -- structurally distinct evidence per assurance level, not
@@ -1145,6 +1171,11 @@ def _apply_signature(
             host_user = get_user_by_party_id(db, listing.party_id) if listing else None
             if host_user:
                 send_agreement_executed_email(host_user.email, host_user.full_name, listing.name)
+
+            # Not merely one signature received (see the PARTIALLY_EXECUTED
+            # branch below, which must never create one) -- both signatures
+            # AND all initial obligations paid.
+            _ensure_pending_move_in_occupancy(db, agreement)
         else:
             agreement.status = "PAYMENT_IN_PROGRESS"
             agreement.payment_session_expires_at = compute_checkout_deadline(now, agreement.offer.listing.market_release)
@@ -1153,25 +1184,9 @@ def _apply_signature(
         # a distinct, visible state from "not yet signed at all", never
         # itself treated as EXECUTED. AMENDMENT_PENDING behaves exactly like
         # SENT here (see models/leasing.py:AGREEMENT_STATUSES' own note).
+        # Deliberately does NOT create an Occupancy -- only one party has
+        # signed so far, so the agreement is not yet executed.
         agreement.status = "PARTIALLY_EXECUTED"
-
-        # Occupancy is committed to this offer as soon as the lease is executed --
-        # move-in itself happens later via confirm_move_in. Guarded against
-        # duplicate creation since a party can be re-signed for (see sign_agreement).
-        offer = agreement.offer
-        existing_occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
-        if not existing_occupancy:
-            latest_terms = offer.terms[-1]
-            db.add(
-                Occupancy(
-                    offer_id=offer.id,
-                    listing_id=offer.listing_id,
-                    room_id=offer.listing.room_id,
-                    guest_id=offer.guest_id,
-                    status="PENDING_MOVE_IN",
-                    expected_end_date=_add_months(latest_terms.start_date, latest_terms.term_months),
-                )
-            )
 
     db.commit()
     db.refresh(agreement)
@@ -1209,6 +1224,11 @@ def confirm_agreement_payment(db: Session, agreement: Agreement, correlation_id:
     before_state = agreement.status
     agreement.status = "SIGNED"
     agreement.payment_session_expires_at = None
+    # The normal sign-first-pay-after order reaches SIGNED here rather than
+    # through _apply_signature's already-paid shortcut -- without this, the
+    # dominant real-world flow never committed an occupancy to the offer at
+    # all (see _ensure_pending_move_in_occupancy's own docstring).
+    _ensure_pending_move_in_occupancy(db, agreement)
     db.commit()
     db.refresh(agreement)
     freeze_agreement_version(db, agreement)
@@ -1379,7 +1399,6 @@ def generate_agreement_pdf(db: Session, agreement: Agreement) -> bytes:
     services/agreement_form_rendering.py for the actual pypdf/reportlab
     work each of B/C/D does."""
     from app.models.agreement_form_template import AgreementFormTemplate
-    from app.services.agreement_form_rendering import check_content_drift, render_mode_b_overlay, render_mode_d_document
 
     version = agreement.versions[-1]
     snapshot = version.snapshot
@@ -1387,6 +1406,11 @@ def generate_agreement_pdf(db: Session, agreement: Agreement) -> bytes:
 
     if form_mode == "A":
         return _generate_native_agreement_pdf(agreement)
+
+    # Deferred until here -- native form_mode "A" (the common case) never
+    # needs pypdf-based rendering at all, so it must not pay for (or fail on)
+    # this import.
+    from app.services.agreement_form_rendering import check_content_drift, render_mode_b_overlay, render_mode_d_document
 
     template_id = snapshot.get("form_template_id")
     template = db.get(AgreementFormTemplate, template_id) if template_id else None
