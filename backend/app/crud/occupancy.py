@@ -278,6 +278,7 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
         return None
 
     amount = schedule.amount if schedule else rent_obligations[-1].amount
+    currency = schedule.currency if schedule else rent_obligations[-1].currency
     next_due = _next_due_date(
         last_due, schedule.cadence if schedule else "MONTHLY", schedule.custom_interval_days if schedule else None,
     )
@@ -293,6 +294,7 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
         obligation_type="RENT",
         money_plane=OBLIGATION_TYPE_TO_PLANE["RENT"],
         amount=amount,
+        currency=currency,
         due_date=next_due,
         occupancy_id=occupancy.id,
         schedule_id=schedule.id if schedule else None,

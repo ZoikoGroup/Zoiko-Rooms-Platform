@@ -490,7 +490,7 @@ def request_financial_change(
     if open_request is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "A change request is already pending for this agreement")
 
-    policy = resolve_market_policy(db)
+    policy = resolve_market_policy(db, offer.listing.room.property.jurisdiction_code)
     last_effective = db.scalar(
         select(BookingChangeRequest)
         .where(

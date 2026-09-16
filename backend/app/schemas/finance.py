@@ -60,6 +60,13 @@ class SimulatedPaymentCreate(CamelModel):
     payer_name: str | None = None
     payer_email: str | None = None
     payer_phone: str | None = None
+    # ZR-ENG-CLR-005 Section 12.1: "EXTERNAL" (the default) is a self-attested
+    # off-platform record -- an admin recording a real cash/cheque payment
+    # explicitly declares that here. Any other class is only ever set for
+    # real by crud/payment_provider.py:dispatch_payment_to_provider, never
+    # trusted from this create call alone -- see method_class's own model
+    # docstring for why the confirm-side gate is the actual enforcement point.
+    method_class: str = "EXTERNAL"
 
 
 class PaymentConfirm(CamelModel):
@@ -84,6 +91,7 @@ class SimulatedPaymentRead(CamelModel):
     currency: str
     idempotency_key: str
     status: str
+    method_class: str
     created_at: datetime
     confirmed_at: datetime | None
     allocations: list[PaymentAllocationRead] = []
@@ -200,6 +208,10 @@ class PayoutRecordRead(CamelModel):
     # withheld to settle a prior HostRecovery -- 0.0 unless run_payout
     # actually applied an offset. Actual cash disbursed = amount - this.
     recovery_offset_amount: float
+    # Set only when this payout actually moved money via a real Stripe
+    # Transfer (crud/finance.py:run_payout) -- null otherwise (HELD, no
+    # Stripe integration configured, or the party has no Connected Account).
+    stripe_transfer_id: str | None
     created_at: datetime
     paid_at: datetime | None
 
@@ -209,7 +221,10 @@ class PayoutBeneficiarySubmit(CamelModel):
     account_holder_name: str
     bank_name: str
     account_number: str
-    ifsc_code: str
+    # Generic secondary routing identifier -- IFSC code (IN), sort code
+    # (England), etc; validated against the format resolved for the party's
+    # jurisdiction, see app/services/bank_identifiers.py.
+    bank_identifier_code: str
 
 
 class PayoutBeneficiaryConfirm(CamelModel):
@@ -222,7 +237,7 @@ class PayoutBeneficiaryRead(CamelModel):
     account_holder_name: str
     bank_name: str
     account_number_last4: str
-    ifsc_code: str
+    bank_identifier_code: str
     status: str
     verified_at: datetime | None
     created_at: datetime
@@ -290,6 +305,18 @@ class FinancialHoldResolve(CamelModel):
     notes: str = ""
 
 
+class FinancialHoldCreate(CamelModel):
+    """ZR-ENG-CLR-005 Section 6.4's 'place ... authorized operational hold'
+    admin action -- deliberately scoped to freezing one provider's payouts
+    (source_type is always forced to "party" server-side, see
+    crud/finance.py:create_financial_hold) rather than an arbitrary
+    source_type/source_id an admin could point at anything."""
+
+    party_id: int
+    severity: str = "HIGH"
+    description: str
+
+
 class FinancialHoldRead(CamelModel):
     id: int
     source_type: str
@@ -314,6 +341,7 @@ class HostRecoveryRead(CamelModel):
     currency: str
     status: str
     recovery_method: str
+    psp_reversal_id: str | None
     notes: str
     created_at: datetime
     resolved_at: datetime | None
@@ -339,3 +367,97 @@ class ReconciliationRunRead(CamelModel):
     totals: dict
     mismatches: list
     status: str
+
+
+class PaymentProviderStatusRead(CamelModel):
+    healthy: bool
+    updated_at: datetime
+
+
+class SetPaymentProviderHealthRequest(CamelModel):
+    healthy: bool
+
+
+class PaymentDispatchRequest(CamelModel):
+    """The allocations Zoiko is declaring this attempt is for, fixed at
+    dispatch time -- see models/finance.py:ProcessorTransaction's own
+    docstring for why a later provider callback can't decide this instead."""
+
+    allocations: list[PaymentAllocationInput]
+
+
+class ProcessorTransactionRead(CamelModel):
+    id: int
+    payment_id: int
+    provider_transaction_id: str
+    status: str
+    declared_allocations: dict
+    dispatch_deadline: datetime | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class PaymentProviderCallbackRequest(CamelModel):
+    provider_event_id: str
+    provider_transaction_id: str
+    event_type: str
+
+
+class HostStripeAccountCreate(CamelModel):
+    party_id: int
+    country: str = "GB"
+    email: str
+
+
+class HostStripeAccountRead(CamelModel):
+    id: int
+    party_id: int
+    stripe_account_id: str
+    status: str
+    details_submitted: bool
+    charges_enabled: bool
+    payouts_enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class HostStripeOnboardingLinkRead(CamelModel):
+    url: str
+
+
+class AutopayMandateCreate(CamelModel):
+    """ZR-ENG-CLR-005 Section 6.1-E: the payer's own explicit consent to set
+    up autopay for their occupancy -- always self-consent (the caller's own
+    guest record), see crud/finance.py:create_autopay_mandate for why there
+    is no separate payer_guest_id override here."""
+
+    occupancy_id: int
+
+
+class AutopayMandateRead(CamelModel):
+    id: int
+    occupancy_id: int
+    payer_guest_id: str
+    provider_ref: str
+    status: str
+    consent_snapshot: dict
+    created_at: datetime
+    revoked_at: datetime | None
+
+
+class PaymentTimelineEntryRead(CamelModel):
+    """ZR-ENG-CLR-005 Section 6.4's admin console 'Timeline: Immutable
+    normalized events + raw webhook references + actor/system timestamps'
+    panel, one row per underlying record -- see
+    crud/finance.py:get_payment_timeline for which three tables this merges."""
+
+    timestamp: datetime
+    source: str  # "DOMAIN_EVENT" | "AUDIT_EVENT" | "PROVIDER_WEBHOOK"
+    event_type: str
+    actor: str
+    detail: dict
+
+
+class PaymentTimelineRead(CamelModel):
+    payment_id: int
+    entries: list[PaymentTimelineEntryRead]

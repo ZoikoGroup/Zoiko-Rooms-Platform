@@ -37,7 +37,13 @@ def _make_room_owned_by(db: Session, party: Party) -> Room:
 
 
 class TestSubmitAuthorityRecordCrud:
-    def test_submit_creates_a_pending_record_tagged_with_the_submitters_own_party(self, db_session: Session):
+    def test_submit_creates_a_pending_record_tagged_with_the_rooms_owning_party(self, db_session: Session):
+        """party_id must be the room's actual owning party, not the submitter's
+        own -- a super_admin can submit this on a provider's behalf (same as the
+        route's own assert_provider_access(db, admin, party_id_for_room(room))
+        check already targets), so tagging it with get_or_create_default_party(admin)
+        instead would silently misattribute the authority declaration whenever the
+        submitter isn't the room's owner."""
         admin = _make_admin(db_session, email="auth-crud-submit@test.com", role="admin")
         owner_party = Party(party_type="provider", status="active", jurisdiction="IN")
         db_session.add(owner_party)
@@ -49,7 +55,8 @@ class TestSubmitAuthorityRecordCrud:
         )
         assert record.status == "pending"
         assert record.room_id == room.id
-        assert record.party_id == get_or_create_default_party(db_session, admin).id
+        assert record.party_id == owner_party.id
+        assert record.party_id != get_or_create_default_party(db_session, admin).id
 
 
 class TestVerifyAndRejectAuthorityRecord:

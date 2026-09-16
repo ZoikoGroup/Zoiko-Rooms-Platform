@@ -115,13 +115,21 @@ def propose_settlement(
     claim_ids: list[int],
     terms_text: str,
     amount: float | None = None,
-    currency: str = "INR",
+    currency: str | None = None,
     expires_at: datetime | None = None,
     acknowledges_no_nonwaivable_waiver: bool,
     supersedes: DisputeSettlement | None = None,
 ) -> DisputeSettlement:
     if (guest is None) == (party_id is None):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "A settlement must be proposed by exactly one of a renter or a host")
+
+    # ZR-ENG-CLR-005 12.3 'Contractual obligation is denominated in the
+    # agreement currency': resolve from the case's occupancy/listing when one
+    # is linked (the common shape); "INR" is a last-resort fallback only for
+    # the claim families that never attach an occupancy at all (see
+    # DisputeResolutionCase's own docstring on occupancy_id/property_id).
+    if currency is None:
+        currency = case.occupancy.listing.currency if case.occupancy else "INR"
     if not acknowledges_no_nonwaivable_waiver:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,

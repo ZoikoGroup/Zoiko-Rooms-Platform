@@ -231,7 +231,7 @@ def calculate_refund_entitlement(db: Session, case: TerminationCase, admin: Admi
     entitlement = RefundEntitlement(
         termination_case_id=case.id,
         version=(previous_max_version or 0) + 1,
-        currency="INR",
+        currency=case.occupancy.listing.currency,
         gross_refundable=gross_refundable,
         net_refund=net_refund,
         calculated_by_admin_id=admin.id,

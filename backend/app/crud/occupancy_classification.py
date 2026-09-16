@@ -22,6 +22,10 @@ def set_classification(db: Session, room: Room, data: OccupancyClassificationSet
     record.confidence = data.confidence
     record.evidence_ref = data.evidence_ref
     record.review_state = data.review_state
+    # Same source as crud/listing.py:_resolve_market_release_id_for_room -- otherwise
+    # this stays stuck on the column default ("IN") regardless of which jurisdiction
+    # the room is actually in.
+    record.jurisdiction = room.property.owner_party.jurisdiction
     record.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(record)

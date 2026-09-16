@@ -268,6 +268,40 @@ class TestLodgerOrLicensee:
         assert body["newAgreementId"] is not None, "lodger still gets a real agreement, unlike ADDITIONAL_OCCUPANT"
 
 
+class TestPayeeModelResolution:
+    """ZR-ENG-CLR-003's own AC-20: 'Payment recipient is resolved by payee
+    model; code does not assume original renter or Host universally.' A real
+    bug found via docs-vs-code review: the co-tenancy/sublease approval path
+    was resolving policy.sublet_assignment_payee_model (the ASSIGNMENT
+    field) instead of the distinct sublet_sublease_payee_model market_policy
+    field that exists specifically for this arrangement family -- leaving
+    sublet_sublease_payee_model permanently unread anywhere in the codebase."""
+
+    def test_assignment_uses_the_assignment_payee_model(self, client, db_session: Session):
+        tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="payeeassign")
+        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL")
+        super_admin = _make_admin(db_session, email="payeeassign-admin@test.com", role="super_admin")
+
+        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", cookies=auth_admin_cookie(super_admin))
+        assert r.status_code == 200, r.text
+        assert r.json()["payeeModel"] == "HOST_OR_LANDLORD_PAYEE"  # MarketPolicyPack's sublet_assignment_payee_model default
+
+    def test_co_tenancy_uses_the_sublease_payee_model_not_the_assignment_one(self, client, db_session: Session):
+        tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="payeesublease")
+        occupancy = db_session.get(Occupancy, occupancy_id)
+        occupancy.room.max_occupants = 2
+        db_session.commit()
+
+        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT")
+        super_admin = _make_admin(db_session, email="payeesublease-admin@test.com", role="super_admin")
+
+        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", cookies=auth_admin_cookie(super_admin))
+        assert r.status_code == 200, r.text
+        # Before the fix this incorrectly came back HOST_OR_LANDLORD_PAYEE --
+        # the assignment field's default, not the sublease field's own.
+        assert r.json()["payeeModel"] == "ORIGINAL_RENTER_PAYEE"  # MarketPolicyPack's sublet_sublease_payee_model default
+
+
 class TestAdditionalOccupant:
     def test_approving_additional_occupant_creates_no_agreement_and_no_new_obligation(self, client, db_session: Session):
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="addlocc")

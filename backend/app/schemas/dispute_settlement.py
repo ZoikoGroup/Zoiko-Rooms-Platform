@@ -7,7 +7,9 @@ class DisputeSettlementCreate(CamelModel):
     claim_ids: list[int]
     terms_text: str
     amount: float | None = None
-    currency: str = "INR"
+    # None resolves to the case's occupancy/listing currency -- see
+    # crud/dispute_settlement.py:propose_settlement.
+    currency: str | None = None
     expires_at: datetime | None = None
     acknowledges_no_nonwaivable_waiver: bool = False
 

@@ -10,12 +10,16 @@ from app.core.service_fee_invoice_documents import resolve_service_fee_invoice_d
 from app.core.receipt_documents import resolve_receipt_document_path
 from app.core.rent_invoice_documents import resolve_rent_invoice_document_path
 from app.crud import finance as crud
+from app.crud import host_stripe_account as host_stripe_account_crud
+from app.crud import payment_provider as payment_provider_crud
 from app.crud import payout_beneficiary as payout_beneficiary_crud
 from app.crud.finance import annotate_payment_context
+from app.services import stripe_client
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
+from app.models.finance import PayoutRecord
 from app.models.party import Party
 from app.schemas.finance import (
     DepositClaimCreate,
@@ -26,13 +30,23 @@ from app.schemas.finance import (
     DisputeCreate,
     DisputeRead,
     DisputeResolve,
+    FinancialHoldCreate,
     FinancialHoldRead,
     FinancialHoldResolve,
     HostRecoveryRead,
     HostRecoveryRecordProgress,
     HostRecoveryWriteOff,
+    HostStripeAccountCreate,
+    HostStripeAccountRead,
+    HostStripeOnboardingLinkRead,
     ObligationRead,
     PaymentConfirm,
+    PaymentDispatchRequest,
+    PaymentProviderCallbackRequest,
+    PaymentProviderStatusRead,
+    PaymentTimelineRead,
+    ProcessorTransactionRead,
+    SetPaymentProviderHealthRequest,
     PayoutBeneficiaryConfirm,
     PayoutBeneficiaryRead,
     PayoutBeneficiarySubmit,
@@ -48,6 +62,12 @@ from app.schemas.finance import (
 
 router = APIRouter(prefix="/api/finance", tags=["finance"], dependencies=[Depends(get_current_admin)])
 
+# No auth dependency -- Stripe's own servers call this directly, with no
+# admin session to present. The signature check inside the handler is the
+# real authentication here (ZR-ENG-CLR-005 AC-23 'authenticated, replay-
+# protected'), not a cookie.
+webhook_router = APIRouter(prefix="/api/finance", tags=["finance-webhooks"])
+
 
 @router.get("/obligations", response_model=list[ObligationRead])
 def get_obligations(
@@ -62,6 +82,15 @@ def get_obligations(
 @router.get("/payments", response_model=list[SimulatedPaymentRead])
 def get_payments(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     return crud.list_payments(db, admin)
+
+
+@router.get("/payments/{payment_id}/timeline", response_model=PaymentTimelineRead)
+def get_payment_timeline(
+    payment_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 6.4's admin console 'Timeline' panel."""
+    entries = crud.get_payment_timeline(db, payment_id, admin)
+    return {"payment_id": payment_id, "entries": entries}
 
 
 @router.post("/payments", response_model=SimulatedPaymentRead, status_code=status.HTTP_201_CREATED)
@@ -94,6 +123,72 @@ def post_confirm_payment(
         )
         db.commit()
     return annotate_payment_context(updated)
+
+
+@router.post("/payments/{payment_id}/dispatch", response_model=ProcessorTransactionRead)
+def post_dispatch_payment(
+    payment_id: int, payload: PaymentDispatchRequest, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    payment = crud.get_payment_or_404(db, payment_id)
+    return payment_provider_crud.dispatch_payment_to_provider(db, payment, admin, payload.allocations)
+
+
+@router.post("/payments/provider-callback/simulate", response_model=ProcessorTransactionRead)
+def post_simulate_payment_provider_callback(
+    payload: PaymentProviderCallbackRequest, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 9.1/17.1: stands in for the provider's own
+    webhook call -- see models/finance.py:PaymentProviderStatus's module
+    docstring for why this is an authenticated admin action rather than a
+    public unauthenticated route in this codebase. Idempotent by
+    provider_event_id."""
+    return payment_provider_crud.ingest_provider_callback(
+        db, admin, provider_event_id=payload.provider_event_id,
+        provider_transaction_id=payload.provider_transaction_id, event_type=payload.event_type,
+    )
+
+
+@router.get(
+    "/payment-provider/status", response_model=PaymentProviderStatusRead, dependencies=[Depends(require_super_admin)],
+)
+def get_payment_provider_status(db: Session = Depends(get_db)):
+    return payment_provider_crud.get_or_create_provider_status(db)
+
+
+@router.post(
+    "/payment-provider/health", response_model=PaymentProviderStatusRead, dependencies=[Depends(require_super_admin)],
+)
+def post_set_payment_provider_health(
+    payload: SetPaymentProviderHealthRequest, admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    return payment_provider_crud.set_provider_health(db, admin, payload.healthy)
+
+
+@router.post("/payments/reconcile-stalled", dependencies=[Depends(require_super_admin)])
+def post_reconcile_stalled_payments(admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db)):
+    stalled = payment_provider_crud.reconcile_stalled_payments(db)
+    return {"failedCount": len(stalled), "processorTransactionIds": [txn.id for txn in stalled]}
+
+
+@webhook_router.post("/payments/stripe/webhook")
+async def post_stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    """The real endpoint Stripe's own servers call. Verifies the
+    Stripe-Signature header against settings.stripe_webhook_secret before
+    trusting anything in the body -- an unverified payload is never passed
+    to ingest_provider_callback. Returns 200 for any event type this
+    integration doesn't act on (see STRIPE_EVENT_TYPE_MAP) so Stripe doesn't
+    keep retrying an event we were never going to react to."""
+    import stripe as stripe_sdk
+
+    payload = await request.body()
+    signature_header = request.headers.get("stripe-signature", "")
+    try:
+        event = stripe_client.construct_webhook_event(payload=payload, signature_header=signature_header)
+    except stripe_sdk.error.SignatureVerificationError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid Stripe signature")
+
+    payment_provider_crud.ingest_stripe_webhook_event(db, event)
+    return {"received": True}
 
 
 @router.get("/payments/{payment_id}/receipt")
@@ -135,6 +230,23 @@ def get_rent_invoice(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{invoice.invoice_number}.pdf"'},
     )
+
+
+@router.post("/obligations/{obligation_id}/autopay-charge", response_model=SimulatedPaymentRead)
+def post_autopay_charge(
+    obligation_id: int,
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 10.5/QA-27's actual auto-pull -- see
+    crud/finance.py:process_autopay_charge's own docstring for why this is
+    admin-triggered rather than a real background job in this build."""
+    obligation = crud.get_obligation_or_404(db, obligation_id)
+    payment = crud.process_autopay_charge(db, obligation, admin)
+    log_audit_event(db, admin, "obligation.autopay_charge", "obligation", str(obligation_id), get_correlation_id(request))
+    db.commit()
+    return crud.annotate_payment_context(payment)
 
 
 @router.get("/deposits", response_model=list[DepositRecordRead])
@@ -262,6 +374,30 @@ def post_run_payout(
     return payout
 
 
+@router.post("/payouts/{payout_id}/retry", response_model=PayoutRecordRead)
+def post_retry_payout(
+    payout_id: int,
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 6.4/16.1 'Retry permitted payout' / QA-23."""
+    payout = db.get(PayoutRecord, payout_id)
+    if not payout:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payout not found")
+    payout = crud.retry_payout(db, payout, admin)
+    log_audit_event(db, admin, "payout.retry", "payout_record", str(payout.id), get_correlation_id(request), reason=payout.status)
+    emit_event(
+        db,
+        "payout.paid" if payout.status == "PAID" else "payout.held",
+        "payout_record",
+        str(payout.id),
+        {"amount": float(payout.amount), "currency": payout.currency, "moneyPlane": "REVENUE", "partyId": payout.party_id},
+    )
+    db.commit()
+    return payout
+
+
 @router.get("/payouts", response_model=list[PayoutRecordRead])
 def get_payouts(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     return crud.list_payouts_for(db, admin)
@@ -279,7 +415,7 @@ def post_payout_beneficiary(
     beneficiary, _raw_code = payout_beneficiary_crud.submit_payout_beneficiary(db, party, admin, payload)
     log_audit_event(
         db, admin, "payout_beneficiary.submitted", "payout_beneficiary", str(beneficiary.id), get_correlation_id(request),
-        after_state=f"last4={beneficiary.account_number_last4}:status={beneficiary.status}",
+        reason=f"last4={beneficiary.account_number_last4}", after_state=beneficiary.status,
     )
     db.commit()
     return beneficiary
@@ -317,6 +453,49 @@ def post_confirm_payout_beneficiary(
 @router.get("/payout-beneficiaries", response_model=list[PayoutBeneficiaryRead])
 def get_payout_beneficiaries(party_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     return payout_beneficiary_crud.list_payout_beneficiaries_for(db, admin, party_id)
+
+
+@router.post("/host-stripe-accounts", response_model=HostStripeAccountRead, status_code=status.HTTP_201_CREATED)
+def post_create_host_stripe_account(
+    payload: HostStripeAccountCreate, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    party = db.get(Party, payload.party_id)
+    if not party:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Party not found")
+    return host_stripe_account_crud.create_connected_account(db, party, admin, payload.country, payload.email)
+
+
+@router.get("/host-stripe-accounts/{account_id}", response_model=HostStripeAccountRead)
+def get_host_stripe_account(account_id: int, db: Session = Depends(get_db)):
+    return host_stripe_account_crud.get_host_stripe_account_or_404(db, account_id)
+
+
+@router.post("/host-stripe-accounts/{account_id}/onboarding-link", response_model=HostStripeOnboardingLinkRead)
+def post_host_stripe_onboarding_link(
+    account_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    account = host_stripe_account_crud.get_host_stripe_account_or_404(db, account_id)
+    url = host_stripe_account_crud.create_onboarding_link(db, account, admin)
+    return HostStripeOnboardingLinkRead(url=url)
+
+
+@router.post("/host-stripe-accounts/{account_id}/refresh", response_model=HostStripeAccountRead)
+def post_refresh_host_stripe_account(
+    account_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    account = host_stripe_account_crud.get_host_stripe_account_or_404(db, account_id)
+    return host_stripe_account_crud.refresh_account_status(db, account, admin)
+
+
+@router.post(
+    "/host-stripe-accounts/{account_id}/simulate-onboarding-complete", response_model=HostStripeAccountRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_simulate_host_stripe_onboarding_complete(
+    account_id: int, admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    account = host_stripe_account_crud.get_host_stripe_account_or_404(db, account_id)
+    return host_stripe_account_crud.simulate_onboarding_complete(db, account, admin)
 
 
 @router.get("/payouts/{payout_id}/statement")
@@ -456,6 +635,27 @@ def get_financial_holds(status: str | None = None, db: Session = Depends(get_db)
 
 
 @router.post(
+    "/financial-holds", response_model=FinancialHoldRead, status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_create_financial_hold(
+    payload: FinancialHoldCreate,
+    request: Request,
+    admin: AdminUser = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 6.4's admin console 'place ... authorized
+    operational hold' action -- freezes this party's payouts (run_payout's
+    own gate check) until a Super Admin resolves it."""
+    hold = crud.create_financial_hold(db, admin, payload)
+    log_audit_event(
+        db, admin, "financial_hold.create", "financial_hold", str(hold.id), get_correlation_id(request),
+        reason=payload.description,
+    )
+    return hold
+
+
+@router.post(
     "/financial-holds/{hold_id}/resolve", response_model=FinancialHoldRead, dependencies=[Depends(require_super_admin)],
 )
 def post_resolve_financial_hold(
@@ -494,6 +694,27 @@ def post_record_host_recovery_progress(
     log_audit_event(
         db, admin, "host_recovery.record_progress", "host_recovery", str(recovery_id), get_correlation_id(request),
         reason=payload.method,
+    )
+    db.commit()
+    return updated
+
+
+@router.post("/host-recoveries/{recovery_id}/attempt-psp-recovery", response_model=HostRecoveryRead)
+def post_attempt_psp_recovery(
+    recovery_id: int,
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-006 Section 15 waterfall tier 3's manual retry -- decide_refund
+    already tries this automatically when a recovery first opens; this covers
+    the case where the host's Stripe Connect onboarding or next payout
+    completed only after that."""
+    recovery = crud.get_host_recovery_or_404(db, recovery_id)
+    updated = crud.attempt_psp_recovery(db, recovery, admin)
+    log_audit_event(
+        db, admin, "host_recovery.attempt_psp_recovery", "host_recovery", str(recovery_id), get_correlation_id(request),
+        reason=updated.recovery_method,
     )
     db.commit()
     return updated

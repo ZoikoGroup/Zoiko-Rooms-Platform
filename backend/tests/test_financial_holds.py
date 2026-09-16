@@ -3,7 +3,13 @@ queryable, resolvable FinancialHold row for each failed check (not just a
 plain string in ReconciliationRun.mismatches), and the new resolve endpoint
 lets a super admin close one out. Reuses the exact "untracked allocation"
 scenario from test_reconciliation_ledger.py, which is already proven to
-trigger the LEDGER_ALLOCATION_MISMATCH check."""
+trigger the LEDGER_ALLOCATION_MISMATCH check.
+
+TestManualOperationalHold covers Section 6.4's admin console action this
+build never had until now: "place ... authorized operational hold" -- every
+FinancialHold before this was system-generated (reconciliation, negative
+balance); create_financial_hold is the create half, and it actually gates
+run_payout the same way the beneficiary/authority/habitability checks do."""
 
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.models.finance import FinancialHold, Obligation
 from app.models.guest import Guest
 from tests.conftest import _make_admin, auth_admin_cookie
+from tests.test_ledger import _make_provider_rent_obligation
 
 
 def _trigger_a_ledger_allocation_mismatch(client, db_session: Session, admin_cookies: dict) -> None:
@@ -114,3 +121,73 @@ class TestFinancialHoldListingAndResolution:
 
         r = client.get("/api/finance/financial-holds?status=OPEN", cookies=admin_cookies)
         assert len(r.json()) == 0
+
+
+class TestManualOperationalHold:
+    def test_super_admin_can_place_a_hold_that_blocks_payout(self, client, db_session: Session):
+        obligation, admin, guest, party_id = _make_provider_rent_obligation(db_session, suffix="manualhold1", amount=1000.0)
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/finance/payments",
+            json={"guestId": guest.id, "amount": 1000.0, "currency": "INR", "idempotencyKey": "manualhold1-pay"},
+            cookies=admin_cookies,
+        )
+        payment_id = r.json()["id"]
+        client.post(
+            f"/api/finance/payments/{payment_id}/confirm",
+            json={"allocations": [{"obligationId": obligation.id, "amount": 1000.0}]},
+            cookies=admin_cookies,
+        )
+
+        r = client.post(
+            "/api/finance/financial-holds",
+            json={"partyId": party_id, "description": "Fraud review in progress"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["status"] == "OPEN"
+        assert body["reasonCode"] == "MANUAL_OPERATIONAL_HOLD"
+        assert body["sourceType"] == "party"
+        assert body["sourceId"] == str(party_id)
+        hold_id = body["id"]
+
+        r = client.post(
+            "/api/finance/payouts/run", json={"partyId": party_id, "periodKey": "2026-09"}, cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        payout = r.json()
+        assert payout["status"] == "HELD"
+        assert "operational hold" in payout["holdReason"].lower()
+        assert "Fraud review in progress" in payout["holdReason"]
+
+        # Resolving the hold, then retrying, lets the payout through.
+        client.post(f"/api/finance/financial-holds/{hold_id}/resolve", json={"notes": "Cleared"}, cookies=admin_cookies)
+        r = client.post(f"/api/finance/payouts/{payout['id']}/retry", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "PAID"
+
+    def test_a_second_open_hold_for_the_same_party_is_rejected(self, client, db_session: Session):
+        obligation, admin, guest, party_id = _make_provider_rent_obligation(db_session, suffix="manualhold2", amount=500.0)
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/finance/financial-holds", json={"partyId": party_id, "description": "First hold"}, cookies=admin_cookies,
+        )
+        assert r.status_code == 201, r.text
+
+        r = client.post(
+            "/api/finance/financial-holds", json={"partyId": party_id, "description": "Second hold"}, cookies=admin_cookies,
+        )
+        assert r.status_code == 409, r.text
+
+    def test_a_plain_admin_cannot_place_a_hold(self, client, db_session: Session):
+        _obligation, _admin, _guest, party_id = _make_provider_rent_obligation(db_session, suffix="manualhold3", amount=500.0)
+        plain_admin = _make_admin(db_session, email="manualhold3-plain@test.com", role="admin")
+
+        r = client.post(
+            "/api/finance/financial-holds", json={"partyId": party_id, "description": "trying anyway"},
+            cookies=auth_admin_cookie(plain_admin),
+        )
+        assert r.status_code == 403, r.text

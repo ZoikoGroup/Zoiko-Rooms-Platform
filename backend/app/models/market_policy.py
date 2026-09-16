@@ -17,17 +17,21 @@ CONSENT_STANDARDS = ("HOST_ABSOLUTE_DISCRETION", "REASONABLE_REFUSAL_ONLY", "NOT
 PAYEE_MODELS = ("ORIGINAL_RENTER_PAYEE", "HOST_OR_LANDLORD_PAYEE", "AUTHORIZED_AGENT_PAYEE", "SPLIT_PAYEE", "EXTERNAL_PAYEE_RECORDED")
 
 # ZR-ENG-CLR-005 Section 9.1/AC-20/AC-35: the named funds-flow profiles the
-# spec defines. Only DIRECT_SETTLEMENT is actually implementable end-to-end
-# in this build -- PSP_DEFERRED_PAYOUT/TRUST_ESCROW_CUSTODY need a real PSP
-# or trust partner this codebase doesn't have, and ZOIKO_REGULATED_CUSTODY is
-# "OFF by default; requires explicit licensing/perimeter approval" per spec.
-# A market pack resolving to any profile outside SUPPORTED_FUNDS_FLOW_PROFILES
-# fails closed at payout time (crud/finance.py:run_payout) rather than
-# silently defaulting to direct settlement or Zoiko custody.
+# spec defines. DIRECT_SETTLEMENT and PSP_DEFERRED_PAYOUT are the two this
+# build can actually execute end-to-end -- the former via the legacy
+# PayoutBeneficiary/bank-details path, the latter via real Stripe Connect
+# (crud/host_stripe_account.py + crud/finance.py:run_payout's deferred-until-
+# move-in-confirmed gate). TRUST_ESCROW_CUSTODY needs a real trust partner
+# this codebase doesn't have, and ZOIKO_REGULATED_CUSTODY is "OFF by default;
+# requires explicit licensing/perimeter approval" per spec -- neither is
+# something app code may fake into existence. A market pack resolving to any
+# profile outside SUPPORTED_FUNDS_FLOW_PROFILES fails closed at payout time
+# (crud/finance.py:run_payout) rather than silently defaulting to direct
+# settlement or Zoiko custody.
 FUNDS_FLOW_PROFILES = (
     "DIRECT_SETTLEMENT", "PSP_DEFERRED_PAYOUT", "TRUST_ESCROW_CUSTODY", "ZOIKO_REGULATED_CUSTODY", "EXTERNAL_OFF_PLATFORM",
 )
-SUPPORTED_FUNDS_FLOW_PROFILES = ("DIRECT_SETTLEMENT",)
+SUPPORTED_FUNDS_FLOW_PROFILES = ("DIRECT_SETTLEMENT", "PSP_DEFERRED_PAYOUT")
 
 # ZR-ENG-CLR-006 Section 11.1's full liability-model taxonomy, modeled
 # completely (same "never trim the taxonomy at the data layer" discipline as
