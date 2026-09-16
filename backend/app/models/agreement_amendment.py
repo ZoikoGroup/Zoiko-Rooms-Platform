@@ -51,6 +51,18 @@ class AgreementAmendment(Base):
     # -- only the keys actually being changed; everything else in the
     # resulting version's snapshot is copied unchanged from source_version.
     proposed_terms: Mapped[dict] = mapped_column(JSON, default=dict)
+    # ZR-ENG-CLR-012 Section 15: an ADDENDUM amendment type proposing a new
+    # guarantor -- {"legalName": .., "contactEmail": ..}. Deliberately
+    # separate from proposed_terms (a guarantor is a party-roster change,
+    # not a commercial-snapshot field) and never auto-adds "guarantor" to
+    # required_signers: approve_amendment creates the AgreementParty row,
+    # but their actual consent is recorded independently via
+    # crud/agreement_party.py:record_guarantor_consent (wet-ink evidence,
+    # since a guarantor has no login to self-serve-sign with) -- see that
+    # module's docstring for why this deliberately does not touch
+    # Agreement.signed_by_provider_at/signed_by_renter_at or
+    # _apply_signature's hardcoded two-party logic.
+    proposed_guarantor: Mapped[dict] = mapped_column(JSON, default=dict)
     requested_by_admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

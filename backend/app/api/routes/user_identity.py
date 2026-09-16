@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.correlation import get_correlation_id
 from app.core.identity_uploads import resolve_identity_document_path, save_identity_document
+from app.crud import evidence_vault as evidence_vault_crud
 from app.crud import identity_verification as crud
 from app.crud.audit import log_audit_event
 from app.db.session import get_db
@@ -52,7 +53,7 @@ async def submit_identity_verification(
     """User submits their identity verification with an uploaded document. This is
     a multipart request (not JSON) because it always carries a real file -- see
     app/core/identity_uploads.py for the content validation and storage."""
-    stored_filename, original_filename, content_type, file_size = await save_identity_document(file)
+    stored_filename, original_filename, content_type, file_size, sha256_hash = await save_identity_document(file)
 
     record = crud.submit_identity_verification_for_user(
         db,
@@ -64,6 +65,11 @@ async def submit_identity_verification(
         original_filename=original_filename,
         content_type=content_type,
         file_size=file_size,
+    )
+    evidence_vault_crud.register_evidence_artifact(
+        db, related_entity_type="identity_verification", related_entity_id=str(record.id),
+        stored_filename=stored_filename, sha256_hash=sha256_hash, original_filename=original_filename,
+        content_type=content_type, file_size=file_size, uploaded_by_user_id=user.id,
     )
     log_audit_event(
         db, None, "user_identity_verification.submit", "identity_verification", str(record.id),

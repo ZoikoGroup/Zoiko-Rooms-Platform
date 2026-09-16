@@ -4,7 +4,14 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_super_admin
 from app.crud import analytics as crud
 from app.db.session import get_db
-from app.schemas.analytics import BookingsByTypePoint, OccupancyByCityPoint, RevenueTrendPoint, Section1MetricsRead
+from app.schemas.analytics import (
+    BookingsByTypePoint,
+    DisputeOperationalMetricsRead,
+    OccupancyByCityPoint,
+    RevenueTrendPoint,
+    Section1MetricsRead,
+)
+from app.services.dispute_operational_metrics import compute_dispute_operational_metrics
 from app.services.operational_metrics import compute_section1_metrics
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"], dependencies=[Depends(require_super_admin)])
@@ -30,3 +37,10 @@ def get_section1_operational_metrics(db: Session = Depends(get_db)):
     """ZR-ENG-CLR-001 Section 15 metrics, computed on demand -- see
     app/services/operational_metrics.py."""
     return compute_section1_metrics(db)
+
+
+@router.get("/dispute-operational-metrics", response_model=DisputeOperationalMetricsRead)
+def get_dispute_operational_metrics(db: Session = Depends(get_db)):
+    """ZR-ENG-CLR-010 Section 28 metrics, computed on demand -- see
+    app/services/dispute_operational_metrics.py."""
+    return compute_dispute_operational_metrics(db)

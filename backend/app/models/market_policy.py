@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Date, DateTime, Numeric, String
+from sqlalchemy import JSON, Date, DateTime, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -137,5 +137,114 @@ class MarketPolicyPack(Base):
     # is a reasonable default, not a verified legal figure for any specific
     # jurisdiction -- same REVIEW_REQUIRED honesty as every other field here.
     rent_change_min_interval_days: Mapped[int] = mapped_column(default=365)
+
+    # -- Dispute forum policy (ZR-ENG-CLR-010 Section 6/7) -- per-jurisdiction
+    # override of app/services/dispute_forum_resolver.py's static claim-family
+    # -> authority-class defaults. Defaults here match that resolver's own
+    # hardcoded values exactly, so a market pack that never sets these changes
+    # nothing -- same REVIEW_REQUIRED honesty as every other field on this
+    # model: reasonable MVP defaults, not counsel-verified per-market
+    # determinations. ZOIKO_SERVICE (always A0) and every claim family this
+    # MVP has no forum mapping for at all (PROTECTED_SAFETY, VERIFICATION_FRAUD,
+    # MARKETPLACE_CONDUCT, PAYMENT, REFUND_PAYOUT) are deliberately not
+    # configurable here -- jurisdiction can't manufacture a mapping that
+    # doesn't exist, and Zoiko's own service-fee authority isn't a
+    # jurisdiction question.
+    dispute_deposit_authority_class: Mapped[str] = mapped_column(String(2), default="A2")
+    dispute_booking_agreement_authority_class: Mapped[str] = mapped_column(String(2), default="A1")
+    dispute_property_condition_authority_class: Mapped[str] = mapped_column(String(2), default="A1")
+    dispute_sublet_occupancy_authority_class: Mapped[str] = mapped_column(String(2), default="A1")
+
+    # -- Dispute deadlines/conciliation/waiver policy (Section 7/20/26/29 --
+    # AC-28/AC-29, QA-Q21/Q22/Q23). Same REVIEW_REQUIRED honesty as every
+    # other field on this model: reasonable MVP defaults, not
+    # counsel-verified per-market determinations. Nothing here invents a
+    # requirement a market hasn't actually configured -- see each field's
+    # own comment for its "nothing configured" behavior.
+    #
+    # Section 26: "recommended commercial default 5 business days only
+    # where no statutory/forum rule supersedes it" -- this field IS that
+    # per-market override point; the hardcoded 5 stays the fallback for an
+    # occupancy with no resolvable market pack at all.
+    dispute_response_window_days: Mapped[int] = mapped_column(default=5)
+    dispute_evidence_window_days: Mapped[int] = mapped_column(default=14)
+    # Null means "no statutory filing deadline configured for this
+    # market" -- crud/dispute_external_proceeding.py never invents one; a
+    # configured value only ever gets used to honestly RECORD whether a
+    # filing landed after it (QA-Q21: "does not invent an extension;
+    # routes according to forum rules"), never to block or reject a filing
+    # outright (Zoiko has no authority to decide that -- the external
+    # forum does).
+    dispute_external_filing_deadline_days: Mapped[int | None] = mapped_column(nullable=True)
+    # Section 7 "Forum route: required pre-action notice; mandatory/
+    # optional conciliation" / QA-Q22/Q23. NOT_REQUIRED is the default and
+    # matches the doc's own "NO UNIVERSAL ARBITRATION... do not implement
+    # a global mandatory-arbitration fallback" rule directly -- a market
+    # pack must opt IN to a conciliation requirement, never the reverse.
+    dispute_conciliation_requirement: Mapped[str] = mapped_column(String(20), default="NOT_REQUIRED")
+    # AC-28: "cannot silently waive non-waivable rights where the market
+    # pack prohibits that result." Empty list (the default) means no
+    # claim family is known to be non-waivable in this market -- honest
+    # absence of configuration, not a claim that nothing is ever
+    # non-waivable anywhere. A market pack that lists a claim family here
+    # makes crud/dispute_settlement.py's own waiver-acknowledgment
+    # checkbox (acknowledges_no_nonwaivable_waiver) a real, enforced block
+    # instead of only a self-certified attestation for that family.
+    dispute_non_waivable_claim_families: Mapped[list] = mapped_column(JSON, default=list)
+    # -- Verification policy (Section 12, ZR-ENG-CLR-012) --
+    # Doc's own AC-16/Section 9: "There is no global 'right to rent' check.
+    # Occupancy eligibility exists only where a jurisdiction imposes it...
+    # must not export England-specific immigration checking to other
+    # markets." False by default -- only England's row (seeded separately)
+    # sets this True. This is the Requirement Resolver's one live input for
+    # OCCUPANCY_ELIGIBILITY; app code must never branch on jurisdiction_code
+    # directly to decide this (same "no hard-coded country branches" rule
+    # as deposit/sublet policy above).
+    occupancy_eligibility_required: Mapped[bool] = mapped_column(default=False)
+    # Doc Section 34 (GOV.UK validation example): England's real mechanism is
+    # either an online "share code" lookup or an accepted manual document
+    # check -- both are real, publicly documented UK government routes, not
+    # invented ones. Stored as free text here since this MVP has no live
+    # Home Office API integration; every check is manual (verifier_admin_id
+    # on OccupancyEligibilityCheck), same honesty as the rest of this pack.
+    occupancy_eligibility_method_note: Mapped[str] = mapped_column(String(200), default="")
+    # Doc Section 9: "Time-limited eligibility creates a FOLLOW_UP_REQUIRED
+    # date." Null means the check (if required) does not expire on its own.
+    occupancy_eligibility_follow_up_days: Mapped[int | None] = mapped_column(nullable=True)
+    # Doc Section 28: "Documents are never stored permanently by default."
+    # Applies to the raw IdentityVerification evidence file, not the
+    # credential/decision record (retained separately, indefinitely, for
+    # audit -- see VerificationCredential). REVIEW_REQUIRED-level default,
+    # like every other number in this pack.
+    identity_evidence_retention_days: Mapped[int] = mapped_column(default=90)
+    # Doc Section 14: "Property compliance should be modeled as structured
+    # credentials, not attachment folders." Which certificate/registration
+    # classes are actually mandatory (gas safety, EPC, HMO license, etc.) is
+    # real per-jurisdiction law this MVP has no legal sign-off on -- so this
+    # resolves to an empty list by default (no gate at all, same fail-open
+    # posture as occupancy_eligibility_required) until a market pack is
+    # explicitly configured with the codes its own legal review approved.
+    # Never hard-code a specific code's meaning in app code; the resolver
+    # only knows "this jurisdiction requires credential code X to publish."
+    required_property_compliance_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+    # Doc Sections 5/AC-03: "Application can proceed before full ID
+    # completion unless the active market pack explicitly requires an
+    # earlier gate." False by default -- same fail-open-to-"nothing extra
+    # required" posture as occupancy_eligibility_required above; a
+    # jurisdiction whose law genuinely requires identity before an
+    # application can be submitted (rather than only before confirmation)
+    # opts in here explicitly.
+    identity_required_at_application: Mapped[bool] = mapped_column(default=False)
+
+    # Doc Sections 10/11: unlike occupancy eligibility (mandatory where
+    # imposed), screening/affordability checks are Host-optional but
+    # jurisdiction-CONSTRAINED -- "No global criminal-record, eviction-
+    # history or credit check." This is a permission list, not a
+    # requirement list: a Host may request any check_type NOT named here.
+    # Empty by default (no prohibition configured yet) rather than
+    # permitting or banning specific categories platform-wide -- the
+    # doc's own AC-17 "no hard-coded country branches", applied here.
+    screening_prohibited_check_types: Mapped[list[str]] = mapped_column(JSON, default=list)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
