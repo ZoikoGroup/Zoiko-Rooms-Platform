@@ -70,6 +70,7 @@ def open_screening_check(
         db, admin, "screening_check.open", "screening_check", str(check.id),
         reason=f"jurisdiction={jurisdiction_code}; check_type={check_type}",
     )
+    db.commit()
     return check
 
 
@@ -130,6 +131,7 @@ def record_screening_decision(
         db, admin, "screening_check.decide", "screening_check", str(check.id),
         reason=f"{decision_status}; {decision_reason}"[:500],
     )
+    db.commit()
     return check
 
 
@@ -157,6 +159,7 @@ def dispute_screening_decision(
         db, admin, "screening_check.dispute", "screening_check", str(check.id),
         reason=dispute_reason.strip()[:500],
     )
+    db.commit()
     return check
 
 

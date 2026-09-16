@@ -126,6 +126,7 @@ def _record_terminal_failure(
         notification_type=f"booking_change_request.{to_status.lower()}",
         related_entity_type="booking_change_request", related_entity_id=str(bcr.id),
     )
+    db.commit()
 
 
 def _expire_if_overdue(db: Session, bcr: BookingChangeRequest) -> BookingChangeRequest:
@@ -149,6 +150,7 @@ def _expire_if_overdue(db: Session, bcr: BookingChangeRequest) -> BookingChangeR
             notification_type="booking_change_request.expired",
             related_entity_type="booking_change_request", related_entity_id=str(bcr.id),
         )
+        db.commit()
     return bcr
 
 
@@ -701,6 +703,7 @@ def admin_create_legal_order_change(
         notification_type="booking_change_request.legal_order_change",
         related_entity_type="booking_change_request", related_entity_id=str(bcr.id),
     )
+    db.commit()
     return bcr
 
 
@@ -757,6 +760,7 @@ def _complete_premises_change_if_applicable(db: Session, new_agreement: Agreemen
         notification_type="booking_change_request.effective",
         related_entity_type="booking_change_request", related_entity_id=str(bcr.id),
     )
+    db.commit()
 
 
 def _approve_premises_change(db: Session, bcr: BookingChangeRequest, admin: AdminUser, decision_note: str) -> BookingChangeRequest:
@@ -1056,6 +1060,7 @@ def accept_alternative_terms(db: Session, user: UserAccount, bcr: BookingChangeR
         notification_type="booking_change_request.approved",
         related_entity_type="booking_change_request", related_entity_id=str(bcr.id),
     )
+    db.commit()
     return bcr
 
 
@@ -1084,6 +1089,7 @@ def decline_alternative_terms(db: Session, user: UserAccount, bcr: BookingChange
             notification_type="booking_change_request.alternative_declined",
             related_entity_type="booking_change_request", related_entity_id=str(bcr.id),
         )
+    db.commit()
     return bcr
 
 
