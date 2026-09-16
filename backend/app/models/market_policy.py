@@ -138,6 +138,59 @@ class MarketPolicyPack(Base):
     # jurisdiction -- same REVIEW_REQUIRED honesty as every other field here.
     rent_change_min_interval_days: Mapped[int] = mapped_column(default=365)
 
+    # -- Dispute forum policy (ZR-ENG-CLR-010 Section 6/7) -- per-jurisdiction
+    # override of app/services/dispute_forum_resolver.py's static claim-family
+    # -> authority-class defaults. Defaults here match that resolver's own
+    # hardcoded values exactly, so a market pack that never sets these changes
+    # nothing -- same REVIEW_REQUIRED honesty as every other field on this
+    # model: reasonable MVP defaults, not counsel-verified per-market
+    # determinations. ZOIKO_SERVICE (always A0) and every claim family this
+    # MVP has no forum mapping for at all (PROTECTED_SAFETY, VERIFICATION_FRAUD,
+    # MARKETPLACE_CONDUCT, PAYMENT, REFUND_PAYOUT) are deliberately not
+    # configurable here -- jurisdiction can't manufacture a mapping that
+    # doesn't exist, and Zoiko's own service-fee authority isn't a
+    # jurisdiction question.
+    dispute_deposit_authority_class: Mapped[str] = mapped_column(String(2), default="A2")
+    dispute_booking_agreement_authority_class: Mapped[str] = mapped_column(String(2), default="A1")
+    dispute_property_condition_authority_class: Mapped[str] = mapped_column(String(2), default="A1")
+    dispute_sublet_occupancy_authority_class: Mapped[str] = mapped_column(String(2), default="A1")
+
+    # -- Dispute deadlines/conciliation/waiver policy (Section 7/20/26/29 --
+    # AC-28/AC-29, QA-Q21/Q22/Q23). Same REVIEW_REQUIRED honesty as every
+    # other field on this model: reasonable MVP defaults, not
+    # counsel-verified per-market determinations. Nothing here invents a
+    # requirement a market hasn't actually configured -- see each field's
+    # own comment for its "nothing configured" behavior.
+    #
+    # Section 26: "recommended commercial default 5 business days only
+    # where no statutory/forum rule supersedes it" -- this field IS that
+    # per-market override point; the hardcoded 5 stays the fallback for an
+    # occupancy with no resolvable market pack at all.
+    dispute_response_window_days: Mapped[int] = mapped_column(default=5)
+    dispute_evidence_window_days: Mapped[int] = mapped_column(default=14)
+    # Null means "no statutory filing deadline configured for this
+    # market" -- crud/dispute_external_proceeding.py never invents one; a
+    # configured value only ever gets used to honestly RECORD whether a
+    # filing landed after it (QA-Q21: "does not invent an extension;
+    # routes according to forum rules"), never to block or reject a filing
+    # outright (Zoiko has no authority to decide that -- the external
+    # forum does).
+    dispute_external_filing_deadline_days: Mapped[int | None] = mapped_column(nullable=True)
+    # Section 7 "Forum route: required pre-action notice; mandatory/
+    # optional conciliation" / QA-Q22/Q23. NOT_REQUIRED is the default and
+    # matches the doc's own "NO UNIVERSAL ARBITRATION... do not implement
+    # a global mandatory-arbitration fallback" rule directly -- a market
+    # pack must opt IN to a conciliation requirement, never the reverse.
+    dispute_conciliation_requirement: Mapped[str] = mapped_column(String(20), default="NOT_REQUIRED")
+    # AC-28: "cannot silently waive non-waivable rights where the market
+    # pack prohibits that result." Empty list (the default) means no
+    # claim family is known to be non-waivable in this market -- honest
+    # absence of configuration, not a claim that nothing is ever
+    # non-waivable anywhere. A market pack that lists a claim family here
+    # makes crud/dispute_settlement.py's own waiver-acknowledgment
+    # checkbox (acknowledges_no_nonwaivable_waiver) a real, enforced block
+    # instead of only a self-certified attestation for that family.
+    dispute_non_waivable_claim_families: Mapped[list] = mapped_column(JSON, default=list)
     # -- Verification policy (Section 12, ZR-ENG-CLR-012) --
     # Doc's own AC-16/Section 9: "There is no global 'right to rent' check.
     # Occupancy eligibility exists only where a jurisdiction imposes it...

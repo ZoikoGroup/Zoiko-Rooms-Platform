@@ -7,6 +7,19 @@ from app.db.base import Base
 
 ADMIN_ROLES = ("admin", "super_admin")
 ADMIN_APPROVAL_STATUSES = ("pending", "approved", "rejected")
+# ZR-ENG-CLR-010 Section 12/20: the named specialist roles the dispute spec
+# calls for (Support/Dispute Officer/Finance/Trust & Safety/Legal-Compliance).
+# Deliberately a SECOND, disputes-only field rather than an extension of
+# ADMIN_ROLES above -- that two-value role gates dozens of unrelated domains
+# platform-wide (finance, leasing, occupancy, listings...) via a hardcoded
+# "!= super_admin" check at every call site; folding five new values into it
+# would silently change every one of those checks' behavior for an admin who
+# picks up a dispute specialization, none of which this build has audited.
+# None (the default, and every admin that existed before this field did) is
+# not "no access" -- see services/dispute_rbac.py's own docstring for why an
+# unassigned admin keeps today's blanket dispute access rather than being
+# retroactively locked out.
+DISPUTE_ADMIN_ROLES = ("SUPPORT", "DISPUTE_OFFICER", "FINANCE", "TRUST_AND_SAFETY", "LEGAL_COMPLIANCE")
 
 
 class AdminUser(Base):
@@ -26,6 +39,9 @@ class AdminUser(Base):
     full_name: Mapped[str] = mapped_column(String(255), default="Zoiko Admin")
     phone: Mapped[str] = mapped_column(String(50), default="")
     role: Mapped[str] = mapped_column(String(20), default="admin")
+    # See DISPUTE_ADMIN_ROLES above -- null means "not yet specialized",
+    # not "no dispute access".
+    dispute_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     approval_status: Mapped[str] = mapped_column(String(20), default="approved")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
