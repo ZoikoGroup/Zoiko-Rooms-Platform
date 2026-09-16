@@ -73,6 +73,12 @@ from app.models.room import Room
 from app.models.room_hold import RoomHold
 from app.models.room_passport import RoomPassportClaim, RoomPassportSnapshot
 from app.models.identity_verification import IdentityVerification
+from app.models.break_glass_access import BreakGlassAccessGrant
+from app.models.evidence_artifact import EvidenceArtifact
+from app.models.occupancy_eligibility_check import OccupancyEligibilityCheck
+from app.models.property_compliance_credential import PropertyComplianceCredential
+from app.models.screening_check import ScreeningCheck
+from app.models.verification_credential import VerificationCredential
 from app.models.password_reset_token import PasswordResetToken
 from app.models.chat import ChatConversation, ChatMessage
 from app.models.handoff import AiHandoff
@@ -166,6 +172,12 @@ __all__ = [
     "PaymentReceipt",
     "PaymentSchedule",
     "IdentityVerification",
+    "BreakGlassAccessGrant",
+    "EvidenceArtifact",
+    "OccupancyEligibilityCheck",
+    "PropertyComplianceCredential",
+    "ScreeningCheck",
+    "VerificationCredential",
     "PasswordResetToken",
     "ChatConversation",
     "ChatMessage",

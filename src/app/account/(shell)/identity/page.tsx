@@ -1,4 +1,5 @@
 import { IdentityVerificationManager } from "@/components/user/IdentityVerificationManager";
+import { VerificationStatusSummary } from "@/components/user/VerificationStatusSummary";
 
 export default function IdentityPage() {
   return (
@@ -11,6 +12,7 @@ export default function IdentityPage() {
           Verify who you are with an Aadhaar, Passport or Driving License. Renting and hosting both depend on it.
         </p>
       </div>
+      <VerificationStatusSummary />
       <IdentityVerificationManager />
     </div>
   );

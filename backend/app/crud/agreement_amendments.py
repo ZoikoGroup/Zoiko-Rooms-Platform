@@ -97,6 +97,32 @@ def propose_terms(db: Session, amendment: AgreementAmendment, admin: AdminUser, 
     return amendment
 
 
+def propose_guarantor_addition(
+    db: Session, amendment: AgreementAmendment, admin: AdminUser, *, legal_name: str, contact_email: str,
+) -> AgreementAmendment:
+    """ZR-ENG-CLR-012 Section 15: the ADDENDUM-specific counterpart to
+    propose_terms above -- a guarantor is a party-roster change, not a
+    commercial-terms field, so it gets its own proposal slot
+    (proposed_guarantor) rather than being force-fit into proposed_terms.
+    CLASSIFIED -> APPROVALS_PENDING, same transition shape as propose_terms."""
+    assert_provider_access(db, admin, party_id_for_listing(amendment.agreement.offer.listing))
+    if amendment.status != "CLASSIFIED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a CLASSIFIED amendment can have a guarantor proposed")
+    if amendment.amendment_type != "ADDENDUM":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A guarantor addition must be classified as ADDENDUM")
+    if not legal_name.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Guarantor legal name is required")
+
+    now = datetime.now(timezone.utc)
+    amendment.proposed_guarantor = {"legalName": legal_name.strip(), "contactEmail": contact_email.strip()}
+    amendment.status = "APPROVALS_PENDING"
+    amendment.terms_proposed_at = now
+    amendment.approvals_pending_at = now
+    db.commit()
+    db.refresh(amendment)
+    return amendment
+
+
 def _merged_snapshot(source_snapshot: dict, proposed_terms: dict) -> dict:
     """Copies the source version's snapshot unchanged except for the
     specific commercial fields the amendment actually proposes -- premises,
@@ -173,6 +199,19 @@ def approve_amendment(db: Session, amendment: AgreementAmendment, admin: AdminUs
     offer.current_version = next_terms_version
     db.flush()
     _populate_version_detail_rows(db, new_version, offer, new_terms)
+
+    # ZR-ENG-CLR-012 Section 15: an ADDENDUM proposing a guarantor gets them
+    # their own AgreementParty (and their own Party for identity/screening
+    # checks) here, at approval time -- see crud/agreement_party.py's
+    # module docstring for why their consent is tracked separately rather
+    # than folded into the provider/renter re-signature below.
+    if amendment.proposed_guarantor:
+        from app.crud.agreement_party import create_guarantor_party_for_amendment
+
+        create_guarantor_party_for_amendment(
+            db, agreement, legal_name=amendment.proposed_guarantor.get("legalName", ""),
+            contact_email=amendment.proposed_guarantor.get("contactEmail", ""),
+        )
 
     agreement.signed_by_provider_at = None
     agreement.signed_by_renter_at = None

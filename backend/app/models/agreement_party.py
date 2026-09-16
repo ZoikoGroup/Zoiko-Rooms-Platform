@@ -35,6 +35,25 @@ class AgreementParty(Base):
     # behalf of the actual legal party.
     authority_evidence_ref: Mapped[str] = mapped_column(String(255), default="")
     is_signatory: Mapped[bool] = mapped_column(Boolean, default=True)
+    # ZR-ENG-CLR-012 Section 15: "Each person is its own Verification
+    # Subject with role-scoped requirements and consent... Guarantor
+    # screening, identity and agreement execution are separate from renter
+    # screening." Nullable -- provider/renter already have their own Party
+    # via the offer/listing they came from; this exists so a guarantor (or
+    # any other agreement_party without an existing Party) can get one,
+    # letting the exact same party_id-scoped IdentityVerification/
+    # ScreeningCheck/VerificationCredential machinery apply to them
+    # independently, with no guarantor-specific verification code needed.
+    party_id: Mapped[int | None] = mapped_column(ForeignKey("parties.id"), nullable=True)
+    # ZR-ENG-CLR-012 Section 15 consent requirement, recorded independently
+    # of the core Agreement signature columns (see crud/agreement_party.py's
+    # module docstring for why). Wet-ink is the only method used today --
+    # method is still stored, not hardcoded, so a future self-service
+    # consent path can populate the same fields.
+    consent_method: Mapped[str] = mapped_column(String(30), default="")
+    consent_evidence_ref: Mapped[str] = mapped_column(String(500), default="")
+    consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     agreement: Mapped["Agreement"] = relationship(back_populates="parties")
+    verification_party: Mapped["Party"] = relationship()

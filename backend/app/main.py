@@ -24,6 +24,7 @@ from app.api.routes import (
     leasing,
     listings,
     knowledge,
+    market_policy,
     market_releases,
     occupancy,
     occupancy_classification,
@@ -43,6 +44,8 @@ from app.api.routes import (
     user_notifications,
     user_payments,
     user_rentals,
+    user_verification,
+    verification,
 )
 from app.core.config import settings
 from app.core.correlation import correlation_id_middleware
@@ -116,6 +119,7 @@ app.include_router(public.router)
 app.include_router(uploads.router)
 app.include_router(search.router)
 app.include_router(market_releases.router)
+app.include_router(market_policy.router)
 app.include_router(properties.router)
 app.include_router(authority.router)
 app.include_router(identity_verification.router)
@@ -135,6 +139,8 @@ app.include_router(user_notifications.router)
 app.include_router(admin_notifications.router)
 app.include_router(user_contact.router)
 app.include_router(admin_contact.router)
+app.include_router(verification.router)
+app.include_router(user_verification.router)
 
 
 @app.get("/health")

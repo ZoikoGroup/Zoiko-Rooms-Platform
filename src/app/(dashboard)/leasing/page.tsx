@@ -1,3 +1,4 @@
+import { AgreementAmendmentsManager } from "@/components/admin/AgreementAmendmentsManager";
 import { LeasingManager } from "@/components/admin/LeasingManager";
 
 export default function AdminLeasingPage() {
@@ -10,6 +11,7 @@ export default function AdminLeasingPage() {
         </p>
       </div>
       <LeasingManager />
+      <AgreementAmendmentsManager />
     </div>
   );
 }
