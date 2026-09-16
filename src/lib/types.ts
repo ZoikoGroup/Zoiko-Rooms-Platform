@@ -718,3 +718,161 @@ export interface AppNotification {
   createdAt: string;
   readAt: string | null;
 }
+
+// --- Verification (ZR-ENG-CLR-012) ---
+
+export type OccupancyEligibilityMethod = "DIGITAL_SHARE_CODE" | "MANUAL_DOCUMENT_CHECK";
+export type OccupancyEligibilityStatus =
+  | "IN_PROGRESS"
+  | "PASS"
+  | "INCONCLUSIVE"
+  | "TECHNICAL_ERROR"
+  | "FAIL_INELIGIBLE"
+  | "FRAUD_REVIEW"
+  | "EXPIRED"
+  | "WAIVED_POLICY"
+  | "SUSPENDED";
+
+export interface OccupancyEligibilityCheck {
+  id: number;
+  partyId: number;
+  jurisdictionCode: string;
+  method: OccupancyEligibilityMethod;
+  shareCode: string;
+  evidenceRef: string;
+  status: OccupancyEligibilityStatus;
+  reasonNote: string;
+  checkedByAdminId: number | null;
+  checkedAt: string | null;
+  followUpDueAt: string | null;
+  createdAt: string;
+}
+
+export type PropertyComplianceCredentialStatus = "UNDER_REVIEW" | "VALID" | "EXPIRING" | "EXPIRED" | "REVOKED" | "SUSPENDED";
+
+export interface PropertyComplianceCredential {
+  id: number;
+  roomId: number;
+  requirementCode: string;
+  status: PropertyComplianceCredentialStatus;
+  issuerSource: string;
+  evidenceRef: string;
+  method: string;
+  jurisdictionCode: string;
+  validFrom: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  revokedReason: string;
+  createdAt: string;
+}
+
+export interface RenterVerificationStatusItem {
+  requirementCode: string;
+  status: string;
+  expiresAt: string | null;
+  jurisdictionCode: string;
+  explanation: string;
+  sharingScope: string;
+  retentionNote: string;
+  alternativeMethodNote: string;
+}
+
+export interface RenterVerificationStatus {
+  identity: RenterVerificationStatusItem;
+  occupancyEligibility: RenterVerificationStatusItem[];
+}
+
+export type ScreeningDecisionStatus = "AUTHORIZED" | "PASS" | "FAIL" | "INCONCLUSIVE" | "DISPUTED_SOURCE";
+
+export type AmendmentStatus =
+  | "REQUESTED"
+  | "CLASSIFIED"
+  | "TERMS_PROPOSED"
+  | "APPROVALS_PENDING"
+  | "GENERATED"
+  | "EXECUTION_PENDING"
+  | "EXECUTED"
+  | "EFFECTIVE";
+
+export type AmendmentType = "MATERIAL_CHANGE" | "ADDENDUM" | "ASSIGNMENT_NOVATION" | "RESTATED_AGREEMENT" | "RENEWAL" | "CORRECTION";
+
+export interface AgreementAmendment {
+  id: number;
+  agreementId: number;
+  sourceVersionId: number;
+  resultingVersionId: number | null;
+  amendmentType: AmendmentType | null;
+  status: AmendmentStatus;
+  reason: string;
+  proposedTerms: Record<string, unknown>;
+  proposedGuarantor: { legalName?: string; contactEmail?: string };
+  requestedByAdminId: number;
+  createdAt: string;
+  classifiedAt: string | null;
+  termsProposedAt: string | null;
+  approvalsPendingAt: string | null;
+  generatedAt: string | null;
+  executionPendingAt: string | null;
+  executedAt: string | null;
+  effectiveAt: string | null;
+}
+
+export interface AgreementParty {
+  id: number;
+  agreementId: number;
+  role: string;
+  legalName: string;
+  contactEmail: string;
+  partyId: number | null;
+  consentMethod: string;
+  consentEvidenceRef: string;
+  consentedAt: string | null;
+}
+
+export interface MarketPolicyPack {
+  id: number;
+  jurisdictionCode: string;
+  version: number;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  confidence: "VERIFIED" | "REVIEW_REQUIRED" | "DEPRECATED" | "EMERGENCY_BLOCK";
+  legalSourceNote: string;
+  depositInstrumentAllowed: string;
+  depositMaxRentMultiple: number;
+  depositCustodyModel: string;
+  depositProtectionDeadlineDays: number | null;
+  depositReleaseDeadlineDays: number;
+  subletConsentStandard: string;
+  subletConsentResponseDays: number;
+  subletMaxRentMultipleOfOriginal: number;
+  subletAssignmentPayeeModel: string;
+  subletSubleasePayeeModel: string;
+  rentChangeMinIntervalDays: number;
+  occupancyEligibilityRequired: boolean;
+  occupancyEligibilityMethodNote: string;
+  occupancyEligibilityFollowUpDays: number | null;
+  identityEvidenceRetentionDays: number;
+  requiredPropertyComplianceCodes: string[];
+  identityRequiredAtApplication: boolean;
+  screeningProhibitedCheckTypes: string[];
+  createdAt: string;
+}
+
+export interface ScreeningCheck {
+  id: number;
+  partyId: number;
+  jurisdictionCode: string;
+  checkType: string;
+  providerName: string;
+  permissiblePurpose: string;
+  hostPolicyCriteria: string;
+  providerResultSummary: string;
+  decisionStatus: ScreeningDecisionStatus;
+  decisionReason: string;
+  adverseActionNoticeSentAt: string | null;
+  reviewedByAdminId: number | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  disputeReason: string;
+  disputedAt: string | null;
+}

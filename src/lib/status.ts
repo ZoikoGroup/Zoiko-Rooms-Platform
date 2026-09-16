@@ -322,3 +322,88 @@ export function formatClassificationLabel(value: string): string {
     .map((word) => word[0].toUpperCase() + word.slice(1))
     .join(" ");
 }
+
+// --- Verification (ZR-ENG-CLR-012) ---
+
+export const occupancyEligibilityStatusTone = {
+  IN_PROGRESS: "warning",
+  PASS: "success",
+  INCONCLUSIVE: "warning",
+  TECHNICAL_ERROR: "warning",
+  FAIL_INELIGIBLE: "danger",
+  FRAUD_REVIEW: "danger",
+  EXPIRED: "neutral",
+  WAIVED_POLICY: "primary",
+  SUSPENDED: "neutral",
+} as const;
+
+export const occupancyEligibilityMethodLabel = {
+  DIGITAL_SHARE_CODE: "Digital share code",
+  MANUAL_DOCUMENT_CHECK: "Manual document check",
+} as const;
+
+export const propertyComplianceCredentialStatusTone = {
+  UNDER_REVIEW: "warning",
+  VALID: "success",
+  EXPIRING: "warning",
+  EXPIRED: "warning",
+  REVOKED: "danger",
+  SUSPENDED: "neutral",
+} as const;
+
+export const amendmentStatusTone = {
+  REQUESTED: "neutral",
+  CLASSIFIED: "warning",
+  TERMS_PROPOSED: "warning",
+  APPROVALS_PENDING: "warning",
+  GENERATED: "primary",
+  EXECUTION_PENDING: "warning",
+  EXECUTED: "primary",
+  EFFECTIVE: "success",
+} as const;
+
+export const amendmentStatusLabel = {
+  REQUESTED: "Requested",
+  CLASSIFIED: "Classified",
+  TERMS_PROPOSED: "Terms proposed",
+  APPROVALS_PENDING: "Awaiting approval",
+  GENERATED: "New version generated",
+  EXECUTION_PENDING: "Awaiting re-signature",
+  EXECUTED: "Executed",
+  EFFECTIVE: "Effective",
+} as const;
+
+export const amendmentTypeLabel = {
+  MATERIAL_CHANGE: "Material change",
+  ADDENDUM: "Addendum (e.g. guarantor)",
+  ASSIGNMENT_NOVATION: "Assignment / novation",
+  RESTATED_AGREEMENT: "Restated agreement",
+  RENEWAL: "Renewal",
+  CORRECTION: "Correction",
+} as const;
+
+export const screeningDecisionStatusTone = {
+  AUTHORIZED: "warning",
+  PASS: "success",
+  FAIL: "danger",
+  INCONCLUSIVE: "warning",
+  DISPUTED_SOURCE: "primary",
+} as const;
+
+export const renterVerificationStatusTone: Record<string, "neutral" | "warning" | "success" | "danger" | "primary"> = {
+  not_submitted: "neutral",
+  pending: "warning",
+  verified: "success",
+  rejected: "danger",
+  expired: "danger",
+  additional_evidence_required: "warning",
+  IN_PROGRESS: "warning",
+  PASS: "success",
+  INCONCLUSIVE: "warning",
+  TECHNICAL_ERROR: "warning",
+  FAIL_INELIGIBLE: "danger",
+  FRAUD_REVIEW: "danger",
+  EXPIRED: "neutral",
+  WAIVED_POLICY: "primary",
+  SUSPENDED: "neutral",
+};

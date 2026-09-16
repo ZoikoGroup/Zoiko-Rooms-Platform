@@ -11,6 +11,7 @@ from app.models.admin_user import AdminUser
 from app.models.identity_verification import DOCUMENT_CATEGORY_BY_TYPE, IdentityVerification, DOCUMENT_TYPES, IDENTITY_STATUSES
 from app.models.party import Party
 from app.models.user_account import UserAccount
+from app.models.verification_credential import VerificationCredential
 from app.schemas.marketplace import IdentityVerificationCreate
 
 IDENTITY_VERIFICATION_VALIDITY_DAYS = 365
@@ -93,6 +94,18 @@ def verify_identity_verification(db: Session, record: IdentityVerification, veri
     db.commit()
     db.refresh(record)
 
+    # ZR-ENG-CLR-012 Section 8/24: identity verification produces a scoped
+    # credential rather than leaving "verified" as a bare status flip on the
+    # raw document row -- the same "no raw document/check becomes a
+    # permanent fact without a credential" doctrine already applied to
+    # OCCUPANCY_ELIGIBILITY in crud/occupancy_eligibility.py.
+    db.add(VerificationCredential(
+        party_id=record.party_id, requirement_code="IDENTITY", status="VALID",
+        method=record.document_type, jurisdiction_code="",
+        source_identity_verification_id=record.id, expires_at=record.expires_at,
+    ))
+    db.commit()
+
     if user:
         send_identity_verification_approved_email(user.email, user.full_name)
     return record
@@ -137,6 +150,25 @@ def get_verified_identity_for_party(db: Session, party_id: int) -> IdentityVerif
             (IdentityVerification.expires_at.is_(None)) | (IdentityVerification.expires_at > now),
         )
         .order_by(IdentityVerification.id.desc())
+    )
+
+
+def get_valid_identity_credential(db: Session, party_id: int) -> VerificationCredential | None:
+    """ZR-ENG-CLR-012 Section 24 source-of-truth rule: downstream gates that
+    care about identity as one requirement family among several (alongside
+    OCCUPANCY_ELIGIBILITY, etc.) should read the credential here, not
+    IdentityVerification.status directly -- kept as its own lookup rather
+    than folded into get_verified_identity_for_party so callers can migrate
+    independently."""
+    now = datetime.now(timezone.utc)
+    return db.scalar(
+        select(VerificationCredential).where(
+            VerificationCredential.party_id == party_id,
+            VerificationCredential.requirement_code == "IDENTITY",
+            VerificationCredential.status == "VALID",
+            (VerificationCredential.expires_at.is_(None)) | (VerificationCredential.expires_at > now),
+        )
+        .order_by(VerificationCredential.valid_from.desc())
     )
 
 

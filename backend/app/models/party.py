@@ -5,7 +5,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-PARTY_TYPES = ("provider", "renter", "institution", "zoiko_operator")
+PARTY_TYPES = ("provider", "renter", "institution", "zoiko_operator", "guarantor")
 PARTY_STATUSES = ("active", "suspended", "closed")
 
 

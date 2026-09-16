@@ -7,6 +7,7 @@ from app.api.deps import get_current_admin, require_super_admin
 from app.core.agreement_documents import resolve_agreement_document_path
 from app.core.correlation import get_correlation_id
 from app.crud import agreement_amendments as amendment_crud
+from app.crud import agreement_party as agreement_party_crud
 from app.crud import booking_change_requests as bcr_crud
 from app.crud import agreement_clause_translations as translation_crud
 from app.crud import agreement_clauses as clause_crud
@@ -25,9 +26,11 @@ from app.services.booking_expiry import sweep_expired_checkouts, sweep_expired_o
 from app.schemas.leasing import (
     AgreementAmendmentRead,
     AgreementCreateRequest,
+    AgreementPartyRead,
     AgreementRead,
     AgreementSign,
     AmendmentClassifyRequest,
+    AmendmentProposeGuarantorRequest,
     AmendmentProposeTermsRequest,
     AmendmentRequestCreate,
     ApplicationCreate,
@@ -46,6 +49,7 @@ from app.schemas.leasing import (
     ClauseTranslationRead,
     DisclosureDeliverRequest,
     DisclosureRequirementRead,
+    GuarantorConsentRequest,
     HostReadinessRead,
     MissingTranslationRead,
     OfferAcceptRequest,
@@ -677,6 +681,26 @@ def post_propose_amendment_terms(
     return updated
 
 
+@router.post("/agreements/{agreement_id}/amendments/{amendment_id}/propose-guarantor", response_model=AgreementAmendmentRead)
+def post_propose_amendment_guarantor(
+    agreement_id: int, amendment_id: int, payload: AmendmentProposeGuarantorRequest, request: Request,
+    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-012 Section 15: the ADDENDUM path for adding a guarantor
+    to an already-signed agreement -- see crud/agreement_amendments.py's
+    propose_guarantor_addition and crud/agreement_party.py's module
+    docstring for why this is a real amendment (new version, audit trail)
+    rather than a silent insert."""
+    agreement = crud.get_agreement_or_404(db, agreement_id)
+    amendment = amendment_crud.get_amendment_or_404(db, agreement, amendment_id)
+    updated = amendment_crud.propose_guarantor_addition(
+        db, amendment, admin, legal_name=payload.legal_name, contact_email=payload.contact_email,
+    )
+    log_audit_event(db, admin, "agreement_amendment.propose_guarantor", "agreement_amendment", str(amendment_id), get_correlation_id(request))
+    db.commit()
+    return updated
+
+
 @router.post(
     "/agreements/{agreement_id}/amendments/{amendment_id}/approve", response_model=AgreementAmendmentRead,
     dependencies=[Depends(require_super_admin)],
@@ -690,6 +714,42 @@ def post_approve_amendment(
     correlation_id = get_correlation_id(request)
     updated = amendment_crud.approve_amendment(db, amendment, admin, correlation_id=correlation_id)
     return updated
+
+
+def _to_agreement_party_read(agreement_party) -> AgreementPartyRead:
+    return AgreementPartyRead(
+        id=agreement_party.id, agreement_id=agreement_party.agreement_id, role=agreement_party.role,
+        legal_name=agreement_party.legal_name, contact_email=agreement_party.contact_email,
+        party_id=agreement_party.party_id, consent_method=agreement_party.consent_method,
+        consent_evidence_ref=agreement_party.consent_evidence_ref, consented_at=agreement_party.consented_at,
+    )
+
+
+@router.get("/agreements/{agreement_id}/parties", response_model=list[AgreementPartyRead])
+def get_agreement_parties(agreement_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    agreement = crud.get_agreement_or_404(db, agreement_id)
+    assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
+    return [_to_agreement_party_read(p) for p in agreement.parties]
+
+
+@router.post(
+    "/agreements/{agreement_id}/parties/{agreement_party_id}/guarantor-consent", response_model=AgreementPartyRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_record_guarantor_consent(
+    agreement_id: int, agreement_party_id: int, payload: GuarantorConsentRequest, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-012 Section 15 consent requirement -- see
+    crud/agreement_party.py's module docstring for why this is tracked
+    independently of Agreement.signed_by_provider_at/signed_by_renter_at."""
+    agreement = crud.get_agreement_or_404(db, agreement_id)
+    agreement_party = agreement_party_crud.get_agreement_party_or_404(db, agreement, agreement_party_id)
+    updated = agreement_party_crud.record_guarantor_consent(
+        db, agreement_party, admin, evidence_ref=payload.evidence_ref, method=payload.method,
+    )
+    log_audit_event(db, admin, "agreement_party.guarantor_consent", "agreement_party", str(agreement_party_id), get_correlation_id(request))
+    return _to_agreement_party_read(updated)
 
 
 @router.get("/booking-change-requests", response_model=list[BookingChangeRequestRead])

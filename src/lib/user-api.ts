@@ -11,6 +11,7 @@ import {
   PublicListing,
   PublicListingsPage,
   PublishEligibility,
+  RenterVerificationStatus,
   Room,
   SimulatedPayment,
   SubletArrangementType,
@@ -69,6 +70,12 @@ export function getIdentityVerification(verificationId: number): Promise<Identit
  *  safe to build client-side with nothing but the verification id. */
 export function identityDocumentUrl(verificationId: number): string {
   return `${API_URL}/api/users/identity-verifications/${verificationId}/document`;
+}
+
+/** ZR-ENG-CLR-012 Section 19: the renter's own identity + occupancy-eligibility
+ *  status summary, scoped server-side to their own party. */
+export function getMyVerificationStatus(): Promise<RenterVerificationStatus> {
+  return apiClientFetch<RenterVerificationStatus>("/api/users/verification-status");
 }
 
 /** True when at least one submitted document has been approved by a super admin. */

@@ -82,6 +82,10 @@ class IdentityVerification(Base):
 
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ZR-ENG-CLR-012 AC-31: idempotency marker for
+    # services/verification_followups.py's expiry-reminder sweep -- same
+    # pattern as OccupancyEligibilityCheck.follow_up_notified_at.
+    expiry_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     verifier_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     verifier_notes: Mapped[str] = mapped_column(String(2000), default="")
     status: Mapped[str] = mapped_column(String(20), default="pending")
