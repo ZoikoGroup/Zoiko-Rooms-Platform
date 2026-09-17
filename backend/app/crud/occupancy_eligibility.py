@@ -63,6 +63,7 @@ def open_occupancy_eligibility_check(
         db, admin, "occupancy_eligibility.open", "occupancy_eligibility_check", str(check.id),
         reason=f"jurisdiction={jurisdiction_code}; method={method}",
     )
+    db.commit()
     return check
 
 
@@ -125,6 +126,7 @@ def record_occupancy_eligibility_result(
         db, admin, "occupancy_eligibility.decide", "occupancy_eligibility_check", str(check.id),
         reason=f"{result_status}; {reason_note}"[:500],
     )
+    db.commit()
     return check
 
 

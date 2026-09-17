@@ -127,6 +127,7 @@ def create_market_policy_pack(db: Session, admin: AdminUser, data: dict) -> Mark
         db, admin, "market_policy_pack.create", "market_policy_pack", str(pack.id),
         reason=f"jurisdiction={jurisdiction_code}; version={next_version}; confidence={confidence}",
     )
+    db.commit()
     return pack
 
 
@@ -148,4 +149,5 @@ def update_market_policy_pack(db: Session, admin: AdminUser, pack: MarketPolicyP
         db, admin, "market_policy_pack.update", "market_policy_pack", str(pack.id),
         reason=f"jurisdiction={pack.jurisdiction_code}; version={pack.version}",
     )
+    db.commit()
     return pack

@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import COOKIE_NAME, get_current_admin
 from app.core.config import settings
+from app.core.rate_limit import login_limiter
 from app.core.security import create_access_token, verify_password
 from app.crud.admin import authenticate, update_password
 from app.db.session import get_db
@@ -36,8 +37,13 @@ def _set_auth_cookie(response: Response, email: str) -> None:
 
 @router.post("/login", response_model=AdminRead)
 def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
+    # Keyed on the submitted email (not the eventual admin.id, which we don't
+    # have until after authenticate() succeeds) -- this is a brute-force guard
+    # against repeatedly guessing one account's password, so it must throttle
+    # failed attempts too, not just successful ones.
+    if not login_limiter.allow(f"login:{payload.email.lower()}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many login attempts. Please wait a moment and try again.")
     admin = authenticate(db, payload.email, payload.password)
-    print("login api test", admin)
     if not admin:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     if admin.approval_status == "pending":

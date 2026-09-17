@@ -21,6 +21,10 @@ from app.core.config import settings
 CHAT_RATE_LIMIT = settings.chat_rate_limit_max
 CHAT_RATE_WINDOW = settings.chat_rate_limit_window_seconds
 
+# Limits for login brute-force throttling, same env-tunable pattern.
+LOGIN_RATE_LIMIT = settings.login_rate_limit_max
+LOGIN_RATE_WINDOW = settings.login_rate_limit_window_seconds
+
 
 class _Window:
     __slots__ = ("count", "reset_at")
@@ -61,3 +65,6 @@ class RateLimiter:
 
 # Module-level singleton shared by the chat routes and tests.
 chat_limiter = RateLimiter(max_requests=CHAT_RATE_LIMIT, window_seconds=CHAT_RATE_WINDOW)
+
+# Module-level singleton shared by the login route and tests.
+login_limiter = RateLimiter(max_requests=LOGIN_RATE_LIMIT, window_seconds=LOGIN_RATE_WINDOW)
