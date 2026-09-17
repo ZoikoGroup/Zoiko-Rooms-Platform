@@ -18,6 +18,7 @@ import {
 import { addMonths, formatCurrency, formatDate } from "@/lib/utils";
 import {
   acceptAlternativeChangeTerms,
+  confirmHandoverReceipt,
   declineAlternativeChangeTerms,
   errorMessage,
   listMyChangeRequests,
@@ -55,6 +56,8 @@ export function RentalsManager() {
   const [extensionSubmitting, setExtensionSubmitting] = useState(false);
   const [extensionError, setExtensionError] = useState("");
   const [withdrawingId, setWithdrawingId] = useState<number | null>(null);
+  const [receiptConfirmedIds, setReceiptConfirmedIds] = useState<Set<number>>(new Set());
+  const [confirmingReceiptId, setConfirmingReceiptId] = useState<number | null>(null);
 
   const [premisesFor, setPremisesFor] = useState<UserOccupancy | null>(null);
   const [availableListings, setAvailableListings] = useState<PublicListing[]>([]);
@@ -91,6 +94,19 @@ export function RentalsManager() {
   useEffect(() => {
     load();
   }, [load]);
+
+  async function handleConfirmReceipt(occupancy: UserOccupancy) {
+    setConfirmingReceiptId(occupancy.id);
+    try {
+      await confirmHandoverReceipt(occupancy.id);
+      setReceiptConfirmedIds((prev) => new Set(prev).add(occupancy.id));
+      showToast("Receipt confirmed — your host can now complete move-in.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not confirm receipt."), "error");
+    } finally {
+      setConfirmingReceiptId(null);
+    }
+  }
 
   function pendingRequestFor(occupancy: UserOccupancy): BookingChangeRequest | undefined {
     if (!occupancy.agreementId) return undefined;
@@ -384,6 +400,27 @@ export function RentalsManager() {
                 </p>
               )}
             </div>
+
+            {occupancy.status === "PENDING_MOVE_IN" && (
+              <div className="mt-4 space-y-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Your host is preparing the room for move-in. Once you&apos;ve actually received the keys/room, confirm
+                  it below — this is one of the required steps before your host can activate your tenancy.
+                </p>
+                {receiptConfirmedIds.has(occupancy.id) ? (
+                  <Badge tone="success">Receipt confirmed</Badge>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    loading={confirmingReceiptId === occupancy.id}
+                    onClick={() => handleConfirmReceipt(occupancy)}
+                  >
+                    <DoorOpen className="h-3.5 w-3.5" /> I&apos;ve received the room
+                  </Button>
+                )}
+              </div>
+            )}
 
             {(() => {
               const pending = pendingRequestFor(occupancy);

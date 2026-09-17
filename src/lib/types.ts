@@ -328,6 +328,22 @@ export interface Occupancy {
   endedAt: string | null;
 }
 
+export type HandoverEventType = "HANDOVER_READY" | "POSSESSION_DELIVERED" | "RENTER_RECEIPT";
+
+export interface HandoverEvent {
+  id: number;
+  occupancyId: number;
+  eventType: HandoverEventType;
+  actorKind: string;
+  createdAt: string;
+}
+
+export interface ActivationGateStatus {
+  occupancyId: number;
+  latestDecision: { outcome: string; reasonCodes: string[] } | null;
+  handoverEvents: HandoverEvent[];
+}
+
 // --- Finance ledger ---
 
 export type ObligationType = "RENT" | "DEPOSIT" | "FEE" | "TAX";
@@ -369,6 +385,27 @@ export interface SimulatedPayment {
   createdAt: string;
   confirmedAt: string | null;
   allocations: PaymentAllocation[];
+}
+
+export interface ObligationRead {
+  id: number;
+  obligationType: string;
+  moneyPlane: string;
+  amount: number;
+  currency: string;
+  dueDate: string;
+  status: string;
+  guestId: string;
+  agreementId: number | null;
+  occupancyId: number | null;
+  payoutId: number | null;
+  createdAt: string;
+}
+
+export interface PaymentPreview {
+  amountDueNow: ObligationRead[];
+  cadence: string;
+  remainingScheduledCount: number;
 }
 
 export type DepositStatus = "HELD" | "RELEASED" | "FORFEITED" | "PARTIALLY_RELEASED";

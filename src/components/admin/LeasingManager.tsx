@@ -14,7 +14,16 @@ import {
   ThumbsUp,
   XCircle,
 } from "lucide-react";
-import { AdminRole, AdminUserSummary, Application, DisclosureRequirement, Listing, PublishEligibility } from "@/lib/types";
+import {
+  ActivationGateStatus,
+  AdminRole,
+  AdminUserSummary,
+  Application,
+  DisclosureRequirement,
+  Listing,
+  Occupancy,
+  PublishEligibility,
+} from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -63,6 +72,10 @@ export function LeasingManager() {
   const [legalOrderReason, setLegalOrderReason] = useState("");
   const [legalOrderSubmitting, setLegalOrderSubmitting] = useState(false);
 
+  const [occupancyByOfferId, setOccupancyByOfferId] = useState<Record<number, Occupancy>>({});
+  const [gateStatusByOccupancy, setGateStatusByOccupancy] = useState<Record<number, ActivationGateStatus>>({});
+  const [handoverBusy, setHandoverBusy] = useState<string | null>(null);
+
   function showToast(message: string) {
     setToast(message);
     setTimeout(() => setToast(""), 3600);
@@ -72,13 +85,15 @@ export function LeasingManager() {
     try {
       const admin = await getCurrentAdmin();
       setRole(admin?.role ?? null);
-      const [applicationsData, listingsData] = await Promise.all([
+      const [applicationsData, listingsData, occupanciesData] = await Promise.all([
         apiClientFetch<Application[]>("/api/leasing/applications"),
         apiClientFetch<Listing[]>("/api/listings"),
+        apiClientFetch<Occupancy[]>("/api/occupancy"),
       ]);
       setApplications(applicationsData);
       setPublishedListings(listingsData.filter((l) => l.state === "PUBLISHED"));
       setListingsById(Object.fromEntries(listingsData.map((l) => [l.id, l])));
+      setOccupancyByOfferId(Object.fromEntries(occupanciesData.map((o) => [o.offerId, o])));
 
       // Owner/host names -- /api/admin-users is super_admin-only, so a regular
       // admin falls back to "Owner #<id>" below rather than erroring on this fetch.
@@ -324,6 +339,40 @@ export function LeasingManager() {
     }
   }
 
+  const loadGateStatus = useCallback(async (occupancyId: number) => {
+    try {
+      const data = await apiClientFetch<ActivationGateStatus>(`/api/occupancy/${occupancyId}/activation-gate`);
+      setGateStatusByOccupancy((prev) => ({ ...prev, [occupancyId]: data }));
+    } catch {
+      // Non-fatal -- handover progress just won't show for this one.
+    }
+  }, []);
+
+  useEffect(() => {
+    Object.values(occupancyByOfferId).forEach((occ) => {
+      if (occ.status === "PENDING_MOVE_IN" && !(occ.id in gateStatusByOccupancy)) {
+        loadGateStatus(occ.id);
+      }
+    });
+  }, [occupancyByOfferId, gateStatusByOccupancy, loadGateStatus]);
+
+  async function recordHandoverStep(occupancyId: number, step: "prepare" | "events") {
+    const key = `${occupancyId}:${step}`;
+    setHandoverBusy(key);
+    try {
+      await apiClientFetch(`/api/occupancy/${occupancyId}/handover/${step}`, {
+        method: "POST",
+        body: JSON.stringify({ evidenceRef: "", notes: "" }),
+      });
+      await loadGateStatus(occupancyId);
+      showToast(step === "prepare" ? "Handover marked ready" : "Possession marked delivered");
+    } catch {
+      showToast("Failed to record this handover step");
+    } finally {
+      setHandoverBusy(null);
+    }
+  }
+
   async function toggleDisclosures(agreementId: number) {
     if (expandedDisclosuresAgreementId === agreementId) {
       setExpandedDisclosuresAgreementId(null);
@@ -563,6 +612,55 @@ export function LeasingManager() {
                   Provider signed: {agreement.signedByProviderAt ? formatDate(agreement.signedByProviderAt) : "Not yet"} · Renter
                   signed: {agreement.signedByRenterAt ? formatDate(agreement.signedByRenterAt) : "Not yet"}
                 </p>
+
+                {agreement.status === "SIGNED" && (() => {
+                  const occupancy = occupancyByOfferId[offer.id];
+                  if (!occupancy || occupancy.status !== "PENDING_MOVE_IN") return null;
+                  const gate = gateStatusByOccupancy[occupancy.id];
+                  const eventTypes = new Set((gate?.handoverEvents ?? []).map((e) => e.eventType));
+                  const hasReady = eventTypes.has("HANDOVER_READY");
+                  const hasDelivered = eventTypes.has("POSSESSION_DELIVERED");
+                  const hasReceipt = eventTypes.has("RENTER_RECEIPT");
+                  return (
+                    <div className="space-y-1.5 rounded-xl bg-white p-2.5 ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                        Move-in handover (all 3 required before Confirm Move-In)
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge tone={hasReady ? "success" : "warning"}>1. Handover ready{hasReady ? " ✓" : ""}</Badge>
+                        {!hasReady && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            loading={handoverBusy === `${occupancy.id}:prepare`}
+                            onClick={() => recordHandoverStep(occupancy.id, "prepare")}
+                          >
+                            Mark Handover Ready
+                          </Button>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge tone={hasDelivered ? "success" : "warning"}>2. Possession delivered{hasDelivered ? " ✓" : ""}</Badge>
+                        {hasReady && !hasDelivered && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            loading={handoverBusy === `${occupancy.id}:events`}
+                            onClick={() => recordHandoverStep(occupancy.id, "events")}
+                          >
+                            Mark Possession Delivered
+                          </Button>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge tone={hasReceipt ? "success" : "warning"}>
+                          3. Renter confirms receipt{hasReceipt ? " ✓" : " (the renter does this from their own account)"}
+                        </Badge>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 <div className="flex flex-wrap gap-2">
                   {agreement.status === "DRAFT" && (
                     <Button size="sm" variant="primary" onClick={() => sendAgreement(agreement.id)}>

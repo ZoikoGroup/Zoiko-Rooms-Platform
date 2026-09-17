@@ -401,6 +401,19 @@ class PaymentDispatchRequest(CamelModel):
     allocations: list[PaymentAllocationInput]
 
 
+class RenterPayObligationRequest(CamelModel):
+    """ZR-ENG-CLR-005 Section 12.1/AC-12: which normalized method class the
+    renter picked from their own jurisdiction's available set -- validated
+    server-side against resolve_available_payment_methods, never trusted as
+    "whatever the client sent" alone."""
+
+    method_class: str = "CARD"
+
+
+class AvailablePaymentMethodsRead(CamelModel):
+    method_classes: list[str]
+
+
 class ProcessorTransactionRead(CamelModel):
     id: int
     payment_id: int

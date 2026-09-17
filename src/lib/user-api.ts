@@ -3,10 +3,12 @@ import {
   Agreement,
   BookingChangeRequest,
   DisclosureRequirement,
+  HandoverEvent,
   HostedListing,
   IdentityDocumentType,
   IdentityVerificationRecord,
   Offer,
+  PaymentPreview,
   Property,
   PublicListing,
   PublicListingsPage,
@@ -173,6 +175,13 @@ export function listOccupancies(): Promise<UserOccupancy[]> {
 
 export function getOccupancy(occupancyId: number): Promise<UserOccupancy> {
   return apiClientFetch<UserOccupancy>(`/api/users/rentals/occupancies/${occupancyId}`);
+}
+
+export function confirmHandoverReceipt(occupancyId: number): Promise<HandoverEvent> {
+  return apiClientFetch<HandoverEvent>(`/api/users/rentals/occupancies/${occupancyId}/handover/receipt`, {
+    method: "POST",
+    body: JSON.stringify({ evidenceRef: "", notes: "" }),
+  });
 }
 
 export function lookupSubletRenter(email: string): Promise<SubletRenterLookup> {
@@ -400,5 +409,24 @@ export function submitHostedListingForReview(listingId: string): Promise<HostedL
 
 export function listUserPayments(): Promise<SimulatedPayment[]> {
   return apiClientFetch<SimulatedPayment[]>("/api/users/payments");
+}
+
+/** Renter self-service payment for their own rent/deposit obligation --
+ *  real PSP dispatch, not an admin manually recording it. */
+export function payOwnObligation(obligationId: number, methodClass: string): Promise<SimulatedPayment> {
+  return apiClientFetch<SimulatedPayment>(`/api/users/payments/obligations/${obligationId}/pay`, {
+    method: "POST",
+    body: JSON.stringify({ methodClass }),
+  });
+}
+
+/** Real, jurisdiction-resolved payment methods for this obligation -- never
+ *  hard-code a method list on the frontend (ZR-ENG-CLR-005 AC-12). */
+export function getObligationAvailableMethods(obligationId: number): Promise<{ methodClasses: string[] }> {
+  return apiClientFetch<{ methodClasses: string[] }>(`/api/users/payments/obligations/${obligationId}/available-methods`);
+}
+
+export function getOwnAgreementPaymentPreview(agreementId: number): Promise<PaymentPreview> {
+  return apiClientFetch<PaymentPreview>(`/api/users/rentals/agreements/${agreementId}/payment-preview`);
 }
 

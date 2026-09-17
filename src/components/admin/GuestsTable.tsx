@@ -58,8 +58,14 @@ export function GuestsTable({ guests }: { guests: Guest[] }) {
             style={{ animationDelay: `${Math.min(i, 8) * 0.04}s` }}
           >
             <div className="flex items-center gap-3">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={g.avatar} alt={g.name} className="h-12 w-12 rounded-full bg-primary-50 dark:bg-primary-500/10" />
+              {g.avatar ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={g.avatar} alt={g.name} className="h-12 w-12 rounded-full bg-primary-50 dark:bg-primary-500/10" />
+              ) : (
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-primary-50 text-sm font-bold text-primary-600 dark:bg-primary-500/10 dark:text-primary-300">
+                  {g.name.charAt(0).toUpperCase()}
+                </div>
+              )}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-bold text-primary-900 dark:text-white">{g.name}</p>
                 <p className="truncate text-xs text-slate-400 dark:text-slate-400">{g.location}</p>
