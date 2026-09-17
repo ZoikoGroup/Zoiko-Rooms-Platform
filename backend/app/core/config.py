@@ -128,6 +128,13 @@ class Settings(BaseSettings):
     chat_rate_limit_max: int = 20
     chat_rate_limit_window_seconds: int = 60
 
+    # Login brute-force throttling (attempts per window, per submitted email --
+    # deliberately keyed pre-authentication, unlike chat's per-authenticated-actor
+    # keying, since the whole point is to slow down guessing before a login ever
+    # succeeds).
+    login_rate_limit_max: int = 10
+    login_rate_limit_window_seconds: int = 60
+
     # ZR-ENG-CLR-001 Rule 7 / policy key booking.acceptance_hold_duration:
     # once an offer is accepted, the room is held (see services/inventory.py)
     # but the renter must reach a confirmed move-in within this window or the

@@ -44,7 +44,7 @@ class TestAutomaticInternalReviewDeadline:
         assert deadline["status"] == "PENDING"
         assert deadline["isOverdue"] is False
 
-        due_at = datetime.fromisoformat(deadline["dueAt"])
+        due_at = datetime.fromisoformat(deadline["dueAt"].replace("Z", "+00:00"))
         assert timedelta(days=6, hours=23) < (due_at - datetime.now(timezone.utc)) < timedelta(days=7, hours=1)
 
     def test_extending_the_deadline_requires_a_basis_and_preserves_original(self, client, db_session: Session):

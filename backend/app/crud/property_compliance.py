@@ -69,6 +69,7 @@ def issue_property_compliance_credential(
         db, admin, "property_compliance_credential.issue", "property_compliance_credential", str(credential.id),
         reason=f"room={room_id}; requirement={requirement_code}",
     )
+    db.commit()
     return credential
 
 
@@ -102,6 +103,7 @@ def declare_property_compliance_credential(
         db, admin, "property_compliance_credential.declare", "property_compliance_credential", str(credential.id),
         reason=f"room={room_id}; requirement={requirement_code}",
     )
+    db.commit()
     return credential
 
 
@@ -135,6 +137,7 @@ def verify_declared_property_compliance_credential(
         db, admin, "property_compliance_credential.verify_declared", "property_compliance_credential", str(credential.id),
         reason="",
     )
+    db.commit()
     return credential
 
 
@@ -161,6 +164,7 @@ def revoke_property_compliance_credential(
         db, admin, "property_compliance_credential.revoke", "property_compliance_credential", str(credential.id),
         reason=reason,
     )
+    db.commit()
     return credential
 
 
@@ -183,6 +187,7 @@ def suspend_property_compliance_credential(
         db, admin, "property_compliance_credential.suspend", "property_compliance_credential", str(credential.id),
         reason=reason,
     )
+    db.commit()
     return credential
 
 
@@ -201,6 +206,7 @@ def resume_property_compliance_credential(
         db, admin, "property_compliance_credential.resume", "property_compliance_credential", str(credential.id),
         reason="",
     )
+    db.commit()
     return credential
 
 

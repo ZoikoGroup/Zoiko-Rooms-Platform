@@ -84,4 +84,5 @@ def record_guarantor_consent(
         db, admin, "agreement_party.guarantor_consent", "agreement_party", str(agreement_party.id),
         reason=f"method={method}",
     )
+    db.commit()
     return agreement_party

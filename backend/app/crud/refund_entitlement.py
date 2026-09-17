@@ -231,6 +231,10 @@ def calculate_refund_entitlement(db: Session, case: TerminationCase, admin: Admi
     entitlement = RefundEntitlement(
         termination_case_id=case.id,
         version=(previous_max_version or 0) + 1,
+        # The tenancy's own listing currency -- never hardcoded, since this
+        # platform genuinely supports non-INR listings (models/listing.py
+        # SUPPORTED_CURRENCIES) and gross_refundable/net_refund above are
+        # computed from that same listing's obligations.
         currency=case.occupancy.listing.currency,
         gross_refundable=gross_refundable,
         net_refund=net_refund,

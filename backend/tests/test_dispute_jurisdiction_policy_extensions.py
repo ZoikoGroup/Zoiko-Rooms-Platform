@@ -276,8 +276,8 @@ class TestForumPackComputedResponseDeadline:
         assert deadline["source"] == "SYSTEM_DEFAULT"
         assert deadline["reminderAt"] is not None
 
-        due_at = datetime.fromisoformat(deadline["dueAt"])
-        created_at = datetime.fromisoformat(deadline["createdAt"])
+        due_at = datetime.fromisoformat(deadline["dueAt"].replace("Z", "+00:00"))
+        created_at = datetime.fromisoformat(deadline["createdAt"].replace("Z", "+00:00"))
         assert timedelta(days=19, hours=23) < (due_at - created_at) < timedelta(days=20, hours=1)
 
     def test_the_default_five_day_window_applies_with_no_market_pack(self, client, db_session: Session):
@@ -287,6 +287,6 @@ class TestForumPackComputedResponseDeadline:
 
         r = client.get(f"/api/users/rentals/disputes/{case_id}/deadlines", cookies=renter_cookies)
         deadline = r.json()[0]
-        due_at = datetime.fromisoformat(deadline["dueAt"])
-        created_at = datetime.fromisoformat(deadline["createdAt"])
+        due_at = datetime.fromisoformat(deadline["dueAt"].replace("Z", "+00:00"))
+        created_at = datetime.fromisoformat(deadline["createdAt"].replace("Z", "+00:00"))
         assert timedelta(days=4, hours=23) < (due_at - created_at) < timedelta(days=5, hours=1)

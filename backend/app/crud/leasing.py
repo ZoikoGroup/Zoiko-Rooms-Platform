@@ -871,6 +871,10 @@ def create_signature_requests(db: Session, agreement: Agreement, version: Agreem
 
 def send_agreement(db: Session, agreement: Agreement, admin: AdminUser) -> Agreement:
     assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
+    if agreement.status != "DRAFT":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Only a DRAFT agreement can be sent (current status: {agreement.status})")
+    if not agreement.versions:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This agreement has no version to send -- terms must be set first")
     agreement.status = "SENT"
     create_signature_requests(db, agreement, agreement.versions[-1])
     db.commit()
@@ -1266,6 +1270,7 @@ def confirm_agreement_payment(db: Session, agreement: Agreement, correlation_id:
     )
     from app.crud.booking_change_requests import _complete_premises_change_if_applicable
     _complete_premises_change_if_applicable(db, agreement)
+    db.commit()
     return agreement
 
 

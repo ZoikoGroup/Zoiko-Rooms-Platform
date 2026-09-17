@@ -700,7 +700,11 @@ def _auto_approve_and_publish_low_risk_market(db: Session, listing: Listing) -> 
             notification_type="listing.published",
             related_entity_type="listing", related_entity_id=listing.id,
         )
-        db.commit()
+    # Unconditional -- the two log_audit_event calls and emit_event calls above
+    # must persist even when this listing's party has no linked user account
+    # (get_user_by_party_id returns None), not only when a notification fires.
+    db.commit()
+    if user:
         send_listing_published_email(user.email, user.full_name, listing.name)
     return listing
 
