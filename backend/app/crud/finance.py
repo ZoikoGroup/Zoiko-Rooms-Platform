@@ -22,19 +22,23 @@ from app.core.service_fee_invoice_documents import save_service_fee_invoice_docu
 from app.crud.authority import get_valid_authority_for_room
 from app.crud.events import emit_event
 from app.crud.guest import get_user_for_guest
-from app.crud.market_policy import resolve_market_policy, to_policy_snapshot
+from app.crud.market_policy import DEFAULT_JURISDICTION, resolve_market_policy, to_policy_snapshot
 from app.models.market_policy import SUPPORTED_FUNDS_FLOW_PROFILES
 from app.crud import notification as notif_crud
 from app.crud.party import assert_provider_access, get_or_create_default_party
 from app.crud.habitability_incident import has_open_severe_incident_for_room
 from app.crud.payout_beneficiary import get_verified_payout_beneficiary
 from app.crud.user import get_user_by_party_id
+from app.crud import host_stripe_account as host_stripe_account_crud
 from app.services import booking_orchestrator
 from app.services import ledger as ledger_service
+from app.services import stripe_client
 from app.models.admin_user import AdminUser
 from app.models.guest import Guest
 from app.models.finance import (
+    AutopayMandate,
     CADENCE_INTERVAL_DAYS,
+    PAYMENT_METHOD_CLASSES,
     DEPOSIT_CLAIM_CATEGORIES,
     DepositClaim,
     DepositClaimItem,
@@ -48,16 +52,20 @@ from app.models.finance import (
     LedgerEntry,
     Obligation,
     PaymentAllocation,
+    PaymentProviderEvent,
     PaymentReceipt,
     PaymentSchedule,
     PayoutRecord,
     PayoutStatement,
+    ProcessorTransaction,
     ReconciliationRun,
     RefundRequest,
     RentInvoice,
     ServiceFeeInvoice,
     SimulatedPayment,
 )
+from app.models.audit import AuditEvent
+from app.models.domain_event import DomainEvent
 from app.models.guest import Guest
 from app.models.leasing import Agreement, Offer
 from app.models.listing import Listing
@@ -77,7 +85,9 @@ from app.schemas.finance import (
     DepositRelease,
     DisputeCreate,
     DisputeResolve,
+    FinancialHoldCreate,
     FinancialHoldResolve,
+    PaymentAllocationInput,
     HostRecoveryRecordProgress,
     HostRecoveryWriteOff,
     ObligationRead,
@@ -233,6 +243,51 @@ def get_payment_or_404(db: Session, payment_id: int) -> SimulatedPayment:
     return payment
 
 
+def get_payment_timeline(db: Session, payment_id: int, admin: AdminUser) -> list[dict]:
+    """ZR-ENG-CLR-005 Section 6.4's admin console 'Timeline: Immutable
+    normalized events + raw webhook references + actor/system timestamps'
+    panel -- merges three already-existing, separately-queryable event
+    trails (DomainEvent, AuditEvent, PaymentProviderEvent-via-
+    ProcessorTransaction) into the one chronological view the doc
+    describes, instead of an admin having to query three endpoints and
+    merge them by hand. Same provider-ownership scoping as list_payments."""
+    payment = get_payment_or_404(db, payment_id)
+    if admin.role != "super_admin" and payment.id not in _owned_payment_ids(db, admin):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to this payment's timeline")
+
+    entries: list[dict] = []
+    for event in db.scalars(
+        select(DomainEvent).where(DomainEvent.resource_type == "simulated_payment", DomainEvent.resource_id == str(payment_id))
+    ):
+        entries.append({
+            "timestamp": event.occurred_at, "source": "DOMAIN_EVENT", "event_type": event.event_type,
+            "actor": "system", "detail": event.payload,
+        })
+    for audit in db.scalars(
+        select(AuditEvent).where(AuditEvent.resource_type == "simulated_payment", AuditEvent.resource_id == str(payment_id))
+    ):
+        entries.append({
+            "timestamp": audit.created_at, "source": "AUDIT_EVENT", "event_type": audit.action,
+            "actor": f"admin:{audit.actor_admin_id}" if audit.actor_admin_id else "system",
+            "detail": {"reason": audit.reason, "beforeState": audit.before_state, "afterState": audit.after_state},
+        })
+    transaction_ids = list(db.scalars(select(ProcessorTransaction.id).where(ProcessorTransaction.payment_id == payment_id)))
+    if transaction_ids:
+        for webhook_event in db.scalars(
+            select(PaymentProviderEvent).where(PaymentProviderEvent.processor_transaction_id.in_(transaction_ids))
+        ):
+            entries.append({
+                "timestamp": webhook_event.received_at, "source": "PROVIDER_WEBHOOK", "event_type": webhook_event.event_type,
+                "actor": "provider",
+                "detail": {
+                    "providerEventId": webhook_event.provider_event_id,
+                    "processedAt": webhook_event.processed_at.isoformat() if webhook_event.processed_at else None,
+                },
+            })
+    entries.sort(key=lambda e: e["timestamp"])
+    return entries
+
+
 def _resolve_payer(db: Session, data: SimulatedPaymentCreate) -> str | None:
     """ZR-ENG-CLR-005 AC-03: resolves the payer_guest_id to store. No payer info at
     all -> payer is the occupant (unchanged default). payer_guest_id given -> must
@@ -258,6 +313,8 @@ def create_payment_intent(db: Session, data: SimulatedPaymentCreate) -> Simulate
     currency/payer) -- otherwise it's a key collision between two different
     requests, not a retry, and returning the old payment would silently discard
     the new one."""
+    if data.method_class not in PAYMENT_METHOD_CLASSES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unrecognized payment method class '{data.method_class}'")
     resolved_payer_guest_id = _resolve_payer(db, data)
 
     existing = db.scalar(select(SimulatedPayment).where(SimulatedPayment.idempotency_key == data.idempotency_key))
@@ -284,6 +341,7 @@ def create_payment_intent(db: Session, data: SimulatedPaymentCreate) -> Simulate
         payer_name=data.payer_name,
         payer_email=data.payer_email,
         payer_phone=data.payer_phone,
+        method_class=data.method_class,
     )
     db.add(payment)
     db.commit()
@@ -293,11 +351,30 @@ def create_payment_intent(db: Session, data: SimulatedPaymentCreate) -> Simulate
 
 def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm, admin: AdminUser) -> SimulatedPayment:
     """Idempotent: replaying a confirm call against an already-SUCCEEDED payment is a
-    no-op that returns the existing state instead of allocating a second time."""
+    no-op that returns the existing state instead of allocating a second time.
+
+    ZR-ENG-CLR-005 AC-27 'Host cannot manually mark a renter obligation paid
+    without a controlled external-payment workflow': method_class ==
+    EXTERNAL (the default -- an admin explicitly recording a real off-
+    platform cash/cheque payment, Section 12.1's own carved-out allowance)
+    is the only class a direct confirm call may complete. Any other class
+    means crud/payment_provider.py:dispatch_payment_to_provider already
+    asserted a real PSP rail is handling this payment -- only that
+    function's own webhook-driven ingest_provider_callback (which always
+    acts as the system/super_admin, see get_system_admin) may complete it
+    from here on; a regular admin (including the obligation's own owning
+    Host) calling this route directly for it is exactly the unaudited
+    'mark paid myself' shortcut AC-27 prohibits."""
     if payment.status == "SUCCEEDED":
         return payment
     if payment.status == "FAILED":
         raise HTTPException(status.HTTP_409_CONFLICT, "Payment already failed")
+    if payment.method_class != "EXTERNAL" and admin.role != "super_admin":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"This payment was dispatched via a real payment provider ({payment.method_class}) -- it can only be "
+            "completed through that provider's own callback, not a direct confirmation",
+        )
 
     requested_total = _round2(sum(a.amount for a in data.allocations))
     if requested_total != _round2(payment.amount):
@@ -357,7 +434,8 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
             # (the only one this platform issues today); custody_model and the
             # policy snapshot are resolved from the market policy pack, not
             # hard-coded, so a new jurisdiction is a data row, not a code change.
-            policy = resolve_market_policy(db)
+            deposit_room = obligation.agreement.offer.listing.room if obligation.agreement else obligation.occupancy.room
+            policy = resolve_market_policy(db, deposit_room.property.jurisdiction_code)
             calculation_snapshot = to_policy_snapshot(policy)
             calculation_snapshot.update({
                 "amount": float(obligation.amount),
@@ -409,6 +487,112 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
 
     db.refresh(payment)
     return payment
+
+
+def create_autopay_mandate(db: Session, guest: Guest, occupancy: Occupancy) -> AutopayMandate:
+    """ZR-ENG-CLR-005 Section 6.1-E's 'Separate explicit consent' -- the
+    calling guest is always the payer/consenting party; nobody can create a
+    mandate on another payer's behalf through this path (a genuine
+    authorized-third-party-payer mandate would need its own, separately
+    authenticated consent flow this build doesn't have yet). consent_snapshot
+    freezes the schedule terms the payer actually saw at consent time --
+    Section 1.2's 'versioned and reproducible later' invariant, applied to
+    autopay the same way calculation_snapshot already applies it to deposits."""
+    if occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only set up autopay for your own tenancy")
+    if occupancy.status == "ENDED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot set up autopay for an ended tenancy")
+    existing = db.scalar(
+        select(AutopayMandate).where(AutopayMandate.occupancy_id == occupancy.id, AutopayMandate.status == "ACTIVE")
+    )
+    if existing is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "An active autopay mandate already exists for this tenancy")
+
+    schedule = db.scalar(
+        select(PaymentSchedule).where(PaymentSchedule.agreement_id == occupancy.offer.agreement.id, PaymentSchedule.status == "ACTIVE")
+    ) if occupancy.offer.agreement else None
+    snapshot = {
+        "cadence": schedule.cadence if schedule else "MONTHLY",
+        "amount": float(schedule.amount) if schedule else None,
+        "currency": schedule.currency if schedule else "INR",
+    }
+    provider_ref = stripe_client.create_setup_intent(
+        customer_email=guest.email, metadata={"occupancy_id": str(occupancy.id), "guest_id": guest.id},
+    )
+    mandate = AutopayMandate(
+        occupancy_id=occupancy.id, payer_guest_id=guest.id, provider_ref=provider_ref, status="ACTIVE",
+        consent_snapshot=snapshot,
+    )
+    db.add(mandate)
+    db.commit()
+    db.refresh(mandate)
+    emit_event(db, "mandate.created", "autopay_mandate", str(mandate.id), {"occupancyId": occupancy.id, "guestId": guest.id})
+    return mandate
+
+
+def revoke_autopay_mandate(db: Session, mandate: AutopayMandate, guest: Guest) -> AutopayMandate:
+    """AC-29: 'Revoking autopay does not cancel future rent obligations' --
+    this only ever flips status; it must never touch Obligation/
+    PaymentSchedule rows. AC-28: independently auditable -- revoked_at plus
+    the domain event below stand on their own regardless of who resolves
+    (or never resolves) the still-due obligations this stops auto-charging."""
+    if mandate.payer_guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This mandate does not belong to you")
+    if mandate.status != "ACTIVE":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This mandate is not active (status: {mandate.status})")
+    mandate.status = "REVOKED"
+    mandate.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(mandate)
+    emit_event(db, "mandate.revoked", "autopay_mandate", str(mandate.id), {"occupancyId": mandate.occupancy_id})
+    return mandate
+
+
+def list_autopay_mandates_for_guest(db: Session, guest: Guest) -> list[AutopayMandate]:
+    return list(
+        db.scalars(select(AutopayMandate).where(AutopayMandate.payer_guest_id == guest.id).order_by(AutopayMandate.created_at.desc()))
+    )
+
+
+def get_autopay_mandate_or_404(db: Session, mandate_id: int) -> AutopayMandate:
+    mandate = db.get(AutopayMandate, mandate_id)
+    if not mandate:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Autopay mandate not found")
+    return mandate
+
+
+def process_autopay_charge(db: Session, obligation: Obligation, admin: AdminUser) -> SimulatedPayment:
+    """QA-27/Section 10.5's actual auto-pull -- there is no background
+    scheduler anywhere in this stack (see crud/occupancy.py:generate_next_
+    rent_obligation's own docstring for the same honesty about recurring
+    rent generation itself), so this is the real charge-execution code path
+    an admin triggers manually today and a real cron would call per due
+    obligation once one exists. Requires an ACTIVE AutopayMandate for the
+    obligation's occupancy -- revoking one only ever blocks this path, never
+    the obligation (AC-29)."""
+    if obligation.obligation_type != "RENT":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Autopay only applies to RENT obligations")
+    if obligation.status != "PENDING":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This obligation is not awaiting payment (status: {obligation.status})")
+    occupancy = _occupancy_for_obligation(db, obligation)
+    if occupancy is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Could not resolve the occupancy behind this obligation")
+    mandate = db.scalar(
+        select(AutopayMandate).where(AutopayMandate.occupancy_id == occupancy.id, AutopayMandate.status == "ACTIVE")
+    )
+    if mandate is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "No active autopay mandate for this tenancy")
+
+    payment = create_payment_intent(
+        db,
+        SimulatedPaymentCreate(
+            guest_id=occupancy.guest_id, amount=float(obligation.amount), currency=obligation.currency,
+            idempotency_key=f"autopay-{mandate.id}-{obligation.id}", payer_guest_id=mandate.payer_guest_id,
+        ),
+    )
+    return confirm_payment(
+        db, payment, PaymentConfirm(allocations=[PaymentAllocationInput(obligation_id=obligation.id, amount=float(obligation.amount))]), admin,
+    )
 
 
 def _generate_payment_receipt_pdf(payment: SimulatedPayment, receipt_number: str) -> bytes:
@@ -1187,7 +1371,57 @@ def _period_as_of(period_key: str) -> date:
         return date.today()
 
 
+def _jurisdiction_for_obligation(obligation: Obligation) -> str:
+    """Same room-resolution path as run_payout's own _room_for -- shared here so
+    every fee-policy lookup keyed off a payout/obligation (run_payout, service
+    fee invoices, refund fee reversal) resolves the room's real jurisdiction
+    instead of silently defaulting to DEFAULT_JURISDICTION ("IN")."""
+    room = obligation.agreement.offer.listing.room if obligation.agreement else obligation.occupancy.room
+    return room.property.jurisdiction_code
+
+
+def _occupancy_for_obligation(db: Session, obligation: Obligation) -> Occupancy | None:
+    """PSP_DEFERRED_PAYOUT gate: same agreement-or-occupancy resolution as
+    _listing_and_guest_for_obligation, extended all the way to the Occupancy
+    itself -- the initial RENT obligation only carries agreement_id (the
+    Occupancy already exists by the time this obligation is PAID, just never
+    linked back onto this row), every recurring one carries occupancy_id
+    directly."""
+    if obligation.occupancy_id:
+        return obligation.occupancy
+    if obligation.agreement:
+        return db.scalar(select(Occupancy).where(Occupancy.offer_id == obligation.agreement.offer_id))
+    return None
+
+
+def _occupancy_active_for_obligation(db: Session, obligation: Obligation) -> bool:
+    occupancy = _occupancy_for_obligation(db, obligation)
+    return occupancy is not None and occupancy.status == "ACTIVE"
+
+
 def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> PayoutRecord:
+    return _resolve_payout(db, party, admin, period_key, existing_payout=None)
+
+
+def retry_payout(db: Session, payout: PayoutRecord, admin: AdminUser) -> PayoutRecord:
+    """ZR-ENG-CLR-005 Section 6.4/16.1 'Retry permitted payout' / QA-23 --
+    re-evaluates a HELD or FAILED payout's own eligibility gates in place,
+    against whatever's changed since the original run (a beneficiary now
+    verified, a Stripe Connect account now onboarded, a habitability
+    incident now resolved, ...). This never creates a second PayoutRecord
+    for the same (party_id, period_key) -- the underlying obligations were
+    never linked to this payout while it stayed HELD (see run_payout's own
+    'if not held_reason' branch below), so they're still exactly as
+    available to re-match as they were the first time."""
+    party = db.get(Party, payout.party_id)
+    if party is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Party not found")
+    if payout.status not in ("HELD", "FAILED"):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Only a HELD or FAILED payout can be retried (current status: {payout.status})")
+    return _resolve_payout(db, party, admin, payout.period_key, existing_payout=payout)
+
+
+def _resolve_payout(db: Session, party: Party, admin: AdminUser, period_key: str, *, existing_payout: PayoutRecord | None) -> PayoutRecord:
     assert_provider_access(db, admin, party.id, roles=("provider_finance", "provider_owner_admin"))
 
     candidates = db.scalars(
@@ -1202,6 +1436,17 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
         return obligation.occupancy.room
 
     matched = [o for o in candidates if _room_for(o).property.owner_party_id == party.id]
+    # Section 15.2 'Ledger balances are calculated/maintained ... with currency
+    # segregation': a party renting in more than one jurisdiction could have
+    # PAID rent obligations in different currencies pending payout for the same
+    # party+period -- summing them as raw numbers below would silently add GBP
+    # to INR. PayoutRecord/the (party_id, period_key) uniqueness only support one
+    # currency per payout, so this run pays out whichever currency the first
+    # matched obligation is in and leaves any other-currency obligations
+    # unmatched (still PAID, payout_id null) for a future run.
+    if matched:
+        payout_currency = matched[0].currency
+        matched = [o for o in matched if o.currency == payout_currency]
     # ZR-ENG-CLR-005 AC-09/AC-34: fee rate resolved from the effective-dated
     # market policy pack, not a hard-coded constant -- same resolver deposit
     # collection already uses (see confirm_payment above). Resolved as of the
@@ -1209,31 +1454,76 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
     # run late (after a fee-policy change) must still apply the rate that was
     # actually in effect when this rent was earned, not retroactively apply a
     # rate change (AC-34). See _period_as_of below.
-    policy = resolve_market_policy(db, as_of=_period_as_of(period_key))
+    policy = resolve_market_policy(
+        db, _jurisdiction_for_obligation(matched[0]) if matched else DEFAULT_JURISDICTION, as_of=_period_as_of(period_key),
+    )
 
     # ZR-ENG-CLR-005 AC-20/AC-35: fail closed rather than silently defaulting
     # to direct settlement or Zoiko custody -- a market pack resolving to a
-    # funds-flow profile this build can't actually execute (no real PSP/
-    # trust partner behind PSP_DEFERRED_PAYOUT/TRUST_ESCROW_CUSTODY;
-    # ZOIKO_REGULATED_CUSTODY is off-by-default and needs separate licensing
-    # approval) must refuse the payout outright, not create a HELD row for a
-    # configuration that was never actually supported.
+    # funds-flow profile this build can't actually execute (no real trust
+    # partner behind TRUST_ESCROW_CUSTODY; ZOIKO_REGULATED_CUSTODY is
+    # off-by-default and needs separate licensing approval) must refuse the
+    # payout outright, not create a HELD row for a configuration that was
+    # never actually supported.
     if policy.funds_flow_profile not in SUPPORTED_FUNDS_FLOW_PROFILES:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"Funds-flow profile '{policy.funds_flow_profile}' is not supported by this build -- payout blocked",
         )
 
+    # ZR-ENG-CLR-005 Section 9.1: PSP_DEFERRED_PAYOUT's whole point is that
+    # money stays parked in Zoiko's own Stripe balance (never even offered
+    # to the host) until a real release event fires -- move-in confirmed is
+    # the only such event this build tracks. An obligation whose occupancy
+    # is still PENDING_MOVE_IN is excluded from THIS run (payout_id stays
+    # null, picked up automatically the first run after move-in), never
+    # blocked outright the way an unsupported profile is above.
+    deferred_pending_move_in = 0
+    if policy.funds_flow_profile == "PSP_DEFERRED_PAYOUT":
+        before = len(matched)
+        matched = [o for o in matched if _occupancy_active_for_obligation(db, o)]
+        deferred_pending_move_in = before - len(matched)
+
     gross = _round2(sum(o.amount for o in matched))
     fee = _round2(gross * float(policy.platform_fee_rate))
     net = _round2(gross - fee)
 
-    # ZR-ENG-CLR-005 AC-19/AC-30/Section 9.2: "Beneficiary identity and payout
-    # account are verified to required level" -- a party with no currently
-    # VERIFIED PayoutBeneficiary (never submitted one, or its strong-auth
-    # confirmation never happened) cannot be paid out, checked before any of
-    # the other gates below.
-    held_reason = "" if get_verified_payout_beneficiary(db, party.id) else "No verified payout beneficiary on file for this provider"
+    # ZR-ENG-CLR-005 AC-19/AC-30/Section 9.2 + ZR-ENG-CLR-012 Section 7's
+    # PAYMENT_ONBOARDING requirement type ("Payout account and PSP/KYC
+    # requirements... owner: Host/payee"): which account model is the actual
+    # gate depends on the resolved funds-flow profile, never a hard-coded
+    # choice -- DIRECT_SETTLEMENT markets still gate on the legacy verified
+    # bank-details PayoutBeneficiary; PSP_DEFERRED_PAYOUT markets gate on a
+    # completed real Stripe Connect onboarding instead, since a bank detail
+    # record was never the account that would actually receive this money.
+    if policy.funds_flow_profile == "PSP_DEFERRED_PAYOUT":
+        stripe_account = host_stripe_account_crud.get_for_party(db, party.id)
+        held_reason = "" if (stripe_account is not None and stripe_account.payouts_enabled) else (
+            "Stripe Connect payout onboarding (PAYMENT_ONBOARDING) is required by this jurisdiction's "
+            "funds-flow profile and is not yet complete"
+        )
+    else:
+        held_reason = "" if get_verified_payout_beneficiary(db, party.id) else "No verified payout beneficiary on file for this provider"
+
+    if not held_reason and not matched and deferred_pending_move_in:
+        held_reason = (
+            f"{deferred_pending_move_in} obligation(s) are deferred under PSP_DEFERRED_PAYOUT until move-in "
+            "is confirmed for the underlying occupancy"
+        )
+
+    # ZR-ENG-CLR-005 Section 6.4: an admin-placed operational hold
+    # (crud/finance.py:create_financial_hold) blocks this party's payout the
+    # same way every other gate here does -- the one gate a human chooses
+    # to open rather than the system detecting it.
+    if not held_reason:
+        manual_hold = db.scalar(
+            select(FinancialHold).where(
+                FinancialHold.source_type == "party", FinancialHold.source_id == str(party.id),
+                FinancialHold.status == "OPEN", FinancialHold.reason_code == "MANUAL_OPERATIONAL_HOLD",
+            )
+        )
+        if manual_hold is not None:
+            held_reason = f"An operational hold is open on this provider: {manual_hold.description}"
 
     if not held_reason:
         for obligation in matched:
@@ -1313,20 +1603,32 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
                 if open_recoveries and outstanding > 0:
                     auto_offset_amount = min(outstanding, net)
 
-    payout = PayoutRecord(
-        party_id=party.id,
-        period_key=period_key,
-        amount=net,
-        status="HELD" if held_reason else "PAID",
-        hold_reason=held_reason,
-        recovery_offset_amount=auto_offset_amount,
-    )
-    db.add(payout)
-    try:
+    if existing_payout is None:
+        payout = PayoutRecord(
+            party_id=party.id,
+            period_key=period_key,
+            amount=net,
+            currency=matched[0].currency if matched else "INR",
+            status="HELD" if held_reason else "PAID",
+            hold_reason=held_reason,
+            recovery_offset_amount=auto_offset_amount,
+        )
+        db.add(payout)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(status.HTTP_409_CONFLICT, "A payout has already been run for this provider and period")
+    else:
+        # retry_payout's path -- update the same row in place rather than
+        # creating a second one for this (party_id, period_key).
+        payout = existing_payout
+        payout.amount = net
+        payout.currency = matched[0].currency if matched else "INR"
+        payout.status = "HELD" if held_reason else "PAID"
+        payout.hold_reason = held_reason
+        payout.recovery_offset_amount = auto_offset_amount
         db.flush()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "A payout has already been run for this provider and period")
 
     if not held_reason:
         payout.paid_at = datetime.now(timezone.utc)
@@ -1407,6 +1709,21 @@ def run_payout(db: Session, party: Party, admin: AdminUser, period_key: str) -> 
                         hold.resolved_at = datetime.now(timezone.utc)
                         hold.resolution_notes = f"Automatically resolved -- fully offset against payout #{payout.id}"
             disbursed = _round2(net - auto_offset_amount)
+
+        # ZR-ENG-CLR-005 Section 9.1 PSP_DEFERRED_PAYOUT/'separate charges and
+        # transfers': the actual money movement out of Zoiko's own Stripe
+        # balance into the host's Connected Account, only for a party that has
+        # completed Stripe Connect onboarding (see crud/host_stripe_account.py).
+        # A party with no Stripe account, or one still ONBOARDING, keeps
+        # exactly the pre-existing simulated behavior -- this never blocks or
+        # changes the ledger/notification logic above, it only additionally
+        # records a real transfer id when one was actually possible.
+        stripe_account = host_stripe_account_crud.get_for_party(db, party.id)
+        if stripe_account is not None and stripe_account.payouts_enabled and disbursed > 0:
+            payout.stripe_transfer_id = stripe_client.create_transfer(
+                amount=disbursed, currency=payout.currency, destination_account_id=stripe_account.stripe_account_id,
+                metadata={"payout_id": str(payout.id), "period_key": period_key},
+            )
 
         if auto_offset_amount > 0:
             message = (
@@ -1619,7 +1936,8 @@ def get_or_create_service_fee_invoice(db: Session, payout: PayoutRecord) -> Serv
     if payout.service_fee_invoice is not None:
         return payout.service_fee_invoice
 
-    policy = resolve_market_policy(db, as_of=_period_as_of(payout.period_key))
+    jurisdiction = _jurisdiction_for_obligation(payout.obligations[0]) if payout.obligations else DEFAULT_JURISDICTION
+    policy = resolve_market_policy(db, jurisdiction, as_of=_period_as_of(payout.period_key))
     gross = _round2(sum(o.amount for o in payout.obligations))
     net = _round2(payout.amount)
     fee_amount = _round2(gross - net)
@@ -1807,6 +2125,16 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
                     db, "host_recovery.created", "host_recovery", str(recovery.id),
                     {"partyId": party_id, "amount": float(recovery.amount), "refundRequestId": refund.id},
                 )
+                # ZR-ENG-CLR-006 Section 15 waterfall tier 3: try to claw the
+                # money straight back from the host's own PSP balance before
+                # this recovery ever has to wait on tier 4 (a future payout
+                # large enough to offset it, run_payout's own automation) or
+                # an admin's manual record_host_recovery_progress. A no-op,
+                # never an error, when tier 3 doesn't apply yet (no Stripe
+                # Connect account, or no PAID payout with a transfer to
+                # reverse) -- the recovery simply stays OPEN for the later
+                # tiers, exactly as it did before this tier existed.
+                _execute_psp_transfer_reversal(db, recovery, admin)
 
     refund.status = "COMPLETED"
     refund.decided_by_admin_id = admin.id
@@ -1847,7 +2175,7 @@ def reverse_platform_fee_for_refund(db: Session, obligation: Obligation, refund:
     payout = db.get(PayoutRecord, obligation.payout_id)
     if payout is None or payout.status != "PAID":
         return
-    policy = resolve_market_policy(db, as_of=_period_as_of(payout.period_key))
+    policy = resolve_market_policy(db, _jurisdiction_for_obligation(obligation), as_of=_period_as_of(payout.period_key))
     fee_reversal = _round2(float(refund.amount) * float(policy.platform_fee_rate))
     if fee_reversal <= 0:
         return
@@ -2084,16 +2412,30 @@ def run_reconciliation(db: Session, admin: AdminUser) -> ReconciliationRun:
     total_allocated = _round2(sum(a.amount_allocated for a in db.scalars(select(PaymentAllocation))))
     total_payouts = _round2(sum(p.amount for p in db.scalars(select(PayoutRecord).where(PayoutRecord.status == "PAID"))))
     total_refunds = _round2(sum(r.amount for r in db.scalars(select(RefundRequest).where(RefundRequest.status == "COMPLETED"))))
+    # A lost chargeback (crud/finance.py:resolve_dispute) reverses collected
+    # money the same way a refund does, but posts a raw negative
+    # PaymentAllocation directly rather than a RefundRequest row -- total_refunds
+    # above never sees it. Without this, every lost chargeback permanently
+    # false-positives the aggregate check below.
+    total_chargeback_reversals = _round2(
+        sum(
+            d.amount or 0
+            for d in db.scalars(
+                select(DisputeCase).where(DisputeCase.category == "CHARGEBACK", DisputeCase.chargeback_outcome == "LOST")
+            )
+        )
+    )
 
     # ZR-ENG-CLR-005 Section 19.2: each failed check becomes a (reason_code,
     # severity, message) triple -- the message still feeds the plain-string
     # `mismatches` list exactly as before, but each triple also becomes a real,
     # queryable, resolvable FinancialHold row below.
     failed_checks: list[tuple[str, str, str]] = []
-    if abs(total_allocated - (total_payments - total_refunds)) > 0.01:
+    expected_allocated = _round2(total_payments - total_refunds - total_chargeback_reversals)
+    if abs(total_allocated - expected_allocated) > 0.01:
         failed_checks.append((
             "AGGREGATE_MISMATCH", "MEDIUM",
-            f"Allocated total ({total_allocated}) does not match payments minus refunds ({_round2(total_payments - total_refunds)})",
+            f"Allocated total ({total_allocated}) does not match payments minus refunds and chargeback reversals ({expected_allocated})",
         ))
 
     # ZR-ENG-CLR-005: the ledger foundation's own two checks, layered on top of
@@ -2139,6 +2481,7 @@ def run_reconciliation(db: Session, admin: AdminUser) -> ReconciliationRun:
             "totalAllocated": total_allocated,
             "totalPayouts": total_payouts,
             "totalRefunds": total_refunds,
+            "totalChargebackReversals": total_chargeback_reversals,
             "ledgerTrialBalance": trial_balance,
             "totalLedgerCollected": total_ledger_collected,
         },
@@ -2161,6 +2504,35 @@ def run_reconciliation(db: Session, admin: AdminUser) -> ReconciliationRun:
 
 def list_reconciliation_runs(db: Session) -> list[ReconciliationRun]:
     return list(db.scalars(select(ReconciliationRun).order_by(ReconciliationRun.run_at.desc())))
+
+
+def create_financial_hold(db: Session, admin: AdminUser, data: FinancialHoldCreate) -> FinancialHold:
+    """ZR-ENG-CLR-005 Section 6.4's admin console 'place ... authorized
+    operational hold' action -- the create half FinancialHold never had
+    (only resolve_financial_hold existed, for the system-generated
+    reconciliation/negative-balance rows). Actually gates run_payout (see
+    that function's own beneficiary/Stripe-onboarding gate check) rather
+    than being a purely informational record -- a Super Admin freezing a
+    party's payouts here has real teeth, not just a note in a queue."""
+    party = db.get(Party, data.party_id)
+    if party is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Party not found")
+    existing = db.scalar(
+        select(FinancialHold).where(
+            FinancialHold.source_type == "party", FinancialHold.source_id == str(data.party_id),
+            FinancialHold.status == "OPEN",
+        )
+    )
+    if existing is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This party already has an open operational hold")
+    hold = FinancialHold(
+        source_type="party", source_id=str(data.party_id), reason_code="MANUAL_OPERATIONAL_HOLD",
+        severity=data.severity, description=data.description,
+    )
+    db.add(hold)
+    db.commit()
+    db.refresh(hold)
+    return hold
 
 
 def list_financial_holds(db: Session, status: str | None = None) -> list[FinancialHold]:
@@ -2214,6 +2586,83 @@ def get_host_recovery_or_404(db: Session, recovery_id: int) -> HostRecovery:
     recovery = db.get(HostRecovery, recovery_id)
     if not recovery:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Host recovery not found")
+    return recovery
+
+
+def _execute_psp_transfer_reversal(db: Session, recovery: HostRecovery, admin: AdminUser) -> bool:
+    """ZR-ENG-CLR-006 Section 15 waterfall tier 3's actual mechanics -- no
+    permission check of its own (the caller, either decide_refund's own
+    automatic cascade or attempt_psp_recovery's admin-facing wrapper below,
+    has already established the admin's standing). Reverses against the
+    party's single most recent PAID payout that actually moved money via a
+    real Stripe Transfer, up to that payout's own amount -- real Stripe
+    itself enforces the true per-transfer reversal ceiling server-side when
+    credentials are configured; this stays a best-effort, non-blocking tier
+    like every simulated provider path elsewhere in this codebase when they
+    aren't. Returns whether a reversal actually happened."""
+    outstanding = _round2(float(recovery.amount) - float(recovery.recovered_amount))
+    if recovery.status != "OPEN" or outstanding <= 0:
+        return False
+
+    stripe_account = host_stripe_account_crud.get_for_party(db, recovery.party_id)
+    if stripe_account is None or not stripe_account.payouts_enabled:
+        return False
+
+    payout = db.scalar(
+        select(PayoutRecord)
+        .where(
+            PayoutRecord.party_id == recovery.party_id, PayoutRecord.currency == recovery.currency,
+            PayoutRecord.status == "PAID", PayoutRecord.stripe_transfer_id.is_not(None),
+        )
+        .order_by(PayoutRecord.paid_at.desc())
+    )
+    if payout is None:
+        return False
+
+    reversed_amount = min(outstanding, float(payout.amount))
+    recovery.psp_reversal_id = stripe_client.reverse_transfer(
+        transfer_id=payout.stripe_transfer_id, amount=reversed_amount, currency=recovery.currency,
+        metadata={"host_recovery_id": str(recovery.id), "payout_id": str(payout.id)},
+    )
+    recovery.recovered_amount = _round2(float(recovery.recovered_amount) + reversed_amount)
+    recovery.recovery_method = "PSP_BALANCE_RECOVERY"
+    if recovery.recovered_amount >= float(recovery.amount) - 0.01:
+        recovery.status = "RECOVERED"
+        recovery.resolved_at = datetime.now(timezone.utc)
+        emit_event(
+            db, "host_recovery.completed", "host_recovery", str(recovery.id),
+            {"status": recovery.status, "recoveredAmount": float(recovery.recovered_amount)},
+        )
+        hold = db.get(FinancialHold, recovery.financial_hold_id)
+        if hold is not None and hold.status == "OPEN":
+            hold.status = "RESOLVED"
+            hold.resolved_by_admin_id = admin.id
+            hold.resolved_at = datetime.now(timezone.utc)
+            hold.resolution_notes = f"Automatically resolved -- fully recovered via Stripe transfer reversal on recovery #{recovery.id}"
+    db.flush()
+    return True
+
+
+def attempt_psp_recovery(db: Session, recovery: HostRecovery, admin: AdminUser) -> HostRecovery:
+    """ZR-ENG-CLR-006 Section 15 waterfall tier 3's admin-facing retry --
+    decide_refund already tries this automatically the moment a recovery
+    opens; this exists for the realistic case where tier 3 didn't apply YET
+    (the host had no Stripe Connect account, or no completed payout to
+    reverse against at that moment) but does now, so an admin isn't stuck
+    waiting on tier 4 or falling back to an out-of-band DIRECT_COLLECTION
+    when a real PSP reversal has become possible in the meantime."""
+    assert_provider_access(db, admin, recovery.party_id, roles=("provider_finance", "provider_owner_admin"))
+    if recovery.status != "OPEN":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This recovery has already been {recovery.status.lower()}")
+    reversed_any = _execute_psp_transfer_reversal(db, recovery, admin)
+    if not reversed_any:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "No PSP recovery is currently possible -- the party has no payouts-enabled Stripe Connect "
+            "account, or no PAID payout with a real transfer to reverse against",
+        )
+    db.commit()
+    db.refresh(recovery)
     return recovery
 
 

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.deps import get_current_user
 from app.core.receipt_documents import resolve_receipt_document_path
 from app.core.rent_invoice_documents import resolve_rent_invoice_document_path
+from app.crud import finance as finance_crud
 from app.crud.finance import (
     annotate_payment_context,
     get_obligation_or_404,
@@ -13,12 +14,52 @@ from app.crud.finance import (
     get_payment_or_404,
 )
 from app.crud.guest import get_guest_for_user
+from app.crud.occupancy import get_occupancy_or_404
 from app.db.session import get_db
 from app.models.finance import SimulatedPayment
 from app.models.user_account import UserAccount
-from app.schemas.finance import SimulatedPaymentRead
+from app.schemas.finance import AutopayMandateCreate, AutopayMandateRead, SimulatedPaymentRead
 
 router = APIRouter(prefix="/api/users/payments", tags=["user-payments"], dependencies=[Depends(get_current_user)])
+
+
+def _get_own_guest_or_403(db: Session, user: UserAccount):
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No guest record for this account")
+    return guest
+
+
+@router.post("/mandates", response_model=AutopayMandateRead, status_code=status.HTTP_201_CREATED)
+def create_autopay_mandate(
+    payload: AutopayMandateCreate,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 6.1-E/16.1 POST /mandates."""
+    guest = _get_own_guest_or_403(db, user)
+    occupancy = get_occupancy_or_404(db, payload.occupancy_id)
+    mandate = finance_crud.create_autopay_mandate(db, guest, occupancy)
+    return mandate
+
+
+@router.get("/mandates", response_model=list[AutopayMandateRead])
+def list_my_autopay_mandates(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    guest = _get_own_guest_or_403(db, user)
+    return finance_crud.list_autopay_mandates_for_guest(db, guest)
+
+
+@router.delete("/mandates/{mandate_id}", response_model=AutopayMandateRead)
+def revoke_autopay_mandate(
+    mandate_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-005 Section 16.1 DELETE /mandates/{id}: 'Revoke future
+    autopay; preserves obligations' (AC-29)."""
+    guest = _get_own_guest_or_403(db, user)
+    mandate = finance_crud.get_autopay_mandate_or_404(db, mandate_id)
+    return finance_crud.revoke_autopay_mandate(db, mandate, guest)
 
 
 @router.get("", response_model=list[SimulatedPaymentRead])

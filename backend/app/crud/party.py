@@ -33,6 +33,20 @@ def get_or_create_default_party(db: Session, admin: AdminUser) -> Party:
     return party
 
 
+def set_party_jurisdiction(db: Session, party: Party, jurisdiction: str) -> Party:
+    """The jurisdiction a provider's properties/listings resolve their MarketRelease
+    against (see crud/listing.py:_resolve_market_release_id_for_room) -- defaults to
+    "IN" at the model level with no caller ever changing it, so every party was
+    previously stuck on that one value with no way to onboard a provider under a
+    different jurisdiction (e.g. the England market release the Agreement Engine
+    actually supports -- see services/agreement_profile.py). Existing listings keep
+    whatever market_release_id they already resolved; only new listings created after
+    this change pick up the new jurisdiction."""
+    party.jurisdiction = jurisdiction
+    db.flush()
+    return party
+
+
 def assert_provider_access(db: Session, admin: AdminUser, party_id: int, roles: tuple[str, ...] | None = None) -> None:
     """Authorizes a provider-side action against the Party/Membership model -- the
     real organizational relationship -- rather than Listing.owner_id (a direct,

@@ -28,7 +28,7 @@ def _submit_payload(party_id: int, **overrides) -> dict:
         "accountHolderName": "Jane Landlord",
         "bankName": "Test Bank of India",
         "accountNumber": "000123456789",
-        "ifscCode": "test0123456",
+        "bankIdentifierCode": "test0123456",
     }
     payload.update(overrides)
     return payload
@@ -37,7 +37,7 @@ def _submit_payload(party_id: int, **overrides) -> dict:
 def _submit_payload_dict(party_id: int) -> dict:
     return {
         "party_id": party_id, "account_holder_name": "Jane Landlord", "bank_name": "Test Bank of India",
-        "account_number": "000123456789", "ifsc_code": "TEST0123456",
+        "account_number": "000123456789", "bank_identifier_code": "TEST0123456",
     }
 
 
@@ -55,7 +55,7 @@ class TestSubmitPayoutBeneficiary:
         body = r.json()
         assert body["status"] == "PENDING_VERIFICATION"
         assert body["accountNumberLast4"] == "6789"
-        assert body["ifscCode"] == "TEST0123456"
+        assert body["bankIdentifierCode"] == "TEST0123456"
         assert "accountNumber" not in body
         assert "code" not in body
 
@@ -76,7 +76,7 @@ class TestSubmitPayoutBeneficiary:
         )
         assert r.status_code == 400, r.text
 
-    def test_rejects_a_malformed_ifsc_code(self, client, db_session: Session):
+    def test_rejects_a_malformed_bank_identifier_code(self, client, db_session: Session):
         owner_party = Party(party_type="provider", status="active", jurisdiction="IN")
         db_session.add(owner_party)
         db_session.commit()
@@ -84,10 +84,21 @@ class TestSubmitPayoutBeneficiary:
 
         r = client.post(
             "/api/finance/payout-beneficiaries",
-            json=_submit_payload(owner_party.id, ifscCode="NOTANIFSC"),
+            json=_submit_payload(owner_party.id, bankIdentifierCode="NOTANIFSC"),
             cookies=auth_admin_cookie(admin),
         )
         assert r.status_code == 400, r.text
+
+    def test_rejects_registration_for_a_jurisdiction_with_no_configured_bank_format(self, client, db_session: Session):
+        owner_party = Party(party_type="provider", status="active", jurisdiction="Nowhereland")
+        db_session.add(owner_party)
+        db_session.commit()
+        admin = _make_admin(db_session, email="benef-nojurisdiction@test.com", role="super_admin")
+
+        r = client.post(
+            "/api/finance/payout-beneficiaries", json=_submit_payload(owner_party.id), cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 409, r.text
 
 
 class TestConfirmPayoutBeneficiary:
@@ -101,7 +112,7 @@ class TestConfirmPayoutBeneficiary:
             db_session, owner_party, admin,
             PayoutBeneficiarySubmit(**{
                 "party_id": owner_party.id, "account_holder_name": "First Holder", "bank_name": "First Bank",
-                "account_number": "111122223333", "ifsc_code": "TEST0111111",
+                "account_number": "111122223333", "bank_identifier_code": "TEST0111111",
             }),
         )
         confirmed_first = beneficiary_crud.confirm_payout_beneficiary(db_session, first, admin, first_code)
@@ -111,7 +122,7 @@ class TestConfirmPayoutBeneficiary:
             db_session, owner_party, admin,
             PayoutBeneficiarySubmit(**{
                 "party_id": owner_party.id, "account_holder_name": "Second Holder", "bank_name": "Second Bank",
-                "account_number": "444455556666", "ifsc_code": "TEST0222222",
+                "account_number": "444455556666", "bank_identifier_code": "TEST0222222",
             }),
         )
         r = client.post(

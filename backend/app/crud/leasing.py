@@ -306,7 +306,7 @@ def add_offer_terms(db: Session, offer: Offer, admin: AdminUser, data: OfferTerm
     # ZR-ENG-CLR-002 AC-02: the quote engine must reject any deposit amount
     # above the resolved market-pack cap -- not a Zoiko-invented number, and
     # not something the UI can silently bypass by omission.
-    policy = resolve_market_policy(db)
+    policy = resolve_market_policy(db, offer.listing.room.property.jurisdiction_code)
     max_deposit = round(data.monthly_rent * float(policy.deposit_max_rent_multiple), 2)
     if data.deposit_amount > max_deposit:
         raise HTTPException(
@@ -473,10 +473,26 @@ def _release_room_hold_for_offer(db: Session, offer: Offer, reason: str, correla
     )
 
 
+_OFFER_ALLOWED_FROM_STATUSES: dict[str, tuple[str, ...]] = {
+    "SENT": ("DRAFT",),
+    # DRAFT is included alongside SENT for the walk-in path: a guest with no
+    # Zoiko account (recorded in person, nothing to "send" online) can be
+    # accepted/declined directly -- see tests/test_notification_coverage.py's
+    # walk-in offer case.
+    "ACCEPTED": ("DRAFT", "SENT"),
+    "DECLINED": ("DRAFT", "SENT"),
+}
+
+
 def set_offer_status(
     db: Session, offer: Offer, admin: AdminUser, new_status: str, correlation_id: str = "", override_reason: str = "",
 ) -> Offer:
     assert_provider_access(db, admin, party_id_for_listing(offer.listing))
+    allowed_from = _OFFER_ALLOWED_FROM_STATUSES.get(new_status)
+    if allowed_from is not None and offer.status not in allowed_from:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"Cannot move an offer from '{offer.status}' to '{new_status}'",
+        )
     if new_status in ("ACCEPTED", "DECLINED"):
         _assert_renter_has_no_account(db, offer.guest_id, action="accept or decline this offer")
     if new_status == "ACCEPTED":
@@ -758,6 +774,7 @@ def create_agreement(
         agreement_id=agreement.id,
         cadence=latest_terms.cadence,
         custom_interval_days=latest_terms.custom_interval_days,
+        currency=listing.currency,
         amount=first_rent_amount,
         first_due=latest_terms.start_date,
         anchor_day=latest_terms.start_date.day,
@@ -770,6 +787,7 @@ def create_agreement(
             obligation_type="RENT",
             money_plane=OBLIGATION_TYPE_TO_PLANE["RENT"],
             amount=first_rent_amount,
+            currency=listing.currency,
             due_date=latest_terms.start_date,
             agreement_id=agreement.id,
             schedule_id=schedule.id,
@@ -780,6 +798,7 @@ def create_agreement(
             obligation_type="DEPOSIT",
             money_plane=OBLIGATION_TYPE_TO_PLANE["DEPOSIT"],
             amount=latest_terms.deposit_amount,
+            currency=listing.currency,
             due_date=latest_terms.start_date,
             agreement_id=agreement.id,
         )

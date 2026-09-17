@@ -8,7 +8,6 @@ moves money."""
 from __future__ import annotations
 
 import hashlib
-import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -23,10 +22,10 @@ from app.models.admin_user import AdminUser
 from app.models.finance import PayoutBeneficiary
 from app.models.party import Party
 from app.schemas.finance import PayoutBeneficiarySubmit
+from app.services.bank_identifiers import resolve_bank_identifier_format
 
 VERIFICATION_CODE_EXPIRE_MINUTES = 15
 MAX_VERIFICATION_ATTEMPTS = 5
-_IFSC_PATTERN = re.compile(r"[A-Z]{4}0[A-Z0-9]{6}")
 
 
 def _hash_code(raw_code: str) -> str:
@@ -71,9 +70,21 @@ def submit_payout_beneficiary(
     account_number = data.account_number.strip()
     if not account_number.isdigit() or not (6 <= len(account_number) <= 20):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Account number must be 6-20 digits")
-    ifsc_code = data.ifsc_code.strip().upper()
-    if not _IFSC_PATTERN.fullmatch(ifsc_code):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not a valid IFSC code")
+
+    # ZR-ENG-CLR-005 Section 5's payout data model calls this a generic
+    # "beneficiary/account token" -- the routing identifier's shape is a
+    # per-country technical fact (app/services/bank_identifiers.py), not one
+    # format hard-coded for every provider regardless of jurisdiction.
+    bank_format = resolve_bank_identifier_format(party.jurisdiction)
+    if bank_format is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"No bank identifier format configured for jurisdiction '{party.jurisdiction}' -- payout beneficiaries "
+            "cannot be registered for this jurisdiction yet",
+        )
+    bank_identifier_code = data.bank_identifier_code.strip().upper()
+    if not bank_format.pattern.fullmatch(bank_identifier_code):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Not a valid {bank_format.label}")
     account_holder_name = data.account_holder_name.strip()
     bank_name = data.bank_name.strip()
     if not account_holder_name or not bank_name:
@@ -84,7 +95,7 @@ def submit_payout_beneficiary(
         account_holder_name=account_holder_name,
         bank_name=bank_name,
         account_number_last4=account_number[-4:],
-        ifsc_code=ifsc_code,
+        bank_identifier_code=bank_identifier_code,
     )
     db.add(beneficiary)
     db.flush()

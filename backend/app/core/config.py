@@ -68,6 +68,23 @@ class Settings(BaseSettings):
     # platform-wide value (Section 20 doesn't ask for this to vary by
     # jurisdiction the way deposit/termination policy does).
     dispute_financial_hold_maker_checker_threshold: float = 10000.0
+    # ZR-ENG-CLR-005 Section 9.1: how long a dispatched payment attempt may sit
+    # PENDING at the (simulated) provider before reconcile_stalled_payments is
+    # allowed to fail it -- same on-demand-sweep shape as
+    # signature_provider_dispatch's deadline handling.
+    payment_provider_dispatch_timeout_minutes: int = 30
+
+    # Real Stripe integration -- collection (Payment Intents) and payout
+    # (Connect: Connected Accounts + Transfers). Left blank, every Stripe
+    # call site in app/services/stripe_client.py falls back to exactly the
+    # pre-existing simulated behavior (a generated id, no network call) --
+    # same "test mode with no real adapter" posture SimulatedPayment already
+    # had, just extended so setting real keys activates the real path
+    # without any other code change.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_connect_refresh_url: str = "http://localhost:3001/host/payouts/refresh"
+    stripe_connect_return_url: str = "http://localhost:3001/host/payouts/return"
     # ZR-ENG-CLR-010 Section 20/24, QA-Q19: the same "mandatory above
     # configured thresholds or for safety/legal/manual override cases" rule
     # Section 20 states for financial holds, applied to who may record an

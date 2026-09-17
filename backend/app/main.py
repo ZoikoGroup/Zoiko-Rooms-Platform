@@ -28,6 +28,7 @@ from app.api.routes import (
     market_releases,
     occupancy,
     occupancy_classification,
+    party,
     payments,
     properties,
     public,
@@ -121,6 +122,7 @@ app.include_router(search.router)
 app.include_router(market_releases.router)
 app.include_router(market_policy.router)
 app.include_router(properties.router)
+app.include_router(party.router)
 app.include_router(authority.router)
 app.include_router(identity_verification.router)
 app.include_router(room_passport.router)
@@ -128,6 +130,7 @@ app.include_router(occupancy_classification.router)
 app.include_router(leasing.router)
 app.include_router(occupancy.router)
 app.include_router(finance.router)
+app.include_router(finance.webhook_router)
 app.include_router(disputes.renter_router)
 app.include_router(disputes.host_router)
 app.include_router(disputes.admin_router)

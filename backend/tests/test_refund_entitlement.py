@@ -523,7 +523,7 @@ class TestPlatformFeeReversal:
         party_id = agreement.offer.listing.room.property.owner_party_id
         db_session.add(PayoutBeneficiary(
             party_id=party_id, account_holder_name="Test Landlord", bank_name="Test Bank",
-            account_number_last4="1234", ifsc_code="TEST0123456", status="VERIFIED",
+            account_number_last4="1234", bank_identifier_code="TEST0123456", status="VERIFIED",
             verified_at=datetime.now(timezone.utc),
         ))
         db_session.commit()

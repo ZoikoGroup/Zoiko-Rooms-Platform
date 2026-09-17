@@ -177,3 +177,14 @@ class OccupancyClassificationRead(CamelModel):
     rule_version: int
     review_state: str
     updated_at: datetime
+
+
+class PartyRead(CamelModel):
+    id: int
+    party_type: str
+    status: str
+    jurisdiction: str
+
+
+class PartyJurisdictionUpdate(CamelModel):
+    jurisdiction: str

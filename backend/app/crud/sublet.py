@@ -17,7 +17,7 @@ from app.crud import guest as guest_crud
 from app.crud import notification as notif_crud
 from app.crud.eligibility import check_room_capacity
 from app.crud.ids import new_id
-from app.crud.market_policy import resolve_market_policy, to_policy_snapshot
+from app.crud.market_policy import jurisdiction_code_for_occupancy, resolve_market_policy, to_policy_snapshot
 from app.schemas.leasing import SubletRequestRead
 
 
@@ -113,7 +113,7 @@ def submit_sublet_request(
 
     _assert_sublet_permitted(occupancy)
 
-    policy = resolve_market_policy(db)
+    policy = resolve_market_policy(db, jurisdiction_code_for_occupancy(occupancy))
 
     if arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES:
         capacity_reasons = check_room_capacity(db, occupancy.room)
@@ -301,11 +301,11 @@ def _create_co_tenancy_agreement(
 
     db.add(Obligation(
         obligation_type="RENT", money_plane=OBLIGATION_TYPE_TO_PLANE["RENT"],
-        amount=latest_terms.monthly_rent, due_date=latest_terms.start_date, agreement_id=agreement.id,
+        amount=latest_terms.monthly_rent, currency=listing.currency, due_date=latest_terms.start_date, agreement_id=agreement.id,
     ))
     db.add(Obligation(
         obligation_type="DEPOSIT", money_plane=OBLIGATION_TYPE_TO_PLANE["DEPOSIT"],
-        amount=latest_terms.deposit_amount, due_date=latest_terms.start_date, agreement_id=agreement.id,
+        amount=latest_terms.deposit_amount, currency=listing.currency, due_date=latest_terms.start_date, agreement_id=agreement.id,
     ))
     db.flush()
     return agreement
@@ -326,7 +326,7 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
     proposed_guest = _guest_for_proposed_party(db, sublet_request.proposed_renter_party_id)
     is_co_tenancy = sublet_request.arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES
     is_no_tenancy = sublet_request.arrangement_type in NO_TENANCY_ARRANGEMENT_TYPES
-    policy = resolve_market_policy(db)
+    policy = resolve_market_policy(db, jurisdiction_code_for_occupancy(sublet_request.current_occupancy))
 
     if is_no_tenancy:
         # ADDITIONAL_OCCUPANT: "permitted to reside without becoming a
@@ -357,8 +357,13 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
         sublet_request.deposit_disposition = "SEPARATE_DEPOSIT_CREATED"
         # ZR-ENG-CLR-003 Rule 4.5: the co-tenant funds their own agreement
         # directly -- there's no third party routing their rent through the
-        # original tenant.
-        sublet_request.payee_model = policy.sublet_assignment_payee_model
+        # original tenant. This is the sublease/co-tenancy payee model
+        # (market_policy.py's sublet_sublease_payee_model), distinct from
+        # sublet_assignment_payee_model below -- an assignment hands the
+        # *entire existing* tenancy's payment relationship to one new
+        # occupant, while a co-tenancy/sublease creates an independent one
+        # alongside the original.
+        sublet_request.payee_model = policy.sublet_sublease_payee_model
         requester_guest_id = sublet_request.current_occupancy.guest_id
     else:
         # Capture who to notify *before* reassigning the occupancy's guest below --

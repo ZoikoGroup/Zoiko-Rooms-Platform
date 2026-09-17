@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, text
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -14,6 +14,20 @@ OBLIGATION_TYPE_TO_PLANE = {"RENT": "OCCUPANCY", "FEE": "OCCUPANCY", "TAX": "OCC
 OBLIGATION_STATUSES = ("PENDING", "PARTIALLY_PAID", "PAID", "WAIVED", "FAILED", "REFUNDED")
 
 SIMULATED_PAYMENT_STATUSES = ("PENDING", "SUCCEEDED", "FAILED")
+# ZR-ENG-CLR-005 Section 12.1's normalized payment-method classes -- CRYPTO
+# and BUY_NOW_PAY_LATER are deliberately excluded (Section 4.8: 'disabled by
+# default' / 'disabled unless separately approved as a regulated credit
+# feature'), not merely a scope trim. EXTERNAL is the one class a host/admin
+# may confirm directly through crud/finance.py:confirm_payment's own
+# controlled-evidence path (Section 12.1: 'Requires controlled evidence/
+# verification; cannot masquerade as processor-confirmed') -- every other
+# class asserts a real PSP rail was actually used, so it can only reach
+# SUCCEEDED through the real dispatch/webhook pipeline
+# (crud/payment_provider.py), never a direct confirm call. See that
+# function's own AC-27 docstring.
+PAYMENT_METHOD_CLASSES = (
+    "CARD", "BANK_DEBIT", "BANK_TRANSFER", "PAY_BY_BANK", "DIGITAL_WALLET", "LOCAL_REAL_TIME", "EXTERNAL",
+)
 # FROZEN: an unresolved claim exists against this deposit -- release/forfeit of the
 # disputed portion is blocked until the claim reaches AGREED or RESOLVED (per
 # ZR-ENG-CLR-002 Section 12.2 custody state model).
@@ -57,8 +71,13 @@ RECONCILIATION_STATUSES = ("CLEAN", "DISCREPANCIES_FOUND")
 # ACCOUNT_BALANCE is raised outside reconciliation, at the moment a refund
 # actually drives a host-payable/deposit-custody account negative (Section
 # 21's "Negative Host balance" edge case) -- see crud/finance.py:decide_refund.
+# MANUAL_OPERATIONAL_HOLD is the one reason code a human, not the system,
+# ever chooses -- Section 6.4's admin console "place/remove authorized
+# operational hold" action (crud/finance.py:create_financial_hold), the
+# create half FinancialHold never had until now (only resolve existed).
 FINANCIAL_HOLD_REASON_CODES = (
     "TRIAL_BALANCE_MISMATCH", "LEDGER_ALLOCATION_MISMATCH", "AGGREGATE_MISMATCH", "NEGATIVE_ACCOUNT_BALANCE",
+    "MANUAL_OPERATIONAL_HOLD",
 )
 FINANCIAL_HOLD_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 FINANCIAL_HOLD_STATUSES = ("OPEN", "RESOLVED")
@@ -156,6 +175,13 @@ class SimulatedPayment(Base):
     payer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     payer_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     payer_phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # ZR-ENG-CLR-005 Section 12.1/AC-27: EXTERNAL by default -- an off-
+    # platform/self-attested payment, the only kind a direct confirm call is
+    # ever allowed to complete. crud/payment_provider.py:dispatch_payment_to_
+    # provider overwrites this to a real PSP class the moment a payment is
+    # actually dispatched to Stripe, which is what then blocks a host-side
+    # admin from confirming it directly -- see PAYMENT_METHOD_CLASSES.
+    method_class: Mapped[str] = mapped_column(String(20), default="EXTERNAL")
 
     guest: Mapped["Guest"] = relationship(foreign_keys=[guest_id])
     payer_guest: Mapped["Guest | None"] = relationship(foreign_keys=[payer_guest_id])
@@ -331,6 +357,11 @@ class PayoutRecord(Base):
     # default) for the overwhelming majority of payouts, which have no open
     # recovery to offset.
     recovery_offset_amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0.0)
+    # Set only when this payout actually moved real money via
+    # app/services/stripe_client.py:create_transfer (crud/finance.py:run_payout)
+    # -- null for a HELD payout, a payout with no real Stripe integration
+    # configured, or one to a party with no Stripe Connected Account.
+    stripe_transfer_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -374,7 +405,11 @@ class PayoutBeneficiary(Base):
     account_holder_name: Mapped[str] = mapped_column(String(200), nullable=False)
     bank_name: Mapped[str] = mapped_column(String(200), nullable=False)
     account_number_last4: Mapped[str] = mapped_column(String(4), nullable=False)
-    ifsc_code: Mapped[str] = mapped_column(String(11), nullable=False)
+    # Generic secondary bank routing identifier -- IFSC code (IN), sort code
+    # (England), etc; format/label resolved per jurisdiction, see
+    # app/services/bank_identifiers.py. Widened beyond IFSC's 11 chars so a
+    # future country needing more (e.g. an IBAN) doesn't need another migration.
+    bank_identifier_code: Mapped[str] = mapped_column(String(34), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="PENDING_VERIFICATION")
     verification_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     verification_code_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -519,7 +554,13 @@ class FinancialHold(Base):
 # build automates end-to-end yet (see crud/finance.py:record_host_recovery_
 # progress's own docstring for exactly what's automated today vs. manual).
 HOST_RECOVERY_STATUSES = ("OPEN", "RECOVERED", "WRITTEN_OFF")
-HOST_RECOVERY_METHODS = ("FUTURE_PAYOUT_OFFSET", "DIRECT_COLLECTION", "WRITTEN_OFF")
+# ZR-ENG-CLR-006 Section 15 waterfall tier 3: PSP_BALANCE_RECOVERY -- a real
+# Stripe Transfer Reversal pulling money back from the host's own Connected
+# Account balance (crud/finance.py:_execute_psp_transfer_reversal), tried
+# automatically the moment decide_refund opens a recovery and again via the
+# manual attempt_psp_recovery retry, before tier 4's FUTURE_PAYOUT_OFFSET or
+# an admin's own DIRECT_COLLECTION ever come into play.
+HOST_RECOVERY_METHODS = ("FUTURE_PAYOUT_OFFSET", "PSP_BALANCE_RECOVERY", "DIRECT_COLLECTION", "WRITTEN_OFF")
 
 
 class HostRecovery(Base):
@@ -543,6 +584,12 @@ class HostRecovery(Base):
     currency: Mapped[str] = mapped_column(String(3), default="INR")
     status: Mapped[str] = mapped_column(String(20), default="OPEN")
     recovery_method: Mapped[str] = mapped_column(String(30), default="")
+    # Set only when recovery_method == PSP_BALANCE_RECOVERY actually fired --
+    # a real Stripe TransferReversal id (crud/finance.py:
+    # _execute_psp_transfer_reversal), the same audit-trail discipline
+    # PayoutRecord.stripe_transfer_id already follows for its own real
+    # Stripe call.
+    psp_reversal_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     notes: Mapped[str] = mapped_column(String(2000), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -596,6 +643,47 @@ class PaymentSchedule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+# ZR-ENG-CLR-005 Section 10.5's full autopay-mandate state machine, modeled
+# completely (same "never trim the taxonomy at the data layer" discipline as
+# TERMINATION_LIABILITY_MODELS/FUNDS_FLOW_PROFILES) even though this build's
+# own create/revoke paths only ever produce ACTIVE and REVOKED directly --
+# there's no async PSP-side authorization delay to model PENDING_AUTHORIZATION
+# against, and no expiry/suspension automation for SUSPENDED/EXPIRED yet.
+AUTOPAY_MANDATE_STATUSES = ("PENDING_AUTHORIZATION", "ACTIVE", "SUSPENDED", "REVOKED", "EXPIRED")
+
+
+class AutopayMandate(Base):
+    """ZR-ENG-CLR-005 Section 6.1-E/10.5/15.1/AC-28/AC-29: a renter's (or an
+    approved third-party payer's, same payer!=occupant doctrine as
+    SimulatedPayment) explicit, independently auditable and revocable
+    consent to have future rent obligations on one occupancy charged
+    automatically. Scoped to the occupancy rather than one PaymentSchedule
+    version -- the consent is "keep paying my ongoing rent for this
+    tenancy", which survives a schedule being superseded by a rent-change
+    amendment (crud/leasing.py:_supersede_payment_schedule_if_rent_changed);
+    consent_snapshot freezes what the payer actually saw/agreed to at
+    consent time, the same "versioned and reproducible later" discipline
+    Section 1.2's non-negotiable invariants require of every schedule term
+    shown before confirmation.
+
+    Revoking (crud/finance.py:revoke_autopay_mandate) only ever flips status
+    to REVOKED -- AC-29: 'Revoking autopay does not cancel future rent
+    obligations,' so it must never touch Obligation/PaymentSchedule rows."""
+
+    __tablename__ = "autopay_mandates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    occupancy_id: Mapped[int] = mapped_column(ForeignKey("occupancies.id", ondelete="CASCADE"), nullable=False, index=True)
+    payer_guest_id: Mapped[str] = mapped_column(ForeignKey("guests.id", ondelete="CASCADE"), nullable=False)
+    provider_ref: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
+    consent_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    occupancy: Mapped["Occupancy"] = relationship()
+
+
 class ReconciliationRun(Base):
     __tablename__ = "reconciliation_runs"
 
@@ -647,3 +735,100 @@ class LedgerEntry(Base):
 
     debit_account: Mapped["LedgerAccount"] = relationship(foreign_keys=[debit_account_id])
     credit_account: Mapped["LedgerAccount"] = relationship(foreign_keys=[credit_account_id])
+
+
+PAYMENT_PROVIDER_EVENT_TYPES = ("PAYMENT_SUCCEEDED", "PAYMENT_FAILED")
+PROCESSOR_TRANSACTION_STATUSES = ("PENDING", "SUCCEEDED", "FAILED")
+
+
+class PaymentProviderStatus(Base):
+    """ZR-ENG-CLR-005 Section 9.1/17.1: a single row (id=1) toggling the
+    simulated payment provider's health -- same pattern as
+    models/signature_provider.py:SignatureProviderStatus. While unhealthy,
+    dispatch_payment_to_provider fails closed (503) rather than silently
+    falling back to a weaker/unsafe collection path, and
+    reconcile_stalled_payments marks anything stuck past its dispatch
+    deadline FAILED for manual review instead of auto-completing it. No real
+    PSP integration exists in this codebase -- see SimulatedPayment's own
+    docstring -- this is the same honest-simulation status, just extended
+    with the dispatch/callback/outage seam a real adapter actually needs to
+    plug into, which SimulatedPayment/confirm_payment alone never had."""
+
+    __tablename__ = "payment_provider_status"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    healthy: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ProcessorTransaction(Base):
+    """ZR-ENG-CLR-005 Section 3.1: 'Payment Intent' (SimulatedPayment -- Zoiko's
+    own attempt envelope) and 'Processor Transaction' (this -- a single PSP
+    transaction) must not be conflated; Section 15.1's data model names
+    processor_transaction as its own entity with provider/external_id/
+    raw_status/normalized_status. declared_allocations is fixed at dispatch
+    time (crud/payment_provider.py:dispatch_payment_to_provider) -- a real
+    PSP webhook reports only success/failure of an already-declared
+    transaction id, it has no way to invent or negotiate which Obligation
+    rows a payment satisfies, so that decision can never be deferred to the
+    callback the way confirm_payment's direct callers still may."""
+
+    __tablename__ = "processor_transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    payment_id: Mapped[int] = mapped_column(ForeignKey("simulated_payments.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider_transaction_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    declared_allocations: Mapped[dict] = mapped_column(JSON, default=dict)
+    dispatch_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    payment: Mapped["SimulatedPayment"] = relationship()
+
+
+class PaymentProviderEvent(Base):
+    """Idempotent webhook event ledger -- same provider_event_id-unique dedup
+    idiom as models/signature_provider.py:SignatureProviderEvent. A
+    duplicate/replayed callback loses the IntegrityError race and is treated
+    as already-processed, never reprocessed."""
+
+    __tablename__ = "payment_provider_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider_event_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    processor_transaction_id: Mapped[int | None] = mapped_column(ForeignKey("processor_transactions.id"), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+HOST_STRIPE_ACCOUNT_STATUSES = ("ONBOARDING", "COMPLETE", "RESTRICTED")
+
+
+class HostStripeAccount(Base):
+    """ZR-ENG-CLR-005 Section 9.1/4.4: the Stripe Connect counterpart to
+    PayoutBeneficiary -- for a market/provider actually using
+    PSP_DEFERRED_PAYOUT via Stripe Connect, this is the real payout
+    destination, not PayoutBeneficiary's manually-collected bank details.
+    Zoiko never collects or stores the host's bank details itself here --
+    only the resulting Stripe Connected Account id from Stripe's own hosted
+    onboarding flow (Account Link), so Zoiko is never in the business of
+    directly holding or routing bank credentials for this path. At most one
+    row per party (unique index below); run_payout reads payouts_enabled as
+    its Stripe-specific payout-eligibility gate, additively alongside (not
+    replacing) the existing PayoutBeneficiary gate for markets/providers not
+    using Stripe Connect."""
+
+    __tablename__ = "host_stripe_accounts"
+    __table_args__ = (UniqueConstraint("party_id", name="uq_host_stripe_accounts_party"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    party_id: Mapped[int] = mapped_column(ForeignKey("parties.id", ondelete="CASCADE"), nullable=False, index=True)
+    stripe_account_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="ONBOARDING")
+    details_submitted: Mapped[bool] = mapped_column(Boolean, default=False)
+    charges_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    payouts_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
