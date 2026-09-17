@@ -11,6 +11,7 @@ already-shipped crud/listing.py code path, but that duplication is exactly
 the cross-domain drift risk Section 1 calls out."""
 
 from sqlalchemy import func, select
+from app.crud.identity_verification import get_verified_identity_for_party
 from app.crud.occupancy_eligibility import get_valid_occupancy_eligibility_credential
 from app.models.leasing import Agreement, Application, Offer
 from app.models.listing import Listing
@@ -108,6 +109,17 @@ def check_agreement_eligibility(db, offer: Offer) -> list[str]:
     # never actually resolved a profile. Same reason text as the real 409.
     if resolve_agreement_profile(db, listing, listing.room) is None:
         reasons.append("No approved agreement profile for this listing's jurisdiction -- routed to manual review")
+
+    # ZR-ENG-CLR-012 Section 5/AC-03/AC-04: "Global default: account/contact
+    # verification before application; full identity verification may occur
+    # after application but must PASS before CONFIRMED booking." Application
+    # itself deliberately asks for no identity by default (see
+    # api/routes/user_rentals.py:submit_rental_application's own docstring) --
+    # this is the one universal identity gate everyone actually hits, not a
+    # per-jurisdiction opt-in like OCCUPANCY_ELIGIBILITY below.
+    guest_user = offer.guest.user_account if offer.guest else None
+    if not guest_user or not guest_user.party_id or not get_verified_identity_for_party(db, guest_user.party_id):
+        reasons.append("Identity verification is not yet approved")
 
     # ZR-ENG-CLR-012 AC-04: "CONFIRMED booking cannot occur while a mandatory
     # confirmation-stage verification requirement is unresolved."

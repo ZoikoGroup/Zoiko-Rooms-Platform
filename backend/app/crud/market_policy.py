@@ -83,6 +83,23 @@ def to_termination_policy_snapshot(policy: MarketPolicyPack) -> dict:
     return snapshot
 
 
+def resolve_available_payment_methods(db: Session, jurisdiction_code: str, *, as_of: date | None = None) -> list[str]:
+    """ZR-ENG-CLR-005 Section 12.2/AC-12: 'Payment method availability is the
+    intersection of [jurisdiction]... computed server-side... the UI must
+    never show a method the backend cannot lawfully or operationally
+    execute.' Fail-open to CARD-only -- the one rail dispatch_payment_to_
+    provider already supports unconditionally -- rather than failing closed
+    to nothing, both when no pack is configured for this jurisdiction at all
+    and when a real pack simply hasn't opted into anything wider yet (same
+    'empty means the safe minimum, not everything' rule the field's own
+    model docstring states)."""
+    try:
+        policy = resolve_market_policy(db, jurisdiction_code, as_of=as_of)
+    except HTTPException:
+        return ["CARD"]
+    return list(policy.permitted_payment_method_classes) or ["CARD"]
+
+
 def list_market_policy_packs(db: Session, jurisdiction_code: str | None = None) -> list[MarketPolicyPack]:
     query = select(MarketPolicyPack).order_by(MarketPolicyPack.jurisdiction_code, MarketPolicyPack.version.desc())
     if jurisdiction_code:

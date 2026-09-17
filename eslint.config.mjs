@@ -19,6 +19,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // A second `next dev` instance run from this same checkout (e.g. for
+    // manual multi-account testing) uses NEXT_DIST_DIR to avoid the
+    // single-instance-per-directory lock -- that build output needs the
+    // same exclusion as the default .next/ above.
+    ".next-*/**",
   ]),
 ]);
 

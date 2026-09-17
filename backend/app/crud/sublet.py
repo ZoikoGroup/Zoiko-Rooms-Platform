@@ -379,6 +379,12 @@ def approve_sublet_request(db: Session, sublet_request: SubletRequest, admin: Ad
         if sublet_request.arrangement_type == "ASSIGNMENT_FULL":
             sublet_request.original_renter_liability = "RELEASED"
             sublet_request.new_occupant_liability = "ASSIGNEE"
+            # The assignee becomes the sole named party on the agreement itself,
+            # not just the occupancy -- otherwise every offer/agreement-scoped
+            # action (booking change requests, disclosures, agreement PDF access)
+            # keeps authorizing the released original renter instead of the
+            # assignee who actually now holds the tenancy.
+            sublet_request.current_occupancy.offer.guest_id = proposed_guest.id
         else:  # REPLACEMENT_OCCUPANT
             sublet_request.original_renter_liability = "LIMITED"
             sublet_request.new_occupant_liability = "SUBORDINATE"

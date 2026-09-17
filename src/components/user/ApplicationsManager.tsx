@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { CalendarClock, ClipboardList, Search } from "lucide-react";
+import { CalendarClock, ClipboardList, Search, ShieldAlert } from "lucide-react";
+import { useUserSession } from "@/components/user/UserSessionContext";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
-import { BookingChangeRequest, DisclosureRequirement, Offer, PublicListing, UserApplication } from "@/lib/types";
+import { BookingChangeRequest, DisclosureRequirement, Offer, PaymentPreview, PublicListing, UserApplication } from "@/lib/types";
 import { applicationStatusTone, bookingChangeRequestStatusTone, bookingChangeTypeLabel } from "@/lib/status";
 import { addMonths, formatCurrency, formatDate } from "@/lib/utils";
 import {
@@ -17,11 +18,14 @@ import {
   declineAlternativeChangeTerms,
   declineOwnOffer,
   errorMessage,
+  getObligationAvailableMethods,
+  getOwnAgreementPaymentPreview,
   getOwnOffer,
   listMyChangeRequests,
   listOwnAgreementDisclosures,
   listPublicListings,
   listRentalApplications,
+  payOwnObligation,
   signOwnAgreement,
   submitDateChangeRequest,
   submitFinancialChangeRequest,
@@ -42,8 +46,22 @@ import { Card, EmptyState, Field, Toast, inputClass, useToast } from "@/componen
 // an amendment even though the backend fully supports it.
 const RENTER_SIGNABLE_AGREEMENT_STATUSES: string[] = ["SENT", "PARTIALLY_EXECUTED", "AMENDMENT_PENDING"];
 
+// Human-readable labels for the backend's normalized method classes
+// (ZR-ENG-CLR-005 Section 12.1) -- the actual available set for a given
+// obligation is always resolved server-side, never hard-coded here.
+const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  CARD: "Card",
+  BANK_DEBIT: "Bank debit",
+  BANK_TRANSFER: "Bank transfer",
+  PAY_BY_BANK: "Pay by bank",
+  DIGITAL_WALLET: "Digital wallet",
+  LOCAL_REAL_TIME: "UPI / instant transfer",
+  EXTERNAL: "Cash / cheque (recorded by host)",
+};
+
 export function ApplicationsManager() {
   const { toast, showToast } = useToast();
+  const { identityVerified } = useUserSession();
   const [applications, setApplications] = useState<UserApplication[]>([]);
   const [loading, setLoading] = useState(true);
   const [withdrawingId, setWithdrawingId] = useState<number | null>(null);
@@ -54,6 +72,10 @@ export function ApplicationsManager() {
   const [actionBusy, setActionBusy] = useState(false);
   const [disclosures, setDisclosures] = useState<DisclosureRequirement[]>([]);
   const [acknowledgingId, setAcknowledgingId] = useState<number | null>(null);
+  const [paymentPreview, setPaymentPreview] = useState<PaymentPreview | null>(null);
+  const [payingObligationId, setPayingObligationId] = useState<number | null>(null);
+  const [obligationMethods, setObligationMethods] = useState<Record<number, string[]>>({});
+  const [selectedMethod, setSelectedMethod] = useState<Record<number, string>>({});
 
   const [changeRequests, setChangeRequests] = useState<BookingChangeRequest[]>([]);
   const [changeType, setChangeType] = useState<"date" | "shorten" | "premises" | "financial" | "termShift" | null>(null);
@@ -245,6 +267,8 @@ export function ApplicationsManager() {
     setOfferFor(application);
     setOffer(null);
     setDisclosures([]);
+    setPaymentPreview(null);
+    setObligationMethods({});
     setOfferLoading(true);
     try {
       const loaded = await getOwnOffer(application.id);
@@ -253,12 +277,48 @@ export function ApplicationsManager() {
         listOwnAgreementDisclosures(loaded.agreement.id)
           .then(setDisclosures)
           .catch(() => {});
+        getOwnAgreementPaymentPreview(loaded.agreement.id)
+          .then((preview) => {
+            setPaymentPreview(preview);
+            // ZR-ENG-CLR-005 AC-12: each obligation's real, jurisdiction-resolved
+            // methods -- never a hard-coded list on the frontend.
+            preview.amountDueNow.forEach((o) => {
+              getObligationAvailableMethods(o.id)
+                .then(({ methodClasses }) => {
+                  setObligationMethods((prev) => ({ ...prev, [o.id]: methodClasses }));
+                  setSelectedMethod((prev) => ({ ...prev, [o.id]: prev[o.id] ?? methodClasses[0] }));
+                })
+                .catch(() => {});
+            });
+          })
+          .catch(() => {});
       }
     } catch (err) {
       showToast(errorMessage(err, "Could not load your offer."), "error");
       setOfferFor(null);
     } finally {
       setOfferLoading(false);
+    }
+  }
+
+  async function handlePayObligation(obligationId: number) {
+    setPayingObligationId(obligationId);
+    try {
+      await payOwnObligation(obligationId, selectedMethod[obligationId] ?? "CARD");
+      showToast("Payment successful.");
+      if (offer?.agreement) {
+        const [refreshedOffer, refreshedPreview] = await Promise.all([
+          getOwnOffer(offerFor!.id),
+          getOwnAgreementPaymentPreview(offer.agreement.id),
+        ]);
+        setOffer(refreshedOffer);
+        setPaymentPreview(refreshedPreview);
+      }
+      load();
+    } catch (err) {
+      showToast(errorMessage(err, "Payment failed."), "error");
+    } finally {
+      setPayingObligationId(null);
     }
   }
 
@@ -363,6 +423,20 @@ export function ApplicationsManager() {
             </p>
             {application.message && (
               <p className="mt-2 max-w-xl text-xs text-slate-500 dark:text-slate-400">“{application.message}”</p>
+            )}
+            {/* ZR-ENG-CLR-012 Section 5/AC-04: identity is only required
+               before CONFIRMED booking (agreement creation), not before
+               applying -- once the offer is accepted and waiting on an
+               agreement, an unverified renter is the one real, common
+               reason nothing moves further, so surface it here instead of
+               leaving them to find out from a stalled admin-side 409. */}
+            {application.offerStatus === "ACCEPTED" && !application.agreementStatus && !identityVerified && (
+              <Link
+                href="/account/identity"
+                className="mt-2 flex items-center gap-1.5 text-xs font-medium text-amber-700 hover:underline dark:text-amber-400"
+              >
+                <ShieldAlert className="h-3.5 w-3.5" /> Verify your identity to keep this moving toward your agreement
+              </Link>
             )}
           </Link>
 
@@ -479,6 +553,55 @@ export function ApplicationsManager() {
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 You&apos;ve signed — waiting on the host to countersign.
               </p>
+            )}
+
+            {["PAYMENT_IN_PROGRESS", "PAYMENT_PENDING"].includes(offer.agreement?.status ?? "") && (
+              <div className="space-y-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  Payment due
+                </p>
+                {paymentPreview === null ? (
+                  <p className="text-xs text-slate-400">Loading...</p>
+                ) : paymentPreview.amountDueNow.length === 0 ? (
+                  <p className="text-xs text-slate-400">Nothing due right now.</p>
+                ) : (
+                  paymentPreview.amountDueNow.map((o) => (
+                    <div key={o.id} className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-sm text-slate-700 dark:text-slate-200">
+                        {o.obligationType === "RENT" ? "Rent" : o.obligationType === "DEPOSIT" ? "Deposit" : o.obligationType}
+                        {" — "}
+                        {formatCurrency(o.amount, o.currency)}
+                      </span>
+                      {o.status === "PAID" ? (
+                        <Badge tone="success">Paid</Badge>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <select
+                            className={`${inputClass} !w-auto py-1.5 text-xs`}
+                            value={selectedMethod[o.id] ?? ""}
+                            onChange={(e) => setSelectedMethod((prev) => ({ ...prev, [o.id]: e.target.value }))}
+                            disabled={!obligationMethods[o.id]?.length}
+                          >
+                            {(obligationMethods[o.id] ?? []).map((m) => (
+                              <option key={m} value={m}>
+                                {PAYMENT_METHOD_LABELS[m] ?? m}
+                              </option>
+                            ))}
+                          </select>
+                          <Button
+                            size="sm"
+                            loading={payingObligationId === o.id}
+                            disabled={!selectedMethod[o.id]}
+                            onClick={() => handlePayObligation(o.id)}
+                          >
+                            Pay now
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
             )}
             {offer.agreement?.status === "SIGNED" && (
               <div className="space-y-3">

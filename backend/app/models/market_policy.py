@@ -73,6 +73,15 @@ class MarketPolicyPack(Base):
     # needs them; renter fees stay OFF by default with no toggle here yet).
     platform_fee_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=0.10)
     funds_flow_profile: Mapped[str] = mapped_column(String(30), default="DIRECT_SETTLEMENT")
+    # ZR-ENG-CLR-005 Section 12.1/12.2/AC-12: "Payment method availability is
+    # the intersection of... market pack... computed server-side... the UI
+    # must never show a method the backend cannot lawfully or operationally
+    # execute." Empty list (the honest default for an unconfigured market)
+    # falls back to CARD-only in the resolver, not to every method class --
+    # a market pack must explicitly opt into the wider set (e.g. India's own
+    # UPI-class LOCAL_REAL_TIME rail), same fail-closed-to-the-safe-minimum
+    # posture as every other list field on this pack.
+    permitted_payment_method_classes: Mapped[list[str]] = mapped_column(JSON, default=list)
     # ZR-ENG-CLR-005 Section 13.1/AC-26: "Service-fee invoice issuer is the
     # correct Zoiko legal entity and tax configuration." Resolved per
     # jurisdiction/effective-date like every other field here, never

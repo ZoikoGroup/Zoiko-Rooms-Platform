@@ -36,6 +36,7 @@ from app.crud.ids import new_id
 from app.models.admin_user import AdminUser
 from app.services import stripe_client
 from app.models.finance import (
+    PAYMENT_METHOD_CLASSES,
     PaymentProviderEvent,
     PaymentProviderStatus,
     ProcessorTransaction,
@@ -75,6 +76,7 @@ def get_processor_transaction_or_404(db: Session, transaction_id: int) -> Proces
 
 def dispatch_payment_to_provider(
     db: Session, payment: SimulatedPayment, admin: AdminUser, allocations: list[PaymentAllocationInput],
+    *, method_class: str = "CARD",
 ) -> ProcessorTransaction:
     """PENDING payment -> creates the ProcessorTransaction representing the
     attempt sent to the (simulated) provider. Fails closed (503) while the
@@ -99,6 +101,9 @@ def dispatch_payment_to_provider(
     if not allocations:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "At least one allocation is required to dispatch a payment")
 
+    if method_class not in PAYMENT_METHOD_CLASSES or method_class == "EXTERNAL":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"methodClass must be one of {[m for m in PAYMENT_METHOD_CLASSES if m != 'EXTERNAL']}")
+
     provider_transaction_id = stripe_client.create_payment_intent(
         amount=float(payment.amount), currency=payment.currency,
         metadata={"payment_id": str(payment.id), "idempotency_key": payment.idempotency_key},
@@ -117,14 +122,89 @@ def dispatch_payment_to_provider(
     # asserting a real PSP rail handled it -- crud/finance.py:confirm_payment's
     # own gate then refuses to let a direct (non-super-admin) confirm call
     # complete it; only this dispatch's own webhook-driven
-    # ingest_provider_callback below may. "CARD" is this build's one real
-    # Stripe integration's actual rail (stripe_client.create_payment_intent
-    # never requests a specific payment_method_types set), not a claim that
-    # every future PSP dispatch will be a card.
-    payment.method_class = "CARD"
+    # ingest_provider_callback below may. method_class records which rail the
+    # payer actually chose (Section 12.1's normalized classes) -- Stripe's
+    # own PaymentIntent isn't told to restrict payment_method_types, so the
+    # real integration already lets whatever methods are enabled on the
+    # Stripe account surface regardless of this label; this is bookkeeping/
+    # routing classification, not a claim about which methods Stripe itself
+    # will offer.
+    payment.method_class = method_class
     db.commit()
     db.refresh(txn)
     return txn
+
+
+def obligation_jurisdiction_code(obligation) -> str | None:
+    """Same agreement/occupancy->room->property traversal
+    crud/finance.py:_obligation_party_id already uses -- the jurisdiction
+    Section 12.2's payment-method routing must resolve against."""
+    if obligation.agreement:
+        room = obligation.agreement.offer.listing.room
+    elif obligation.occupancy:
+        room = obligation.occupancy.room
+    else:
+        return None
+    return room.property.jurisdiction_code if room and room.property else None
+
+
+def renter_pay_obligation(db: Session, guest, obligation, *, method_class: str = "CARD") -> SimulatedPayment:
+    """The customer-facing counterpart to the admin dispatch/confirm flow
+    above -- a renter paying their own rent/deposit obligation themselves,
+    not an admin recording that a payment happened. Runs through the exact
+    same real-Stripe-or-simulated-fallback dispatch path admin dispatch
+    uses (AC-27: a real PSP rail, never a self-attested 'mark paid').
+    method_class must be one of this obligation's jurisdiction's own
+    resolve_available_payment_methods -- AC-12: 'never show a method the
+    backend cannot lawfully or operationally execute.'
+
+    Only because no real webhook will ever arrive without real Stripe keys
+    configured does this then immediately ingest a synthetic
+    PAYMENT_SUCCEEDED callback -- through the identical ingest_provider_
+    callback a genuine signed Stripe webhook uses, attributed to the same
+    system admin a real webhook would be (get_system_admin). Once real
+    Stripe keys are configured (stripe_client.is_configured()), this same
+    call still dispatches correctly, but only the real webhook -- not this
+    synthetic step -- completes it, exactly matching how the rest of this
+    module already behaves everywhere else."""
+    from app.crud import finance as finance_crud
+    from app.crud.market_policy import DEFAULT_JURISDICTION, resolve_available_payment_methods
+    from app.schemas.finance import SimulatedPaymentCreate
+
+    owner_guest_id = None
+    if obligation.agreement:
+        owner_guest_id = obligation.agreement.offer.guest_id
+    elif obligation.occupancy:
+        owner_guest_id = obligation.occupancy.guest_id
+    if owner_guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This obligation does not belong to you")
+
+    if obligation.status == "PAID":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This obligation is already paid")
+
+    jurisdiction_code = obligation_jurisdiction_code(obligation) or DEFAULT_JURISDICTION
+    available = resolve_available_payment_methods(db, jurisdiction_code)
+    if method_class not in available:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"methodClass must be one of {available} for this jurisdiction")
+
+    payment = finance_crud.create_payment_intent(db, SimulatedPaymentCreate(
+        guest_id=guest.id, amount=float(obligation.amount), currency=obligation.currency,
+        idempotency_key=f"renter-pay-obligation-{obligation.id}",
+    ))
+    if payment.status == "SUCCEEDED":
+        return payment
+
+    system_admin = get_system_admin(db)
+    allocations = [PaymentAllocationInput(obligation_id=obligation.id, amount=float(obligation.amount))]
+    txn = dispatch_payment_to_provider(db, payment, system_admin, allocations, method_class=method_class)
+
+    if not stripe_client.is_configured():
+        ingest_provider_callback(
+            db, system_admin, provider_event_id=new_id("EVT"),
+            provider_transaction_id=txn.provider_transaction_id, event_type="PAYMENT_SUCCEEDED",
+        )
+        db.refresh(payment)
+    return payment
 
 
 def ingest_provider_callback(
