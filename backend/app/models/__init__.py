@@ -33,6 +33,7 @@ from app.models.password_reset_token import PasswordResetToken
 from app.models.chat import ChatConversation, ChatMessage
 from app.models.handoff import AiHandoff
 from app.models.kb import KbChunk, KbDocument, KbRelease
+from app.models.public_rate_limit import PublicRateLimit
 from app.models.notification import Notification
 from app.models.contact_email import ContactEmail
 from app.models.feature_flag import FeatureFlag
@@ -81,6 +82,7 @@ __all__ = [
     "KbChunk",
     "KbDocument",
     "KbRelease",
+    "PublicRateLimit",
     "Notification",
     "ContactEmail",
     "FeatureFlag",
