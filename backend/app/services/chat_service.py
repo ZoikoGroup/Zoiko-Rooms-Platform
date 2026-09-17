@@ -38,12 +38,14 @@ from app.services.guardrails import (
     scan_for_determination,
 )
 from app.services.pdp import Decision, check_permission, is_actor
+from app.services.kb import allowed_access_classes
 from app.services.rag import hits_to_text, retrieve
 from app.services.feature_flags import is_enabled
 
 Actor = Union[AdminUser, UserAccount]
 
 MAX_TOOL_ROWS = 20
+MAX_TOOL_CALLS_PER_TURN = 8
 GROQ_TIMEOUT_SECONDS = 45.0
 CONNECTION_RETRY_ATTEMPTS = 3
 
@@ -180,7 +182,13 @@ def _user_tool_search_knowledge(db: Session, user: UserAccount, args: dict) -> l
     query_text = (args.get("query") or "").strip()
     if not query_text:
         return [{"info": "Please provide a search term."}]
-    hits = retrieve(db, query_text, market="GLOBAL", max_results=MAX_TOOL_ROWS)
+    hits = retrieve(
+        db,
+        query_text,
+        market="GLOBAL",
+        access_classes=allowed_access_classes(user),
+        max_results=MAX_TOOL_ROWS,
+    )
     if not hits:
         return [{"info": "No approved knowledge matched your question. Guidance may be temporarily unavailable."}]
     return [
@@ -691,8 +699,9 @@ def execute_tool(db: Session, actor: Actor, name: str, raw_args: str) -> tuple[l
     args = _parse_args(raw_args)
     try:
         return spec.handler(db, actor, args), True
-    except Exception as exc:  # noqa: BLE001 - surfaced to the model as a failed result
-        return [{"error": f"Tool failed: {exc}"}], True
+    except Exception:  # noqa: BLE001 - only a safe, generic result reaches the model
+        logger.exception("tool %r failed for actor role %r", name, is_actor(actor))
+        return [{"error": "Tool failed: couldn't fetch that data."}], True
 
 
 def stream_assistant_reply(
@@ -760,6 +769,11 @@ def stream_assistant_reply(
         tool_calls = [pending_calls[i] for i in sorted(pending_calls)]
         if finish_reason != "tool_calls" or not tool_calls:
             break
+        # Bound the DB/cost work a single turn can trigger -- the per-turn loop
+        # count alone doesn't stop one completion from requesting many calls at
+        # once. Calls beyond the cap are simply never executed or acknowledged,
+        # same as if the model had stopped there.
+        tool_calls = tool_calls[:MAX_TOOL_CALLS_PER_TURN]
 
         messages.append(
             {
@@ -779,6 +793,7 @@ def stream_assistant_reply(
             collected_blocks.append({"type": "tool_use", "name": call["name"], "arguments": call["arguments"]})
             yield "tool", {"name": call["name"]}
             rows, _allowed = execute_tool(db, actor, call["name"], call["arguments"])
+            collected_blocks.append({"type": "tool_result", "name": call["name"], "result": rows})
             if any("error" in row for row in rows):
                 yield "tool_error", {"name": call["name"]}
             messages.append(

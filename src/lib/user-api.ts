@@ -1,14 +1,17 @@
 import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
+  Agreement,
   HostedListing,
   IdentityDocumentType,
   IdentityVerificationRecord,
+  Offer,
   Property,
   PublicListing,
   PublicListingsPage,
   PublishEligibility,
   Room,
   SimulatedPayment,
+  SubletRenterLookup,
   SubletRequest,
   UserApplication,
   UserOccupancy,
@@ -128,12 +131,32 @@ export function withdrawRentalApplication(applicationId: number): Promise<UserAp
   });
 }
 
+export function getOwnOffer(applicationId: number): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/rentals/applications/${applicationId}/offer`);
+}
+
+export function acceptOwnOffer(offerId: number): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/rentals/offers/${offerId}/accept`, { method: "POST" });
+}
+
+export function declineOwnOffer(offerId: number): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/rentals/offers/${offerId}/decline`, { method: "POST" });
+}
+
+export function signOwnAgreement(agreementId: number): Promise<Agreement> {
+  return apiClientFetch<Agreement>(`/api/users/rentals/agreements/${agreementId}/sign`, { method: "POST" });
+}
+
 export function listOccupancies(): Promise<UserOccupancy[]> {
   return apiClientFetch<UserOccupancy[]>("/api/users/rentals/occupancies");
 }
 
 export function getOccupancy(occupancyId: number): Promise<UserOccupancy> {
   return apiClientFetch<UserOccupancy>(`/api/users/rentals/occupancies/${occupancyId}`);
+}
+
+export function lookupSubletRenter(email: string): Promise<SubletRenterLookup> {
+  return apiClientFetch<SubletRenterLookup>(`/api/users/rentals/sublet-lookup?email=${encodeURIComponent(email)}`);
 }
 
 export function submitSubletRequest(

@@ -47,8 +47,11 @@ export function resolveNotificationHref(
       return relatedEntityId ? `/properties?listingId=${encodeURIComponent(relatedEntityId)}` : "/properties";
     }
     if (notificationType.startsWith("application.")) return "/leasing";
+    if (notificationType.startsWith("offer.")) return "/leasing";
+    if (notificationType.startsWith("agreement.")) return "/leasing";
     if (notificationType.startsWith("identity_verification.")) return "/trust-safety";
     if (notificationType.startsWith("sublet_request.")) return "/occupancy";
+    if (notificationType.startsWith("dispute.")) return "/finance";
     return null;
   }
 
@@ -56,9 +59,35 @@ export function resolveNotificationHref(
   if (notificationType === "listing.published" || notificationType === "listing.rejected") {
     return "/account/host/listings";
   }
-  if (notificationType === "application.received") return "/account/host/listings";
+  // Host-facing variants of renter-facing events -- distinct notificationType
+  // strings (the "_for_host"/"_host" suffix, or "application.decided"/
+  // "application.received") so they never share a route with the renter's own
+  // copy of a conceptually similar event.
+  if (
+    notificationType === "application.received" ||
+    notificationType === "application.decided" ||
+    notificationType === "offer.accepted_for_host" ||
+    notificationType === "offer.declined_for_host" ||
+    notificationType === "agreement.signed_for_host" ||
+    notificationType === "occupancy.move_in_confirmed_for_host" ||
+    notificationType === "occupancy.ended_for_host" ||
+    notificationType === "payout.paid" ||
+    notificationType === "payout.held" ||
+    notificationType === "sublet_request.tenant_changed" ||
+    notificationType === "dispute.opened_for_host" ||
+    notificationType === "dispute.resolved_for_host"
+  ) {
+    return "/account/host/listings";
+  }
   if (notificationType.startsWith("application.")) return "/account/applications";
+  if (notificationType.startsWith("offer.")) return "/account/applications";
+  if (notificationType.startsWith("agreement.")) return "/account/applications";
   if (notificationType.startsWith("identity_verification.")) return "/account/identity";
+  if (notificationType.startsWith("occupancy.")) return "/account/rentals";
+  if (notificationType.startsWith("deposit.")) return "/account/payments";
+  if (notificationType.startsWith("refund.")) return "/account/payments";
   if (notificationType.startsWith("sublet_request.")) return "/account/sublets";
+  // Payout/dispute have no renter-facing detail page today -- mark read only
+  // rather than sending the renter somewhere that won't show them anything.
   return null;
 }

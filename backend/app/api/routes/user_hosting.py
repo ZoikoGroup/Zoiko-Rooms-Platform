@@ -199,11 +199,15 @@ def list_user_listings(
     if not user.party_id:
         return []
     from sqlalchemy import select
+    from sqlalchemy.orm import joinedload
     from app.models.listing import Listing
 
     listings = list(
         db.scalars(
-            select(Listing).where(Listing.party_id == user.party_id).order_by(Listing.id.desc())
+            select(Listing)
+            .options(joinedload(Listing.room))
+            .where(Listing.party_id == user.party_id)
+            .order_by(Listing.id.desc())
         )
     )
     return listing_crud.annotate_availability(db, listings)

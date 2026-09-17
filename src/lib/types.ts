@@ -55,6 +55,10 @@ export interface Listing {
   contactName: string;
   contactPhone: string;
   contactEmail: string;
+  // Real-time: state === "PUBLISHED" alone doesn't mean a renter hasn't since
+  // moved in. Computed server-side (crud.listing.annotate_availability) --
+  // never infer "is this actually live" from state alone.
+  available: boolean;
 }
 
 export interface PublishEligibility {
@@ -523,6 +527,10 @@ export interface UserApplication {
   desiredMoveIn: string | null;
   submittedAt: string;
   updatedAt: string;
+  offerId: number | null;
+  offerStatus: string | null;
+  agreementId: number | null;
+  agreementStatus: string | null;
 }
 
 export interface UserOccupancy {
@@ -554,6 +562,21 @@ export interface SubletRequest {
   decidedByAdminId: number | null;
   createdAt: string;
   decidedAt: string | null;
+  listingName: string;
+  listingCity: string;
+  roomType: string;
+  guests: number;
+  bedrooms: number;
+  bathrooms: number;
+  currentTenantName: string;
+  proposedRenterName: string;
+}
+
+export interface SubletRenterLookup {
+  found: boolean;
+  partyId: number | null;
+  name: string | null;
+  identityVerified: boolean;
 }
 
 /** A listing owned by a user's party rather than an admin -- `ownerId` is always null

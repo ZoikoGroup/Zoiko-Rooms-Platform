@@ -151,6 +151,109 @@ class TestSubletDecisionNotifications:
         assert r.status_code == 403, r.text
 
 
+class TestSubletHostVisibility:
+    """The listing's own host (a self-hosting UserAccount tied to the property's
+    owning party) previously heard nothing about a sublet on their own room and
+    saw only raw IDs when reviewing one -- both are fixed here."""
+
+    def test_reviewer_payload_includes_room_and_people_context(self, client, db_session: Session):
+        sublet_request, _tenant_user, proposed_user, _occupancy = _make_active_tenancy_with_sublet_request(db_session)
+        admin = _make_admin(db_session, email="reviewer@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.get("/api/occupancy/sublet-requests", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        body = next(sr for sr in r.json() if sr["id"] == sublet_request.id)
+        assert body["listingName"] == "Sublet Test Listing"
+        assert body["listingCity"] == "Bengaluru"
+        assert body["currentTenantName"] == "Tenant"
+        assert body["proposedRenterName"] == proposed_user.full_name
+
+    def test_host_is_notified_on_submit_and_decision(self, db_session: Session):
+        from app.crud import sublet as sublet_crud
+        from tests.conftest import _make_user as make_user
+
+        owner_party = Party(party_type="provider", status="active", jurisdiction="IN")
+        db_session.add(owner_party)
+        db_session.flush()
+        host_user = make_user(db_session, email="host@test.com")
+        host_user.party_id = owner_party.id
+
+        prop = Property(owner_party_id=owner_party.id, address="1 Host St", city="Bengaluru", status="active")
+        db_session.add(prop)
+        db_session.flush()
+        room = Room(property_id=prop.id, room_type="private_room", size=100, has_ensuite=True, status="active")
+        db_session.add(room)
+        db_session.flush()
+
+        tenant_party = Party(party_type="renter", status="active", jurisdiction="IN")
+        db_session.add(tenant_party)
+        db_session.flush()
+        tenant_user = make_user(db_session, email="hosttest-tenant@test.com")
+        tenant_user.party_id = tenant_party.id
+        tenant_guest = Guest(id="G-HOSTTEST-TENANT", name="Tenant", email="hosttest-tenant@test.com", joined_at=date.today())
+        db_session.add(tenant_guest)
+        db_session.flush()
+
+        listing = Listing(
+            id="L-HOSTVIS", slug="hostvis", name="Host Visibility Listing", room_type="Private room",
+            city="Bengaluru", location="Indiranagar", price_per_night=500, guests=1,
+            rating=4.5, review_count=0, party_id=owner_party.id, owner_id=None, room_id=room.id,
+            state="PUBLISHED",
+        )
+        db_session.add(listing)
+        db_session.flush()
+        application = Application(listing_id=listing.id, guest_id=tenant_guest.id, status="DECIDED")
+        db_session.add(application)
+        db_session.flush()
+        offer = Offer(application_id=application.id, listing_id=listing.id, guest_id=tenant_guest.id, status="ACCEPTED")
+        db_session.add(offer)
+        db_session.flush()
+        agreement = Agreement(offer_id=offer.id, status="SIGNED")
+        db_session.add(agreement)
+        db_session.flush()
+        occupancy = Occupancy(
+            offer_id=offer.id, listing_id=listing.id, room_id=room.id, guest_id=tenant_guest.id,
+            status="ACTIVE", expected_end_date=date.today() + timedelta(days=60),
+        )
+        db_session.add(occupancy)
+        db_session.commit()
+
+        proposed_party = Party(party_type="renter", status="active", jurisdiction="IN")
+        db_session.add(proposed_party)
+        db_session.flush()
+        make_user(db_session, email="hosttest-proposed@test.com").party_id = proposed_party.id
+        db_session.add(
+            IdentityVerification(
+                party_id=proposed_party.id, document_type="passport", document_category="identity", status="verified"
+            )
+        )
+        db_session.commit()
+
+        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy.id, proposed_party.id)
+
+        submitted_notification = db_session.scalar(
+            select(Notification).where(
+                Notification.recipient_user_id == host_user.id,
+                Notification.notification_type == "sublet_request.submitted",
+            )
+        )
+        assert submitted_notification is not None
+        assert submitted_notification.related_entity_id == str(sublet_request.id)
+
+        admin = _make_admin(db_session, email="hostvis-admin@test.com", role="super_admin")
+        sublet_crud.approve_sublet_request(db_session, sublet_request, admin)
+
+        approved_notification = db_session.scalar(
+            select(Notification).where(
+                Notification.recipient_user_id == host_user.id,
+                Notification.notification_type == "sublet_request.approved",
+            )
+        )
+        assert approved_notification is not None
+        assert approved_notification.related_entity_id == str(sublet_request.id)
+
+
 class TestFinanceAdminGating:
     def test_plain_admin_cannot_run_reconciliation(self, client, db_session: Session):
         admin = _make_admin(db_session, email="plainadmin2@test.com", role="admin")

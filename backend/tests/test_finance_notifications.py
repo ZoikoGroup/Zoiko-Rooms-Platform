@@ -72,3 +72,47 @@ class TestPaymentConfirmationNotifiesRenter:
         )
         assert notification is not None
         assert notification.related_entity_id == str(payment_id)
+
+
+class TestFullRefundMarksObligationRefunded:
+    """A fully-refunded obligation must read back as REFUNDED, not PENDING --
+    recompute_obligation_status previously treated a net-zero allocation sum the
+    same whether nothing was ever paid or a full payment was refunded."""
+
+    def test_refunding_the_full_amount_sets_status_refunded(self, client, db_session: Session):
+        guest, _user = _make_guest_linked_to_user(db_session, email="refund-renter@test.com")
+        obligation = _make_obligation(db_session, amount=500.0)
+        admin = _make_admin(db_session, email="refund-admin@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/finance/payments",
+            json={"guestId": guest.id, "amount": 500.0, "currency": "INR", "idempotencyKey": "test-refund-key-1"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 201, r.text
+        payment_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/finance/payments/{payment_id}/confirm",
+            json={"allocations": [{"obligationId": obligation.id, "amount": 500.0}]},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+
+        db_session.refresh(obligation)
+        assert obligation.status == "PAID"
+
+        r = client.post(
+            "/api/finance/refunds",
+            json={"paymentId": payment_id, "obligationId": obligation.id, "amount": 500.0, "reason": "test"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 201, r.text
+        refund_id = r.json()["id"]
+
+        r = client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+
+        db_session.refresh(obligation)
+        assert obligation.status == "REFUNDED"

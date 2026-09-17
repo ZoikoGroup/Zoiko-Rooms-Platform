@@ -7,10 +7,10 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
-import { UserOccupancy } from "@/lib/types";
+import { SubletRenterLookup, UserOccupancy } from "@/lib/types";
 import { occupancyStatusTone } from "@/lib/status";
 import { formatDate } from "@/lib/utils";
-import { errorMessage, listOccupancies, submitSubletRequest } from "@/lib/user-api";
+import { errorMessage, listOccupancies, lookupSubletRenter, submitSubletRequest } from "@/lib/user-api";
 import { Card, EmptyState, Field, Toast, inputClass, useToast } from "@/components/user/ui";
 
 export function RentalsManager() {
@@ -19,7 +19,9 @@ export function RentalsManager() {
   const [loading, setLoading] = useState(true);
 
   const [subletFor, setSubletFor] = useState<UserOccupancy | null>(null);
-  const [proposedPartyId, setProposedPartyId] = useState("");
+  const [proposedEmail, setProposedEmail] = useState("");
+  const [lookupResult, setLookupResult] = useState<SubletRenterLookup | null>(null);
+  const [lookingUp, setLookingUp] = useState(false);
   const [evidenceRef, setEvidenceRef] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -40,24 +42,47 @@ export function RentalsManager() {
 
   function openSublet(occupancy: UserOccupancy) {
     setSubletFor(occupancy);
-    setProposedPartyId("");
+    setProposedEmail("");
+    setLookupResult(null);
     setEvidenceRef("");
     setError("");
+  }
+
+  function editEmail(value: string) {
+    setProposedEmail(value);
+    setLookupResult(null);
+    setError("");
+  }
+
+  async function handleLookup() {
+    if (!proposedEmail.trim()) return;
+    setError("");
+    setLookingUp(true);
+    try {
+      setLookupResult(await lookupSubletRenter(proposedEmail.trim()));
+    } catch (err) {
+      setError(errorMessage(err, "Could not look up that email."));
+    } finally {
+      setLookingUp(false);
+    }
   }
 
   async function handleSublet(e: FormEvent) {
     e.preventDefault();
     if (!subletFor) return;
-    const partyId = Number(proposedPartyId);
-    if (!Number.isInteger(partyId) || partyId <= 0) {
-      setError("Enter the numeric party ID of the person who would take over the room.");
+    if (!lookupResult?.found || !lookupResult.partyId) {
+      setError("Look up the proposed renter's email first.");
+      return;
+    }
+    if (!lookupResult.identityVerified) {
+      setError("This person needs a verified identity on Zoiko before they can take over a room.");
       return;
     }
     setError("");
     setSubmitting(true);
     try {
       await submitSubletRequest(subletFor.id, {
-        proposedRenterPartyId: partyId,
+        proposedRenterPartyId: lookupResult.partyId,
         authorityEvidenceRef: evidenceRef.trim(),
       });
       setSubletFor(null);
@@ -131,18 +156,40 @@ export function RentalsManager() {
         <form onSubmit={handleSublet} className="space-y-4">
           <p className="rounded-xl bg-slate-50 px-4 py-3 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
             Zoiko has to approve every sublet. The person taking over the room must already have a Zoiko account
-            with a verified identity — ask them for their party ID from their profile page.
+            with a verified identity.
           </p>
 
-          <Field label="Proposed renter party ID" hint="Shown on the incoming renter's profile page.">
-            <input
-              inputMode="numeric"
-              value={proposedPartyId}
-              onChange={(e) => setProposedPartyId(e.target.value)}
-              placeholder="e.g. 42"
-              className={inputClass}
-            />
+          <Field label="Proposed renter's email" hint="The email they use to sign in to Zoiko.">
+            <div className="flex gap-2">
+              <input
+                type="email"
+                value={proposedEmail}
+                onChange={(e) => editEmail(e.target.value)}
+                placeholder="them@example.com"
+                className={inputClass}
+              />
+              <Button type="button" variant="outline" loading={lookingUp} onClick={handleLookup}>
+                Look up
+              </Button>
+            </div>
           </Field>
+
+          {lookupResult && (
+            <p
+              className={
+                lookupResult.found && lookupResult.identityVerified
+                  ? "rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20"
+                  : "rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20"
+              }
+            >
+              {!lookupResult.found &&
+                "No Zoiko account found with that email. Ask them to create one first."}
+              {lookupResult.found && !lookupResult.identityVerified &&
+                `Found ${lookupResult.name ?? "this person"}, but they haven't verified their identity yet.`}
+              {lookupResult.found && lookupResult.identityVerified &&
+                `Confirmed: ${lookupResult.name ?? "this person"} (identity verified).`}
+            </p>
+          )}
 
           <Field label="Authority evidence link (optional)" hint="Landlord consent letter or similar, if you have one.">
             <input
@@ -163,7 +210,7 @@ export function RentalsManager() {
             <Button type="button" variant="ghost" onClick={() => setSubletFor(null)}>
               Cancel
             </Button>
-            <Button type="submit" loading={submitting}>
+            <Button type="submit" loading={submitting} disabled={!lookupResult?.found || !lookupResult.identityVerified}>
               Submit request
             </Button>
           </div>

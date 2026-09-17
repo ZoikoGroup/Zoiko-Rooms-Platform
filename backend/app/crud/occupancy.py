@@ -2,15 +2,18 @@
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.crud.eligibility import check_move_in_eligibility
+from app.crud import notification as notif_crud
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.models.admin_user import AdminUser
 from app.models.finance import OBLIGATION_TYPE_TO_PLANE, Obligation
+from app.models.guest import Guest
 from app.models.leasing import Agreement
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
+from app.models.room import Room
 from app.schemas.occupancy import OccupancyRead
 
 
@@ -73,13 +76,52 @@ def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occu
         expected_end_date=_add_months(latest_terms.start_date, latest_terms.term_months),
     )
     db.add(occupancy)
+    db.flush()
+
+    listing = offer.listing
+    guest = db.get(Guest, offer.guest_id)
+    if guest:
+        notif_crud.notify_user_by_guest(
+            db, guest,
+            title="Move-in confirmed",
+            message=f'Your move-in for "{listing.name}" has been confirmed.',
+            notification_type="occupancy.move_in_confirmed",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="Move-in confirmed",
+            message=f'A tenant has moved in to "{listing.name}".',
+            notification_type="occupancy.move_in_confirmed_for_host",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
+
     db.commit()
     db.refresh(occupancy)
+
+    guest = db.get(Guest, occupancy.guest_id)
+    if guest:
+        notif_crud.notify_user_by_guest(
+            db, guest,
+            title="You're moved in!",
+            message=f"Your move-in for \"{offer.listing.name}\" is confirmed.",
+            notification_type="occupancy.move_in_confirmed",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
     return occupancy
 
 
 def list_occupancies_for(db: Session, admin: AdminUser) -> list[Occupancy]:
-    query = select(Occupancy).order_by(Occupancy.created_at.desc())
+    query = (
+        select(Occupancy)
+        .options(
+            joinedload(Occupancy.listing),
+            joinedload(Occupancy.room).joinedload(Room.property),
+            joinedload(Occupancy.guest),
+        )
+        .order_by(Occupancy.created_at.desc())
+    )
     if admin.role != "super_admin":
         query = query.join(Listing, Listing.id == Occupancy.listing_id).where(Listing.owner_id == admin.id)
     return list(db.scalars(query))
@@ -135,6 +177,26 @@ def end_occupancy(db: Session, occupancy: Occupancy, admin: AdminUser) -> Occupa
     occupancy.status = "ENDED"
     occupancy.move_out_date = date.today()
     occupancy.ended_at = datetime.now(timezone.utc)
+
+    listing = occupancy.listing
+    guest = db.get(Guest, occupancy.guest_id)
+    if guest:
+        notif_crud.notify_user_by_guest(
+            db, guest,
+            title="Move-out recorded",
+            message=f'Your tenancy at "{listing.name}" has ended.',
+            notification_type="occupancy.ended",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="Move-out recorded",
+            message=f'A tenancy at "{listing.name}" has ended.',
+            notification_type="occupancy.ended_for_host",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
+
     db.commit()
     db.refresh(occupancy)
     return occupancy

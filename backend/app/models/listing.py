@@ -1,4 +1,6 @@
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, UniqueConstraint
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -68,10 +70,14 @@ class Listing(Base):
         ForeignKey("parties.id", ondelete="CASCADE"), nullable=True, index=True
     )
 
-    room_id: Mapped[int | None] = mapped_column(ForeignKey("rooms.id"), nullable=True)
+    room_id: Mapped[int | None] = mapped_column(ForeignKey("rooms.id"), nullable=True, index=True)
     market_release_id: Mapped[int | None] = mapped_column(ForeignKey("market_releases.id"), nullable=True)
     min_stay_nights: Mapped[int] = mapped_column(Integer, default=30)
     state: Mapped[str] = mapped_column(String(20), default="DRAFT")
+    # Set once, the first time a listing reaches PUBLISHED (see publish_listing) --
+    # never touched by a later pause/republish. Exists so alert-matching can ask
+    # "what's newly published since I last checked", not just "what's live now".
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Set by an admin/super admin when moving REVIEW -> REJECTED; cleared again on
     # resubmission. Empty for every other state.
     rejection_reason: Mapped[str] = mapped_column(String(1000), default="")

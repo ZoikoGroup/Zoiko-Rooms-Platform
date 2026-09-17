@@ -1,4 +1,6 @@
+from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password, verify_password
@@ -38,7 +40,11 @@ def update_profile(db: Session, admin: AdminUser, full_name: str, email: str, ph
     admin.full_name = full_name
     admin.email = email
     admin.phone = phone
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "That email is already in use by another account")
     db.refresh(admin)
     return admin
 

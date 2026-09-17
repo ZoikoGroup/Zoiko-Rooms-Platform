@@ -179,6 +179,37 @@ def send_listing_published_email(to_email: str, full_name: str, listing_name: st
     )
 
 
+def send_alert_confirmation_email(to_email: str, city: str, unsubscribe_url: str) -> None:
+    send_email(
+        to_email,
+        f"You'll be notified about new rooms in {city}",
+        heading="Alert saved",
+        body_lines=[
+            f"We'll email you at this address whenever a new room matching your criteria in {city} is published.",
+            "You can stop these emails at any time using the link below.",
+        ],
+        cta_label="Unsubscribe from this alert",
+        cta_url=unsubscribe_url,
+    )
+
+
+def send_alert_match_email(to_email: str, city: str, listing_names: list[str], unsubscribe_url: str) -> None:
+    names = ", ".join(listing_names)
+    send_email(
+        to_email,
+        f"New room{'s' if len(listing_names) != 1 else ''} published in {city}",
+        heading=f"New in {city}",
+        body_lines=[
+            f"The following room{'s' if len(listing_names) != 1 else ''} matching your alert "
+            f"{'were' if len(listing_names) != 1 else 'was'} just published: {names}.",
+            "Sign in to view details and apply.",
+            f"Unsubscribe from this alert: {unsubscribe_url}",
+        ],
+        cta_label="View rooms",
+        cta_url=f"{settings.frontend_url}/find-a-room?city={city}",
+    )
+
+
 def send_listing_rejected_email(to_email: str, full_name: str, listing_name: str, reason: str = "") -> None:
     body_lines = [
         f"Hi {full_name},",
@@ -192,5 +223,91 @@ def send_listing_rejected_email(to_email: str, full_name: str, listing_name: str
         heading="Listing not approved",
         body_lines=body_lines,
         cta_label="Review your listings",
+        cta_url=f"{settings.frontend_url}/account/host/listings",
+    )
+
+
+def send_application_decided_email(to_email: str, full_name: str, listing_name: str, approved: bool) -> None:
+    verb = "approved" if approved else "not approved"
+    send_email(
+        to_email,
+        f"Your rental application was {verb}",
+        heading="Application approved" if approved else "Application not approved",
+        body_lines=[
+            f"Hi {full_name},",
+            f"Your application for \"{listing_name}\" was {verb}.",
+        ],
+        cta_label="View your applications",
+        cta_url=f"{settings.frontend_url}/account/applications",
+    )
+
+
+def send_agreement_executed_email(to_email: str, full_name: str, listing_name: str) -> None:
+    send_email(
+        to_email,
+        f"Your rental agreement for '{listing_name}' is signed",
+        heading="Agreement executed",
+        body_lines=[
+            f"Hi {full_name},",
+            f"The rental agreement for \"{listing_name}\" has been signed by both parties and is now in effect.",
+        ],
+        cta_label="View your applications",
+        cta_url=f"{settings.frontend_url}/account/applications",
+    )
+
+
+def send_payment_confirmed_email(to_email: str, full_name: str, amount: float, currency: str) -> None:
+    send_email(
+        to_email,
+        "Your payment has been received",
+        heading="Payment received",
+        body_lines=[
+            f"Hi {full_name},",
+            f"We've recorded your payment of {currency} {amount:.2f}. Thank you.",
+        ],
+        cta_label="View your payments",
+        cta_url=f"{settings.frontend_url}/account/payments",
+    )
+
+
+def send_deposit_status_email(to_email: str, full_name: str, amount: float, released: bool) -> None:
+    verb = "released" if released else "forfeited"
+    send_email(
+        to_email,
+        f"Your security deposit was {verb}",
+        heading="Deposit released" if released else "Deposit forfeited",
+        body_lines=[
+            f"Hi {full_name},",
+            f"{amount:.2f} of your security deposit has been {verb}." if released else "Your security deposit has been forfeited.",
+        ],
+        cta_label="View your payments",
+        cta_url=f"{settings.frontend_url}/account/payments",
+    )
+
+
+def send_refund_completed_email(to_email: str, full_name: str, amount: float, currency: str) -> None:
+    send_email(
+        to_email,
+        "Your refund has been processed",
+        heading="Refund processed",
+        body_lines=[
+            f"Hi {full_name},",
+            f"A refund of {currency} {amount:.2f} has been processed to your account records.",
+        ],
+        cta_label="View your payments",
+        cta_url=f"{settings.frontend_url}/account/payments",
+    )
+
+
+def send_payout_paid_email(to_email: str, full_name: str, amount: float, currency: str, period_key: str) -> None:
+    send_email(
+        to_email,
+        "Your payout has been paid",
+        heading="Payout paid",
+        body_lines=[
+            f"Hi {full_name},",
+            f"A payout of {currency} {amount:.2f} for {period_key} has been paid out to you.",
+        ],
+        cta_label="View your listings",
         cta_url=f"{settings.frontend_url}/account/host/listings",
     )

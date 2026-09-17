@@ -59,3 +59,10 @@ def party_id_for_listing(listing: "Listing") -> int:
     if not listing.room:
         raise HTTPException(status.HTTP_409_CONFLICT, "Listing is not linked to a room")
     return listing.room.property.owner_party_id
+
+
+def party_id_for_room(room: "Room") -> int:
+    """Same authorizing party as party_id_for_listing, resolved directly from a room
+    for domains (room passport, authority records) that key off room_id rather than
+    a listing."""
+    return room.property.owner_party_id
