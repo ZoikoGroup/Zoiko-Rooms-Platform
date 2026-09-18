@@ -11,8 +11,23 @@ const PUBLIC_ACCOUNT_PATHS = [
   "/account/reset-password",
 ];
 
+// Local dev only: when two `next dev` instances run on separate ports (one for
+// Admin/Super Admin, one for the customer app), APP_PORT_MODE pins each port to
+// its own area entirely -- so visiting the bare root on the "customer" port can
+// never show the admin dashboard just because an admin cookie exists in the same
+// browser, and vice versa. Unset in production, where there's only one deployment.
+const APP_PORT_MODE = process.env.APP_PORT_MODE;
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const isAccountPath = pathname === "/account" || pathname.startsWith("/account/");
+
+  if (APP_PORT_MODE === "customer" && !isAccountPath) {
+    return NextResponse.redirect(new URL("/account/login", request.url));
+  }
+  if (APP_PORT_MODE === "admin" && isAccountPath) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
 
   // Two independent sessions live side by side: /account is gated on the user cookie,
   // everything else in the matcher stays gated on the admin cookie exactly as before.
