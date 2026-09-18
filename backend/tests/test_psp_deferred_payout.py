@@ -47,7 +47,12 @@ def _make_pending_move_in_rent_obligation(db: Session, *, suffix: str, amount: f
     db.add(owner_party)
     db.flush()
 
-    prop = Property(owner_party_id=owner_party.id, address=f"{suffix} PSP St", city="Bengaluru", status="active")
+    # Explicitly "IN" (not this platform's default jurisdiction, "England")
+    # -- this test exercises the "IN" market policy pack's funds_flow_profile.
+    prop = Property(
+        owner_party_id=owner_party.id, address=f"{suffix} PSP St", city="Bengaluru", status="active",
+        jurisdiction_code="IN",
+    )
     db.add(prop)
     db.flush()
     room = Room(property_id=prop.id, room_type="private_room", size=100, has_ensuite=True, status="active")

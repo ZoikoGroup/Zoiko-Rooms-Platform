@@ -9,7 +9,7 @@ from app.models.admin_user import AdminUser
 from app.models.market_policy import MARKET_POLICY_CONFIDENCE_LEVELS, MarketPolicyPack
 from app.models.occupancy import Occupancy
 
-DEFAULT_JURISDICTION = "IN"
+DEFAULT_JURISDICTION = "England"
 
 
 def jurisdiction_code_for_occupancy(occupancy: Occupancy) -> str:

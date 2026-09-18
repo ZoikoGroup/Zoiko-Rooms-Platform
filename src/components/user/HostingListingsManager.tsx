@@ -24,6 +24,7 @@ import { ListARoomWizard } from "@/components/user/ListARoomWizard";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
+import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 
 const MAX_LISTING_IMAGES = 10;
 
@@ -46,7 +47,7 @@ interface ListingFormState {
   size: string;
   minStayNights: string;
   description: string;
-  amenities: string;
+  amenities: string[];
   images: string[];
   contactName: string;
   contactPhone: string;
@@ -69,19 +70,12 @@ function toFormState(listing: HostedListing): ListingFormState {
     size: String(listing.size),
     minStayNights: String(listing.minStayNights),
     description: listing.description,
-    amenities: listing.amenities.join(", "),
+    amenities: listing.amenities,
     images: listing.images,
     contactName: listing.contactName,
     contactPhone: listing.contactPhone,
     contactEmail: listing.contactEmail,
   };
-}
-
-function splitList(value: string): string[] {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
 }
 
 export function HostingListingsManager() {
@@ -173,7 +167,7 @@ export function HostingListingsManager() {
       bathrooms: Number(form.bathrooms) || 1,
       size: Number(form.size) || 0,
       description: form.description.trim(),
-      amenities: splitList(form.amenities),
+      amenities: form.amenities,
       images: form.images,
       minStayNights: Math.round(minStay),
       roomId,
@@ -436,11 +430,10 @@ export function HostingListingsManager() {
             />
           </Field>
 
-          <Field label="Amenities" hint="Comma separated, e.g. Wi-Fi, Washing machine, Air conditioning">
-            <input
-              value={form?.amenities ?? ""}
-              onChange={(e) => setForm((f) => (f ? { ...f, amenities: e.target.value } : f))}
-              className={inputClass}
+          <Field label="Amenities" hint="Pick what's available, or add your own.">
+            <AmenitiesPicker
+              value={form?.amenities ?? []}
+              onChange={(amenities) => setForm((f) => (f ? { ...f, amenities } : f))}
             />
           </Field>
 

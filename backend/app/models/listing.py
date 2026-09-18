@@ -51,7 +51,10 @@ class Listing(Base):
     price_per_night: Mapped[float] = mapped_column(Float, nullable=False)
     # Still Float, still just price_per_night's currency -- widening this to Numeric
     # and deriving it from market/jurisdiction are both separate, later tasks.
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="INR")
+    # Defaults to "GBP" -- this platform targets foreign markets, not India;
+    # England is the one jurisdiction with a real market-pack/agreement-clause
+    # registry (services/agreement_profile.py:SUPPORTED_JURISDICTION).
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="GBP")
     rating: Mapped[float] = mapped_column(Float, default=4.5)
     review_count: Mapped[int] = mapped_column(Integer, default=0)
     guests: Mapped[int] = mapped_column(Integer, nullable=False)

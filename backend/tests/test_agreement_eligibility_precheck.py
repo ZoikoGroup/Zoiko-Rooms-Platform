@@ -33,7 +33,11 @@ def _accepted_offer_on_india_jurisdiction_listing(db: Session) -> tuple[Offer, o
     so this offer is exactly the case the pre-check used to miss."""
     admin = _make_admin(db, email="precheck-admin@test.com")
     owner_party = get_or_create_default_party(db, admin)
-    assert owner_party.jurisdiction == "IN"
+    # Explicitly "IN" (not this platform's default jurisdiction, "England")
+    # -- the point of this fixture is a jurisdiction in real good standing
+    # that still has no approved agreement profile.
+    owner_party.jurisdiction = "IN"
+    db.flush()
 
     prop = Property(owner_party_id=owner_party.id, address="1 Precheck St", city="Bengaluru", status="active")
     db.add(prop)

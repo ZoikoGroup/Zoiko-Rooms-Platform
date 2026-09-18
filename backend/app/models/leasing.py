@@ -90,11 +90,17 @@ class ApplicationDecision(Base):
     decision: Mapped[str] = mapped_column(String(20), nullable=False)
     reason_code: Mapped[str] = mapped_column(String(50), default="")
     note: Mapped[str] = mapped_column(String(2000), default="")
-    decided_by_admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id"), nullable=False)
+    # Exactly one of these two is set per row -- an admin/super_admin decision
+    # (the original, still-used path for admin-portal-owned listings) or a
+    # self-service Host's own decision on their party-owned listing (ZR-ENG-CLR-011
+    # AC-06/Section 10 "Applications to review"). Enforced at the crud layer.
+    decided_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    decided_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     application: Mapped["Application"] = relationship(back_populates="decisions")
     decided_by: Mapped["AdminUser"] = relationship()
+    decided_by_user: Mapped["UserAccount"] = relationship()
 
 
 class Offer(Base):
@@ -158,6 +164,16 @@ class OfferTerms(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     offer: Mapped["Offer"] = relationship(back_populates="terms")
+
+    @property
+    def currency(self) -> str:
+        """Currency is inherently the listing's own property (see
+        crud/leasing.py's Obligation-creation call sites, which all pass
+        listing.currency) -- not stored per-terms-version here, just
+        surfaced through OfferTermsRead so the frontend can format monthly
+        rent/deposit in the listing's real currency instead of assuming
+        INR (formatCurrency's own default)."""
+        return self.offer.listing.currency
 
 
 class Agreement(Base):

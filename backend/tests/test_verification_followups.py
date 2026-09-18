@@ -33,7 +33,7 @@ def _passed_check_with_follow_up(db: Session, admin, *, follow_up_in_days: int, 
         db, admin, party_id=party.id, jurisdiction_code="England", method="MANUAL_DOCUMENT_CHECK",
     )
     record_occupancy_eligibility_result(
-        db, check, admin, result_status="PASS", follow_up_days=follow_up_in_days,
+        db, check, admin, result_status="PASS", reason_note="Manual document check passed", follow_up_days=follow_up_in_days,
     )
     return check, party
 

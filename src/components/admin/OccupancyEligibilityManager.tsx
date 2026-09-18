@@ -252,19 +252,32 @@ export function OccupancyEligibilityManager() {
             </div>
           )}
           <div>
-            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Reason note</label>
+            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">
+              Reason note{(decideResult === "PASS" || decideResult === "WAIVED_POLICY") && " (required)"}
+            </label>
             <textarea
               value={decideNote}
               onChange={(e) => setDecideNote(e.target.value)}
               rows={3}
               className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
             />
+            {(decideResult === "PASS" || decideResult === "WAIVED_POLICY") && (
+              <p className="mt-1 text-xs text-slate-400">
+                A PASS/waiver is recorded against the jurisdiction's current market policy version automatically --
+                you only need to state the reason.
+              </p>
+            )}
           </div>
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setDecideTarget(null)}>
               Cancel
             </Button>
-            <Button variant="primary" loading={busyId === decideTarget?.id} onClick={submitDecide}>
+            <Button
+              variant="primary"
+              loading={busyId === decideTarget?.id}
+              disabled={(decideResult === "PASS" || decideResult === "WAIVED_POLICY") && !decideNote.trim()}
+              onClick={submitDecide}
+            >
               Record decision
             </Button>
           </div>

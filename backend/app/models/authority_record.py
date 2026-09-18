@@ -5,7 +5,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-AUTHORITY_STATUSES = ("not_started", "pending", "verified", "expiring", "expired", "failed", "conflict", "review_required")
+AUTHORITY_STATUSES = (
+    "not_started", "pending", "verified", "expiring", "expired", "failed", "conflict", "review_required", "revoked",
+)
 
 
 class AuthorityRecord(Base):

@@ -27,7 +27,7 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
-import { apiClientFetch } from "@/lib/api-client";
+import { ApiError, apiClientFetch } from "@/lib/api-client";
 import { getCurrentAdmin } from "@/lib/auth";
 import { agreementStatusLabel, agreementStatusTone, offerStatusLabel, offerStatusTone } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
@@ -60,6 +60,9 @@ export function LeasingManager() {
   const [applicationForm, setApplicationForm] = useState(emptyApplicationForm);
   const [rejectingId, setRejectingId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [overlapOfferId, setOverlapOfferId] = useState<number | null>(null);
+  const [overlapMessage, setOverlapMessage] = useState("");
+  const [overlapReasonInput, setOverlapReasonInput] = useState("");
   const [disclosuresByAgreement, setDisclosuresByAgreement] = useState<Record<number, DisclosureRequirement[]>>({});
   const [expandedDisclosuresAgreementId, setExpandedDisclosuresAgreementId] = useState<number | null>(null);
   const [disclosuresLoading, setDisclosuresLoading] = useState(false);
@@ -276,12 +279,30 @@ export function LeasingManager() {
     }
   }
 
-  async function transitionOffer(offerId: number, action: "send" | "accept" | "decline") {
+  async function transitionOffer(offerId: number, action: "send" | "accept" | "decline", overrideReason?: string) {
     try {
-      await apiClientFetch(`/api/leasing/offers/${offerId}/${action}`, { method: "POST" });
+      await apiClientFetch(`/api/leasing/offers/${offerId}/${action}`, {
+        method: "POST",
+        ...(action === "accept" ? { body: JSON.stringify({ overrideReason: overrideReason ?? "" }) } : {}),
+      });
       showToast(`Offer ${action === "send" ? "sent" : action === "accept" ? "accepted" : "declined"}`);
+      setOverlapOfferId(null);
+      setOverlapMessage("");
+      setOverlapReasonInput("");
       loadApplications();
-    } catch {
+    } catch (err) {
+      // ZR-ENG-CLR-001 Rule 6/Section 9: a BLOCK-tier occupant-overlap
+      // conflict isn't a dead end for a walk-in guest either -- let the
+      // admin self-declare a reason and proceed anyway, same escape hatch
+      // the renter's own self-service accept has.
+      if (
+        action === "accept" && !overrideReason &&
+        err instanceof ApiError && err.status === 409 && err.message.includes("overlapping active booking")
+      ) {
+        setOverlapOfferId(offerId);
+        setOverlapMessage(err.message);
+        return;
+      }
       showToast(`Failed to ${action} offer`);
     }
   }
@@ -560,7 +581,8 @@ export function LeasingManager() {
                 </div>
                 {latestTerms ? (
                   <p className="text-sm text-slate-700 dark:text-slate-200">
-                    {formatCurrency(latestTerms.monthlyRent)}/month · {formatCurrency(latestTerms.depositAmount)} deposit ·{" "}
+                    {formatCurrency(latestTerms.monthlyRent, latestTerms.currency)}/month ·{" "}
+                    {formatCurrency(latestTerms.depositAmount, latestTerms.currency)} deposit ·{" "}
                     {latestTerms.termMonths} months from {formatDate(latestTerms.startDate)}
                   </p>
                 ) : (
@@ -862,11 +884,52 @@ export function LeasingManager() {
         </form>
       </Modal>
 
+      <Modal
+        open={overlapOfferId !== null}
+        onClose={() => {
+          setOverlapOfferId(null);
+          setOverlapMessage("");
+          setOverlapReasonInput("");
+        }}
+        title="Overlapping booking detected"
+      >
+        <div className="space-y-3.5">
+          <p className="text-sm text-slate-600 dark:text-slate-300">{overlapMessage}</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            You can still accept this offer if you have a genuine reason (e.g. the other booking is ending) — this
+            will be recorded on the offer for later review.
+          </p>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Reason for accepting anyway
+            </label>
+            <textarea
+              value={overlapReasonInput}
+              onChange={(e) => setOverlapReasonInput(e.target.value)}
+              rows={3}
+              className="w-full resize-none rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <Button
+            variant="primary"
+            fullWidth
+            disabled={!overlapReasonInput.trim()}
+            onClick={() => {
+              if (overlapOfferId !== null) transitionOffer(overlapOfferId, "accept", overlapReasonInput.trim());
+            }}
+          >
+            Accept anyway
+          </Button>
+        </div>
+      </Modal>
+
       <Modal open={termsOfferId !== null} onClose={() => { setTermsOfferId(null); setTermsListingId(null); }} title="Offer Terms">
         <form onSubmit={submitTerms} className="space-y-3.5">
           {termsListingId && listingsById[termsListingId] && (
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Listing is advertised at {formatCurrency(listingsById[termsListingId].pricePerNight)}/night — monthly rent below is
+              Listing is advertised at{" "}
+              {formatCurrency(listingsById[termsListingId].pricePerNight, listingsById[termsListingId].currency)}/night —
+              monthly rent below is
               pre-filled from that; change it if the actual agreed rent differs.
             </p>
           )}

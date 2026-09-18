@@ -53,7 +53,12 @@ def _make_provider_rent_obligation(
             account_number_last4="1234", bank_identifier_code="TEST0123456", status="VERIFIED",
             verified_at=datetime.now(timezone.utc),
         ))
-    prop = Property(owner_party_id=owner_party.id, address=f"{suffix} Ledger St", city="Bengaluru", status="active")
+    # Explicitly "IN" (not this platform's default jurisdiction, "England")
+    # -- these tests exercise the "IN" market policy pack's own fields.
+    prop = Property(
+        owner_party_id=owner_party.id, address=f"{suffix} Ledger St", city="Bengaluru", status="active",
+        jurisdiction_code="IN",
+    )
     db.add(prop)
     db.flush()
     room = Room(property_id=prop.id, room_type="private_room", size=100, has_ensuite=True, status="active")

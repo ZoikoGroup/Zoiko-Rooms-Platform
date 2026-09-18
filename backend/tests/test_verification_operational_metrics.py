@@ -22,7 +22,7 @@ class TestVerificationOperationalMetrics:
         check = open_occupancy_eligibility_check(
             db_session, admin, party_id=party.id, jurisdiction_code="England", method="MANUAL_DOCUMENT_CHECK",
         )
-        record_occupancy_eligibility_result(db_session, check, admin, result_status="PASS")
+        record_occupancy_eligibility_result(db_session, check, admin, result_status="PASS", reason_note="Manual document check passed")
 
         open_screening_check(
             db_session, admin, party_id=party.id, jurisdiction_code="England",

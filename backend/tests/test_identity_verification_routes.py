@@ -107,3 +107,37 @@ class TestVerifyAndReject:
         admin = _make_admin(db_session, email="idvr-reject-plain@test.com", role="admin")
         r = client.post(f"/api/identity-verifications/{record.id}/reject", cookies=auth_admin_cookie(admin))
         assert r.status_code == 403, r.text
+
+
+class TestRequestAdditionalEvidence:
+    def _make_pending(self, db: Session) -> IdentityVerification:
+        party = Party(party_type="renter", status="active", jurisdiction="IN")
+        db.add(party)
+        db.flush()
+        record = IdentityVerification(party_id=party.id, document_type="passport", status="pending")
+        db.add(record)
+        db.commit()
+        return record
+
+    def test_super_admin_can_request_additional_evidence(self, client, db_session: Session):
+        record = self._make_pending(db_session)
+        super_admin = _make_admin(db_session, email="idvr-addl-super@test.com", role="super_admin")
+        r = client.post(
+            f"/api/identity-verifications/{record.id}/request-additional-evidence",
+            json={"notes": "Document photo is blurry, please resubmit"},
+            cookies=auth_admin_cookie(super_admin),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "additional_evidence_required"
+        assert r.json()["verifierNotes"] == "Document photo is blurry, please resubmit"
+
+    def test_plain_admin_cannot_request_additional_evidence(self, client, db_session: Session):
+        record = self._make_pending(db_session)
+        admin = _make_admin(db_session, email="idvr-addl-plain@test.com", role="admin")
+        r = client.post(f"/api/identity-verifications/{record.id}/request-additional-evidence", cookies=auth_admin_cookie(admin))
+        assert r.status_code == 403, r.text
+
+    def test_request_additional_evidence_unknown_id_is_404(self, client, db_session: Session):
+        super_admin = _make_admin(db_session, email="idvr-addl-404@test.com", role="super_admin")
+        r = client.post("/api/identity-verifications/999999/request-additional-evidence", cookies=auth_admin_cookie(super_admin))
+        assert r.status_code == 404, r.text

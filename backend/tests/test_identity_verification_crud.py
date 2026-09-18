@@ -151,6 +151,24 @@ class TestVerifyAndRejectRequireSuperAdmin:
         updated = crud.request_additional_evidence(db_session, record, super_admin, "Please resend")
         assert updated.status == "additional_evidence_required"
 
+    def test_request_additional_evidence_stores_notes_and_notifies_the_linked_user(self, db_session: Session):
+        record, party = self._make_pending_record(db_session)
+        user = _make_user(db_session, email="idv-evidence-linked-user@test.com")
+        user.party_id = party.id
+        db_session.commit()
+
+        super_admin = _make_admin(db_session, email="idv-evidence-notify-super@test.com", role="super_admin")
+        updated = crud.request_additional_evidence(db_session, record, super_admin, "Photo is blurry, please resubmit")
+
+        assert updated.verifier_notes == "Photo is blurry, please resubmit"
+        assert updated.verifier_admin_id == super_admin.id
+
+        notification = db_session.query(Notification).filter(
+            Notification.recipient_user_id == user.id,
+            Notification.notification_type == "identity_verification.additional_evidence_required",
+        ).one_or_none()
+        assert notification is not None
+
 
 class TestGetVerifiedIdentityForParty:
     def test_returns_none_when_no_verification_exists(self, db_session: Session):
@@ -259,6 +277,34 @@ class TestSubmitIdentityVerificationForUser:
             Notification.notification_type == "identity_verification.submitted",
         ).one_or_none()
         assert notification is not None
+
+    def test_duplicate_of_verification_id_is_flagged_in_the_admin_notification(self, db_session: Session):
+        """ZR-ENG-CLR-012 Section 18: duplicate-hash matches (resolved by the
+        caller via crud/evidence_vault.py's find_duplicate_by_hash) must
+        reach the reviewer's notification, not be silently dropped."""
+        super_admin = _make_admin(db_session, email="idv-dup-super@test.com", role="super_admin")
+        user = _make_user(db_session, email="idv-dup-user@test.com")
+        party = Party(party_type="renter", status="active", jurisdiction="IN")
+        db_session.add(party)
+        db_session.flush()
+        user.party_id = party.id
+        db_session.commit()
+
+        record = crud.submit_identity_verification_for_user(
+            db_session, user, document_type="passport", document_number="P999", custom_document_name="",
+            stored_filename="stored2.pdf", original_filename="my-passport-2.pdf",
+            content_type="application/pdf", file_size=1234, duplicate_of_verification_id=42,
+        )
+        assert record.status == "pending"
+
+        notification = db_session.query(Notification).filter(
+            Notification.recipient_admin_id == super_admin.id,
+            Notification.notification_type == "identity_verification.submitted",
+            Notification.related_entity_id == str(record.id),
+        ).one_or_none()
+        assert notification is not None
+        assert "verification #42" in notification.message
+        assert "reuse or fraud" in notification.message
 
 
 class TestListing:

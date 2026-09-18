@@ -143,8 +143,11 @@ def db_engine():
     # Every test DB needs a resolvable market policy pack -- deposit funding,
     # offer-terms creation, and sublet submission/approval all call
     # resolve_market_policy(db) and fail closed (409) with none configured.
-    # Mirrors alembic/versions/0027_market_policy_packs.py's seed row; this
-    # doesn't run Alembic migrations, so it has to be inserted directly.
+    # Mirrors alembic/versions/0027_market_policy_packs.py's seed row (IN)
+    # and 294dc9f9f823's (England, this platform's actual default
+    # jurisdiction since the jurisdiction/currency default-value fix) --
+    # this doesn't run Alembic migrations, so both have to be inserted
+    # directly.
     with Session(bind=eng) as seed_session:
         seed_session.add(MarketPolicyPack(
             jurisdiction_code="IN",
@@ -152,6 +155,18 @@ def db_engine():
             effective_from=dt.date(2026, 1, 1),
             confidence="REVIEW_REQUIRED",
             legal_source_note="Test fixture placeholder, not verified legal research.",
+        ))
+        seed_session.add(MarketPolicyPack(
+            jurisdiction_code="England",
+            version=1,
+            effective_from=dt.date(2026, 1, 1),
+            confidence="REVIEW_REQUIRED",
+            legal_source_note="Test fixture placeholder, not verified legal research.",
+            # Left at the model's own default (False) -- unlike the real
+            # production seed, this shared fixture must not turn on a gate
+            # every other England-jurisdiction test would then have to
+            # satisfy. test_occupancy_eligibility_verification.py already
+            # opts this on for its own tests by mutating this row directly.
         ))
         seed_session.commit()
 

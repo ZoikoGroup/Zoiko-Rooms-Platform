@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from pydantic import Field
+
 from app.schemas.common import CamelModel
 
 
@@ -34,9 +36,10 @@ class PropertyCreate(CamelModel):
     # ZR-ENG-CLR-006 Section 6: which market pack the Termination Policy
     # Resolver (and any other jurisdiction-aware engine) uses for this
     # property. Optional -- omitting it keeps this build's only real
-    # jurisdiction, "IN", exactly as every property already defaulted to
-    # before this field existed.
-    jurisdiction_code: str = "IN"
+    # supported jurisdiction, "England" (see
+    # services/agreement_profile.py:SUPPORTED_JURISDICTION). This platform
+    # targets foreign markets, not India.
+    jurisdiction_code: str = "England"
 
 
 class PropertyRead(CamelModel):
@@ -68,6 +71,13 @@ class AuthorityRecordCreate(CamelModel):
     room_id: int
     authority_type: str
     evidence_ref: str = ""
+
+
+class AuthorityRecordRevoke(CamelModel):
+    # ZR-ENG-CLR-012 Section 13: a revocation of an already-verified
+    # credential is a materially different, higher-stakes action than the
+    # original submit/verify/reject flow -- always requires a real reason.
+    reason: str = Field(min_length=1)
 
 
 class AuthorityRecordRead(CamelModel):
