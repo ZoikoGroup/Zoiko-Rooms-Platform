@@ -172,7 +172,8 @@ class TestOccupancyEligibilityReCheckedAtMoveIn:
             db_session, super_admin, party_id=party_id, jurisdiction_code="England", method="MANUAL_DOCUMENT_CHECK",
         )
         record_occupancy_eligibility_result(
-            db_session, check, super_admin, result_status="PASS", policy_pack_version=1, follow_up_days=365,
+            db_session, check, super_admin, result_status="PASS", reason_note="Verified passport",
+            policy_pack_version=1, follow_up_days=365,
         )
 
         r = client.post(f"/api/leasing/offers/{offer_id}/agreement", cookies=admin_cookies)
@@ -246,7 +247,11 @@ class TestOccupancyEligibilityAdminRoutes:
             cookies=admin_cookies,
         )
         check_id = r.json()["id"]
-        r = client.post(f"/api/verification/occupancy-eligibility-checks/{check_id}/decide", json={"resultStatus": "PASS"}, cookies=admin_cookies)
+        r = client.post(
+            f"/api/verification/occupancy-eligibility-checks/{check_id}/decide",
+            json={"resultStatus": "PASS", "reasonNote": "Manual document check passed"},
+            cookies=admin_cookies,
+        )
         assert r.status_code == 200, r.text
 
         r = client.post(f"/api/verification/occupancy-eligibility-checks/{check_id}/decide", json={"resultStatus": "FAIL_INELIGIBLE"}, cookies=admin_cookies)
@@ -317,7 +322,9 @@ class TestOccupancyEligibilityExpandedStateModel:
         assert get_valid_occupancy_eligibility_credential(db_session, party.id, "England") is None
 
         # Never a dead end -- Section 8: "Retry/failover; never adverse decision."
-        updated = record_occupancy_eligibility_result(db_session, check, admin, result_status="PASS")
+        updated = record_occupancy_eligibility_result(
+            db_session, check, admin, result_status="PASS", reason_note="Retried via manual document check",
+        )
         assert updated.status == "PASS"
         assert get_valid_occupancy_eligibility_credential(db_session, party.id, "England") is not None
 
@@ -343,7 +350,9 @@ class TestOccupancyEligibilityExpandedStateModel:
         )
         record_occupancy_eligibility_result(db_session, check, admin, result_status="SUSPENDED", reason_note="Pending investigation")
         assert check.status == "SUSPENDED"
-        updated = record_occupancy_eligibility_result(db_session, check, admin, result_status="PASS")
+        updated = record_occupancy_eligibility_result(
+            db_session, check, admin, result_status="PASS", reason_note="Investigation cleared",
+        )
         assert updated.status == "PASS"
 
     def test_waived_policy_issues_a_credential_and_is_terminal(self, db_session: Session):
@@ -375,7 +384,9 @@ class TestOccupancyEligibilityExpandedStateModel:
         check = open_occupancy_eligibility_check(
             db_session, admin, party_id=party.id, jurisdiction_code="England", method="MANUAL_DOCUMENT_CHECK",
         )
-        record_occupancy_eligibility_result(db_session, check, admin, result_status="PASS", follow_up_days=1)
+        record_occupancy_eligibility_result(
+            db_session, check, admin, result_status="PASS", reason_note="Manual document check passed", follow_up_days=1,
+        )
 
         read_before = to_occupancy_eligibility_check_read(db_session, check)
         assert read_before.status == "PASS"

@@ -35,7 +35,8 @@ class ApplicationDecisionRead(CamelModel):
     decision: str
     reason_code: str
     note: str
-    decided_by_admin_id: int
+    decided_by_admin_id: int | None = None
+    decided_by_user_id: int | None = None
     decided_at: datetime
 
 
@@ -76,6 +77,7 @@ class OfferTermsRead(CamelModel):
     version: int
     monthly_rent: float
     deposit_amount: float
+    currency: str
     start_date: date
     term_months: int
     cadence: str

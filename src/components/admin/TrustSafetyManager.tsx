@@ -36,6 +36,8 @@ export function TrustSafetyManager() {
   const [classifyForm, setClassifyForm] = useState(emptyClassifyForm);
   const [authorityModalOpen, setAuthorityModalOpen] = useState(false);
   const [authorityForm, setAuthorityForm] = useState(emptyAuthorityForm);
+  const [revokeRecordId, setRevokeRecordId] = useState<number | null>(null);
+  const [revokeReason, setRevokeReason] = useState("");
 
   function showToast(message: string) {
     setToast(message);
@@ -144,6 +146,23 @@ export function TrustSafetyManager() {
       showToast("Authority record rejected");
     } catch {
       showToast("Failed to reject authority record");
+    }
+  }
+
+  async function submitRevokeAuthority(e: React.FormEvent) {
+    e.preventDefault();
+    if (revokeRecordId === null || !revokeReason.trim()) return;
+    try {
+      const updated = await apiClientFetch<AuthorityRecord>(`/api/authority-records/${revokeRecordId}/revoke`, {
+        method: "POST",
+        body: JSON.stringify({ reason: revokeReason.trim() }),
+      });
+      setAuthorityRecords((prev) => prev.map((r) => (r.id === revokeRecordId ? updated : r)));
+      setRevokeRecordId(null);
+      setRevokeReason("");
+      showToast("Authority record revoked");
+    } catch {
+      showToast("Failed to revoke authority record");
     }
   }
 
@@ -271,6 +290,18 @@ export function TrustSafetyManager() {
                       <XCircle className="h-3.5 w-3.5" /> Reject
                     </Button>
                   </>
+                )}
+                {record.status === "verified" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setRevokeRecordId(record.id);
+                      setRevokeReason("");
+                    }}
+                  >
+                    <XCircle className="h-3.5 w-3.5" /> Revoke
+                  </Button>
                 )}
               </div>
             </div>
@@ -400,6 +431,34 @@ export function TrustSafetyManager() {
           </div>
           <Button type="submit" variant="primary" fullWidth>
             Submit for Review
+          </Button>
+        </form>
+      </Modal>
+
+      <Modal
+        open={revokeRecordId !== null}
+        onClose={() => { setRevokeRecordId(null); setRevokeReason(""); }}
+        title="Revoke Authority Record"
+      >
+        <form onSubmit={submitRevokeAuthority} className="space-y-3.5">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            This immediately invalidates the record for eligibility checks, even though it hasn't expired yet --
+            e.g. the evidence turned out to be fraudulent, or the underlying lease/ownership basis has since ended.
+          </p>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Reason (required)
+            </label>
+            <textarea
+              value={revokeReason}
+              onChange={(e) => setRevokeReason(e.target.value)}
+              rows={3}
+              required
+              className="w-full resize-none rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <Button type="submit" variant="primary" fullWidth disabled={!revokeReason.trim()}>
+            Revoke
           </Button>
         </form>
       </Modal>

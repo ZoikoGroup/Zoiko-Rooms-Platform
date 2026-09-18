@@ -1,6 +1,7 @@
 import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
   Agreement,
+  Application,
   BookingChangeRequest,
   DisclosureRequirement,
   HandoverEvent,
@@ -147,8 +148,15 @@ export function getOwnOffer(applicationId: number): Promise<Offer> {
   return apiClientFetch<Offer>(`/api/users/rentals/applications/${applicationId}/offer`);
 }
 
-export function acceptOwnOffer(offerId: number): Promise<Offer> {
-  return apiClientFetch<Offer>(`/api/users/rentals/offers/${offerId}/accept`, { method: "POST" });
+/** overrideReason: only needed when the occupant-overlap check comes back
+ *  BLOCK (ZR-ENG-CLR-001 Rule 6/Section 9) -- the renter self-declares why
+ *  they still want to proceed, captured on the offer for later admin
+ *  review. Leave blank for a normal accept. */
+export function acceptOwnOffer(offerId: number, overrideReason?: string): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/rentals/offers/${offerId}/accept`, {
+    method: "POST",
+    body: JSON.stringify({ overrideReason: overrideReason ?? "" }),
+  });
 }
 
 export function declineOwnOffer(offerId: number): Promise<Offer> {
@@ -403,6 +411,73 @@ export function submitHostedListingForReview(listingId: string): Promise<HostedL
   return apiClientFetch<HostedListing>(`/api/users/hosting/listings/${listingId}/submit-for-review`, {
     method: "POST",
   });
+}
+
+// --- Applications to review (ZR-ENG-CLR-011 Section 10) --------------------
+
+/** Applications submitted to any of the host's own party-owned listings. */
+export function listHostedApplications(): Promise<Application[]> {
+  return apiClientFetch<Application[]>("/api/users/hosting/applications");
+}
+
+export function decideHostedApplication(
+  applicationId: number,
+  payload: { decision: "APPROVED" | "REJECTED"; note?: string; reasonCode?: string }
+): Promise<Application> {
+  return apiClientFetch<Application>(`/api/users/hosting/applications/${applicationId}/decide`, {
+    method: "POST",
+    body: JSON.stringify({ reasonCode: "", note: "", ...payload }),
+  });
+}
+
+// --- Offers and agreements (ZR-ENG-CLR-004 Section 4.3) ---------------------
+
+export function createHostedOffer(applicationId: number): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/applications/${applicationId}/offers`, { method: "POST" });
+}
+
+export function getHostedOffer(offerId: number): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/offers/${offerId}`);
+}
+
+export function addHostedOfferTerms(
+  offerId: number,
+  payload: { monthlyRent: number; depositAmount: number; startDate: string; termMonths: number }
+): Promise<Offer> {
+  return apiClientFetch(`/api/users/hosting/offers/${offerId}/terms`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }).then(() => getHostedOffer(offerId));
+}
+
+export function sendHostedOffer(offerId: number): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/offers/${offerId}/send`, { method: "POST" });
+}
+
+export function createHostedAgreement(offerId: number): Promise<Agreement> {
+  return apiClientFetch<Agreement>(`/api/users/hosting/offers/${offerId}/agreement`, { method: "POST" });
+}
+
+export function getHostedAgreement(agreementId: number): Promise<Agreement> {
+  return apiClientFetch<Agreement>(`/api/users/hosting/agreements/${agreementId}`);
+}
+
+export function sendHostedAgreement(agreementId: number): Promise<Agreement> {
+  return apiClientFetch<Agreement>(`/api/users/hosting/agreements/${agreementId}/send`, { method: "POST" });
+}
+
+export function signHostedAgreement(agreementId: number): Promise<Agreement> {
+  return apiClientFetch<Agreement>(`/api/users/hosting/agreements/${agreementId}/sign`, { method: "POST" });
+}
+
+export function listHostedAgreementDisclosures(agreementId: number): Promise<DisclosureRequirement[]> {
+  return apiClientFetch<DisclosureRequirement[]>(`/api/users/hosting/agreements/${agreementId}/disclosures`);
+}
+
+export function deliverHostedDisclosure(agreementId: number, disclosureId: number): Promise<DisclosureRequirement> {
+  return apiClientFetch<DisclosureRequirement>(
+    `/api/users/hosting/agreements/${agreementId}/disclosures/${disclosureId}/deliver`, { method: "POST" },
+  );
 }
 
 // --- Payments --------------------------------------------------------------

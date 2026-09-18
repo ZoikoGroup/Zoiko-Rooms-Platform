@@ -20,7 +20,7 @@ from app.crud.listing import is_listing_available
 from app.crud.market_policy import resolve_market_policy
 from app.crud import notification as notif_crud
 from app.crud.occupancy import _add_months
-from app.crud.party import assert_provider_access, party_id_for_listing
+from app.crud.party import assert_provider_access, assert_provider_access_any, party_id_for_listing
 from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
 from app.models.agreement_amendment import AgreementAmendment
@@ -156,6 +156,48 @@ def list_applications_for(db: Session, admin: AdminUser) -> list[Application]:
     return list(db.scalars(query))
 
 
+def list_applications_for_host(db: Session, user: UserAccount) -> list[Application]:
+    """The self-service counterpart to list_applications_for above -- applications
+    on any of the host's own party-owned listings, for the "Applications to review"
+    surface (ZR-ENG-CLR-011 Section 10)."""
+    if not user.party_id:
+        return []
+    query = (
+        select(Application)
+        .join(Listing, Listing.id == Application.listing_id)
+        .where(Listing.party_id == user.party_id)
+        .options(
+            joinedload(Application.listing),
+            joinedload(Application.guest),
+            selectinload(Application.decisions),
+            joinedload(Application.offer),
+        )
+        .order_by(Application.submitted_at.desc())
+    )
+    return list(db.scalars(query))
+
+
+def get_application_for_host_or_404(db: Session, application_id: int, user: UserAccount) -> Application:
+    application = get_application_or_404(db, application_id)
+    if not user.party_id or party_id_for_listing(application.listing) != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view applications for your own listings")
+    return application
+
+
+def get_offer_for_host_or_404(db: Session, offer_id: int, user: UserAccount) -> Offer:
+    offer = get_offer_or_404(db, offer_id)
+    if not user.party_id or party_id_for_listing(offer.listing) != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view offers for your own listings")
+    return offer
+
+
+def get_agreement_for_host_or_404(db: Session, agreement_id: int, user: UserAccount) -> Agreement:
+    agreement = get_agreement_or_404(db, agreement_id)
+    if not user.party_id or party_id_for_listing(agreement.offer.listing) != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view agreements for your own listings")
+    return agreement
+
+
 def get_application_or_404(db: Session, application_id: int) -> Application:
     application = db.get(Application, application_id)
     if not application:
@@ -190,10 +232,12 @@ def withdraw_application(db: Session, application: Application, admin: AdminUser
     return application
 
 
-def decide_application(db: Session, application: Application, admin: AdminUser, data: ApplicationDecide) -> ApplicationDecision:
-    """Restricted to super_admin at the route level -- applicant screening/approval is
-    a platform trust & safety decision, not a provider one, unlike everything after it
-    (offer terms, agreement) which stays with the provider."""
+def _apply_application_decision(
+    db: Session, application: Application, data: ApplicationDecide, *, admin_id: int | None, user_id: int | None,
+) -> ApplicationDecision:
+    """Shared core of decide_application/decide_application_as_host -- the same
+    status transition and renter/host notifications regardless of which actor
+    decided. Exactly one of admin_id/user_id is set by the caller."""
     if data.decision not in ("APPROVED", "REJECTED"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "decision must be APPROVED or REJECTED")
 
@@ -202,7 +246,8 @@ def decide_application(db: Session, application: Application, admin: AdminUser, 
         decision=data.decision,
         reason_code=data.reason_code,
         note=data.note,
-        decided_by_admin_id=admin.id,
+        decided_by_admin_id=admin_id,
+        decided_by_user_id=user_id,
     )
     db.add(decision)
     application.status = "DECIDED"
@@ -229,10 +274,12 @@ def decide_application(db: Session, application: Application, admin: AdminUser, 
     # now build an offer; a rejection means this applicant is off the table) --
     # a separate notification_type from the renter's own, so each recipient's
     # notification links to their own role-appropriate page, and deliberately
-    # never includes the admin's internal note/reason_code (that's a platform
-    # trust & safety detail, not something to expose to the host).
+    # never includes the internal note/reason_code (that's a platform trust &
+    # safety detail, not something to expose to the host). Only fires for a
+    # self-service (party-owned) listing -- when the host themselves just made
+    # this decision (user_id set), they already know the outcome.
     listing = application.listing
-    if listing and listing.party_id:
+    if listing and listing.party_id and user_id is None:
         verb = "approved" if data.decision == "APPROVED" else "rejected"
         notif_crud.notify_user_by_party(
             db, listing.party_id,
@@ -245,6 +292,28 @@ def decide_application(db: Session, application: Application, admin: AdminUser, 
     db.commit()
     db.refresh(decision)
     return decision
+
+
+def decide_application(db: Session, application: Application, admin: AdminUser, data: ApplicationDecide) -> ApplicationDecision:
+    """Restricted to super_admin at the route level -- applicant screening/approval is
+    a platform trust & safety decision, not a provider one, unlike everything after it
+    (offer terms, agreement) which stays with the provider. This is the admin-portal
+    path; a self-service Host decides their own party-owned listing's applications
+    through decide_application_as_host below instead."""
+    return _apply_application_decision(db, application, data, admin_id=admin.id, user_id=None)
+
+
+def decide_application_as_host(
+    db: Session, application: Application, user: UserAccount, data: ApplicationDecide,
+) -> ApplicationDecision:
+    """ZR-ENG-CLR-011 Section 10/AC-06: the Host's own "Applications to review"
+    action, for a self-service (party-owned) listing only -- admin-portal listings
+    still go through decide_application/super_admin above."""
+    if not user.party_id or party_id_for_listing(application.listing) != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only decide applications for your own listings")
+    if application.status != "SUBMITTED":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Application in status {application.status} cannot be decided")
+    return _apply_application_decision(db, application, data, admin_id=None, user_id=user.id)
 
 
 def get_offer_or_404(db: Session, offer_id: int, correlation_id: str = "") -> Offer:
@@ -260,8 +329,8 @@ def get_offer_or_404(db: Session, offer_id: int, correlation_id: str = "") -> Of
     return offer
 
 
-def create_offer(db: Session, application: Application, admin: AdminUser) -> Offer:
-    assert_provider_access(db, admin, party_id_for_listing(application.listing))
+def create_offer(db: Session, application: Application, admin: AdminUser | UserAccount) -> Offer:
+    assert_provider_access_any(db, admin, party_id_for_listing(application.listing))
     reasons = check_offer_eligibility(db, application)
     if reasons:
         raise HTTPException(status.HTTP_409_CONFLICT, {"message": "Not eligible to create an offer", "reasons": reasons})
@@ -273,7 +342,9 @@ def create_offer(db: Session, application: Application, admin: AdminUser) -> Off
     return offer
 
 
-def add_offer_terms(db: Session, offer: Offer, admin: AdminUser, data: OfferTermsCreate, correlation_id: str = "") -> OfferTerms:
+def add_offer_terms(
+    db: Session, offer: Offer, admin: AdminUser | UserAccount, data: OfferTermsCreate, correlation_id: str = "",
+) -> OfferTerms:
     """ZR-ENG-CLR-004 AC-06 'A change to rent, dates, parties, premises,
     deposit or other configured material term invalidates a pending signing
     version'. Two cases:
@@ -288,7 +359,7 @@ def add_offer_terms(db: Session, offer: Offer, admin: AdminUser, data: OfferTerm
 
     Once a version reaches FROZEN/EXECUTED_IMMUTABLE, neither case applies --
     the guard below rejects the request outright, exactly as before."""
-    assert_provider_access(db, admin, party_id_for_listing(offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(offer.listing))
     agreement = offer.agreement
     reversioning = False
     if offer.status not in ("DRAFT", "SENT"):
@@ -356,7 +427,8 @@ def add_offer_terms(db: Session, offer: Offer, admin: AdminUser, data: OfferTerm
 
 
 def _invalidate_pending_agreement_version(
-    db: Session, agreement: Agreement, offer: Offer, latest_terms: OfferTerms, admin: AdminUser, correlation_id: str = "",
+    db: Session, agreement: Agreement, offer: Offer, latest_terms: OfferTerms, admin: AdminUser | UserAccount,
+    correlation_id: str = "",
 ) -> None:
     """ZR-ENG-CLR-004 AC-06/Section 9.2/17.1 'Host changes rent after renter
     opens agreement: Invalidate pending version; return to commercial terms
@@ -398,9 +470,15 @@ def _invalidate_pending_agreement_version(
     agreement.signature_ref = ""
     agreement.status = "DRAFT"
 
+    # log_audit_event's actor is admin-only -- a self-service Host has no
+    # admin_users row to attribute the event to, so it's recorded the same
+    # way every other user_hosting.py/user_rentals.py action already does:
+    # actor=None plus a "user:<id>" reason marker.
+    audit_admin = admin if isinstance(admin, AdminUser) else None
+    reason = "material_term_change" if audit_admin else f"material_term_change,user:{admin.id}"
     log_audit_event(
-        db, admin, "agreement.version_superseded", "agreement", str(agreement.id), correlation_id,
-        reason="material_term_change", before_state=before_state, after_state=f"v{new_version.version_no}:DRAFT",
+        db, audit_admin, "agreement.version_superseded", "agreement", str(agreement.id), correlation_id,
+        reason=reason, before_state=before_state, after_state=f"v{new_version.version_no}:DRAFT",
     )
     emit_event(
         db, "agreement.version_superseded", "agreement", str(agreement.id),
@@ -485,9 +563,10 @@ _OFFER_ALLOWED_FROM_STATUSES: dict[str, tuple[str, ...]] = {
 
 
 def set_offer_status(
-    db: Session, offer: Offer, admin: AdminUser, new_status: str, correlation_id: str = "", override_reason: str = "",
+    db: Session, offer: Offer, admin: AdminUser | UserAccount, new_status: str, correlation_id: str = "",
+    override_reason: str = "",
 ) -> Offer:
-    assert_provider_access(db, admin, party_id_for_listing(offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(offer.listing))
     allowed_from = _OFFER_ALLOWED_FROM_STATUSES.get(new_status)
     if allowed_from is not None and offer.status not in allowed_from:
         raise HTTPException(
@@ -704,9 +783,9 @@ def _populate_version_detail_rows(db: Session, version: AgreementVersion, offer:
 
 
 def create_agreement(
-    db: Session, offer: Offer, admin: AdminUser, selected_optional_clause_ids: list[str] | None = None,
+    db: Session, offer: Offer, admin: AdminUser | UserAccount, selected_optional_clause_ids: list[str] | None = None,
 ) -> Agreement:
-    assert_provider_access(db, admin, party_id_for_listing(offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(offer.listing))
     reasons = check_agreement_eligibility(db, offer)
     if reasons:
         raise HTTPException(status.HTTP_409_CONFLICT, {"message": "Not eligible to create an agreement", "reasons": reasons})
@@ -869,8 +948,8 @@ def create_signature_requests(db: Session, agreement: Agreement, version: Agreem
     return requests
 
 
-def send_agreement(db: Session, agreement: Agreement, admin: AdminUser) -> Agreement:
-    assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
+def send_agreement(db: Session, agreement: Agreement, admin: AdminUser | UserAccount) -> Agreement:
+    assert_provider_access_any(db, admin, party_id_for_listing(agreement.offer.listing))
     if agreement.status != "DRAFT":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Only a DRAFT agreement can be sent (current status: {agreement.status})")
     if not agreement.versions:
@@ -922,7 +1001,7 @@ ALLOWED_DELIVERY_CHANNELS = ("IN_APP", "EMAIL", "POST", "ACCESSIBLE_TEXT")
 
 
 def deliver_disclosure(
-    db: Session, agreement: Agreement, disclosure: DisclosureRequirement, admin: AdminUser, *,
+    db: Session, agreement: Agreement, disclosure: DisclosureRequirement, admin: AdminUser | UserAccount, *,
     to_party: str = "renter", delivery_channel: str = "IN_APP",
 ) -> DisclosureRequirement:
     """ZR-ENG-CLR-004 Section 9.3 disclosure lifecycle: REQUIRED -> ...
@@ -939,7 +1018,7 @@ def deliver_disclosure(
     selectable alternatives to the default in-app PDF, not just enum values
     nothing sets (see GET .../accessible-text for the ACCESSIBLE_TEXT
     rendering itself)."""
-    assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(agreement.offer.listing))
     if delivery_channel not in ALLOWED_DELIVERY_CHANNELS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"deliveryChannel must be one of {list(ALLOWED_DELIVERY_CHANNELS)}")
     if disclosure.status in ("DELIVERED", "ACKNOWLEDGED"):
@@ -1292,6 +1371,20 @@ def sign_agreement(
     if as_party == "renter":
         _assert_renter_has_no_account(db, agreement.offer.guest_id, action="sign this agreement")
     return _apply_signature(db, agreement, as_party, method=method, evidence_metadata=evidence_metadata)
+
+
+def host_sign_agreement(
+    db: Session, agreement: Agreement, user: UserAccount, *,
+    method: str = "SIMPLE_ESIGN", evidence_metadata: dict | None = None,
+) -> Agreement:
+    """ZR-ENG-CLR-004 Section 4.3: 'The default is the legal landlord/Host...
+    Zoiko Admin does not sign merely because Zoiko operates the platform.' The
+    self-service Host's own counterpart to user_sign_agreement above -- always
+    signs as_party="provider" only; a Host can never sign as the renter (that
+    stays an admin-attested, walk-in-guest-only path via sign_agreement)."""
+    if not user.party_id or party_id_for_listing(agreement.offer.listing) != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This agreement does not belong to your listing")
+    return _apply_signature(db, agreement, "provider", method=method, evidence_metadata=evidence_metadata)
 
 
 def record_wet_ink_signature(

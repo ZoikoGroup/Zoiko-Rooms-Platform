@@ -258,7 +258,13 @@ class TestAvailabilityEnforcedAcrossEntryPoints:
         )
         assert r.status_code == 201, r.text
 
-    def test_occupied_listing_rejects_new_legacy_booking(self, client, db_session: Session):
+    def test_legacy_booking_creation_endpoint_no_longer_exists(self, client, db_session: Session):
+        """ZR-ENG-CLR-001 Section 1: the legacy Booking model predates the
+        real Application -> Offer -> Agreement -> Occupancy pipeline and
+        creating a row through it bypassed every gate (RoomHold,
+        jurisdiction, overlap, identity) that pipeline enforces -- POST was
+        removed entirely rather than re-implementing availability
+        enforcement on a path that shouldn't exist at all."""
         listing_id, room_id, _host, admin_cookies = _create_publish_listing(client, db_session)
         _make_active_occupancy(db_session, listing_id=listing_id, room_id=room_id)
 
@@ -275,4 +281,4 @@ class TestAvailabilityEnforcedAcrossEntryPoints:
             },
             cookies=admin_cookies,
         )
-        assert r.status_code == 409, r.text
+        assert r.status_code == 405, r.text

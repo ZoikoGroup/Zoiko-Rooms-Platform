@@ -97,6 +97,18 @@ def record_occupancy_eligibility_result(
     if result_status not in OCCUPANCY_ELIGIBILITY_STATUSES or result_status == "IN_PROGRESS":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid result status '{result_status}'")
 
+    # ZR-ENG-CLR-012 Section 9 (acceptance criteria): "Manual reviewer PASS
+    # requires reason and policy snapshot." Applies to WAIVED_POLICY too --
+    # it issues the exact same VerificationCredential as PASS below, just on
+    # a different basis, so it needs the same accountability.
+    if result_status in ("PASS", "WAIVED_POLICY"):
+        if not reason_note.strip():
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"A reason is required to record a {result_status} decision")
+        if policy_pack_version is None:
+            from app.crud.market_policy import resolve_market_policy
+
+            policy_pack_version = resolve_market_policy(db, check.jurisdiction_code).version
+
     now = datetime.now(timezone.utc)
     check.status = result_status
     check.reason_note = reason_note

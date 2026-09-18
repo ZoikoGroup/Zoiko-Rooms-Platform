@@ -43,7 +43,7 @@ def create_guarantor_party_for_amendment(db: Session, agreement: Agreement, *, l
     records their evidence via record_guarantor_consent below."""
     guarantor_party = Party(
         party_type="guarantor", status="active",
-        jurisdiction=agreement.offer.listing.market_release.jurisdiction if agreement.offer.listing.market_release else "IN",
+        jurisdiction=agreement.offer.listing.market_release.jurisdiction if agreement.offer.listing.market_release else "England",
     )
     db.add(guarantor_party)
     db.flush()

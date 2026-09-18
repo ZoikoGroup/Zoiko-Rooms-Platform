@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.identity_verification import IdentityVerification
 from app.models.party import Party
-from tests.conftest import _make_user, auth_user_cookie
+from tests.conftest import _make_admin, _make_user, auth_user_cookie
 
 _PDF_BYTES = b"%PDF-1.4 fake identity document content"
 
@@ -80,6 +80,53 @@ class TestSubmit:
             cookies=auth_user_cookie(user),
         )
         assert r.status_code == 400, r.text
+
+    def test_reuploading_identical_document_bytes_flags_admins_of_the_duplicate(
+        self, client, db_session: Session, tmp_path, monkeypatch
+    ):
+        """ZR-ENG-CLR-012 Section 18: duplicate/fraud-pattern detection must
+        actually reach the admin notification queue, not just exist as an
+        unused helper."""
+        from app.models.notification import Notification
+
+        monkeypatch.setattr(settings, "identity_upload_dir", str(tmp_path))
+        super_admin = _make_admin(db_session, email="uidv-dup-super@test.com", role="super_admin")
+
+        party_a = Party(party_type="renter", status="active", jurisdiction="IN")
+        party_b = Party(party_type="renter", status="active", jurisdiction="IN")
+        db_session.add_all([party_a, party_b])
+        db_session.flush()
+        user_a = _make_user(db_session, email="uidv-dup-a@test.com")
+        user_a.party_id = party_a.id
+        user_b = _make_user(db_session, email="uidv-dup-b@test.com")
+        user_b.party_id = party_b.id
+        db_session.commit()
+
+        r1 = client.post(
+            "/api/users/identity-verifications",
+            data={"document_type": "passport", "document_number": "P111"},
+            files={"file": ("passport.pdf", _PDF_BYTES, "application/pdf")},
+            cookies=auth_user_cookie(user_a),
+        )
+        assert r1.status_code == 201, r1.text
+        first_id = r1.json()["id"]
+
+        r2 = client.post(
+            "/api/users/identity-verifications",
+            data={"document_type": "passport", "document_number": "P222"},
+            files={"file": ("passport.pdf", _PDF_BYTES, "application/pdf")},
+            cookies=auth_user_cookie(user_b),
+        )
+        assert r2.status_code == 201, r2.text
+        second_id = r2.json()["id"]
+
+        notification = db_session.query(Notification).filter(
+            Notification.recipient_admin_id == super_admin.id,
+            Notification.notification_type == "identity_verification.submitted",
+            Notification.related_entity_id == str(second_id),
+        ).one_or_none()
+        assert notification is not None
+        assert f"verification #{first_id}" in notification.message
 
     def test_user_with_no_party_gets_409(self, client, db_session: Session, tmp_path, monkeypatch):
         monkeypatch.setattr(settings, "identity_upload_dir", str(tmp_path))

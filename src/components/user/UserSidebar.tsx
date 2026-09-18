@@ -7,6 +7,7 @@ import {
   Building2,
   ChevronLeft,
   ChevronRight,
+  ClipboardCheck,
   ClipboardList,
   CreditCard,
   DoorOpen,
@@ -42,6 +43,7 @@ const navGroups = [
     items: [
       { href: "/account/host", label: "My Properties", icon: Building2 },
       { href: "/account/host/listings", label: "My Listings", icon: BedDouble },
+      { href: "/account/host/applications", label: "Applications", icon: ClipboardCheck },
     ],
   },
   {

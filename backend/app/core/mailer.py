@@ -172,6 +172,23 @@ def send_identity_verification_rejected_email(to_email: str, full_name: str, not
     )
 
 
+def send_identity_verification_additional_evidence_email(to_email: str, full_name: str, notes: str = "") -> None:
+    body_lines = [
+        f"Hi {full_name},",
+        "We reviewed your identity document but need additional or different evidence before we can verify you.",
+    ]
+    if notes:
+        body_lines.append(f"Reviewer notes: {notes}")
+    send_email(
+        to_email,
+        "Additional evidence needed to verify your identity",
+        heading="More information needed",
+        body_lines=body_lines,
+        cta_label="Submit additional evidence",
+        cta_url=f"{settings.frontend_url}/account/identity",
+    )
+
+
 def send_listing_published_email(to_email: str, full_name: str, listing_name: str) -> None:
     send_email(
         to_email,

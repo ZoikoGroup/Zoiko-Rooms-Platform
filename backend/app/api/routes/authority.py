@@ -8,6 +8,7 @@ from app.crud.authority import (
     get_authority_record,
     list_authority_records,
     reject_authority_record,
+    revoke_authority_record,
     submit_authority_record,
     verify_authority_record,
 )
@@ -16,7 +17,7 @@ from app.crud.party import assert_provider_access, party_id_for_room
 from app.crud.property import get_room
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
-from app.schemas.marketplace import AuthorityRecordCreate, AuthorityRecordRead
+from app.schemas.marketplace import AuthorityRecordCreate, AuthorityRecordRead, AuthorityRecordRevoke
 
 router = APIRouter(prefix="/api/authority-records", tags=["authority"], dependencies=[Depends(get_current_admin)])
  
@@ -68,5 +69,26 @@ def reject_record(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Authority record not found")
     updated = reject_authority_record(db, record, admin)
     log_audit_event(db, admin, "authority.reject", "authority_record", str(authority_id), get_correlation_id(request))
+    db.commit()
+    return updated
+
+
+@router.post("/{authority_id}/revoke", response_model=AuthorityRecordRead, dependencies=[Depends(require_super_admin)])
+def revoke_record(
+    authority_id: int,
+    payload: AuthorityRecordRevoke,
+    request: Request,
+    admin: AdminUser = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    record = get_authority_record(db, authority_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Authority record not found")
+    updated = revoke_authority_record(db, record, admin)
+    log_audit_event(
+        db, admin, "authority.revoke", "authority_record", str(authority_id), get_correlation_id(request),
+        reason=payload.reason,
+    )
+    emit_event(db, "authority.revoked", "authority_record", str(authority_id), {"room_id": record.room_id})
     db.commit()
     return updated
