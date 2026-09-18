@@ -5,7 +5,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-PARTY_TYPES = ("provider", "renter", "institution", "zoiko_operator")
+PARTY_TYPES = ("provider", "renter", "institution", "zoiko_operator", "guarantor")
 PARTY_STATUSES = ("active", "suspended", "closed")
 
 
@@ -15,7 +15,10 @@ class Party(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     party_type: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="active")
-    jurisdiction: Mapped[str] = mapped_column(String(50), default="IN")
+    # This platform targets foreign markets, not India -- "England" is the
+    # only jurisdiction with a real market-pack/agreement-clause registry
+    # (services/agreement_profile.py:SUPPORTED_JURISDICTION).
+    jurisdiction: Mapped[str] = mapped_column(String(50), default="England")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     memberships: Mapped[list["Membership"]] = relationship(back_populates="party", cascade="all, delete-orphan")

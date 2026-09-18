@@ -7,7 +7,6 @@ import { StarRating } from "@/components/ui/StarRating";
 import { PublicListing } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils";
 import { ListingImageGallery } from "@/components/user/ListingImageGallery";
-import { IdentityGate } from "@/components/user/IdentityGate";
 import { Card } from "@/components/user/ui";
 
 /** The full listing/property detail body -- gallery, name/location/price, stats,
@@ -99,18 +98,24 @@ export function ListingDetailContent({
         <p className="text-sm text-slate-600 dark:text-slate-300">{listing.ownerName || "Zoiko host"}</p>
       </Card>
 
-      <IdentityGate action="apply for a room">
-        <Card className="!bg-emerald-50 !ring-emerald-200 dark:!bg-emerald-500/10 dark:!ring-emerald-500/20">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">
-              Your identity is verified — you can apply for this room.
+      <Card className="!bg-emerald-50 !ring-emerald-200 dark:!bg-emerald-500/10 dark:!ring-emerald-500/20">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">Ready to apply?</p>
+            {/* ZR-ENG-CLR-012 Section 5/AC-03: progressive verification -- no
+               global requirement to verify identity before applying. Full
+               identity verification is only required later, before your
+               agreement can be prepared (see VerificationStatusSummary on
+               the dashboard for that check). */}
+            <p className="text-xs text-emerald-700 dark:text-emerald-400">
+              You can apply without verifying your identity first — you&apos;ll need a verified identity later, before your agreement can be prepared.
             </p>
-            <Button disabled={applied} onClick={onApplyClick}>
-              {applied ? "Applied" : "Apply for this room"}
-            </Button>
           </div>
-        </Card>
-      </IdentityGate>
+          <Button disabled={applied} onClick={onApplyClick}>
+            {applied ? "Applied" : "Apply for this room"}
+          </Button>
+        </div>
+      </Card>
     </div>
   );
 }

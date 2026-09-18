@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from app.schemas.common import CamelModel
 
 
@@ -18,9 +20,10 @@ class ListingBase(CamelModel):
     longitude: float | None = None
     price_per_night: float
     # ISO-4217-style 3-letter code, validated server-side against
-    # models.listing.SUPPORTED_CURRENCIES. Defaulting to "INR" here keeps every
-    # existing caller that doesn't send this field working unchanged.
-    currency: str = "INR"
+    # models.listing.SUPPORTED_CURRENCIES. Defaults to "GBP" -- this platform
+    # targets foreign markets, not India; England is the one jurisdiction
+    # with a real market-pack/agreement-clause registry.
+    currency: str = "GBP"
     guests: int
     bedrooms: int = 0
     bathrooms: int = 1
@@ -74,6 +77,8 @@ class ListingRead(ListingBase):
     party_id: int | None = None
     state: str
     rejection_reason: str = ""
+    suspension_reason: str = ""
+    paused_at: datetime | None = None
     market_release_id: int | None = None
     contact_name: str = ""
     contact_phone: str = ""
@@ -85,6 +90,18 @@ class ListingRead(ListingBase):
 
 
 class ListingRejectRequest(CamelModel):
+    reason: str
+
+
+class ListingSuspendRequest(CamelModel):
+    reason: str
+
+
+class ListingQuarantineRequest(CamelModel):
+    reason: str
+
+
+class ListingChangesRequestedRequest(CamelModel):
     reason: str
 
 

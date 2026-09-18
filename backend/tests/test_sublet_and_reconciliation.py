@@ -230,7 +230,7 @@ class TestSubletHostVisibility:
         )
         db_session.commit()
 
-        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy.id, proposed_party.id)
+        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy.id, proposed_party.id, "ASSIGNMENT_FULL")
 
         submitted_notification = db_session.scalar(
             select(Notification).where(

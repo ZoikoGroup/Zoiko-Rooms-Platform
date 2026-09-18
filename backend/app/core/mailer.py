@@ -89,11 +89,18 @@ def _send_via_smtp(to_email: str, subject: str, html_body: str, text_body: str) 
     message.add_alternative(html_body, subtype="html")
 
     try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
-            if settings.smtp_use_tls:
-                smtp.starttls()
-            smtp.login(settings.smtp_username, settings.smtp_password)
-            smtp.send_message(message)
+        if settings.smtp_use_ssl:
+            # Implicit TLS (e.g. port 465) -- the socket is SSL-wrapped before any
+            # SMTP command is sent, so STARTTLS is neither needed nor valid here.
+            with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+                smtp.login(settings.smtp_username, settings.smtp_password)
+                smtp.send_message(message)
+        else:
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+                if settings.smtp_use_tls:
+                    smtp.starttls()
+                smtp.login(settings.smtp_username, settings.smtp_password)
+                smtp.send_message(message)
         return True
     except Exception:
         # Email is always best-effort: a delivery failure must never roll back or
@@ -161,6 +168,23 @@ def send_identity_verification_rejected_email(to_email: str, full_name: str, not
         heading="Verification not approved",
         body_lines=body_lines,
         cta_label="Submit a new document",
+        cta_url=f"{settings.frontend_url}/account/identity",
+    )
+
+
+def send_identity_verification_additional_evidence_email(to_email: str, full_name: str, notes: str = "") -> None:
+    body_lines = [
+        f"Hi {full_name},",
+        "We reviewed your identity document but need additional or different evidence before we can verify you.",
+    ]
+    if notes:
+        body_lines.append(f"Reviewer notes: {notes}")
+    send_email(
+        to_email,
+        "Additional evidence needed to verify your identity",
+        heading="More information needed",
+        body_lines=body_lines,
+        cta_label="Submit additional evidence",
         cta_url=f"{settings.frontend_url}/account/identity",
     )
 
@@ -296,6 +320,20 @@ def send_refund_completed_email(to_email: str, full_name: str, amount: float, cu
         ],
         cta_label="View your payments",
         cta_url=f"{settings.frontend_url}/account/payments",
+    )
+
+
+def send_payout_beneficiary_verification_code_email(to_email: str, full_name: str, code: str, expires_minutes: int) -> None:
+    send_email(
+        to_email,
+        "Confirm your payout account",
+        heading="Confirm your payout account",
+        body_lines=[
+            f"Hi {full_name},",
+            f"Use this code to confirm your payout account: {code}",
+            f"This code is valid for {expires_minutes} minutes and can only be used once.",
+            "If you didn't request this change, contact support immediately -- do not share this code with anyone.",
+        ],
     )
 
 

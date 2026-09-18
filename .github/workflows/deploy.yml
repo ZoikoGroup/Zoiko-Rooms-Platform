@@ -28,7 +28,7 @@ jobs:
 
             cd /var/www/zoiko-rooms-platform/app
             git pull origin main
-            npm install
+            npm ci
             npm run build
             pm2 restart zoiko-rooms-platform
             pm2 save

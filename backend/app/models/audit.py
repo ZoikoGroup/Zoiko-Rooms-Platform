@@ -19,4 +19,26 @@ class AuditEvent(Base):
     resource_id: Mapped[str] = mapped_column(String(50), nullable=False)
     reason: Mapped[str] = mapped_column(String(500), default="")
     correlation_id: Mapped[str] = mapped_column(String(64), default="")
+    # ZR-ENG-CLR-001 Section 15: "capture... before/after state, object version...
+    # and policy/ruleset version." Nullable -- most existing call sites (chat,
+    # finance, identity verification, etc.) don't have a meaningful state
+    # transition or policy version to report and are left as None rather than
+    # forced to invent one.
+    before_state: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    after_state: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    object_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    policy_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # ZR-ENG-CLR-010 Section 23/28: audit_event's own "previous_hash,
+    # new_hash" fields -- a tamper-evident hash chain over the single,
+    # global, append-only sequence of audit events (not per-resource):
+    # each row's new_hash covers its own content plus the immediately
+    # preceding row's new_hash, so deleting or reordering any row breaks
+    # every hash after it. Computed once, in app/crud/audit.py's
+    # log_audit_event, the one shared write path every domain already
+    # uses -- nullable because every row written before this field existed
+    # has neither, and backfilling a real hash for historical rows this
+    # codebase never actually chained would be fabricating provenance, not
+    # recovering it.
+    previous_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    new_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)

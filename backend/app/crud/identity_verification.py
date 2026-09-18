@@ -4,13 +4,18 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.mailer import send_identity_verification_approved_email, send_identity_verification_rejected_email
+from app.core.mailer import (
+    send_identity_verification_additional_evidence_email,
+    send_identity_verification_approved_email,
+    send_identity_verification_rejected_email,
+)
 from app.crud import notification as notif_crud
 from app.crud.party import get_or_create_default_party
 from app.models.admin_user import AdminUser
 from app.models.identity_verification import DOCUMENT_CATEGORY_BY_TYPE, IdentityVerification, DOCUMENT_TYPES, IDENTITY_STATUSES
 from app.models.party import Party
 from app.models.user_account import UserAccount
+from app.models.verification_credential import VerificationCredential
 from app.schemas.marketplace import IdentityVerificationCreate
 
 IDENTITY_VERIFICATION_VALIDITY_DAYS = 365
@@ -93,6 +98,18 @@ def verify_identity_verification(db: Session, record: IdentityVerification, veri
     db.commit()
     db.refresh(record)
 
+    # ZR-ENG-CLR-012 Section 8/24: identity verification produces a scoped
+    # credential rather than leaving "verified" as a bare status flip on the
+    # raw document row -- the same "no raw document/check becomes a
+    # permanent fact without a credential" doctrine already applied to
+    # OCCUPANCY_ELIGIBILITY in crud/occupancy_eligibility.py.
+    db.add(VerificationCredential(
+        party_id=record.party_id, requirement_code="IDENTITY", status="VALID",
+        method=record.document_type, jurisdiction_code="",
+        source_identity_verification_id=record.id, expires_at=record.expires_at,
+    ))
+    db.commit()
+
     if user:
         send_identity_verification_approved_email(user.email, user.full_name)
     return record
@@ -140,6 +157,25 @@ def get_verified_identity_for_party(db: Session, party_id: int) -> IdentityVerif
     )
 
 
+def get_valid_identity_credential(db: Session, party_id: int) -> VerificationCredential | None:
+    """ZR-ENG-CLR-012 Section 24 source-of-truth rule: downstream gates that
+    care about identity as one requirement family among several (alongside
+    OCCUPANCY_ELIGIBILITY, etc.) should read the credential here, not
+    IdentityVerification.status directly -- kept as its own lookup rather
+    than folded into get_verified_identity_for_party so callers can migrate
+    independently."""
+    now = datetime.now(timezone.utc)
+    return db.scalar(
+        select(VerificationCredential).where(
+            VerificationCredential.party_id == party_id,
+            VerificationCredential.requirement_code == "IDENTITY",
+            VerificationCredential.status == "VALID",
+            (VerificationCredential.expires_at.is_(None)) | (VerificationCredential.expires_at > now),
+        )
+        .order_by(VerificationCredential.valid_from.desc())
+    )
+
+
 def submit_identity_verification_for_user(
     db: Session,
     user_account: "UserAccount",
@@ -151,10 +187,19 @@ def submit_identity_verification_for_user(
     original_filename: str,
     content_type: str,
     file_size: int,
+    duplicate_of_verification_id: int | None = None,
 ) -> IdentityVerification:
     """User submits their own identity verification, with an uploaded document, for
     PENDING approval. The document category is always derived from document_type
-    server-side (never trusted from the client) so it can't be mismatched."""
+    server-side (never trusted from the client) so it can't be mismatched.
+
+    ZR-ENG-CLR-012 Section 18: "duplicate/fraud-pattern detection occur
+    before reviewer exposure." duplicate_of_verification_id (the caller
+    resolves it via crud/evidence_vault.py's find_duplicate_by_hash before
+    this record even exists) surfaces that signal in the same review-queue
+    notification an admin already sees, rather than a silent, never-flagged
+    fact -- flags it as a signal to check, not a verdict, per that section's
+    own framing."""
     if document_type not in DOCUMENT_TYPES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid document type")
     if document_type == "other" and not custom_document_name.strip():
@@ -178,10 +223,17 @@ def submit_identity_verification_for_user(
     db.add(record)
     db.flush()
 
+    message = f"{user_account.full_name} submitted a {document_type.replace('_', ' ')} for review."
+    if duplicate_of_verification_id is not None:
+        message += (
+            f" Note: this document's content matches a previous submission "
+            f"(verification #{duplicate_of_verification_id}) -- review for reuse or fraud."
+        )
+
     notif_crud.notify_all_super_admins(
         db,
         title="Identity verification pending review",
-        message=f"{user_account.full_name} submitted a {document_type.replace('_', ' ')} for review.",
+        message=message,
         notification_type="identity_verification.submitted",
         related_entity_type="identity_verification", related_entity_id=str(record.id),
     )
@@ -205,14 +257,36 @@ def list_user_identity_verifications(db: Session, user_account: "UserAccount") -
 
 
 def request_additional_evidence(db: Session, record: IdentityVerification, verifier: AdminUser, note: str = "") -> IdentityVerification:
-    """Super admin requests additional evidence from user."""
+    """Super admin requests additional evidence from user.
+
+    ZR-ENG-CLR-012 Section 17 MISMATCH/UNSUPPORTED_DOCUMENT handling: "Ask
+    for correction/supporting evidence" rather than an outright reject.
+    Mirrors verify_identity_verification/reject_identity_verification's own
+    notify+email pattern so the renter actually learns what changed and why
+    -- record.verifier_notes is what api/routes/user_identity.py's
+    IdentityVerificationUserRead already surfaces to the renter."""
     if verifier.role != "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
     now = datetime.now(timezone.utc)
     record.status = "additional_evidence_required"
     record.verifier_admin_id = verifier.id
+    record.verifier_notes = note
     record.updated_at = now
+
+    user = _user_for_party(db, record.party_id)
+    if user:
+        notif_crud.notify_user(
+            db, user.id,
+            title="Additional evidence needed to verify your identity",
+            message=note or "We need additional or different evidence before we can verify your identity.",
+            notification_type="identity_verification.additional_evidence_required",
+            related_entity_type="identity_verification", related_entity_id=str(record.id),
+        )
+
     db.commit()
     db.refresh(record)
+
+    if user:
+        send_identity_verification_additional_evidence_email(user.email, user.full_name, note)
     return record
 

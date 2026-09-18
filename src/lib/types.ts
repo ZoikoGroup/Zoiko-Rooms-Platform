@@ -113,7 +113,8 @@ export type AuthorityStatus =
   | "expired"
   | "failed"
   | "conflict"
-  | "review_required";
+  | "review_required"
+  | "revoked";
 
 export interface AuthorityRecord {
   id: number;
@@ -233,7 +234,8 @@ export interface ApplicationDecisionRecord {
   decision: "APPROVED" | "REJECTED";
   reasonCode: string;
   note: string;
-  decidedByAdminId: number;
+  decidedByAdminId: number | null;
+  decidedByUserId: number | null;
   decidedAt: string;
 }
 
@@ -244,12 +246,22 @@ export interface OfferTermsRecord {
   version: number;
   monthlyRent: number;
   depositAmount: number;
+  currency: string;
   startDate: string;
   termMonths: number;
   createdAt: string;
 }
 
-export type AgreementStatus = "DRAFT" | "SENT" | "SIGNED" | "VOID";
+export type AgreementStatus =
+  | "DRAFT"
+  | "SENT"
+  | "PARTIALLY_EXECUTED"
+  | "PAYMENT_IN_PROGRESS"
+  | "PAYMENT_PENDING"
+  | "SIGNED"
+  | "EXPIRED"
+  | "VOID"
+  | "AMENDMENT_PENDING";
 
 export interface Agreement {
   id: number;
@@ -260,6 +272,24 @@ export interface Agreement {
   signedByProviderAt: string | null;
   signedByRenterAt: string | null;
   signatureRef: string;
+  paymentSessionExpiresAt: string | null;
+  createdAt: string;
+}
+
+export type DisclosureStatus = "REQUIRED_MISSING" | "DELIVERED" | "ACKNOWLEDGED";
+
+export interface DisclosureRequirement {
+  id: number;
+  agreementId: number;
+  disclosureType: string;
+  title: string;
+  required: boolean;
+  status: DisclosureStatus;
+  deliveredAt: string | null;
+  deliveredToParty: string;
+  deliveryChannel: string;
+  acknowledgedAt: string | null;
+  documentContentHash: string;
   createdAt: string;
 }
 
@@ -273,6 +303,7 @@ export interface Offer {
   createdAt: string;
   terms: OfferTermsRecord[];
   agreement: Agreement | null;
+  guestHasAccount: boolean;
 }
 
 export interface Application {
@@ -308,6 +339,22 @@ export interface Occupancy {
   moveOutDate: string | null;
   createdAt: string;
   endedAt: string | null;
+}
+
+export type HandoverEventType = "HANDOVER_READY" | "POSSESSION_DELIVERED" | "RENTER_RECEIPT";
+
+export interface HandoverEvent {
+  id: number;
+  occupancyId: number;
+  eventType: HandoverEventType;
+  actorKind: string;
+  createdAt: string;
+}
+
+export interface ActivationGateStatus {
+  occupancyId: number;
+  latestDecision: { outcome: string; reasonCodes: string[] } | null;
+  handoverEvents: HandoverEvent[];
 }
 
 // --- Finance ledger ---
@@ -351,6 +398,27 @@ export interface SimulatedPayment {
   createdAt: string;
   confirmedAt: string | null;
   allocations: PaymentAllocation[];
+}
+
+export interface ObligationRead {
+  id: number;
+  obligationType: string;
+  moneyPlane: string;
+  amount: number;
+  currency: string;
+  dueDate: string;
+  status: string;
+  guestId: string;
+  agreementId: number | null;
+  occupancyId: number | null;
+  payoutId: number | null;
+  createdAt: string;
+}
+
+export interface PaymentPreview {
+  amountDueNow: ObligationRead[];
+  cadence: string;
+  remainingScheduledCount: number;
 }
 
 export type DepositStatus = "HELD" | "RELEASED" | "FORFEITED" | "PARTIALLY_RELEASED";
@@ -543,6 +611,58 @@ export interface UserOccupancy {
   moveOutDate: string | null;
   createdAt: string;
   endedAt: string | null;
+  agreementId: number | null;
+}
+
+export type BookingChangeType =
+  | "DATE_SHIFT"
+  | "EXTENSION"
+  | "SHORTENING"
+  | "PREMISES_CHANGE"
+  | "FINANCIAL_CHANGE"
+  | "TERM_SHIFT"
+  | "LEGAL_ORDER_CHANGE"
+  | "DEPOSIT_CHANGE";
+
+export type BookingChangeRequestStatus =
+  | "AWAITING_HOST"
+  | "AWAITING_RENTER"
+  | "AWAITING_AGREEMENT_ACTION"
+  | "EFFECTIVE"
+  | "REJECTED"
+  | "WITHDRAWN"
+  | "EXPIRED"
+  | "CONFLICT"
+  | "FAILED";
+
+export interface BookingChangeRequest {
+  id: number;
+  agreementId: number;
+  requestedByGuestId: string;
+  changeType: BookingChangeType;
+  status: BookingChangeRequestStatus;
+  originalStartDate: string;
+  proposedStartDate: string;
+  originalEndDate: string | null;
+  proposedEndDate: string | null;
+  additionalTermMonths: number | null;
+  targetListingId: string | null;
+  resultingApplicationId: number | null;
+  originalMonthlyRent: number | null;
+  proposedMonthlyRent: number | null;
+  reason: string;
+  decisionNote: string;
+  decidedByAdminId: number | null;
+  decidedAt: string | null;
+  resultingAmendmentId: number | null;
+  createdAt: string;
+  expiresAt: string;
+  listingName: string;
+  targetListingName: string;
+  guestName: string;
+  authorityEvidenceRef: string;
+  originalDepositAmount: number | null;
+  proposedDepositAmount: number | null;
 }
 
 export type SubletRequestStatus =
@@ -550,6 +670,14 @@ export type SubletRequestStatus =
   | "pending_admin_review"
   | "approved"
   | "rejected";
+
+export type SubletArrangementType =
+  | "ASSIGNMENT_FULL"
+  | "REPLACEMENT_OCCUPANT"
+  | "SUBLEASE_PARTIAL"
+  | "ADD_CO_TENANT"
+  | "LODGER_OR_LICENSEE"
+  | "ADDITIONAL_OCCUPANT";
 
 export interface SubletRequest {
   id: number;
@@ -562,6 +690,7 @@ export interface SubletRequest {
   decidedByAdminId: number | null;
   createdAt: string;
   decidedAt: string | null;
+  arrangementType: SubletArrangementType;
   listingName: string;
   listingCity: string;
   roomType: string;
@@ -638,4 +767,162 @@ export interface AppNotification {
   isRead: boolean;
   createdAt: string;
   readAt: string | null;
+}
+
+// --- Verification (ZR-ENG-CLR-012) ---
+
+export type OccupancyEligibilityMethod = "DIGITAL_SHARE_CODE" | "MANUAL_DOCUMENT_CHECK";
+export type OccupancyEligibilityStatus =
+  | "IN_PROGRESS"
+  | "PASS"
+  | "INCONCLUSIVE"
+  | "TECHNICAL_ERROR"
+  | "FAIL_INELIGIBLE"
+  | "FRAUD_REVIEW"
+  | "EXPIRED"
+  | "WAIVED_POLICY"
+  | "SUSPENDED";
+
+export interface OccupancyEligibilityCheck {
+  id: number;
+  partyId: number;
+  jurisdictionCode: string;
+  method: OccupancyEligibilityMethod;
+  shareCode: string;
+  evidenceRef: string;
+  status: OccupancyEligibilityStatus;
+  reasonNote: string;
+  checkedByAdminId: number | null;
+  checkedAt: string | null;
+  followUpDueAt: string | null;
+  createdAt: string;
+}
+
+export type PropertyComplianceCredentialStatus = "UNDER_REVIEW" | "VALID" | "EXPIRING" | "EXPIRED" | "REVOKED" | "SUSPENDED";
+
+export interface PropertyComplianceCredential {
+  id: number;
+  roomId: number;
+  requirementCode: string;
+  status: PropertyComplianceCredentialStatus;
+  issuerSource: string;
+  evidenceRef: string;
+  method: string;
+  jurisdictionCode: string;
+  validFrom: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  revokedReason: string;
+  createdAt: string;
+}
+
+export interface RenterVerificationStatusItem {
+  requirementCode: string;
+  status: string;
+  expiresAt: string | null;
+  jurisdictionCode: string;
+  explanation: string;
+  sharingScope: string;
+  retentionNote: string;
+  alternativeMethodNote: string;
+}
+
+export interface RenterVerificationStatus {
+  identity: RenterVerificationStatusItem;
+  occupancyEligibility: RenterVerificationStatusItem[];
+}
+
+export type ScreeningDecisionStatus = "AUTHORIZED" | "PASS" | "FAIL" | "INCONCLUSIVE" | "DISPUTED_SOURCE";
+
+export type AmendmentStatus =
+  | "REQUESTED"
+  | "CLASSIFIED"
+  | "TERMS_PROPOSED"
+  | "APPROVALS_PENDING"
+  | "GENERATED"
+  | "EXECUTION_PENDING"
+  | "EXECUTED"
+  | "EFFECTIVE";
+
+export type AmendmentType = "MATERIAL_CHANGE" | "ADDENDUM" | "ASSIGNMENT_NOVATION" | "RESTATED_AGREEMENT" | "RENEWAL" | "CORRECTION";
+
+export interface AgreementAmendment {
+  id: number;
+  agreementId: number;
+  sourceVersionId: number;
+  resultingVersionId: number | null;
+  amendmentType: AmendmentType | null;
+  status: AmendmentStatus;
+  reason: string;
+  proposedTerms: Record<string, unknown>;
+  proposedGuarantor: { legalName?: string; contactEmail?: string };
+  requestedByAdminId: number;
+  createdAt: string;
+  classifiedAt: string | null;
+  termsProposedAt: string | null;
+  approvalsPendingAt: string | null;
+  generatedAt: string | null;
+  executionPendingAt: string | null;
+  executedAt: string | null;
+  effectiveAt: string | null;
+}
+
+export interface AgreementParty {
+  id: number;
+  agreementId: number;
+  role: string;
+  legalName: string;
+  contactEmail: string;
+  partyId: number | null;
+  consentMethod: string;
+  consentEvidenceRef: string;
+  consentedAt: string | null;
+}
+
+export interface MarketPolicyPack {
+  id: number;
+  jurisdictionCode: string;
+  version: number;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  confidence: "VERIFIED" | "REVIEW_REQUIRED" | "DEPRECATED" | "EMERGENCY_BLOCK";
+  legalSourceNote: string;
+  depositInstrumentAllowed: string;
+  depositMaxRentMultiple: number;
+  depositCustodyModel: string;
+  depositProtectionDeadlineDays: number | null;
+  depositReleaseDeadlineDays: number;
+  subletConsentStandard: string;
+  subletConsentResponseDays: number;
+  subletMaxRentMultipleOfOriginal: number;
+  subletAssignmentPayeeModel: string;
+  subletSubleasePayeeModel: string;
+  rentChangeMinIntervalDays: number;
+  occupancyEligibilityRequired: boolean;
+  occupancyEligibilityMethodNote: string;
+  occupancyEligibilityFollowUpDays: number | null;
+  identityEvidenceRetentionDays: number;
+  requiredPropertyComplianceCodes: string[];
+  identityRequiredAtApplication: boolean;
+  screeningProhibitedCheckTypes: string[];
+  createdAt: string;
+}
+
+export interface ScreeningCheck {
+  id: number;
+  partyId: number;
+  jurisdictionCode: string;
+  checkType: string;
+  providerName: string;
+  permissiblePurpose: string;
+  hostPolicyCriteria: string;
+  providerResultSummary: string;
+  decisionStatus: ScreeningDecisionStatus;
+  decisionReason: string;
+  adverseActionNoticeSentAt: string | null;
+  reviewedByAdminId: number | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  disputeReason: string;
+  disputedAt: string | null;
 }

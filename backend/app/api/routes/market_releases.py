@@ -4,10 +4,16 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_super_admin
 from app.core.correlation import get_correlation_id
 from app.crud.audit import log_audit_event
-from app.crud.market_release import create_market_release, get_market_release, list_market_releases, set_market_release_status
+from app.crud.market_release import (
+    create_market_release,
+    get_market_release,
+    list_market_releases,
+    set_market_release_policy_overrides,
+    set_market_release_status,
+)
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
-from app.schemas.marketplace import MarketReleaseCreate, MarketReleaseRead
+from app.schemas.marketplace import MarketReleaseCreate, MarketReleasePolicyUpdate, MarketReleaseRead
 
 router = APIRouter(prefix="/api/market-releases", tags=["market-releases"], dependencies=[Depends(require_super_admin)])
 
@@ -53,5 +59,26 @@ def disable_market_release(
     release = _get_or_404(db, market_release_id)
     updated = set_market_release_status(db, release, "disabled", admin)
     log_audit_event(db, admin, "market_release.disable", "market_release", str(market_release_id), get_correlation_id(request))
+    db.commit()
+    return updated
+
+
+@router.put("/{market_release_id}/policy", response_model=MarketReleaseRead)
+def put_market_release_policy(
+    market_release_id: int,
+    payload: MarketReleasePolicyUpdate,
+    request: Request,
+    admin: AdminUser = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-001 Section 14: replace this market's full policy-override
+    set (see app/services/policy.py for the known keys). Super admin only --
+    same authority level as approve/disable above."""
+    release = _get_or_404(db, market_release_id)
+    updated = set_market_release_policy_overrides(db, release, payload.overrides)
+    log_audit_event(
+        db, admin, "market_release.set_policy", "market_release", str(market_release_id), get_correlation_id(request),
+        reason=str(payload.overrides),
+    )
     db.commit()
     return updated

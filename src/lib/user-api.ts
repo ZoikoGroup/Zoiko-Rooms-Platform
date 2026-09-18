@@ -1,16 +1,23 @@
 import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
   Agreement,
+  Application,
+  BookingChangeRequest,
+  DisclosureRequirement,
+  HandoverEvent,
   HostedListing,
   IdentityDocumentType,
   IdentityVerificationRecord,
   Offer,
+  PaymentPreview,
   Property,
   PublicListing,
   PublicListingsPage,
   PublishEligibility,
+  RenterVerificationStatus,
   Room,
   SimulatedPayment,
+  SubletArrangementType,
   SubletRenterLookup,
   SubletRequest,
   UserApplication,
@@ -66,6 +73,12 @@ export function getIdentityVerification(verificationId: number): Promise<Identit
  *  safe to build client-side with nothing but the verification id. */
 export function identityDocumentUrl(verificationId: number): string {
   return `${API_URL}/api/users/identity-verifications/${verificationId}/document`;
+}
+
+/** ZR-ENG-CLR-012 Section 19: the renter's own identity + occupancy-eligibility
+ *  status summary, scoped server-side to their own party. */
+export function getMyVerificationStatus(): Promise<RenterVerificationStatus> {
+  return apiClientFetch<RenterVerificationStatus>("/api/users/verification-status");
 }
 
 /** True when at least one submitted document has been approved by a super admin. */
@@ -135,8 +148,15 @@ export function getOwnOffer(applicationId: number): Promise<Offer> {
   return apiClientFetch<Offer>(`/api/users/rentals/applications/${applicationId}/offer`);
 }
 
-export function acceptOwnOffer(offerId: number): Promise<Offer> {
-  return apiClientFetch<Offer>(`/api/users/rentals/offers/${offerId}/accept`, { method: "POST" });
+/** overrideReason: only needed when the occupant-overlap check comes back
+ *  BLOCK (ZR-ENG-CLR-001 Rule 6/Section 9) -- the renter self-declares why
+ *  they still want to proceed, captured on the offer for later admin
+ *  review. Leave blank for a normal accept. */
+export function acceptOwnOffer(offerId: number, overrideReason?: string): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/rentals/offers/${offerId}/accept`, {
+    method: "POST",
+    body: JSON.stringify({ overrideReason: overrideReason ?? "" }),
+  });
 }
 
 export function declineOwnOffer(offerId: number): Promise<Offer> {
@@ -147,6 +167,16 @@ export function signOwnAgreement(agreementId: number): Promise<Agreement> {
   return apiClientFetch<Agreement>(`/api/users/rentals/agreements/${agreementId}/sign`, { method: "POST" });
 }
 
+export function listOwnAgreementDisclosures(agreementId: number): Promise<DisclosureRequirement[]> {
+  return apiClientFetch<DisclosureRequirement[]>(`/api/users/rentals/agreements/${agreementId}/disclosures`);
+}
+
+export function acknowledgeOwnDisclosure(agreementId: number, disclosureId: number): Promise<DisclosureRequirement> {
+  return apiClientFetch<DisclosureRequirement>(
+    `/api/users/rentals/agreements/${agreementId}/disclosures/${disclosureId}/acknowledge`, { method: "POST" },
+  );
+}
+
 export function listOccupancies(): Promise<UserOccupancy[]> {
   return apiClientFetch<UserOccupancy[]>("/api/users/rentals/occupancies");
 }
@@ -155,13 +185,25 @@ export function getOccupancy(occupancyId: number): Promise<UserOccupancy> {
   return apiClientFetch<UserOccupancy>(`/api/users/rentals/occupancies/${occupancyId}`);
 }
 
+export function confirmHandoverReceipt(occupancyId: number): Promise<HandoverEvent> {
+  return apiClientFetch<HandoverEvent>(`/api/users/rentals/occupancies/${occupancyId}/handover/receipt`, {
+    method: "POST",
+    body: JSON.stringify({ evidenceRef: "", notes: "" }),
+  });
+}
+
 export function lookupSubletRenter(email: string): Promise<SubletRenterLookup> {
   return apiClientFetch<SubletRenterLookup>(`/api/users/rentals/sublet-lookup?email=${encodeURIComponent(email)}`);
 }
 
 export function submitSubletRequest(
   occupancyId: number,
-  payload: { proposedRenterPartyId: number; authorityEvidenceRef?: string }
+  payload: {
+    proposedRenterPartyId: number;
+    authorityEvidenceRef?: string;
+    arrangementType?: SubletArrangementType;
+    proposedMonthlyRent?: number;
+  }
 ): Promise<SubletRequest> {
   return apiClientFetch<SubletRequest>(`/api/users/rentals/occupancies/${occupancyId}/sublet-request`, {
     method: "POST",
@@ -172,6 +214,100 @@ export function submitSubletRequest(
 
 export function listSubletRequests(): Promise<SubletRequest[]> {
   return apiClientFetch<SubletRequest[]>("/api/users/rentals/sublet-requests");
+}
+
+// --- Booking change requests (ZR-ENG-CLR-008 Section 8 MVP) ---------------
+
+export function submitDateChangeRequest(
+  agreementId: number,
+  payload: { proposedStartDate: string; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/change-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function submitTermShiftRequest(
+  agreementId: number,
+  payload: { proposedStartDate: string; newTermMonths: number; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/term-shift-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function submitExtensionRequest(
+  agreementId: number,
+  payload: { additionalTermMonths: number; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/extension-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function submitShorteningRequest(
+  agreementId: number,
+  payload: { reducedTermMonths: number; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/shortening-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function submitPremisesChangeRequest(
+  agreementId: number,
+  payload: { targetListingId: string; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/premises-change-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function submitFinancialChangeRequest(
+  agreementId: number,
+  payload: { proposedMonthlyRent: number; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/financial-change-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listMyChangeRequests(): Promise<BookingChangeRequest[]> {
+  return apiClientFetch<BookingChangeRequest[]>("/api/users/rentals/change-requests");
+}
+
+export function withdrawChangeRequest(bcrId: number): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/change-requests/${bcrId}/withdraw`, {
+    method: "POST",
+  });
+}
+
+export function submitDepositChangeRequest(
+  agreementId: number,
+  payload: { proposedDepositAmount: number; reason?: string }
+): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/deposit-change-requests`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function acceptAlternativeChangeTerms(bcrId: number): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/change-requests/${bcrId}/accept-alternative`, {
+    method: "POST",
+  });
+}
+
+export function declineAlternativeChangeTerms(bcrId: number): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/change-requests/${bcrId}/decline-alternative`, {
+    method: "POST",
+  });
 }
 
 // --- Hosting ---------------------------------------------------------------
@@ -277,9 +413,95 @@ export function submitHostedListingForReview(listingId: string): Promise<HostedL
   });
 }
 
+// --- Applications to review (ZR-ENG-CLR-011 Section 10) --------------------
+
+/** Applications submitted to any of the host's own party-owned listings. */
+export function listHostedApplications(): Promise<Application[]> {
+  return apiClientFetch<Application[]>("/api/users/hosting/applications");
+}
+
+export function decideHostedApplication(
+  applicationId: number,
+  payload: { decision: "APPROVED" | "REJECTED"; note?: string; reasonCode?: string }
+): Promise<Application> {
+  return apiClientFetch<Application>(`/api/users/hosting/applications/${applicationId}/decide`, {
+    method: "POST",
+    body: JSON.stringify({ reasonCode: "", note: "", ...payload }),
+  });
+}
+
+// --- Offers and agreements (ZR-ENG-CLR-004 Section 4.3) ---------------------
+
+export function createHostedOffer(applicationId: number): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/applications/${applicationId}/offers`, { method: "POST" });
+}
+
+export function getHostedOffer(offerId: number): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/offers/${offerId}`);
+}
+
+export function addHostedOfferTerms(
+  offerId: number,
+  payload: { monthlyRent: number; depositAmount: number; startDate: string; termMonths: number }
+): Promise<Offer> {
+  return apiClientFetch(`/api/users/hosting/offers/${offerId}/terms`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }).then(() => getHostedOffer(offerId));
+}
+
+export function sendHostedOffer(offerId: number): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/offers/${offerId}/send`, { method: "POST" });
+}
+
+export function createHostedAgreement(offerId: number): Promise<Agreement> {
+  return apiClientFetch<Agreement>(`/api/users/hosting/offers/${offerId}/agreement`, { method: "POST" });
+}
+
+export function getHostedAgreement(agreementId: number): Promise<Agreement> {
+  return apiClientFetch<Agreement>(`/api/users/hosting/agreements/${agreementId}`);
+}
+
+export function sendHostedAgreement(agreementId: number): Promise<Agreement> {
+  return apiClientFetch<Agreement>(`/api/users/hosting/agreements/${agreementId}/send`, { method: "POST" });
+}
+
+export function signHostedAgreement(agreementId: number): Promise<Agreement> {
+  return apiClientFetch<Agreement>(`/api/users/hosting/agreements/${agreementId}/sign`, { method: "POST" });
+}
+
+export function listHostedAgreementDisclosures(agreementId: number): Promise<DisclosureRequirement[]> {
+  return apiClientFetch<DisclosureRequirement[]>(`/api/users/hosting/agreements/${agreementId}/disclosures`);
+}
+
+export function deliverHostedDisclosure(agreementId: number, disclosureId: number): Promise<DisclosureRequirement> {
+  return apiClientFetch<DisclosureRequirement>(
+    `/api/users/hosting/agreements/${agreementId}/disclosures/${disclosureId}/deliver`, { method: "POST" },
+  );
+}
+
 // --- Payments --------------------------------------------------------------
 
 export function listUserPayments(): Promise<SimulatedPayment[]> {
   return apiClientFetch<SimulatedPayment[]>("/api/users/payments");
+}
+
+/** Renter self-service payment for their own rent/deposit obligation --
+ *  real PSP dispatch, not an admin manually recording it. */
+export function payOwnObligation(obligationId: number, methodClass: string): Promise<SimulatedPayment> {
+  return apiClientFetch<SimulatedPayment>(`/api/users/payments/obligations/${obligationId}/pay`, {
+    method: "POST",
+    body: JSON.stringify({ methodClass }),
+  });
+}
+
+/** Real, jurisdiction-resolved payment methods for this obligation -- never
+ *  hard-code a method list on the frontend (ZR-ENG-CLR-005 AC-12). */
+export function getObligationAvailableMethods(obligationId: number): Promise<{ methodClasses: string[] }> {
+  return apiClientFetch<{ methodClasses: string[] }>(`/api/users/payments/obligations/${obligationId}/available-methods`);
+}
+
+export function getOwnAgreementPaymentPreview(agreementId: number): Promise<PaymentPreview> {
+  return apiClientFetch<PaymentPreview>(`/api/users/rentals/agreements/${agreementId}/payment-preview`);
 }
 

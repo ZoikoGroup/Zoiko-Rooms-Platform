@@ -29,6 +29,7 @@ import {
 import { AdminRole, Listing, ListingState, Property, PublishEligibility, Room } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { StarRating } from "@/components/ui/StarRating";
+import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { StatCard } from "@/components/admin/StatCard";
@@ -57,7 +58,7 @@ const emptyForm = {
   size: "120",
   minStayNights: "30",
   description: "",
-  amenities: "",
+  amenities: [] as string[],
   tags: "",
   latitude: null as number | null,
   longitude: null as number | null,
@@ -281,7 +282,7 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
       size: String(listing.size),
       minStayNights: String(listing.minStayNights),
       description: listing.description,
-      amenities: listing.amenities.join(", "),
+      amenities: listing.amenities,
       tags: listing.tags.join(", "),
       latitude: listing.latitude ?? null,
       longitude: listing.longitude ?? null,
@@ -343,10 +344,7 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
       }
     }
 
-    const amenities = form.amenities
-      .split(",")
-      .map((a) => a.trim())
-      .filter(Boolean);
+    const amenities = form.amenities;
     const tags = form.tags
       .split(",")
       .map((t) => t.trim())
@@ -829,13 +827,11 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
 
           <div>
             <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Amenities (comma separated)
+              Amenities
             </label>
-            <input
+            <AmenitiesPicker
               value={form.amenities}
-              onChange={(e) => setForm((f) => ({ ...f, amenities: e.target.value }))}
-              placeholder="Free WiFi, Shared Kitchen, Housekeeping"
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              onChange={(amenities) => setForm((f) => ({ ...f, amenities }))}
             />
           </div>
 

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import USER_COOKIE_NAME, get_current_user
 from app.core.config import settings
 from app.core.mailer import send_email, send_password_reset_email
+from app.core.rate_limit import login_limiter
 from app.core.security import create_access_token, verify_password
 from app.crud import notification as notif_crud
 from app.crud.password_reset import create_reset_token, reset_password_with_token
@@ -86,6 +87,8 @@ def register_user(payload: UserRegisterRequest, db: Session = Depends(get_db)):
 @router.post("/login", response_model=UserRead)
 def login_user(payload: UserLoginRequest, response: Response, db: Session = Depends(get_db)):
     """Authenticate user and set cookie."""
+    if not login_limiter.allow(f"login:{payload.email.lower()}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many login attempts. Please wait a moment and try again.")
     user = authenticate_user(db, payload.email, payload.password)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")

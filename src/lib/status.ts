@@ -64,15 +64,25 @@ export const offerStatusLabel = {
 export const agreementStatusTone = {
   DRAFT: "neutral",
   SENT: "warning",
+  PARTIALLY_EXECUTED: "warning",
+  PAYMENT_IN_PROGRESS: "warning",
+  PAYMENT_PENDING: "warning",
   SIGNED: "success",
+  EXPIRED: "danger",
   VOID: "danger",
+  AMENDMENT_PENDING: "warning",
 } as const;
 
 export const agreementStatusLabel = {
   DRAFT: "Draft",
   SENT: "Sent for signature",
+  PARTIALLY_EXECUTED: "Partially signed",
+  PAYMENT_IN_PROGRESS: "Awaiting payment",
+  PAYMENT_PENDING: "Payment pending",
   SIGNED: "Signed",
+  EXPIRED: "Expired",
   VOID: "Void",
+  AMENDMENT_PENDING: "Amendment pending",
 } as const;
 
 export const occupancyStatusTone = {
@@ -205,6 +215,65 @@ export const subletRequestStatusLabel = {
   rejected: "Rejected",
 } as const;
 
+// ZR-ENG-CLR-003 Section 3's arrangement-type taxonomy, in renter-facing (first-person) terms.
+export const subletArrangementTypeLabel = {
+  ASSIGNMENT_FULL: "Full handover — I move out, they take over completely",
+  REPLACEMENT_OCCUPANT: "Replace me as occupant — I move out, they take over completely",
+  SUBLEASE_PARTIAL: "Sublease part of the room — I stay on, they get their own agreement",
+  ADD_CO_TENANT: "Add a co-tenant — we'd both hold our own tenancy",
+  LODGER_OR_LICENSEE: "Take on a lodger/licensee — they live here without full tenancy rights",
+  ADDITIONAL_OCCUPANT: "Just let them live here — no separate tenancy or agreement",
+} as const;
+
+// Same taxonomy, third-person -- for the admin review console.
+export const subletArrangementTypeAdminLabel = {
+  ASSIGNMENT_FULL: "Full handover (tenant moves out, replacement takes over)",
+  REPLACEMENT_OCCUPANT: "Occupant replacement (tenant moves out, replacement takes over)",
+  SUBLEASE_PARTIAL: "Partial sublease (tenant stays, new occupant gets own agreement)",
+  ADD_CO_TENANT: "Add co-tenant (both hold their own tenancy)",
+  LODGER_OR_LICENSEE: "Lodger/licensee (no full tenancy rights)",
+  ADDITIONAL_OCCUPANT: "Additional occupant only (no tenancy or agreement)",
+} as const;
+
+// Types that create a second, independent tenancy alongside the existing one --
+// these are the only ones where a proposed rent for that new tenancy applies.
+export const CO_TENANCY_ARRANGEMENT_TYPES = ["SUBLEASE_PARTIAL", "ADD_CO_TENANT", "LODGER_OR_LICENSEE"] as const;
+
+export const bookingChangeRequestStatusTone = {
+  AWAITING_HOST: "warning",
+  AWAITING_RENTER: "warning",
+  AWAITING_AGREEMENT_ACTION: "warning",
+  EFFECTIVE: "success",
+  REJECTED: "danger",
+  WITHDRAWN: "neutral",
+  EXPIRED: "neutral",
+  CONFLICT: "danger",
+  FAILED: "danger",
+} as const;
+
+export const bookingChangeRequestStatusLabel = {
+  AWAITING_HOST: "Pending Review",
+  AWAITING_RENTER: "Host proposed different terms",
+  AWAITING_AGREEMENT_ACTION: "Approved — awaiting re-signature",
+  EFFECTIVE: "Effective",
+  REJECTED: "Declined",
+  WITHDRAWN: "Withdrawn",
+  EXPIRED: "Expired",
+  CONFLICT: "Conflict — please submit a new request",
+  FAILED: "Failed — please submit a new request",
+} as const;
+
+export const bookingChangeTypeLabel = {
+  DATE_SHIFT: "Move-in date change",
+  EXTENSION: "Stay extension",
+  SHORTENING: "Stay shortening",
+  PREMISES_CHANGE: "Room/property change",
+  FINANCIAL_CHANGE: "Rent change",
+  TERM_SHIFT: "Move-in date & term change",
+  LEGAL_ORDER_CHANGE: "Legal/regulatory order change",
+  DEPOSIT_CHANGE: "Deposit change",
+} as const;
+
 // --- Trust & Safety surface ---
 
 export const authorityRecordStatusTone = {
@@ -216,6 +285,7 @@ export const authorityRecordStatusTone = {
   failed: "danger",
   conflict: "danger",
   review_required: "warning",
+  revoked: "danger",
 } as const;
 
 export const authorityRecordStatusLabel = {
@@ -227,6 +297,7 @@ export const authorityRecordStatusLabel = {
   failed: "Failed",
   conflict: "Conflict found",
   review_required: "Review required",
+  revoked: "Revoked",
 } as const;
 
 export const marketReleaseStatusTone = {
@@ -263,3 +334,88 @@ export function formatClassificationLabel(value: string): string {
     .map((word) => word[0].toUpperCase() + word.slice(1))
     .join(" ");
 }
+
+// --- Verification (ZR-ENG-CLR-012) ---
+
+export const occupancyEligibilityStatusTone = {
+  IN_PROGRESS: "warning",
+  PASS: "success",
+  INCONCLUSIVE: "warning",
+  TECHNICAL_ERROR: "warning",
+  FAIL_INELIGIBLE: "danger",
+  FRAUD_REVIEW: "danger",
+  EXPIRED: "neutral",
+  WAIVED_POLICY: "primary",
+  SUSPENDED: "neutral",
+} as const;
+
+export const occupancyEligibilityMethodLabel = {
+  DIGITAL_SHARE_CODE: "Digital share code",
+  MANUAL_DOCUMENT_CHECK: "Manual document check",
+} as const;
+
+export const propertyComplianceCredentialStatusTone = {
+  UNDER_REVIEW: "warning",
+  VALID: "success",
+  EXPIRING: "warning",
+  EXPIRED: "warning",
+  REVOKED: "danger",
+  SUSPENDED: "neutral",
+} as const;
+
+export const amendmentStatusTone = {
+  REQUESTED: "neutral",
+  CLASSIFIED: "warning",
+  TERMS_PROPOSED: "warning",
+  APPROVALS_PENDING: "warning",
+  GENERATED: "primary",
+  EXECUTION_PENDING: "warning",
+  EXECUTED: "primary",
+  EFFECTIVE: "success",
+} as const;
+
+export const amendmentStatusLabel = {
+  REQUESTED: "Requested",
+  CLASSIFIED: "Classified",
+  TERMS_PROPOSED: "Terms proposed",
+  APPROVALS_PENDING: "Awaiting approval",
+  GENERATED: "New version generated",
+  EXECUTION_PENDING: "Awaiting re-signature",
+  EXECUTED: "Executed",
+  EFFECTIVE: "Effective",
+} as const;
+
+export const amendmentTypeLabel = {
+  MATERIAL_CHANGE: "Material change",
+  ADDENDUM: "Addendum (e.g. guarantor)",
+  ASSIGNMENT_NOVATION: "Assignment / novation",
+  RESTATED_AGREEMENT: "Restated agreement",
+  RENEWAL: "Renewal",
+  CORRECTION: "Correction",
+} as const;
+
+export const screeningDecisionStatusTone = {
+  AUTHORIZED: "warning",
+  PASS: "success",
+  FAIL: "danger",
+  INCONCLUSIVE: "warning",
+  DISPUTED_SOURCE: "primary",
+} as const;
+
+export const renterVerificationStatusTone: Record<string, "neutral" | "warning" | "success" | "danger" | "primary"> = {
+  not_submitted: "neutral",
+  pending: "warning",
+  verified: "success",
+  rejected: "danger",
+  expired: "danger",
+  additional_evidence_required: "warning",
+  IN_PROGRESS: "warning",
+  PASS: "success",
+  INCONCLUSIVE: "warning",
+  TECHNICAL_ERROR: "warning",
+  FAIL_INELIGIBLE: "danger",
+  FRAUD_REVIEW: "danger",
+  EXPIRED: "neutral",
+  WAIVED_POLICY: "primary",
+  SUSPENDED: "neutral",
+};

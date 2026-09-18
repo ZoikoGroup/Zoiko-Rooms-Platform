@@ -3,22 +3,14 @@ from datetime import date, datetime
 from app.schemas.common import CamelModel
 
 
+# Shared with schemas/leasing.py -- the real leasing pipeline's admin-recorded
+# walk-in-guest applications reuse this shape, not just the legacy Booking
+# model below.
 class NewGuestInput(CamelModel):
     name: str
     email: str
     phone: str = ""
     location: str = ""
-
-
-class BookingCreate(CamelModel):
-    listing_id: str
-    guest_id: str | None = None
-    new_guest: NewGuestInput | None = None
-    check_in: date
-    check_out: date
-    guests: int
-    status: str = "confirmed"
-    payment_status: str = "unpaid"
 
 
 class BookingRead(CamelModel):

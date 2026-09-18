@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
 
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.admin_user import AdminUser
 from app.models.market_release import MarketRelease
 from app.schemas.marketplace import MarketReleaseCreate
+from app.services.policy import set_policy_overrides
 
 
 def list_market_releases(db: Session) -> list[MarketRelease]:
@@ -31,6 +33,16 @@ def set_market_release_status(db: Session, release: MarketRelease, status: str, 
         release.approved_at = datetime.now(timezone.utc)
         if release.effective_from is None:
             release.effective_from = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(release)
+    return release
+
+
+def set_market_release_policy_overrides(db: Session, release: MarketRelease, overrides: dict) -> MarketRelease:
+    try:
+        set_policy_overrides(release, overrides)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
     db.commit()
     db.refresh(release)
     return release

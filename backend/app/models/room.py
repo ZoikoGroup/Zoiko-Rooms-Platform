@@ -20,6 +20,12 @@ class Room(Base):
     size: Mapped[int] = mapped_column(Integer, default=0)
     has_ensuite: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(20), default="active")
+    # How many concurrent ACTIVE/PENDING_MOVE_IN occupancies this room may hold.
+    # Default 1 matches every room's behavior before this column existed --
+    # nothing previously checked this at all, so two tenancies could silently
+    # double-book the same room. Raise this only for rooms actually meant to be
+    # shared (ZR-ENG-CLR-003 Section 3's SUBLEASE_PARTIAL / ADD_CO_TENANT).
+    max_occupants: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     property: Mapped["Property"] = relationship(back_populates="rooms")

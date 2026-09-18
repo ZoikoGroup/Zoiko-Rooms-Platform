@@ -99,7 +99,7 @@ def create(
 def read(
     handoff_id: int,
     user: UserAccount = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db),  
 ):
     handoff = _get_owned_handoff(db, user, handoff_id)
     return _serialize(handoff)

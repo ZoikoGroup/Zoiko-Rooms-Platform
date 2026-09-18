@@ -68,8 +68,8 @@ def test_app_routes():
         '/api/users/login',
         '/api/users/me',
         '/api/users/identity-verifications',
-        '/api/users/applications',
-        '/api/users/occupancies',
+        '/api/users/rentals/applications',
+        '/api/users/rentals/occupancies',
         '/api/users/hosting/properties',
     ]
     
