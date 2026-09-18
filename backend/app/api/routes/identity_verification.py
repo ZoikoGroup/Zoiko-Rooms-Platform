@@ -70,6 +70,32 @@ def reject_identity_verification(
     return updated
 
 
+@router.post("/{verification_id}/request-additional-evidence", response_model=IdentityVerificationRead, dependencies=[Depends(require_super_admin)])
+def post_request_additional_evidence(
+    verification_id: int,
+    request: Request,
+    payload: IdentityVerificationReject | None = Body(default=None),
+    admin: AdminUser = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    """ZR-ENG-CLR-012 Section 17/31: the REQUEST_ALTERNATIVE decision path
+    alongside verify/reject -- crud.request_additional_evidence already
+    existed and IDENTITY_STATUSES/user_verification.py already handled its
+    result status, but no route ever called it, so an admin had no way to
+    actually choose this outcome instead of an outright reject."""
+    record = crud.get_identity_verification(db, verification_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Identity verification not found")
+    notes = payload.notes if payload else ""
+    updated = crud.request_additional_evidence(db, record, admin, notes)
+    log_audit_event(
+        db, admin, "identity_verification.request_additional_evidence", "identity_verification", str(verification_id),
+        get_correlation_id(request), reason=notes,
+    )
+    db.commit()
+    return updated
+
+
 @router.get("/{verification_id}/document")
 def download_identity_document(verification_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     """Super admins can always view uploaded identity documents. A plain

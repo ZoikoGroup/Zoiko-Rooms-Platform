@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.models.admin_user import AdminUser
 from app.models.membership import Membership
 from app.models.party import Party
+from app.models.user_account import UserAccount
 
 
 def get_default_membership(db: Session, admin: AdminUser) -> Membership | None:
@@ -65,6 +66,20 @@ def assert_provider_access(db: Session, admin: AdminUser, party_id: int, roles: 
     )
     if not membership or (roles and membership.role not in roles):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
+
+
+def assert_provider_access_any(db: Session, actor: AdminUser | UserAccount, party_id: int) -> None:
+    """assert_provider_access, extended to a self-service Host (UserAccount)
+    acting on their own party-owned listing -- ZR-ENG-CLR-011 Section 10/
+    ZR-ENG-CLR-004 Section 4.3: the leasing pipeline (offers, agreement
+    generation, signing as provider) is a Host commercial action, not
+    exclusively an admin-portal one. A UserAccount only ever passes for its
+    own party; there is no super_admin-style override for this actor type."""
+    if isinstance(actor, UserAccount):
+        if not actor.party_id or actor.party_id != party_id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this listing's records")
+        return
+    assert_provider_access(db, actor, party_id)
 
 
 def party_id_for_listing(listing: "Listing") -> int:

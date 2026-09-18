@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Building2, Check, ChevronLeft, ChevronRight, FileEdit, Send } from "lucide-react";
+import Link from "next/link";
+import { AlertTriangle, Building2, Check, ChevronLeft, ChevronRight, FileEdit, Send, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -18,8 +19,10 @@ import {
   submitHostedListingForReview,
 } from "@/lib/user-api";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
+import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { formatCurrency } from "@/lib/utils";
 import { Field, inputClass } from "@/components/user/ui";
+import { useUserSession } from "@/components/user/UserSessionContext";
 
 const MAX_LISTING_IMAGES = 10;
 const SUPPORTED_CURRENCIES = ["INR", "GBP", "USD", "EUR", "CAD", "AUD", "AED", "SGD", "NZD"];
@@ -40,7 +43,7 @@ interface ListingDetailsForm {
   bathrooms: string;
   size: string;
   description: string;
-  amenities: string;
+  amenities: string[];
   images: string[];
   contactName: string;
   contactPhone: string;
@@ -53,23 +56,19 @@ function emptyDetails(contact: { name: string; phone: string; email: string }): 
     roomType: "Private room",
     location: "",
     pricePerNight: "",
-    currency: "INR",
+    currency: "GBP",
     minStayNights: "30",
     guests: "1",
     bedrooms: "1",
     bathrooms: "1",
     size: "0",
     description: "",
-    amenities: "",
+    amenities: [],
     images: [],
     contactName: contact.name,
     contactPhone: contact.phone,
     contactEmail: contact.email,
   };
-}
-
-function splitList(value: string): string[] {
-  return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 /** One "List a Room" workflow spanning property -> room -> listing -> photos ->
@@ -103,6 +102,8 @@ export function ListARoomWizard({
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+
+  const { identityVerified } = useUserSession();
 
   useEffect(() => {
     if (!open) return;
@@ -237,7 +238,7 @@ export function ListARoomWizard({
         bathrooms: Number(details.bathrooms) || 1,
         size: Number(details.size) || 0,
         description: details.description.trim(),
-        amenities: splitList(details.amenities),
+        amenities: details.amenities,
         images: details.images,
         minStayNights: Math.round(minStay),
         roomId,
@@ -520,11 +521,10 @@ export function ListARoomWizard({
                   />
                 </Field>
 
-                <Field label="Amenities" hint="Comma separated, e.g. Wi-Fi, Washing machine, Air conditioning">
-                  <input
+                <Field label="Amenities" hint="Pick what's available, or add your own.">
+                  <AmenitiesPicker
                     value={details.amenities}
-                    onChange={(e) => setDetails((d) => ({ ...d, amenities: e.target.value }))}
-                    className={inputClass}
+                    onChange={(amenities) => setDetails((d) => ({ ...d, amenities }))}
                   />
                 </Field>
 
@@ -574,6 +574,26 @@ export function ListARoomWizard({
                   Review your listing before saving. You can save it as a draft and come back later, or submit it
                   for a Zoiko admin to review and publish.
                 </p>
+
+                {identityVerified ? (
+                  <div className="flex items-start gap-2 rounded-xl bg-emerald-50 px-4 py-3 text-xs text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20">
+                    <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>Your identity is verified — this listing can be published once a Zoiko admin approves it.</span>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-2 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-700 ring-1 ring-amber-200 sm:flex-row sm:items-center sm:justify-between dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20">
+                    <span className="flex items-start gap-2">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        Your identity isn&apos;t verified yet. You can still save or submit this listing, but a
+                        Zoiko admin won&apos;t be able to publish it until your identity is verified.
+                      </span>
+                    </span>
+                    <Link href="/account/identity" className="shrink-0 font-semibold underline underline-offset-2">
+                      Verify my identity
+                    </Link>
+                  </div>
+                )}
 
                 <div className="overflow-hidden rounded-xl ring-1 ring-slate-100 dark:ring-white/10">
                   {details.images[0] ? (

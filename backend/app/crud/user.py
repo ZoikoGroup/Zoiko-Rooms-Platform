@@ -49,7 +49,7 @@ def create_user(db: Session, email: str, password: str, full_name: str, phone: s
     )
 
     # Create default renter party for this user
-    party = Party(party_type="renter", status="active", jurisdiction="IN")
+    party = Party(party_type="renter", status="active", jurisdiction="England")
     db.add(party)
     db.flush()
 

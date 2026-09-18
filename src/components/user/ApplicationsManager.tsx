@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { CalendarClock, ClipboardList, Search, ShieldAlert } from "lucide-react";
 import { useUserSession } from "@/components/user/UserSessionContext";
+import { ApiError } from "@/lib/api-client";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
@@ -73,6 +74,8 @@ export function ApplicationsManager() {
   const [disclosures, setDisclosures] = useState<DisclosureRequirement[]>([]);
   const [acknowledgingId, setAcknowledgingId] = useState<number | null>(null);
   const [paymentPreview, setPaymentPreview] = useState<PaymentPreview | null>(null);
+  const [overlapMessage, setOverlapMessage] = useState("");
+  const [overrideReasonInput, setOverrideReasonInput] = useState("");
   const [payingObligationId, setPayingObligationId] = useState<number | null>(null);
   const [obligationMethods, setObligationMethods] = useState<Record<number, string[]>>({});
   const [selectedMethod, setSelectedMethod] = useState<Record<number, string>>({});
@@ -269,6 +272,8 @@ export function ApplicationsManager() {
     setDisclosures([]);
     setPaymentPreview(null);
     setObligationMethods({});
+    setOverlapMessage("");
+    setOverrideReasonInput("");
     setOfferLoading(true);
     try {
       const loaded = await getOwnOffer(application.id);
@@ -336,15 +341,25 @@ export function ApplicationsManager() {
     }
   }
 
-  async function handleAcceptOffer() {
+  async function handleAcceptOffer(overrideReason?: string) {
     if (!offer) return;
     setActionBusy(true);
     try {
-      setOffer(await acceptOwnOffer(offer.id));
+      setOffer(await acceptOwnOffer(offer.id, overrideReason));
       showToast("Offer accepted.");
+      setOverlapMessage("");
+      setOverrideReasonInput("");
       await load();
     } catch (err) {
-      showToast(errorMessage(err, "Could not accept this offer."), "error");
+      // ZR-ENG-CLR-001 Rule 6/Section 9: a BLOCK-tier occupant-overlap
+      // conflict isn't a dead end -- the renter can self-declare a reason
+      // and proceed anyway (flagged for admin review), so surface that
+      // instead of just failing the accept outright.
+      if (!overrideReason && err instanceof ApiError && err.status === 409 && err.message.includes("overlapping active booking")) {
+        setOverlapMessage(err.message);
+      } else {
+        showToast(errorMessage(err, "Could not accept this offer."), "error");
+      }
     } finally {
       setActionBusy(false);
     }
@@ -479,13 +494,13 @@ export function ApplicationsManager() {
                       <div>
                         <dt className="text-xs text-slate-400">Monthly rent</dt>
                         <dd className="font-semibold text-primary-900 dark:text-white">
-                          {formatCurrency(latest.monthlyRent)}
+                          {formatCurrency(latest.monthlyRent, latest.currency)}
                         </dd>
                       </div>
                       <div>
                         <dt className="text-xs text-slate-400">Deposit</dt>
                         <dd className="font-semibold text-primary-900 dark:text-white">
-                          {formatCurrency(latest.depositAmount)}
+                          {formatCurrency(latest.depositAmount, latest.currency)}
                         </dd>
                       </div>
                       <div>
@@ -503,14 +518,52 @@ export function ApplicationsManager() {
             )}
 
             {offer.status === "SENT" && (
-              <div className="flex justify-end gap-2">
-                <Button variant="outline" loading={actionBusy} onClick={handleDeclineOffer}>
-                  Decline
-                </Button>
-                <Button loading={actionBusy} onClick={handleAcceptOffer}>
-                  Accept offer
-                </Button>
-              </div>
+              overlapMessage ? (
+                <div className="space-y-2 rounded-xl bg-amber-50 p-3 text-xs dark:bg-amber-500/10">
+                  <p className="font-medium text-amber-800 dark:text-amber-300">{overlapMessage}</p>
+                  <p className="text-amber-700 dark:text-amber-400">
+                    You can still accept if you have a genuine reason (e.g. your other booking is ending) — explain
+                    briefly below. This will be flagged for host/admin review.
+                  </p>
+                  <Field label="Reason for accepting anyway">
+                    <textarea
+                      value={overrideReasonInput}
+                      onChange={(e) => setOverrideReasonInput(e.target.value)}
+                      rows={2}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setOverlapMessage("");
+                        setOverrideReasonInput("");
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      loading={actionBusy}
+                      disabled={!overrideReasonInput.trim()}
+                      onClick={() => handleAcceptOffer(overrideReasonInput.trim())}
+                    >
+                      Accept anyway
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" loading={actionBusy} onClick={handleDeclineOffer}>
+                    Decline
+                  </Button>
+                  <Button loading={actionBusy} onClick={() => handleAcceptOffer()}>
+                    Accept offer
+                  </Button>
+                </div>
+              )
             )}
 
             {offer.agreement && disclosures.length > 0 && (
@@ -622,7 +675,7 @@ export function ApplicationsManager() {
                           {pending.changeType === "PREMISES_CHANGE" ? (
                             `Move to "${pending.targetListingName || pending.targetListingId}"`
                           ) : pending.changeType === "FINANCIAL_CHANGE" ? (
-                            `${formatCurrency(pending.originalMonthlyRent ?? 0)} → ${formatCurrency(pending.proposedMonthlyRent ?? 0)}/month`
+                            `${formatCurrency(pending.originalMonthlyRent ?? 0, offer.terms[offer.terms.length - 1]?.currency)} → ${formatCurrency(pending.proposedMonthlyRent ?? 0, offer.terms[offer.terms.length - 1]?.currency)}/month`
                           ) : (
                             <>
                               Proposed move-in: {formatDate(pending.proposedStartDate)}
@@ -864,7 +917,7 @@ export function ApplicationsManager() {
                     <div className="flex items-center justify-between">
                       <span className="text-slate-500 dark:text-slate-400">Listed reference price</span>
                       <span className="font-semibold text-primary-900 dark:text-white">
-                        {formatCurrency(target.pricePerNight)}/night
+                        {formatCurrency(target.pricePerNight, target.currency)}/night
                       </span>
                     </div>
                     <p className="mt-1 text-slate-400">
@@ -877,12 +930,14 @@ export function ApplicationsManager() {
           })()}
 
           {changeType === "financial" && (() => {
-            const currentRent = offer?.terms.length ? offer.terms[offer.terms.length - 1].monthlyRent : null;
+            const currentTerms = offer?.terms.length ? offer.terms[offer.terms.length - 1] : null;
+            const currentRent = currentTerms?.monthlyRent ?? null;
+            const currency = currentTerms?.currency;
             const proposed = Number(proposedRent);
             const showDelta = currentRent != null && Number.isFinite(proposed) && proposed > 0;
             return (
               <>
-                <Field label="Proposed monthly rent (₹)">
+                <Field label={`Proposed monthly rent${currency ? ` (${currency})` : ""}`}>
                   <input
                     type="number"
                     min={0}
@@ -901,17 +956,17 @@ export function ApplicationsManager() {
                   <div className="rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
                     <div className="flex items-center justify-between">
                       <span className="text-slate-500 dark:text-slate-400">Current rent</span>
-                      <span className="font-semibold text-primary-900 dark:text-white">{formatCurrency(currentRent!)}/mo</span>
+                      <span className="font-semibold text-primary-900 dark:text-white">{formatCurrency(currentRent!, currency)}/mo</span>
                     </div>
                     <div className="mt-1 flex items-center justify-between">
                       <span className="text-slate-500 dark:text-slate-400">Proposed rent</span>
-                      <span className="font-semibold text-primary-900 dark:text-white">{formatCurrency(proposed)}/mo</span>
+                      <span className="font-semibold text-primary-900 dark:text-white">{formatCurrency(proposed, currency)}/mo</span>
                     </div>
                     <div className="mt-1 flex items-center justify-between border-t border-slate-200 pt-1 dark:border-slate-700">
                       <span className="text-slate-500 dark:text-slate-400">Difference</span>
                       <span className={proposed > currentRent! ? "font-semibold text-accent-700 dark:text-accent-400" : "font-semibold text-emerald-600 dark:text-emerald-400"}>
                         {proposed > currentRent! ? "+" : ""}
-                        {formatCurrency(proposed - currentRent!)}/mo
+                        {formatCurrency(proposed - currentRent!, currency)}/mo
                       </span>
                     </div>
                   </div>

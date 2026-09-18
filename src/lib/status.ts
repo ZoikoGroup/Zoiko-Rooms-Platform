@@ -64,15 +64,25 @@ export const offerStatusLabel = {
 export const agreementStatusTone = {
   DRAFT: "neutral",
   SENT: "warning",
+  PARTIALLY_EXECUTED: "warning",
+  PAYMENT_IN_PROGRESS: "warning",
+  PAYMENT_PENDING: "warning",
   SIGNED: "success",
+  EXPIRED: "danger",
   VOID: "danger",
+  AMENDMENT_PENDING: "warning",
 } as const;
 
 export const agreementStatusLabel = {
   DRAFT: "Draft",
   SENT: "Sent for signature",
+  PARTIALLY_EXECUTED: "Partially signed",
+  PAYMENT_IN_PROGRESS: "Awaiting payment",
+  PAYMENT_PENDING: "Payment pending",
   SIGNED: "Signed",
+  EXPIRED: "Expired",
   VOID: "Void",
+  AMENDMENT_PENDING: "Amendment pending",
 } as const;
 
 export const occupancyStatusTone = {
@@ -275,6 +285,7 @@ export const authorityRecordStatusTone = {
   failed: "danger",
   conflict: "danger",
   review_required: "warning",
+  revoked: "danger",
 } as const;
 
 export const authorityRecordStatusLabel = {
@@ -286,6 +297,7 @@ export const authorityRecordStatusLabel = {
   failed: "Failed",
   conflict: "Conflict found",
   review_required: "Review required",
+  revoked: "Revoked",
 } as const;
 
 export const marketReleaseStatusTone = {

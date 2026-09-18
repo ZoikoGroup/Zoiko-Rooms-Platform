@@ -259,6 +259,17 @@ export function IdentityVerificationManager() {
                       </span>
                     </p>
                   )}
+                  {record.status === "additional_evidence_required" && (
+                    <p className="mt-1.5 flex items-start gap-1 text-xs text-amber-600">
+                      <Clock className="mt-0.5 h-3 w-3 shrink-0" />
+                      <span>
+                        {record.verifierNotes
+                          ? `More evidence needed: ${record.verifierNotes}`
+                          : "We need additional or different evidence before we can verify you."}
+                        {" "}Submit a new document above to continue.
+                      </span>
+                    </p>
+                  )}
                 </div>
                 <Badge tone={identityStatusTone[record.status] ?? "neutral"}>
                   {identityStatusLabel[record.status] ?? record.status}

@@ -55,6 +55,16 @@ async def submit_identity_verification(
     app/core/identity_uploads.py for the content validation and storage."""
     stored_filename, original_filename, content_type, file_size, sha256_hash = await save_identity_document(file)
 
+    # ZR-ENG-CLR-012 Section 18: checked before the new record/artifact exist,
+    # so a match here is necessarily a *prior* submission, never the one
+    # being created right now.
+    duplicate_artifact = evidence_vault_crud.find_duplicate_by_hash(db, sha256_hash)
+    duplicate_of_verification_id = (
+        int(duplicate_artifact.related_entity_id)
+        if duplicate_artifact and duplicate_artifact.related_entity_type == "identity_verification"
+        else None
+    )
+
     record = crud.submit_identity_verification_for_user(
         db,
         user,
@@ -65,6 +75,7 @@ async def submit_identity_verification(
         original_filename=original_filename,
         content_type=content_type,
         file_size=file_size,
+        duplicate_of_verification_id=duplicate_of_verification_id,
     )
     evidence_vault_crud.register_evidence_artifact(
         db, related_entity_type="identity_verification", related_entity_id=str(record.id),

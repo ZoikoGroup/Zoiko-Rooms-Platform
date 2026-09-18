@@ -70,6 +70,51 @@ services:
       - key: SMTP_USE_TLS
         value: "true"
 
+  # ZR-ENG-CLR-001 Section 1, Rule 7/Section 13: scheduled safety-net sweep
+  # for the two lazy expiry clocks (24h accepted-booking confirmation window,
+  # 30m payment checkout lock) -- see backend/reconcile_expirations.py. Both
+  # clocks already self-heal on read; this catches an overdue offer/agreement
+  # that nobody happens to read again, so its room hold doesn't stay stuck.
+  - type: cron
+    name: zoiko-rooms-reconcile-expirations
+    runtime: python
+    region: oregon
+    plan: starter
+    rootDir: backend
+    schedule: "*/15 * * * *"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python reconcile_expirations.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: DATABASE_URL
+        fromDatabase:
+          name: zoiko-rooms-db
+          property: connectionString
+
+  # ZR-ENG-CLR-012 Section 9/28, AC-28/29/31: unlike the expiry clocks above,
+  # these four verification sweeps (occupancy-eligibility/identity/property-
+  # compliance follow-up notifications, evidence-artifact retention deletion)
+  # have no lazy self-healing read path at all -- without this cron they
+  # never run, see backend/reconcile_verification_sweeps.py. Daily cadence:
+  # every follow-up/retention window here is day-granularity, not minutes.
+  - type: cron
+    name: zoiko-rooms-reconcile-verification-sweeps
+    runtime: python
+    region: oregon
+    plan: starter
+    rootDir: backend
+    schedule: "0 3 * * *"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python reconcile_verification_sweeps.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: DATABASE_URL
+        fromDatabase:
+          name: zoiko-rooms-db
+          property: connectionString
+
 databases:
   - name: zoiko-rooms-db
     plan: free

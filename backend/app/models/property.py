@@ -18,11 +18,12 @@ class Property(Base):
     status: Mapped[str] = mapped_column(String(20), default="active")
     # ZR-ENG-CLR-006 Section 6: 'The Termination Policy Resolver must select
     # an effective-dated market rule set using the property jurisdiction.'
-    # Defaults to "IN" -- every existing property/market-pack row this build
-    # has ever seeded is that jurisdiction, so a default-only backfill is a
-    # genuine no-op for every property that doesn't explicitly set another
-    # one (see crud/market_policy.py:jurisdiction_code_for_room).
-    jurisdiction_code: Mapped[str] = mapped_column(String(10), nullable=False, default="IN")
+    # Defaults to "England" -- the only jurisdiction this build actually has
+    # a real market-pack/agreement-clause registry for (see
+    # services/agreement_profile.py:SUPPORTED_JURISDICTION). This platform
+    # targets foreign markets, not India -- "IN" is not a supported
+    # jurisdiction and must never be the silent default.
+    jurisdiction_code: Mapped[str] = mapped_column(String(10), nullable=False, default="England")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     owner_party: Mapped["Party"] = relationship(back_populates="properties")

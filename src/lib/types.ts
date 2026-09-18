@@ -113,7 +113,8 @@ export type AuthorityStatus =
   | "expired"
   | "failed"
   | "conflict"
-  | "review_required";
+  | "review_required"
+  | "revoked";
 
 export interface AuthorityRecord {
   id: number;
@@ -233,7 +234,8 @@ export interface ApplicationDecisionRecord {
   decision: "APPROVED" | "REJECTED";
   reasonCode: string;
   note: string;
-  decidedByAdminId: number;
+  decidedByAdminId: number | null;
+  decidedByUserId: number | null;
   decidedAt: string;
 }
 
@@ -244,12 +246,22 @@ export interface OfferTermsRecord {
   version: number;
   monthlyRent: number;
   depositAmount: number;
+  currency: string;
   startDate: string;
   termMonths: number;
   createdAt: string;
 }
 
-export type AgreementStatus = "DRAFT" | "SENT" | "SIGNED" | "VOID";
+export type AgreementStatus =
+  | "DRAFT"
+  | "SENT"
+  | "PARTIALLY_EXECUTED"
+  | "PAYMENT_IN_PROGRESS"
+  | "PAYMENT_PENDING"
+  | "SIGNED"
+  | "EXPIRED"
+  | "VOID"
+  | "AMENDMENT_PENDING";
 
 export interface Agreement {
   id: number;
@@ -260,6 +272,7 @@ export interface Agreement {
   signedByProviderAt: string | null;
   signedByRenterAt: string | null;
   signatureRef: string;
+  paymentSessionExpiresAt: string | null;
   createdAt: string;
 }
 

@@ -8,10 +8,23 @@ from app.core.correlation import get_correlation_id
 from app.core.image_uploads import save_listing_images
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
+from app.crud import leasing as leasing_crud
 from app.crud import listing as listing_crud
 from app.crud.property import get_property, list_rooms_for_property
 from app.db.session import get_db
 from app.models.user_account import UserAccount
+from app.schemas.leasing import (
+    AgreementCreateRequest,
+    AgreementRead,
+    ApplicationDecide,
+    ApplicationRead,
+    DisclosureDeliverRequest,
+    DisclosureRequirementRead,
+    OfferRead,
+    OfferTermsCreate,
+    OfferTermsRead,
+    UserAgreementSignRequest,
+)
 from app.schemas.marketplace import PropertyCreate, PropertyRead, RoomCreate, RoomRead
 from app.schemas.listing import ListingCreate, ListingRead, ListingUpdate
 
@@ -274,5 +287,203 @@ def submit_user_listing_for_review(
         reason=f"user:{user.id}",
     )
     emit_event(db, "listing.submitted", "listing", listing_id, {"room_id": updated.room_id, "partyId": user.party_id})
+    db.commit()
+    return updated
+
+
+# --- Applications (ZR-ENG-CLR-011 Section 10: Host "Applications to review") ----
+
+
+@router.get("/applications", response_model=list[ApplicationRead])
+def list_hosted_applications(
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Applications submitted to any of the host's own party-owned listings."""
+    applications = leasing_crud.list_applications_for_host(db, user)
+    return [leasing_crud.to_application_read(a) for a in applications]
+
+
+@router.get("/applications/{application_id}", response_model=ApplicationRead)
+def get_hosted_application(
+    application_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    application = leasing_crud.get_application_for_host_or_404(db, application_id, user)
+    return leasing_crud.to_application_read(application)
+
+
+@router.post("/applications/{application_id}/decide", response_model=ApplicationRead)
+def decide_hosted_application(
+    application_id: int,
+    payload: ApplicationDecide,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    application = leasing_crud.get_application_for_host_or_404(db, application_id, user)
+    leasing_crud.decide_application_as_host(db, application, user, payload)
+    log_audit_event(
+        db, None, "user_application.decide", "application", str(application_id), get_correlation_id(request),
+        reason=f"user:{user.id}:{payload.decision}",
+    )
+    emit_event(db, "application.decided", "application", str(application_id), {"decision": payload.decision})
+    db.commit()
+    db.refresh(application)
+    return leasing_crud.to_application_read(application)
+
+
+# --- Offers and agreements (ZR-ENG-CLR-004 Section 4.3: "The default is the
+# legal landlord/Host... Zoiko Admin does not sign merely because Zoiko
+# operates the platform.") ------------------------------------------------
+
+
+@router.post("/applications/{application_id}/offers", response_model=OfferRead, status_code=status.HTTP_201_CREATED)
+def create_hosted_offer(
+    application_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    application = leasing_crud.get_application_for_host_or_404(db, application_id, user)
+    offer = leasing_crud.create_offer(db, application, user)
+    log_audit_event(
+        db, None, "user_offer.create", "offer", str(offer.id), get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "offer.created", "offer", str(offer.id), {"applicationId": application_id})
+    db.commit()
+    return offer
+
+
+@router.get("/offers/{offer_id}", response_model=OfferRead)
+def get_hosted_offer(offer_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    return leasing_crud.get_offer_for_host_or_404(db, offer_id, user)
+
+
+@router.post("/offers/{offer_id}/terms", response_model=OfferTermsRead)
+def create_hosted_offer_terms(
+    offer_id: int,
+    payload: OfferTermsCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_for_host_or_404(db, offer_id, user)
+    terms = leasing_crud.add_offer_terms(db, offer, user, payload, correlation_id=correlation_id)
+    log_audit_event(db, None, "user_offer.add_terms", "offer", str(offer_id), correlation_id, reason=f"user:{user.id}")
+    emit_event(
+        db, "offer.terms_added", "offer", str(offer_id), {"version": terms.version, "monthlyRent": float(terms.monthly_rent)},
+    )
+    db.commit()
+    return terms
+
+
+@router.post("/offers/{offer_id}/send", response_model=OfferRead)
+def send_hosted_offer(
+    offer_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_for_host_or_404(db, offer_id, user)
+    updated = leasing_crud.set_offer_status(db, offer, user, "SENT", correlation_id=correlation_id)
+    log_audit_event(db, None, "user_offer.send", "offer", str(offer_id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+    return updated
+
+
+@router.post("/offers/{offer_id}/agreement", response_model=AgreementRead, status_code=status.HTTP_201_CREATED)
+def create_hosted_agreement(
+    offer_id: int,
+    request: Request,
+    payload: AgreementCreateRequest = AgreementCreateRequest(),
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_for_host_or_404(db, offer_id, user)
+    agreement = leasing_crud.create_agreement(db, offer, user, payload.selected_optional_clause_ids)
+    log_audit_event(
+        db, None, "user_agreement.create", "agreement", str(agreement.id), correlation_id, reason=f"user:{user.id}",
+    )
+    emit_event(db, "agreement.created", "agreement", str(agreement.id), {"offerId": offer_id})
+    db.commit()
+    return agreement
+
+
+@router.get("/agreements/{agreement_id}", response_model=AgreementRead)
+def get_hosted_agreement(
+    agreement_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    return leasing_crud.get_agreement_for_host_or_404(db, agreement_id, user)
+
+
+@router.get("/agreements/{agreement_id}/disclosures", response_model=list[DisclosureRequirementRead])
+def list_hosted_agreement_disclosures(
+    agreement_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    agreement = leasing_crud.get_agreement_for_host_or_404(db, agreement_id, user)
+    return agreement.disclosures
+
+
+@router.post(
+    "/agreements/{agreement_id}/disclosures/{disclosure_id}/deliver", response_model=DisclosureRequirementRead,
+)
+def deliver_hosted_agreement_disclosure(
+    agreement_id: int,
+    disclosure_id: int,
+    request: Request,
+    payload: DisclosureDeliverRequest = DisclosureDeliverRequest(),
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    agreement = leasing_crud.get_agreement_for_host_or_404(db, agreement_id, user)
+    disclosure = leasing_crud.get_disclosure_or_404(db, agreement, disclosure_id)
+    updated = leasing_crud.deliver_disclosure(
+        db, agreement, disclosure, user, to_party=payload.to_party, delivery_channel=payload.delivery_channel,
+    )
+    log_audit_event(
+        db, None, "user_disclosure.deliver", "disclosure_requirement", str(disclosure_id), get_correlation_id(request),
+        reason=f"user:{user.id}", after_state=updated.status,
+    )
+    db.commit()
+    return updated
+
+
+@router.post("/agreements/{agreement_id}/send", response_model=AgreementRead)
+def send_hosted_agreement(
+    agreement_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    agreement = leasing_crud.get_agreement_for_host_or_404(db, agreement_id, user)
+    updated = leasing_crud.send_agreement(db, agreement, user)
+    log_audit_event(
+        db, None, "user_agreement.send", "agreement", str(agreement_id), get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    db.commit()
+    return updated
+
+
+@router.post("/agreements/{agreement_id}/sign", response_model=AgreementRead)
+def sign_hosted_agreement(
+    agreement_id: int,
+    request: Request,
+    payload: UserAgreementSignRequest = UserAgreementSignRequest(),
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    correlation_id = get_correlation_id(request)
+    agreement = leasing_crud.get_agreement_for_host_or_404(db, agreement_id, user)
+    updated = leasing_crud.host_sign_agreement(db, agreement, user, method=payload.method, evidence_metadata=payload.evidence_metadata)
+    log_audit_event(
+        db, None, "user_agreement.sign", "agreement", str(agreement_id), correlation_id, reason=f"user:{user.id}:provider",
+    )
+    if updated.status == "SIGNED":
+        emit_event(db, "agreement.signed", "agreement", str(agreement_id), {}, correlation_id=correlation_id)
+    elif updated.status == "PAYMENT_IN_PROGRESS":
+        emit_event(
+            db, "agreement.payment_started", "agreement", str(agreement_id),
+            {"payment_session_expires_at": updated.payment_session_expires_at.isoformat()},
+            correlation_id=correlation_id,
+        )
     db.commit()
     return updated
