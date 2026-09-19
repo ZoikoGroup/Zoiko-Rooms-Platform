@@ -148,6 +148,7 @@ class DepositRecordRead(CamelModel):
     instrument: DepositInstrumentRead | None = None
     claimed_amount: float = 0
     disputed_amount: float = 0
+    currency: str = "USD"
 
 
 class DepositRelease(CamelModel):
@@ -282,6 +283,7 @@ class RefundRequestRead(CamelModel):
     decided_by_admin_id: int | None
     created_at: datetime
     decided_at: datetime | None
+    currency: str = "USD"
 
 
 class DisputeCreate(CamelModel):

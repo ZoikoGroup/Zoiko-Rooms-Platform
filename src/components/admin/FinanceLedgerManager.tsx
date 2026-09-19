@@ -107,7 +107,7 @@ export function FinanceLedgerManager() {
             >
               <div>
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                  {obligation.obligationType} · {formatCurrency(obligation.amount)}
+                  {obligation.obligationType} · {formatCurrency(obligation.amount, obligation.currency)}
                 </p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   Owed by guest {obligation.guestId} · due {formatDate(obligation.dueDate)} · {obligation.moneyPlane.toLowerCase()} plane
@@ -142,9 +142,9 @@ export function FinanceLedgerManager() {
               className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-white/10"
             >
               <div>
-                <p className="text-sm font-semibold text-primary-900 dark:text-white">{formatCurrency(deposit.heldAmount)} held</p>
+                <p className="text-sm font-semibold text-primary-900 dark:text-white">{formatCurrency(deposit.heldAmount, deposit.currency)} held</p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {formatCurrency(deposit.releasedAmount)} released{deposit.notes ? ` · ${deposit.notes}` : ""}
+                  {formatCurrency(deposit.releasedAmount, deposit.currency)} released{deposit.notes ? ` · ${deposit.notes}` : ""}
                 </p>
               </div>
               <div className="flex items-center gap-2">

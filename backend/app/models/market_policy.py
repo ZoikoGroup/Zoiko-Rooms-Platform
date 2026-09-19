@@ -12,6 +12,14 @@ from app.db.base import Base
 # for actual legal review before any of this governs real money or real tenancies.
 MARKET_POLICY_CONFIDENCE_LEVELS = ("VERIFIED", "REVIEW_REQUIRED", "DEPRECATED", "EMERGENCY_BLOCK")
 
+# ZR-ENG-CLR-002 Section 2/13.2: whether a jurisdiction permits a deposit
+# instrument at all for this market. REQUIRED/PROHIBITED were previously
+# stored but never read by any business logic -- every pack this platform has
+# ever created uses OPTIONAL (the model default), and crud/leasing.py:
+# add_offer_terms validated only the deposit *amount* against the cap, never
+# whether a deposit was permitted in the first place.
+DEPOSIT_INSTRUMENT_ALLOWED_VALUES = ("REQUIRED", "OPTIONAL", "PROHIBITED", "NOT_APPLICABLE")
+
 DEPOSIT_CUSTODY_MODELS = ("STATUTORY_SCHEME", "GOVERNMENT_BOND", "REGULATED_ESCROW", "TRUST_ACCOUNT", "HOST_OR_AGENT", "OTHER_APPROVED")
 CONSENT_STANDARDS = ("HOST_ABSOLUTE_DISCRETION", "REASONABLE_REFUSAL_ONLY", "NOTICE_ONLY", "STATUTORY_RESPONSE_DEADLINE")
 PAYEE_MODELS = ("ORIGINAL_RENTER_PAYEE", "HOST_OR_LANDLORD_PAYEE", "AUTHORIZED_AGENT_PAYEE", "SPLIT_PAYEE", "EXTERNAL_PAYEE_RECORDED")

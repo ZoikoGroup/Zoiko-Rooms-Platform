@@ -776,3 +776,69 @@ class TestApproveFinancialChange:
         )
         assert r.status_code == 409, r.text
         assert "days between rent changes" in r.json()["detail"]
+
+
+class TestFinancialChangeDepositTopup:
+    """Section 2 gap: a deposit top-up can now be bundled with a rent-change
+    request -- previously there was no way to associate the two, and even a
+    contractual deposit_amount bump via an amendment never actually billed
+    the tenant for the difference."""
+
+    def test_topup_below_current_deposit_is_rejected_at_request_time(self, client, db_session: Session):
+        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="35", start_date=date.today() - timedelta(days=5),
+        )
+        r = client.post(
+            f"/api/users/rentals/agreements/{agreement_id}/financial-change-requests",
+            json={"proposedMonthlyRent": 600, "proposedDepositAmount": 400}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 400, r.text
+
+    def test_approving_a_bundled_topup_bills_only_the_difference(self, client, db_session: Session):
+        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="36", start_date=date.today() - timedelta(days=5),
+        )
+        r = client.post(
+            f"/api/users/rentals/agreements/{agreement_id}/financial-change-requests",
+            json={"proposedMonthlyRent": 600, "proposedDepositAmount": 650, "reason": "raising rent"},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["proposedDepositAmount"] == 650.0
+        bcr_id = r.json()["id"]
+
+        r = client.post(f"/api/leasing/booking-change-requests/{bcr_id}/approve", json={}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+
+        client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=auth_user_cookie(renter))
+        client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
+
+        agreement = db_session.get(Agreement, agreement_id)
+        db_session.refresh(agreement)
+        offer = db_session.get(Offer, agreement.offer_id)
+        db_session.refresh(offer)
+        assert offer.terms[-1].monthly_rent == 600.0
+        assert offer.terms[-1].deposit_amount == 650.0
+
+        deposit_obligations = [o for o in agreement.obligations if o.obligation_type == "DEPOSIT"]
+        assert len(deposit_obligations) == 2
+        topup = next(o for o in deposit_obligations if float(o.amount) == 150.0)
+        assert topup.due_date == date.today()
+
+    def test_a_rent_change_without_a_bundled_deposit_creates_no_extra_obligation(self, client, db_session: Session):
+        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="37", start_date=date.today() - timedelta(days=5),
+        )
+        r = client.post(
+            f"/api/users/rentals/agreements/{agreement_id}/financial-change-requests",
+            json={"proposedMonthlyRent": 600}, cookies=auth_user_cookie(renter),
+        )
+        bcr_id = r.json()["id"]
+        client.post(f"/api/leasing/booking-change-requests/{bcr_id}/approve", json={}, cookies=admin_cookies)
+        client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=auth_user_cookie(renter))
+        client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
+
+        agreement = db_session.get(Agreement, agreement_id)
+        db_session.refresh(agreement)
+        deposit_obligations = [o for o in agreement.obligations if o.obligation_type == "DEPOSIT"]
+        assert len(deposit_obligations) == 1

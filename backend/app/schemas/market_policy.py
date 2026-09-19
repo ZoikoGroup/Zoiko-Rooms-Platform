@@ -1,6 +1,15 @@
 from datetime import date, datetime
 
+from pydantic import field_validator
+
+from app.models.market_policy import DEPOSIT_INSTRUMENT_ALLOWED_VALUES
 from app.schemas.common import CamelModel
+
+
+def _validate_deposit_instrument_allowed(value: str | None) -> str | None:
+    if value is not None and value not in DEPOSIT_INSTRUMENT_ALLOWED_VALUES:
+        raise ValueError(f"depositInstrumentAllowed must be one of {DEPOSIT_INSTRUMENT_ALLOWED_VALUES}")
+    return value
 
 
 class MarketPolicyPackCreate(CamelModel):
@@ -31,6 +40,8 @@ class MarketPolicyPackCreate(CamelModel):
     required_property_compliance_codes: list[str] = []
     identity_required_at_application: bool = False
     screening_prohibited_check_types: list[str] = []
+
+    _validate_deposit_instrument_allowed = field_validator("deposit_instrument_allowed")(_validate_deposit_instrument_allowed)
 
 
 class MarketPolicyPackUpdate(CamelModel):
@@ -65,6 +76,8 @@ class MarketPolicyPackUpdate(CamelModel):
     required_property_compliance_codes: list[str] | None = None
     identity_required_at_application: bool | None = None
     screening_prohibited_check_types: list[str] | None = None
+
+    _validate_deposit_instrument_allowed = field_validator("deposit_instrument_allowed")(_validate_deposit_instrument_allowed)
 
 
 class MarketPolicyPackRead(CamelModel):

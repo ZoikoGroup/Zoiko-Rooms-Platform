@@ -204,15 +204,19 @@ export const identityStatusLabel = {
 export const subletRequestStatusTone = {
   pending_verification: "warning",
   pending_admin_review: "warning",
+  more_information_requested: "warning",
   approved: "success",
   rejected: "danger",
+  withdrawn: "neutral",
 } as const;
 
 export const subletRequestStatusLabel = {
   pending_verification: "Pending Verification",
   pending_admin_review: "Pending Admin Review",
+  more_information_requested: "More Information Requested",
   approved: "Approved",
   rejected: "Rejected",
+  withdrawn: "Withdrawn",
 } as const;
 
 // ZR-ENG-CLR-003 Section 3's arrangement-type taxonomy, in renter-facing (first-person) terms.

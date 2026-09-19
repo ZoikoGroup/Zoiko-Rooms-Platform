@@ -52,6 +52,7 @@ from app.schemas.leasing import (
     OfferRead,
     SubletRenterLookup,
     SubletRequestCreate,
+    SubletRequestDecision,
     SubletRequestRead,
     TermShiftRequestCreate,
     UserAgreementSignRequest,
@@ -136,6 +137,7 @@ def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyR
         created_at=occupancy.created_at,
         ended_at=occupancy.ended_at,
         agreement_id=agreement.id if agreement else None,
+        currency=listing.currency if listing else "USD",
     )
 
 
@@ -508,7 +510,10 @@ def request_own_financial_change(
     crud/booking_change_requests.py:request_financial_change."""
     correlation_id = get_correlation_id(request)
     agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
-    bcr = bcr_crud.request_financial_change(db, user, agreement, payload.proposed_monthly_rent, reason=payload.reason)
+    bcr = bcr_crud.request_financial_change(
+        db, user, agreement, payload.proposed_monthly_rent, reason=payload.reason,
+        proposed_deposit_amount=payload.proposed_deposit_amount,
+    )
     log_audit_event(db, None, "booking_change_request.submit", "booking_change_request", str(bcr.id), correlation_id, reason=f"user:{user.id}")
     db.commit()
     return bcr_crud.to_booking_change_request_read(bcr)
@@ -925,7 +930,7 @@ def submit_sublet_request(
 
     sublet_request = sublet_crud.submit_sublet_request(
         db, user, occupancy_id, payload.proposed_renter_party_id, payload.arrangement_type,
-        payload.authority_evidence_ref, payload.proposed_monthly_rent,
+        payload.authority_evidence_ref, payload.proposed_monthly_rent, payload.reason,
     )
 
     log_audit_event(db, None, "user_sublet_request.submit", "sublet_request", str(sublet_request.id), get_correlation_id(request), reason=f"user:{user.id}")
@@ -948,6 +953,72 @@ def list_user_sublet_requests(
     sublet_requests = sublet_crud.list_sublet_requests_for_guest(db, guest.id)
 
     return [sublet_crud.to_sublet_request_read(db, sr) for sr in sublet_requests]
+
+
+@router.get("/sublet-requests/{sublet_request_id}/record")
+def download_own_sublet_decision_record(
+    sublet_request_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Wireframe J: the tenant's own permanent, downloadable record
+    of a completed sublet request."""
+    guest = get_guest_for_user(db, user)
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    if not guest or sublet_request.requested_by_guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This sublet request does not belong to you")
+
+    pdf_bytes = sublet_crud.generate_sublet_decision_record_pdf(db, sublet_request)
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="sublet-request-{sublet_request_id}.pdf"'},
+    )
+
+
+@router.post("/sublet-requests/{sublet_request_id}/respond", response_model=SubletRequestRead)
+def respond_to_sublet_info_request(
+    sublet_request_id: int,
+    payload: SubletRequestDecision,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Section 5.1: the tenant supplies the additional information
+    the Host asked for, sending the request back to the Host's decision queue."""
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    updated = sublet_crud.respond_to_sublet_info_request(db, sublet_request, user, payload.notes)
+    log_audit_event(
+        db, None, "user_sublet_request.respond", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "sublet_request.tenant_response_submitted", "sublet_request", str(sublet_request_id), {})
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
+
+
+@router.post("/sublet-requests/{sublet_request_id}/withdraw", response_model=SubletRequestRead)
+def withdraw_sublet_request(
+    sublet_request_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-SUB-003: the tenant withdraws their own sublet request before a decision."""
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    updated = sublet_crud.withdraw_sublet_request(db, sublet_request, user)
+    log_audit_event(
+        db, None, "user_sublet_request.withdraw", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "sublet_request.withdrawn", "sublet_request", str(sublet_request_id), {})
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
 
 
 @router.get("/deposit-claims", response_model=list[DepositClaimRead])

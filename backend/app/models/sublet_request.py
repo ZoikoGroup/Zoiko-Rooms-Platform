@@ -5,7 +5,18 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-SUBLET_REQUEST_STATUSES = ("pending_verification", "pending_admin_review", "approved", "rejected")
+SUBLET_REQUEST_STATUSES = (
+    "pending_verification",
+    "pending_admin_review",
+    # ZR-SUB-003 Section 5.1/6: the Host asked the tenant for more information
+    # before deciding -- a distinct state, not a rejection or a silent stall.
+    "more_information_requested",
+    "approved",
+    "rejected",
+    # ZR-SUB-003 Section 6/13: "Withdraw pending request | Tenant" -- the
+    # tenant's own action, distinct from a landlord/agent DECLINED decision.
+    "withdrawn",
+)
 
 # India-scope MVP of ZR-ENG-CLR-003 Section 3's 10-type canonical taxonomy.
 # ASSIGNMENT_FULL / REPLACEMENT_OCCUPANT overwrite the existing tenancy.
@@ -55,8 +66,40 @@ class SubletRequest(Base):
     admin_decision: Mapped[str] = mapped_column(String(20), default="")
     admin_notes: Mapped[str] = mapped_column(String(2000), default="")
     decided_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    # ZR-SUB-003 IMPLEMENTATION LOCK: the doc's whole point is that this decision
+    # belongs to the verified landlord/Host, not Zoiko staff -- decided_by_admin_id
+    # stays only as a "legal ops" override path (see crud/sublet.py), and the real,
+    # expected actor for an ordinary decision is the Host, recorded here instead.
+    decided_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ZR-SUB-003 Section 5.1: "The tenant may respond with an additive
+    # submission; the original request remains intact." One round trip is
+    # enough for this MVP -- a dedicated sublet_information_request/response
+    # history table is the doc's fuller model, deferred until a real need for
+    # more than one round trip shows up.
+    info_request_note: Mapped[str] = mapped_column(String(2000), default="")
+    info_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    info_response_note: Mapped[str] = mapped_column(String(2000), default="")
+    info_responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # ZR-SUB-003 Section 3 Step 2 Wireframe B: "Reason (optional)" -- the
+    # tenant's own stated reason for the request. Distinct from
+    # authority_evidence_ref (a landlord-consent-letter-type link).
+    reason: Mapped[str] = mapped_column(String(2000), default="")
+
+    # ZR-SUB-003 Section 5.2/Wireframe H: "Approval may include conditions,
+    # expiry dates and scope limitations." Free-text conditions is this MVP's
+    # representation of the doc's structured condition list -- approval_expires_at
+    # is descriptive metadata only (no scheduler exists in this stack to enforce
+    # it automatically; see services/booking_expiry.py's own admission of the
+    # same gap for the sibling room-hold-expiry feature).
+    approval_conditions: Mapped[str] = mapped_column(String(2000), default="")
+    approval_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Deliberately separate from decided_at -- a withdrawal is the tenant's own
+    # action, never a landlord/agent decision, and the doc's state table keeps
+    # them as genuinely distinct events.
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     arrangement_type: Mapped[str] = mapped_column(String(30), default="ASSIGNMENT_FULL")
     # Captured once, at submission -- the occupancy's own guest_id is overwritten
@@ -83,4 +126,5 @@ class SubletRequest(Base):
     new_agreement: Mapped["Agreement"] = relationship(foreign_keys=[new_agreement_id])
     proposed_renter_party: Mapped["Party"] = relationship()
     decided_by_admin: Mapped["AdminUser"] = relationship()
+    decided_by_user: Mapped["UserAccount"] = relationship()
     requested_by_guest: Mapped["Guest"] = relationship(foreign_keys=[requested_by_guest_id])

@@ -486,6 +486,13 @@ class RefundRequest(Base):
     payment: Mapped["SimulatedPayment"] = relationship()
     obligation: Mapped["Obligation"] = relationship()
 
+    @property
+    def currency(self) -> str:
+        """RefundRequest has no currency column of its own -- it's always the
+        underlying obligation's currency, so this is never a separate,
+        potentially-stale duplicate value."""
+        return self.obligation.currency
+
 
 class DisputeCase(Base):
     """ZR-ENG-CLR-005 Section 20/AC-32: obligation_id/amount/chargeback_outcome

@@ -203,6 +203,7 @@ export function submitSubletRequest(
     authorityEvidenceRef?: string;
     arrangementType?: SubletArrangementType;
     proposedMonthlyRent?: number;
+    reason?: string;
   }
 ): Promise<SubletRequest> {
   return apiClientFetch<SubletRequest>(`/api/users/rentals/occupancies/${occupancyId}/sublet-request`, {
@@ -214,6 +215,33 @@ export function submitSubletRequest(
 
 export function listSubletRequests(): Promise<SubletRequest[]> {
   return apiClientFetch<SubletRequest[]>("/api/users/rentals/sublet-requests");
+}
+
+/** Answers the Host's "more information" request on the tenant's own sublet request. */
+export function respondToSubletInfoRequest(subletRequestId: number, notes: string): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/rentals/sublet-requests/${subletRequestId}/respond`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+}
+
+/** Tenant withdraws their own sublet request before a decision is made. */
+export function withdrawSubletRequest(subletRequestId: number): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/rentals/sublet-requests/${subletRequestId}/withdraw`, { method: "POST" });
+}
+
+/** The tenant's own downloadable decision record (ZR-SUB-003 Wireframe J) --
+ *  a direct link, same pattern as identityDocumentUrl above. 409s until the
+ *  request reaches a completed state (approved/rejected/withdrawn). */
+export function tenantSubletDecisionRecordUrl(subletRequestId: number): string {
+  return `${API_URL}/api/users/rentals/sublet-requests/${subletRequestId}/record`;
+}
+
+/** ZR-ENG-CLR-004 Section 4.10: "All contractual parties must have continuing
+ *  access." The renter's own copy of their agreement PDF -- the backend route
+ *  already existed with no frontend caller anywhere. */
+export function tenantAgreementPdfUrl(agreementId: number): string {
+  return `${API_URL}/api/users/rentals/agreements/${agreementId}/pdf`;
 }
 
 // --- Booking change requests (ZR-ENG-CLR-008 Section 8 MVP) ---------------
@@ -270,7 +298,7 @@ export function submitPremisesChangeRequest(
 
 export function submitFinancialChangeRequest(
   agreementId: number,
-  payload: { proposedMonthlyRent: number; reason?: string }
+  payload: { proposedMonthlyRent: number; proposedDepositAmount?: number; reason?: string }
 ): Promise<BookingChangeRequest> {
   return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/financial-change-requests`, {
     method: "POST",
@@ -428,6 +456,42 @@ export function decideHostedApplication(
     method: "POST",
     body: JSON.stringify({ reasonCode: "", note: "", ...payload }),
   });
+}
+
+// --- Sublet requests (ZR-SUB-003: the Host, not Zoiko Admin, decides) -------
+
+/** Sublet requests routed to any of the host's own party-owned listings. */
+export function listHostedSubletRequests(): Promise<SubletRequest[]> {
+  return apiClientFetch<SubletRequest[]>("/api/users/hosting/sublet-requests");
+}
+
+export function requestHostedSubletMoreInfo(subletRequestId: number, notes: string): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/hosting/sublet-requests/${subletRequestId}/request-info`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+}
+
+export function approveHostedSubletRequest(
+  subletRequestId: number,
+  payload: { notes?: string; conditions?: string; expiresAt?: string | null } = {}
+): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/hosting/sublet-requests/${subletRequestId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ notes: "", conditions: "", expiresAt: null, ...payload }),
+  });
+}
+
+export function declineHostedSubletRequest(subletRequestId: number, notes = ""): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/hosting/sublet-requests/${subletRequestId}/decline`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+}
+
+/** The Host's own copy of the same downloadable decision record. */
+export function hostSubletDecisionRecordUrl(subletRequestId: number): string {
+  return `${API_URL}/api/users/hosting/sublet-requests/${subletRequestId}/record`;
 }
 
 // --- Offers and agreements (ZR-ENG-CLR-004 Section 4.3) ---------------------

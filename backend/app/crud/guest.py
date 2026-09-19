@@ -62,7 +62,11 @@ def get_or_create_guest_for_user(db: Session, user: UserAccount) -> Guest:
 
 
 def list_guests(db: Session) -> list[GuestRead]:
-    guests = db.scalars(select(Guest).options(joinedload(Guest.bookings).joinedload(Booking.listing)).order_by(Guest.name)).unique()
+    guests = db.scalars(
+        select(Guest)
+        .options(joinedload(Guest.bookings).joinedload(Booking.listing), joinedload(Guest.user_account))
+        .order_by(Guest.name)
+    ).unique()
     return [to_guest_read(g) for g in guests]
 
 
@@ -80,4 +84,5 @@ def to_guest_read(guest: Guest) -> GuestRead:
         total_spent=total_spent,
         joined_at=guest.joined_at,
         status=guest.status,
+        party_id=guest.user_account.party_id if guest.user_account else None,
     )

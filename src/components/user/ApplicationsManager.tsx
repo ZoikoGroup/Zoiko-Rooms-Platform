@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { CalendarClock, ClipboardList, Search, ShieldAlert } from "lucide-react";
+import { CalendarClock, ClipboardList, Download, Search, ShieldAlert } from "lucide-react";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { ApiError } from "@/lib/api-client";
 import { Badge } from "@/components/ui/Badge";
@@ -33,6 +33,7 @@ import {
   submitPremisesChangeRequest,
   submitShorteningRequest,
   submitTermShiftRequest,
+  tenantAgreementPdfUrl,
   withdrawChangeRequest,
   withdrawRentalApplication,
 } from "@/lib/user-api";
@@ -418,33 +419,37 @@ export function ApplicationsManager() {
     <div className="space-y-3">
       {applications.map((application) => (
         <Card key={application.id} className="flex flex-wrap items-center justify-between gap-4">
-          <Link href={`/account/rent/${application.listingId}`} className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="font-heading text-sm font-bold text-primary-900 hover:underline dark:text-white">
-                {application.listingName || application.listingId}
+          <div className="min-w-0 flex-1">
+            <Link href={`/account/rent/${application.listingId}`} className="block">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-heading text-sm font-bold text-primary-900 hover:underline dark:text-white">
+                  {application.listingName || application.listingId}
+                </p>
+                <Badge tone={applicationStatusTone[application.status] ?? "neutral"}>{application.status}</Badge>
+                {application.agreementStatus && <Badge tone="neutral">Agreement: {application.agreementStatus}</Badge>}
+                {!application.agreementStatus && application.offerStatus && (
+                  <Badge tone="neutral">Offer: {application.offerStatus}</Badge>
+                )}
+              </div>
+              <p className="mt-0.5 text-xs text-slate-400">Application #{application.listingId}</p>
+              <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+                <span className="flex items-center gap-1">
+                  <CalendarClock className="h-3 w-3" /> Submitted {formatDate(application.submittedAt)}
+                </span>
+                {application.desiredMoveIn && <span>Move-in {formatDate(application.desiredMoveIn)}</span>}
               </p>
-              <Badge tone={applicationStatusTone[application.status] ?? "neutral"}>{application.status}</Badge>
-              {application.agreementStatus && <Badge tone="neutral">Agreement: {application.agreementStatus}</Badge>}
-              {!application.agreementStatus && application.offerStatus && (
-                <Badge tone="neutral">Offer: {application.offerStatus}</Badge>
+              {application.message && (
+                <p className="mt-2 max-w-xl text-xs text-slate-500 dark:text-slate-400">“{application.message}”</p>
               )}
-            </div>
-            <p className="mt-0.5 text-xs text-slate-400">Application #{application.listingId}</p>
-            <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
-              <span className="flex items-center gap-1">
-                <CalendarClock className="h-3 w-3" /> Submitted {formatDate(application.submittedAt)}
-              </span>
-              {application.desiredMoveIn && <span>Move-in {formatDate(application.desiredMoveIn)}</span>}
-            </p>
-            {application.message && (
-              <p className="mt-2 max-w-xl text-xs text-slate-500 dark:text-slate-400">“{application.message}”</p>
-            )}
+            </Link>
             {/* ZR-ENG-CLR-012 Section 5/AC-04: identity is only required
                before CONFIRMED booking (agreement creation), not before
                applying -- once the offer is accepted and waiting on an
                agreement, an unverified renter is the one real, common
                reason nothing moves further, so surface it here instead of
-               leaving them to find out from a stalled admin-side 409. */}
+               leaving them to find out from a stalled admin-side 409.
+               A sibling of the listing Link above, not nested inside it --
+               <a> can never contain another <a> (invalid HTML, breaks hydration). */}
             {application.offerStatus === "ACCEPTED" && !application.agreementStatus && !identityVerified && (
               <Link
                 href="/account/identity"
@@ -453,7 +458,7 @@ export function ApplicationsManager() {
                 <ShieldAlert className="h-3.5 w-3.5" /> Verify your identity to keep this moving toward your agreement
               </Link>
             )}
-          </Link>
+          </div>
 
           <div className="flex shrink-0 items-center gap-2">
             {application.offerId && (
@@ -480,9 +485,16 @@ export function ApplicationsManager() {
           <Loader label="Loading your offer" />
         ) : offer ? (
           <div className="space-y-4">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Badge tone="neutral">Offer: {offer.status}</Badge>
               {offer.agreement && <Badge tone="neutral">Agreement: {offer.agreement.status}</Badge>}
+              {offer.agreement && (
+                <a href={tenantAgreementPdfUrl(offer.agreement.id)} download className="ml-auto">
+                  <Button size="sm" variant="outline">
+                    <Download className="h-3.5 w-3.5" /> Download agreement
+                  </Button>
+                </a>
+              )}
             </div>
 
             {offer.terms.length > 0 && (

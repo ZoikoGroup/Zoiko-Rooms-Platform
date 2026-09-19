@@ -42,7 +42,7 @@ export function RevenueChart({ data: revenueTrend }: { data: RevenueTrendPoint[]
             axisLine={false}
             tickLine={false}
             tick={{ fill: isDark ? "#94a3b8" : "#64748b", fontSize: 12 }}
-            tickFormatter={(v) => `₹${v / 1000}k`}
+            tickFormatter={(v) => `${v / 1000}k`}
             width={48}
           />
           <Tooltip

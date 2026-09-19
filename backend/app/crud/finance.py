@@ -938,6 +938,7 @@ def to_deposit_record_read(record: DepositRecord) -> DepositRecordRead:
         instrument=to_deposit_instrument_read(record.instrument),
         claimed_amount=_deposit_committed_amount(record),
         disputed_amount=_deposit_disputed_amount(record),
+        currency=record.obligation.currency,
     )
 
 

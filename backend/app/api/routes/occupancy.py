@@ -524,6 +524,27 @@ def list_pending_sublet_requests(
     return [sublet_crud.to_sublet_request_read(db, sr) for sr in sublet_requests]
 
 
+@router.post("/sublet-requests/{sublet_request_id}/request-info", response_model=SubletRequestRead, dependencies=[Depends(require_super_admin)])
+def admin_request_sublet_more_info(
+    sublet_request_id: int,
+    request: Request,
+    payload: SubletRequestDecision,
+    admin: AdminUser = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    """Super admin asks the tenant for more information (legal-ops override --
+    the ordinary path is the Host's own dashboard, see user_hosting.py)."""
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+
+    updated = sublet_crud.request_more_sublet_info(db, sublet_request, admin, payload.notes)
+    log_audit_event(db, admin, "sublet_request.request_info", "sublet_request", str(sublet_request_id), get_correlation_id(request))
+    emit_event(db, "sublet_request.more_information_requested", "sublet_request", str(sublet_request_id), {})
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
+
+
 @router.post("/sublet-requests/{sublet_request_id}/approve", response_model=SubletRequestRead, dependencies=[Depends(require_super_admin)])
 def approve_sublet_request(
     sublet_request_id: int,
@@ -537,7 +558,10 @@ def approve_sublet_request(
     if not sublet_request:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
 
-    approved = sublet_crud.approve_sublet_request(db, sublet_request, admin, payload.notes if payload else "")
+    approved = sublet_crud.approve_sublet_request(
+        db, sublet_request, admin,
+        payload.notes if payload else "", payload.conditions if payload else "", payload.expires_at if payload else None,
+    )
     log_audit_event(db, admin, "sublet_request.approve", "sublet_request", str(sublet_request_id), get_correlation_id(request))
     emit_event(
         db, "sublet_request.approved", "sublet_request", str(sublet_request_id),

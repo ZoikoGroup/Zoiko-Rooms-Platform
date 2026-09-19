@@ -37,6 +37,7 @@ from app.models.agreement_clause import ClauseDefinition
 from app.models.agreement_clause_translation import ClauseTranslation
 from app.models.agreement_amendment import AgreementAmendment
 from app.models.agreement_form_template import AgreementFormTemplate
+from app.models.agreement_legal_hold import AgreementLegalHold
 from app.models.agreement_party import AgreementParty
 from app.models.agreement_version_detail import AgreementPremises, CommercialTermsSnapshot, ExecutionCertificate
 from app.models.disclosure_requirement import DisclosureRequirement
@@ -126,6 +127,7 @@ __all__ = [
     "ClauseTranslation",
     "AgreementAmendment",
     "AgreementFormTemplate",
+    "AgreementLegalHold",
     "AgreementParty",
     "AgreementPremises",
     "CommercialTermsSnapshot",

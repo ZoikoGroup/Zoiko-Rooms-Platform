@@ -44,6 +44,7 @@ const navGroups = [
       { href: "/account/host", label: "My Properties", icon: Building2 },
       { href: "/account/host/listings", label: "My Listings", icon: BedDouble },
       { href: "/account/host/applications", label: "Applications", icon: ClipboardCheck },
+      { href: "/account/host/sublet-requests", label: "Sublet Requests", icon: Repeat },
     ],
   },
   {

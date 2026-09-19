@@ -66,6 +66,11 @@ export interface PublishEligibility {
   reasons: string[];
 }
 
+export interface OptionalClauseChoice {
+  clauseId: string;
+  title: string;
+}
+
 export type PartyType = "provider" | "renter" | "institution" | "zoiko_operator";
 
 export interface Party {
@@ -182,6 +187,9 @@ export interface Guest {
   totalSpent: number;
   joinedAt: string;
   status: "active" | "inactive";
+  /** Null when this guest has no linked Zoiko login (e.g. an admin-recorded
+   *  walk-in) -- Party-keyed features like Occupancy Eligibility can't target them. */
+  partyId: number | null;
 }
 
 export interface Review {
@@ -431,6 +439,7 @@ export interface DepositRecord {
   releasedAmount: number;
   releasedAt: string | null;
   notes: string;
+  currency: string;
 }
 
 export type PayoutStatus = "PENDING" | "PAID" | "FAILED" | "HELD";
@@ -460,6 +469,7 @@ export interface RefundRequest {
   decidedByAdminId: number | null;
   createdAt: string;
   decidedAt: string | null;
+  currency: string;
 }
 
 export type DisputeCategory = "CHARGEBACK" | "COMPENSATION" | "OTHER";
@@ -612,6 +622,7 @@ export interface UserOccupancy {
   createdAt: string;
   endedAt: string | null;
   agreementId: number | null;
+  currency: string;
 }
 
 export type BookingChangeType =
@@ -663,13 +674,16 @@ export interface BookingChangeRequest {
   authorityEvidenceRef: string;
   originalDepositAmount: number | null;
   proposedDepositAmount: number | null;
+  currency: string;
 }
 
 export type SubletRequestStatus =
   | "pending_verification"
   | "pending_admin_review"
+  | "more_information_requested"
   | "approved"
-  | "rejected";
+  | "rejected"
+  | "withdrawn";
 
 export type SubletArrangementType =
   | "ASSIGNMENT_FULL"
@@ -688,8 +702,17 @@ export interface SubletRequest {
   adminDecision: string;
   adminNotes: string;
   decidedByAdminId: number | null;
+  decidedByUserId: number | null;
   createdAt: string;
   decidedAt: string | null;
+  infoRequestNote: string;
+  infoRequestedAt: string | null;
+  infoResponseNote: string;
+  infoRespondedAt: string | null;
+  approvalConditions: string;
+  approvalExpiresAt: string | null;
+  withdrawnAt: string | null;
+  reason: string;
   arrangementType: SubletArrangementType;
   listingName: string;
   listingCity: string;

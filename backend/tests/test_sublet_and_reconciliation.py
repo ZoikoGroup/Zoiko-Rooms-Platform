@@ -32,6 +32,11 @@ def _make_active_tenancy_with_sublet_request(db: Session):
     owner_party = Party(party_type="provider", status="active", jurisdiction="IN")
     db.add(owner_party)
     db.flush()
+    # A real listing always has a verified Host login attached -- required
+    # since crud/sublet.py started blocking submission without one (ZR-SUB-003
+    # Section 15: "No verified landlord/agent").
+    host_user = _make_user(db, email="sublet-host@test.com")
+    host_user.party_id = owner_party.id
 
     prop = Property(owner_party_id=owner_party.id, address="1 Test St", city="Bengaluru", status="active")
     db.add(prop)

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { Building2, CalendarClock, DoorOpen, Repeat, Search, TrendingUp } from "lucide-react";
+import { Building2, CalendarClock, DoorOpen, Download, Repeat, Search, TrendingUp } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
@@ -30,6 +30,7 @@ import {
   submitFinancialChangeRequest,
   submitPremisesChangeRequest,
   submitSubletRequest,
+  tenantAgreementPdfUrl,
   withdrawChangeRequest,
 } from "@/lib/user-api";
 import { Card, EmptyState, Field, Toast, inputClass, useToast } from "@/components/user/ui";
@@ -41,12 +42,15 @@ export function RentalsManager() {
   const [loading, setLoading] = useState(true);
 
   const [subletFor, setSubletFor] = useState<UserOccupancy | null>(null);
+  const [subletStep, setSubletStep] = useState<1 | 2 | 3>(1);
   const [proposedEmail, setProposedEmail] = useState("");
   const [lookupResult, setLookupResult] = useState<SubletRenterLookup | null>(null);
   const [lookingUp, setLookingUp] = useState(false);
   const [evidenceRef, setEvidenceRef] = useState("");
+  const [subletReason, setSubletReason] = useState("");
   const [arrangementType, setArrangementType] = useState<SubletArrangementType>("ASSIGNMENT_FULL");
   const [proposedMonthlyRent, setProposedMonthlyRent] = useState("");
+  const [confirmNoPermissionYet, setConfirmNoPermissionYet] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -69,6 +73,7 @@ export function RentalsManager() {
 
   const [financialFor, setFinancialFor] = useState<UserOccupancy | null>(null);
   const [financialProposedRent, setFinancialProposedRent] = useState("");
+  const [financialProposedDeposit, setFinancialProposedDeposit] = useState("");
   const [financialReason, setFinancialReason] = useState("");
   const [financialSubmitting, setFinancialSubmitting] = useState(false);
   const [financialError, setFinancialError] = useState("");
@@ -117,12 +122,39 @@ export function RentalsManager() {
 
   function openSublet(occupancy: UserOccupancy) {
     setSubletFor(occupancy);
+    setSubletStep(1);
     setProposedEmail("");
     setLookupResult(null);
     setEvidenceRef("");
+    setSubletReason("");
     setArrangementType("ASSIGNMENT_FULL");
     setProposedMonthlyRent("");
+    setConfirmNoPermissionYet(false);
     setError("");
+  }
+
+  function subletStepOneValid(): boolean {
+    const rentIsRelevant = (CO_TENANCY_ARRANGEMENT_TYPES as readonly string[]).includes(arrangementType);
+    if (!rentIsRelevant || !proposedMonthlyRent.trim()) return true;
+    const parsed = Number(proposedMonthlyRent);
+    return Number.isFinite(parsed) && parsed > 0;
+  }
+
+  function goToSubletStep(step: 1 | 2 | 3) {
+    setError("");
+    if (step === 2 && !subletStepOneValid()) {
+      setError("Proposed monthly rent must be a positive number.");
+      return;
+    }
+    if (step === 3 && (!lookupResult?.found || !lookupResult.identityVerified)) {
+      setError(
+        !lookupResult?.found
+          ? "Look up the proposed renter's email first."
+          : "This person needs a verified identity on Zoiko before they can take over a room."
+      );
+      return;
+    }
+    setSubletStep(step);
   }
 
   function openExtension(occupancy: UserOccupancy) {
@@ -200,6 +232,7 @@ export function RentalsManager() {
   function openFinancial(occupancy: UserOccupancy) {
     setFinancialFor(occupancy);
     setFinancialProposedRent("");
+    setFinancialProposedDeposit("");
     setFinancialReason("");
     setFinancialError("");
   }
@@ -212,11 +245,19 @@ export function RentalsManager() {
       setFinancialError("Enter a valid proposed monthly rent.");
       return;
     }
+    let deposit: number | undefined;
+    if (financialProposedDeposit.trim()) {
+      deposit = Number(financialProposedDeposit);
+      if (!Number.isFinite(deposit) || deposit < 0) {
+        setFinancialError("Enter a valid deposit top-up amount.");
+        return;
+      }
+    }
     setFinancialError("");
     setFinancialSubmitting(true);
     try {
       await submitFinancialChangeRequest(financialFor.agreementId, {
-        proposedMonthlyRent: rent, reason: financialReason.trim(),
+        proposedMonthlyRent: rent, proposedDepositAmount: deposit, reason: financialReason.trim(),
       });
       setFinancialFor(null);
       showToast("Rent change request submitted for host review.");
@@ -328,6 +369,10 @@ export function RentalsManager() {
       setError("This person needs a verified identity on Zoiko before they can take over a room.");
       return;
     }
+    if (!confirmNoPermissionYet) {
+      setError("Confirm you understand this request does not grant permission yet.");
+      return;
+    }
     const rentIsRelevant = (CO_TENANCY_ARRANGEMENT_TYPES as readonly string[]).includes(arrangementType);
     const parsedRent = proposedMonthlyRent.trim() ? Number(proposedMonthlyRent) : undefined;
     if (rentIsRelevant && proposedMonthlyRent.trim() && (!Number.isFinite(parsedRent) || (parsedRent ?? 0) <= 0)) {
@@ -341,10 +386,11 @@ export function RentalsManager() {
         proposedRenterPartyId: lookupResult.partyId,
         authorityEvidenceRef: evidenceRef.trim(),
         arrangementType,
+        reason: subletReason.trim(),
         ...(rentIsRelevant && parsedRent ? { proposedMonthlyRent: parsedRent } : {}),
       });
       setSubletFor(null);
-      showToast("Sublet request submitted for admin review.");
+      showToast("Sublet request sent to your host for review.");
     } catch (err) {
       setError(errorMessage(err, "Could not submit the sublet request."));
     } finally {
@@ -401,6 +447,14 @@ export function RentalsManager() {
               )}
             </div>
 
+            {occupancy.agreementId && (
+              <a href={tenantAgreementPdfUrl(occupancy.agreementId)} download className="mt-2 inline-block">
+                <Button size="sm" variant="outline">
+                  <Download className="h-3.5 w-3.5" /> Download agreement
+                </Button>
+              </a>
+            )}
+
             {occupancy.status === "PENDING_MOVE_IN" && (
               <div className="mt-4 space-y-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
                 <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -440,7 +494,7 @@ export function RentalsManager() {
                       {pending.changeType === "PREMISES_CHANGE" ? (
                         `Move to "${pending.targetListingName || pending.targetListingId}"`
                       ) : pending.changeType === "FINANCIAL_CHANGE" ? (
-                        `${formatCurrency(pending.originalMonthlyRent ?? 0)} → ${formatCurrency(pending.proposedMonthlyRent ?? 0)}/month`
+                        `${formatCurrency(pending.originalMonthlyRent ?? 0, pending.currency)} → ${formatCurrency(pending.proposedMonthlyRent ?? 0, pending.currency)}/month`
                       ) : (
                         `+${pending.additionalTermMonths} month${pending.additionalTermMonths === 1 ? "" : "s"} — new end date ${pending.proposedEndDate ? formatDate(pending.proposedEndDate) : "—"}`
                       )}
@@ -514,99 +568,172 @@ export function RentalsManager() {
         ))}
       </div>
 
-      <Modal open={Boolean(subletFor)} onClose={() => setSubletFor(null)} title="Request to sublet">
+      <Modal open={Boolean(subletFor)} onClose={() => setSubletFor(null)} title={`Request permission to sublet — Step ${subletStep} of 3`}>
         <form onSubmit={handleSublet} className="space-y-4">
           <p className="rounded-xl bg-slate-50 px-4 py-3 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
-            Zoiko has to approve every request. The other person must already have a Zoiko account with a
-            verified identity.
+            Your host decides this, not Zoiko — we only route the request and record the decision.
           </p>
 
-          <Field label="What kind of arrangement is this?">
-            <select
-              value={arrangementType}
-              onChange={(e) => setArrangementType(e.target.value as SubletArrangementType)}
-              className={inputClass}
-            >
-              {Object.entries(subletArrangementTypeLabel).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </Field>
+          {subletStep === 1 && (
+            <>
+              <Field label="What kind of arrangement is this?">
+                <select
+                  value={arrangementType}
+                  onChange={(e) => setArrangementType(e.target.value as SubletArrangementType)}
+                  className={inputClass}
+                >
+                  {Object.entries(subletArrangementTypeLabel).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
 
-          <Field label="Proposed renter's email" hint="The email they use to sign in to Zoiko.">
-            <div className="flex gap-2">
-              <input
-                type="email"
-                value={proposedEmail}
-                onChange={(e) => editEmail(e.target.value)}
-                placeholder="them@example.com"
-                className={inputClass}
-              />
-              <Button type="button" variant="outline" loading={lookingUp} onClick={handleLookup}>
-                Look up
-              </Button>
-            </div>
-          </Field>
+              {(CO_TENANCY_ARRANGEMENT_TYPES as readonly string[]).includes(arrangementType) && (
+                <Field
+                  label="Proposed monthly rent for them (optional)"
+                  hint="Leave blank to mirror your own rent. Capped by policy — you'll see the max if this is too high."
+                >
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={proposedMonthlyRent}
+                    onChange={(e) => setProposedMonthlyRent(e.target.value)}
+                    placeholder="e.g. 500"
+                    className={inputClass}
+                  />
+                </Field>
+              )}
 
-          {lookupResult && (
-            <p
-              className={
-                lookupResult.found && lookupResult.identityVerified
-                  ? "rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20"
-                  : "rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20"
-              }
-            >
-              {!lookupResult.found &&
-                "No Zoiko account found with that email. Ask them to create one first."}
-              {lookupResult.found && !lookupResult.identityVerified &&
-                `Found ${lookupResult.name ?? "this person"}, but they haven't verified their identity yet.`}
-              {lookupResult.found && lookupResult.identityVerified &&
-                `Confirmed: ${lookupResult.name ?? "this person"} (identity verified).`}
-            </p>
+              {error && (
+                <p className="rounded-lg bg-accent-50 px-3 py-2 text-xs font-medium text-accent-700 ring-1 ring-accent-200">
+                  {error}
+                </p>
+              )}
+
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" onClick={() => setSubletFor(null)}>
+                  Cancel
+                </Button>
+                <Button type="button" onClick={() => goToSubletStep(2)}>
+                  Continue
+                </Button>
+              </div>
+            </>
           )}
 
-          {(CO_TENANCY_ARRANGEMENT_TYPES as readonly string[]).includes(arrangementType) && (
-            <Field
-              label="Proposed monthly rent for them (optional)"
-              hint="Leave blank to mirror your own rent. Capped by policy — you'll see the max if this is too high."
-            >
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                value={proposedMonthlyRent}
-                onChange={(e) => setProposedMonthlyRent(e.target.value)}
-                placeholder="e.g. 500"
-                className={inputClass}
-              />
-            </Field>
+          {subletStep === 2 && (
+            <>
+              <Field label="Proposed renter's email" hint="The email they use to sign in to Zoiko.">
+                <div className="flex gap-2">
+                  <input
+                    type="email"
+                    value={proposedEmail}
+                    onChange={(e) => editEmail(e.target.value)}
+                    placeholder="them@example.com"
+                    className={inputClass}
+                  />
+                  <Button type="button" variant="outline" loading={lookingUp} onClick={handleLookup}>
+                    Look up
+                  </Button>
+                </div>
+              </Field>
+
+              {lookupResult && (
+                <p
+                  className={
+                    lookupResult.found && lookupResult.identityVerified
+                      ? "rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20"
+                      : "rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20"
+                  }
+                >
+                  {!lookupResult.found &&
+                    "No Zoiko account found with that email. Ask them to create one first."}
+                  {lookupResult.found && !lookupResult.identityVerified &&
+                    `Found ${lookupResult.name ?? "this person"}, but they haven't verified their identity yet.`}
+                  {lookupResult.found && lookupResult.identityVerified &&
+                    `Confirmed: ${lookupResult.name ?? "this person"} (identity verified).`}
+                </p>
+              )}
+
+              <Field label="Reason (optional)" hint="Only shared with your host, to help them decide.">
+                <textarea
+                  value={subletReason}
+                  onChange={(e) => setSubletReason(e.target.value)}
+                  rows={3}
+                  placeholder="e.g. I have to relocate for work for 3 months."
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field label="Authority evidence link (optional)" hint="Landlord consent letter or similar, if you have one.">
+                <input
+                  value={evidenceRef}
+                  onChange={(e) => setEvidenceRef(e.target.value)}
+                  placeholder="https://..."
+                  className={inputClass}
+                />
+              </Field>
+
+              {error && (
+                <p className="rounded-lg bg-accent-50 px-3 py-2 text-xs font-medium text-accent-700 ring-1 ring-accent-200">
+                  {error}
+                </p>
+              )}
+
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" onClick={() => goToSubletStep(1)}>
+                  Back
+                </Button>
+                <Button type="button" onClick={() => goToSubletStep(3)}>
+                  Continue
+                </Button>
+              </div>
+            </>
           )}
 
-          <Field label="Authority evidence link (optional)" hint="Landlord consent letter or similar, if you have one.">
-            <input
-              value={evidenceRef}
-              onChange={(e) => setEvidenceRef(e.target.value)}
-              placeholder="https://..."
-              className={inputClass}
-            />
-          </Field>
+          {subletStep === 3 && (
+            <>
+              <div className="space-y-1.5 rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
+                <p><span className="text-slate-400">Arrangement:</span> {subletArrangementTypeLabel[arrangementType]}</p>
+                <p><span className="text-slate-400">Proposed renter:</span> {lookupResult?.name ?? proposedEmail}</p>
+                {subletReason && <p><span className="text-slate-400">Reason:</span> {subletReason}</p>}
+                {evidenceRef && <p><span className="text-slate-400">Evidence:</span> {evidenceRef}</p>}
+              </div>
 
-          {error && (
-            <p className="rounded-lg bg-accent-50 px-3 py-2 text-xs font-medium text-accent-700 ring-1 ring-accent-200">
-              {error}
-            </p>
+              <p className="rounded-xl bg-amber-50 px-4 py-3 text-xs font-medium text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+                Submitting this request does not give you permission to sublet. Wait for an approval decision from
+                your host before proceeding.
+              </p>
+
+              <label className="flex items-start gap-2 text-xs text-slate-600 dark:text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={confirmNoPermissionYet}
+                  onChange={(e) => setConfirmNoPermissionYet(e.target.checked)}
+                  className="mt-0.5"
+                />
+                I confirm the information above is accurate and understand this does not yet grant permission.
+              </label>
+
+              {error && (
+                <p className="rounded-lg bg-accent-50 px-3 py-2 text-xs font-medium text-accent-700 ring-1 ring-accent-200">
+                  {error}
+                </p>
+              )}
+
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" onClick={() => goToSubletStep(2)}>
+                  Back
+                </Button>
+                <Button type="submit" loading={submitting} disabled={!confirmNoPermissionYet}>
+                  Submit request
+                </Button>
+              </div>
+            </>
           )}
-
-          <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => setSubletFor(null)}>
-              Cancel
-            </Button>
-            <Button type="submit" loading={submitting} disabled={!lookupResult?.found || !lookupResult.identityVerified}>
-              Submit request
-            </Button>
-          </div>
         </form>
       </Modal>
 
@@ -715,7 +842,7 @@ export function RentalsManager() {
                 <div className="flex items-center justify-between">
                   <span className="text-slate-500 dark:text-slate-400">Listed reference price</span>
                   <span className="font-semibold text-primary-900 dark:text-white">
-                    {formatCurrency(target.pricePerNight)}/night
+                    {formatCurrency(target.pricePerNight, target.currency)}/night
                   </span>
                 </div>
                 <p className="mt-1 text-slate-400">
@@ -758,7 +885,7 @@ export function RentalsManager() {
             effect.
           </p>
 
-          <Field label="Proposed monthly rent (₹)">
+          <Field label={`Proposed monthly rent${financialFor?.currency ? ` (${financialFor.currency})` : ""}`}>
             <input
               type="number"
               min={0}
@@ -769,8 +896,20 @@ export function RentalsManager() {
             />
           </Field>
 
+          <Field label={`Deposit top-up (optional)${financialFor?.currency ? ` (${financialFor.currency})` : ""}`}>
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              placeholder="Leave blank to keep the current deposit"
+              value={financialProposedDeposit}
+              onChange={(e) => setFinancialProposedDeposit(e.target.value)}
+              className={inputClass}
+            />
+          </Field>
           <p className="text-xs text-slate-400">
-            Your security deposit is not automatically changed by a rent change.
+            Your security deposit only changes if you enter a top-up amount above -- it must be equal to or greater
+            than your current deposit.
           </p>
 
           <Field label="Reason (optional)">
@@ -806,7 +945,7 @@ export function RentalsManager() {
             adjustment is processed separately under your market&apos;s deposit rules.
           </p>
 
-          <Field label="Proposed deposit amount (₹)">
+          <Field label={`Proposed deposit amount${depositFor?.currency ? ` (${depositFor.currency})` : ""}`}>
             <input
               type="number"
               min={0}

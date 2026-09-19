@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -10,6 +10,7 @@ from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
 from app.crud import leasing as leasing_crud
 from app.crud import listing as listing_crud
+from app.crud import sublet as sublet_crud
 from app.crud.property import get_property, list_rooms_for_property
 from app.db.session import get_db
 from app.models.user_account import UserAccount
@@ -23,6 +24,8 @@ from app.schemas.leasing import (
     OfferRead,
     OfferTermsCreate,
     OfferTermsRead,
+    SubletRequestDecision,
+    SubletRequestRead,
     UserAgreementSignRequest,
 )
 from app.schemas.marketplace import PropertyCreate, PropertyRead, RoomCreate, RoomRead
@@ -402,7 +405,11 @@ def create_hosted_agreement(
 ):
     correlation_id = get_correlation_id(request)
     offer = leasing_crud.get_offer_for_host_or_404(db, offer_id, user)
-    agreement = leasing_crud.create_agreement(db, offer, user, payload.selected_optional_clause_ids)
+    agreement = leasing_crud.create_agreement(
+        db, offer, user, payload.selected_optional_clause_ids,
+        signing_as_agent=payload.signing_as_agent,
+        agent_authority_evidence_ref=payload.agent_authority_evidence_ref,
+    )
     log_audit_event(
         db, None, "user_agreement.create", "agreement", str(agreement.id), correlation_id, reason=f"user:{user.id}",
     )
@@ -487,3 +494,106 @@ def sign_hosted_agreement(
         )
     db.commit()
     return updated
+
+
+# --- Sublet requests (ZR-SUB-003: 'A tenant's request for permission to sublet
+# must be sent to the verified landlord, agent or other authorized property
+# representative. Zoiko Rooms records and routes the request; it does not
+# grant permission on the owner's behalf.' -- the Host, not Zoiko Admin, is
+# the real decision-maker.) -------------------------------------------------
+
+
+@router.get("/sublet-requests", response_model=list[SubletRequestRead])
+def list_hosted_sublet_requests(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    requests = sublet_crud.list_sublet_requests_for_host(db, user)
+    return [sublet_crud.to_sublet_request_read(db, r) for r in requests]
+
+
+@router.get("/sublet-requests/{sublet_request_id}", response_model=SubletRequestRead)
+def get_hosted_sublet_request(
+    sublet_request_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    return sublet_crud.to_sublet_request_read(db, sublet_request)
+
+
+@router.get("/sublet-requests/{sublet_request_id}/record")
+def download_hosted_sublet_decision_record(
+    sublet_request_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Wireframe J: 'The provider sees the same canonical decision
+    facts.' The Host's own copy of the downloadable record."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    pdf_bytes = sublet_crud.generate_sublet_decision_record_pdf(db, sublet_request)
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="sublet-request-{sublet_request_id}.pdf"'},
+    )
+
+
+@router.post("/sublet-requests/{sublet_request_id}/request-info", response_model=SubletRequestRead)
+def request_hosted_sublet_more_info(
+    sublet_request_id: int,
+    request: Request,
+    payload: SubletRequestDecision,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The Host asks the tenant for more information before deciding."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    updated = sublet_crud.request_more_sublet_info(db, sublet_request, user, payload.notes)
+    log_audit_event(
+        db, None, "user_sublet_request.request_info", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "sublet_request.more_information_requested", "sublet_request", str(sublet_request_id), {})
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
+
+
+@router.post("/sublet-requests/{sublet_request_id}/approve", response_model=SubletRequestRead)
+def approve_hosted_sublet_request(
+    sublet_request_id: int,
+    request: Request,
+    payload: SubletRequestDecision | None = None,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The Host approves a sublet request for their own listing."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    approved = sublet_crud.approve_sublet_request(
+        db, sublet_request, user,
+        payload.notes if payload else "", payload.conditions if payload else "", payload.expires_at if payload else None,
+    )
+    log_audit_event(
+        db, None, "user_sublet_request.approve", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(
+        db, "sublet_request.approved", "sublet_request", str(sublet_request_id),
+        {"occupancyId": approved.current_occupancy_id, "arrangementType": approved.arrangement_type},
+    )
+    db.commit()
+    db.refresh(approved)
+    return sublet_crud.to_sublet_request_read(db, approved)
+
+
+@router.post("/sublet-requests/{sublet_request_id}/decline", response_model=SubletRequestRead)
+def decline_hosted_sublet_request(
+    sublet_request_id: int,
+    request: Request,
+    payload: SubletRequestDecision | None = None,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The Host declines a sublet request for their own listing."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    declined = sublet_crud.reject_sublet_request(db, sublet_request, user, payload.notes if payload else "")
+    log_audit_event(
+        db, None, "user_sublet_request.decline", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "sublet_request.rejected", "sublet_request", str(sublet_request_id), {"occupancyId": declined.current_occupancy_id})
+    db.commit()
+    db.refresh(declined)
+    return sublet_crud.to_sublet_request_read(db, declined)

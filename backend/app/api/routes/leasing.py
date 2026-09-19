@@ -7,6 +7,7 @@ from app.api.deps import get_current_admin, require_super_admin
 from app.core.agreement_documents import resolve_agreement_document_path
 from app.core.correlation import get_correlation_id
 from app.crud import agreement_amendments as amendment_crud
+from app.crud import agreement_legal_hold as legal_hold_crud
 from app.crud import agreement_party as agreement_party_crud
 from app.crud import booking_change_requests as bcr_crud
 from app.crud import agreement_clause_translations as translation_crud
@@ -38,6 +39,8 @@ from app.schemas.leasing import (
     ApplicationRead,
     ApplicationUpdate,
     AgreementFormTemplateRead,
+    AgreementLegalHoldCreate,
+    AgreementLegalHoldRead,
     BookingChangeAdminCorrectionCreate,
     BookingChangeAlternativeProposalCreate,
     BookingChangeDecisionRequest,
@@ -56,6 +59,7 @@ from app.schemas.leasing import (
     OfferRead,
     OfferTermsCreate,
     OfferTermsRead,
+    OptionalClauseChoiceRead,
     SetSignatureProviderHealthRequest,
     SignatureEventRead,
     SignatureProviderCallbackRequest,
@@ -238,6 +242,17 @@ def get_agreement_readiness(offer_id: int, request: Request, db: Session = Depen
     return compute_host_readiness(db, offer)
 
 
+@router.get("/offers/{offer_id}/clause-options", response_model=list[OptionalClauseChoiceRead])
+def get_offer_clause_options(offer_id: int, request: Request, db: Session = Depends(get_db)):
+    """ZR-ENG-CLR-004 AC-17 Screen G: the resolved optional-clause choices
+    (e.g. pets, parking) the admin/host can pick from before calling
+    POST .../agreement -- previously undiscoverable without already knowing
+    a clause_id."""
+    offer = crud.get_offer_or_404(db, offer_id, correlation_id=get_correlation_id(request))
+    choices = crud.list_optional_clause_choices(db, offer.listing)
+    return [OptionalClauseChoiceRead(clause_id=c["clause_id"], title=c["title"]) for c in choices]
+
+
 @router.post("/offers/{offer_id}/agreement", response_model=AgreementRead)
 def post_create_agreement(
     offer_id: int,
@@ -248,7 +263,11 @@ def post_create_agreement(
 ):
     correlation_id = get_correlation_id(request)
     offer = crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
-    agreement = crud.create_agreement(db, offer, admin, payload.selected_optional_clause_ids)
+    agreement = crud.create_agreement(
+        db, offer, admin, payload.selected_optional_clause_ids,
+        signing_as_agent=payload.signing_as_agent,
+        agent_authority_evidence_ref=payload.agent_authority_evidence_ref,
+    )
     log_audit_event(db, admin, "agreement.create", "agreement", str(agreement.id), correlation_id)
     emit_event(db, "agreement.created", "agreement", str(agreement.id), {"offerId": offer_id})
     db.commit()
@@ -650,6 +669,50 @@ def get_agreement_amendments(agreement_id: int, admin: AdminUser = Depends(get_c
     agreement = crud.get_agreement_or_404(db, agreement_id)
     assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
     return amendment_crud.list_amendments(db, agreement)
+
+
+def _assert_legal_ops(admin: AdminUser) -> None:
+    """Section 4 gap: a legal hold is a platform-level compliance action,
+    not a per-property Host action -- gated the same way this codebase
+    already treats other legal-ops overrides (e.g.
+    crud/sublet.py:_assert_can_decide_sublet's super_admin path), not by
+    assert_provider_access ownership."""
+    if admin.role != "super_admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a super admin can manage an agreement's legal hold")
+
+
+@router.get("/agreements/{agreement_id}/legal-holds", response_model=list[AgreementLegalHoldRead])
+def get_agreement_legal_holds(agreement_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    agreement = crud.get_agreement_or_404(db, agreement_id)
+    return legal_hold_crud.list_legal_holds(db, agreement)
+
+
+@router.post("/agreements/{agreement_id}/legal-hold", response_model=AgreementLegalHoldRead)
+def post_place_legal_hold(
+    agreement_id: int, payload: AgreementLegalHoldCreate, request: Request,
+    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    _assert_legal_ops(admin)
+    agreement = crud.get_agreement_or_404(db, agreement_id)
+    hold = legal_hold_crud.place_legal_hold(
+        db, agreement, admin, reason=payload.reason, authority_evidence_ref=payload.authority_evidence_ref,
+    )
+    log_audit_event(db, admin, "agreement.legal_hold.place", "agreement", str(agreement_id), get_correlation_id(request))
+    db.commit()
+    return hold
+
+
+@router.post("/agreements/{agreement_id}/legal-hold/release", response_model=AgreementLegalHoldRead)
+def post_release_legal_hold(
+    agreement_id: int, request: Request,
+    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    _assert_legal_ops(admin)
+    agreement = crud.get_agreement_or_404(db, agreement_id)
+    hold = legal_hold_crud.release_legal_hold(db, agreement, admin)
+    log_audit_event(db, admin, "agreement.legal_hold.release", "agreement", str(agreement_id), get_correlation_id(request))
+    db.commit()
+    return hold
 
 
 @router.post("/agreements/{agreement_id}/amendments/{amendment_id}/classify", response_model=AgreementAmendmentRead)
