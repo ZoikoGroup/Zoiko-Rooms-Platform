@@ -263,7 +263,7 @@ export function OccupancyEligibilityManager() {
             />
             {(decideResult === "PASS" || decideResult === "WAIVED_POLICY") && (
               <p className="mt-1 text-xs text-slate-400">
-                A PASS/waiver is recorded against the jurisdiction's current market policy version automatically --
+                A PASS/waiver is recorded against the jurisdiction&apos;s current market policy version automatically --
                 you only need to state the reason.
               </p>
             )}

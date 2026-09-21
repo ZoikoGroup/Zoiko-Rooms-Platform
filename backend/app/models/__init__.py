@@ -57,6 +57,14 @@ from app.models.leasing import (
     SignatureEvent,
 )
 from app.models.listing import Listing
+from app.models.listing_fee import (
+    ListingFeePayment,
+    ListingFeePolicy,
+    ListingFeeProviderEvent,
+    ListingFeeQuote,
+    ListingFeeReceipt,
+    ListingFeeRefund,
+)
 from app.models.listing_version import ListingVersion
 from app.models.listing_approval import ListingApproval
 from app.models.market_release import MarketRelease
@@ -87,6 +95,14 @@ from app.models.notification import Notification
 from app.models.contact_email import ContactEmail
 from app.models.feature_flag import FeatureFlag
 from app.models.room_alert import RoomAlert
+from app.models.rental_payment import (
+    RentalPaymentCorrection,
+    RentalPaymentDispute,
+    RentalPaymentEvidenceHold,
+    RentalPaymentInstruction,
+    RentalPaymentObligation,
+    RentalPaymentRecord,
+)
 
 __all__ = [
     "AdminUser",
@@ -96,6 +112,12 @@ __all__ = [
     "Listing",
     "ListingVersion",
     "ListingApproval",
+    "ListingFeePolicy",
+    "ListingFeeQuote",
+    "ListingFeePayment",
+    "ListingFeeReceipt",
+    "ListingFeeRefund",
+    "ListingFeeProviderEvent",
     "Guest",
     "Booking",
     "BookingChangeRequest",
@@ -189,4 +211,10 @@ __all__ = [
     "ContactEmail",
     "FeatureFlag",
     "RoomAlert",
+    "RentalPaymentObligation",
+    "RentalPaymentRecord",
+    "RentalPaymentDispute",
+    "RentalPaymentCorrection",
+    "RentalPaymentInstruction",
+    "RentalPaymentEvidenceHold",
 ]

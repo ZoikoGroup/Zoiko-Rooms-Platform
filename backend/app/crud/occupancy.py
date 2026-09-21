@@ -317,6 +317,21 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
     except Exception:
         pass
 
+    # ZR-PAY-002 Section 4/6: the record/evidence-layer counterpart to the
+    # custody-based Obligation above -- see models/rental_payment.py's own
+    # module docstring. Same best-effort placement as the rent-invoice hook.
+    try:
+        from app.crud.rental_payment import create_obligation as create_rental_payment_obligation
+
+        recipient_party_id = occupancy.room.property.owner_party_id if occupancy.room and occupancy.room.property else None
+        if recipient_party_id is not None:
+            create_rental_payment_obligation(
+                db, obligation_type="RENT", tenant_guest_id=occupancy.guest_id, recipient_party_id=recipient_party_id,
+                amount=amount, currency=currency, due_date=next_due, occupancy_id=occupancy.id,
+            )
+    except Exception:
+        pass
+
     return obligation
 
 

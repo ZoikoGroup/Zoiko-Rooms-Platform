@@ -442,7 +442,7 @@ export function TrustSafetyManager() {
       >
         <form onSubmit={submitRevokeAuthority} className="space-y-3.5">
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            This immediately invalidates the record for eligibility checks, even though it hasn't expired yet --
+            This immediately invalidates the record for eligibility checks, even though it hasn&apos;t expired yet --
             e.g. the evidence turned out to be fraudulent, or the underlying lease/ownership basis has since ended.
           </p>
           <div>

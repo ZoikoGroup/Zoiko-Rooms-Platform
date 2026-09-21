@@ -14,6 +14,7 @@ import {
   LayoutDashboard,
   LogOut,
   MessageCircle,
+  Receipt,
   Repeat,
   Search,
   ShieldCheck,
@@ -35,6 +36,7 @@ const navGroups = [
       { href: "/account/rent", label: "Find a Room", icon: Search },
       { href: "/account/applications", label: "My Applications", icon: ClipboardList },
       { href: "/account/rentals", label: "My Rentals", icon: DoorOpen },
+      { href: "/account/rent-payments", label: "Rent & Deposit Payments", icon: Receipt },
       { href: "/account/sublets", label: "Sublet Requests", icon: Repeat },
     ],
   },
@@ -44,6 +46,7 @@ const navGroups = [
       { href: "/account/host", label: "My Properties", icon: Building2 },
       { href: "/account/host/listings", label: "My Listings", icon: BedDouble },
       { href: "/account/host/applications", label: "Applications", icon: ClipboardCheck },
+      { href: "/account/host/payments", label: "Payments", icon: Receipt },
     ],
   },
   {

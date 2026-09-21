@@ -64,6 +64,7 @@ def to_application_read(application: Application) -> ApplicationRead:
         guest_id=application.guest_id,
         guest_name=application.guest.name,
         guest_email=application.guest.email,
+        guest_party_id=application.guest.user_account.party_id if application.guest.user_account else None,
         named_occupant_guest_id=application.named_occupant_guest_id,
         status=application.status,
         message=application.message,
@@ -885,6 +886,30 @@ def create_agreement(
     inventory_service.mark_hold_booked(db, source_type="offer", source_id=offer.id)
     db.commit()
     db.refresh(agreement)
+
+    # ZR-PAY-002 Section 4/6: the record/evidence-layer counterpart to the
+    # two custody-based Obligation rows above -- see
+    # models/rental_payment.py's own module docstring for why this is a
+    # deliberate, temporary duplication rather than a replacement. Same
+    # best-effort placement as the rent-invoice hook below: a failure here
+    # must never undo or fail an already-committed agreement.
+    try:
+        from app.crud.rental_payment import create_obligation as create_rental_payment_obligation
+
+        recipient_party_id = listing.room.property.owner_party_id if listing.room and listing.room.property else None
+        if recipient_party_id is not None:
+            create_rental_payment_obligation(
+                db, obligation_type="RENT", tenant_guest_id=offer.guest_id, recipient_party_id=recipient_party_id,
+                amount=first_rent_amount, currency=listing.currency, due_date=latest_terms.start_date,
+                agreement_id=agreement.id,
+            )
+            create_rental_payment_obligation(
+                db, obligation_type="DEPOSIT", tenant_guest_id=offer.guest_id, recipient_party_id=recipient_party_id,
+                amount=latest_terms.deposit_amount, currency=listing.currency, due_date=latest_terms.start_date,
+                agreement_id=agreement.id,
+            )
+    except Exception:
+        pass
 
     # ZR-ENG-CLR-005 Section 13.1: same best-effort placement as
     # crud/finance.py::confirm_payment's receipt hook -- an invoice-rendering

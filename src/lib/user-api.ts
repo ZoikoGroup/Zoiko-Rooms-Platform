@@ -4,16 +4,27 @@ import {
   Application,
   BookingChangeRequest,
   DisclosureRequirement,
+  EvidenceArtifact,
   HandoverEvent,
   HostedListing,
   IdentityDocumentType,
   IdentityVerificationRecord,
+  ListingFeeCheckoutSession,
+  ListingFeePayment,
+  ListingFeeQuote,
+  ListingFeeRefund,
   Offer,
   PaymentPreview,
   Property,
   PublicListing,
   PublicListingsPage,
   PublishEligibility,
+  RentalPaymentCorrection,
+  RentalPaymentDiscrepancyReason,
+  RentalPaymentDispute,
+  RentalPaymentInstruction,
+  RentalPaymentMethodCategory,
+  RentalPaymentObligation,
   RenterVerificationStatus,
   Room,
   SimulatedPayment,
@@ -505,3 +516,202 @@ export function getOwnAgreementPaymentPreview(agreementId: number): Promise<Paym
   return apiClientFetch<PaymentPreview>(`/api/users/rentals/agreements/${agreementId}/payment-preview`);
 }
 
+
+// --- Listing Fee (ZR-PAY-002 Section 8) --------------------------------------
+// The only payment Zoiko Rooms collects for itself.
+
+export function createListingFeeQuote(listingId: string): Promise<ListingFeeQuote> {
+  return apiClientFetch<ListingFeeQuote>(`/api/users/listing-fees/listings/${listingId}/quotes`, { method: "POST" });
+}
+
+export function createListingFeeCheckoutSession(payload: {
+  quoteId: number;
+  idempotencyKey: string;
+  billingCountry: string;
+}): Promise<ListingFeeCheckoutSession> {
+  return apiClientFetch<ListingFeeCheckoutSession>("/api/users/listing-fees/checkout-sessions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** ZR-PAY-002 Section 3.2: 'Listing fee receipts | View.' */
+export function listMyListingFeePayments(): Promise<ListingFeePayment[]> {
+  return apiClientFetch<ListingFeePayment[]>("/api/users/listing-fees/payments");
+}
+
+/** ZR-PAY-002 Section 8.4: the lister's own view of refund status against
+ *  their payment -- issuing one stays admin-restricted. */
+export function listListingFeeRefundsForPayment(paymentId: number): Promise<ListingFeeRefund[]> {
+  return apiClientFetch<ListingFeeRefund[]>(`/api/users/listing-fees/payments/${paymentId}/refunds`);
+}
+
+export function getListingFeePayment(paymentId: number): Promise<ListingFeePayment> {
+  return apiClientFetch<ListingFeePayment>(`/api/users/listing-fees/payments/${paymentId}`);
+}
+
+/** Returns the receipt PDF as a Blob (not JSON) -- only exists once the
+ *  payment has SUCCEEDED. Caller is responsible for turning this into a
+ *  download (e.g. via URL.createObjectURL). */
+export async function downloadListingFeeReceipt(paymentId: number): Promise<Blob> {
+  const res = await fetch(`${API_URL}/api/users/listing-fees/payments/${paymentId}/receipt`, { credentials: "include" });
+  if (!res.ok) throw new ApiError(res.status, "Could not download the Listing Fee receipt.");
+  return res.blob();
+}
+
+// --- Rental payments: tenant view (ZR-PAY-002 Section 4) ---------------------
+// Evidence/workflow only -- Zoiko Rooms never receives or holds this money.
+
+export function listMyRentalPaymentObligations(obligationType?: RentalPaymentObligation["obligationType"]): Promise<RentalPaymentObligation[]> {
+  const query = obligationType ? `?obligationType=${obligationType}` : "";
+  return apiClientFetch<RentalPaymentObligation[]>(`/api/users/rental-payments/obligations${query}`);
+}
+
+export function getMyRentalPaymentObligation(obligationId: number): Promise<RentalPaymentObligation> {
+  return apiClientFetch<RentalPaymentObligation>(`/api/users/rental-payments/obligations/${obligationId}`);
+}
+
+export function markRentalPaymentPaid(
+  obligationId: number,
+  payload: {
+    amount: number;
+    currency: string;
+    declaredDate: string;
+    paymentMethodCategory: RentalPaymentMethodCategory;
+    externalReference?: string;
+  }
+): Promise<RentalPaymentObligation> {
+  return apiClientFetch<RentalPaymentObligation>(`/api/users/rental-payments/obligations/${obligationId}/mark-paid`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function uploadRentalPaymentEvidence(recordId: number, file: File): Promise<EvidenceArtifact> {
+  const form = new FormData();
+  form.append("file", file);
+  return apiClientFetch<EvidenceArtifact>(`/api/users/rental-payments/records/${recordId}/evidence`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+export function reportRentalPaymentDiscrepancyAsTenant(
+  recordId: number,
+  payload: { reasonCode: RentalPaymentDiscrepancyReason; details?: string }
+): Promise<RentalPaymentDispute> {
+  return apiClientFetch<RentalPaymentDispute>(`/api/users/rental-payments/records/${recordId}/disputes`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** field's *value* is the backend's own snake_case column name
+ *  ("external_reference" / "payment_method_category"), not a camelCase JS
+ *  field name -- it's used directly server-side in getattr/setattr. */
+export function correctOwnRentalPaymentRecord(
+  recordId: number,
+  payload: { fieldName: "external_reference" | "payment_method_category"; newValue: string; reason?: string }
+): Promise<RentalPaymentCorrection> {
+  return apiClientFetch<RentalPaymentCorrection>(`/api/users/rental-payments/records/${recordId}/self-correct`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getMyRentalPaymentInstructions(obligationId: number): Promise<RentalPaymentInstruction> {
+  return apiClientFetch<RentalPaymentInstruction>(`/api/users/rental-payments/obligations/${obligationId}/instructions`);
+}
+
+export function listRentalPaymentEvidence(recordId: number): Promise<EvidenceArtifact[]> {
+  return apiClientFetch<EvidenceArtifact[]>(`/api/users/rental-payments/records/${recordId}/evidence`);
+}
+
+export function downloadRentalPaymentEvidence(recordId: number, artifactId: number): Promise<Blob> {
+  return fetch(`${API_URL}/api/users/rental-payments/records/${recordId}/evidence/${artifactId}`, {
+    credentials: "include",
+  }).then((res) => {
+    if (!res.ok) throw new ApiError(res.status, "Could not open this evidence file.");
+    return res.blob();
+  });
+}
+
+// --- Rental payments: recipient view (ZR-PAY-002 Section 5/9) ---------------
+// The landlord/agent's own side -- confirming receipt, disputing, and
+// managing payment instructions. Same evidence/workflow-only boundary.
+
+export function listRecipientRentalPaymentObligations(
+  obligationType?: RentalPaymentObligation["obligationType"]
+): Promise<RentalPaymentObligation[]> {
+  const query = obligationType ? `?obligationType=${obligationType}` : "";
+  return apiClientFetch<RentalPaymentObligation[]>(`/api/users/rental-payments/recipient/obligations${query}`);
+}
+
+/** amount omitted means 'confirm the full declared amount'. A lesser
+ *  amount records a partial confirmation -- ZR-PAY-002 Section 6
+ *  PARTIALLY_PAID -- and can never exceed the record's own declared amount. */
+export function confirmRentalPaymentReceipt(recordId: number, amount?: number, note?: string): Promise<RentalPaymentObligation> {
+  return apiClientFetch<RentalPaymentObligation>(`/api/users/rental-payments/recipient/records/${recordId}/confirm-receipt`, {
+    method: "POST",
+    body: JSON.stringify({ amount: amount ?? null, note: note ?? "" }),
+  });
+}
+
+export function reportRentalPaymentDiscrepancyAsRecipient(
+  recordId: number,
+  payload: { reasonCode: RentalPaymentDiscrepancyReason; details?: string }
+): Promise<RentalPaymentDispute> {
+  return apiClientFetch<RentalPaymentDispute>(`/api/users/rental-payments/recipient/records/${recordId}/disputes`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateOwnOpenRentalPaymentDispute(
+  disputeId: number,
+  payload: { reasonCode?: RentalPaymentDiscrepancyReason; details?: string }
+): Promise<RentalPaymentDispute> {
+  return apiClientFetch<RentalPaymentDispute>(`/api/users/rental-payments/recipient/disputes/${disputeId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function uploadRentalPaymentEvidenceAsRecipient(recordId: number, file: File): Promise<EvidenceArtifact> {
+  const form = new FormData();
+  form.append("file", file);
+  return apiClientFetch<EvidenceArtifact>(`/api/users/rental-payments/recipient/records/${recordId}/evidence`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+export function listMyRentalPaymentInstructions(): Promise<RentalPaymentInstruction[]> {
+  return apiClientFetch<RentalPaymentInstruction[]>("/api/users/rental-payments/recipient/instructions");
+}
+
+export function submitRentalPaymentInstruction(payload: {
+  method: RentalPaymentMethodCategory;
+  recipientName: string;
+  accountIdentifier: string;
+  referenceFormat?: string;
+  additionalInstructions?: string;
+}): Promise<RentalPaymentInstruction> {
+  return apiClientFetch<RentalPaymentInstruction>("/api/users/rental-payments/recipient/instructions", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function resendRentalPaymentInstructionCode(instructionId: number): Promise<void> {
+  return apiClientFetch<void>(`/api/users/rental-payments/recipient/instructions/${instructionId}/resend-code`, {
+    method: "POST",
+  });
+}
+
+export function confirmRentalPaymentInstruction(instructionId: number, code: string): Promise<RentalPaymentInstruction> {
+  return apiClientFetch<RentalPaymentInstruction>(`/api/users/rental-payments/recipient/instructions/${instructionId}/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}

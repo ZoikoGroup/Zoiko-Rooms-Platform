@@ -85,6 +85,28 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str = ""
     stripe_connect_refresh_url: str = "http://localhost:3001/host/payouts/refresh"
     stripe_connect_return_url: str = "http://localhost:3001/host/payouts/return"
+    # ZR-PAY-002 Section 6/13: the Listing Fee is a separate Zoiko-own-account
+    # checkout from the rent/payout domain above (see models/listing_fee.py's
+    # own module docstring for why). Ops may register it as its own Stripe
+    # webhook endpoint with its own signing secret; blank falls back to
+    # stripe_webhook_secret so a single-endpoint Stripe setup keeps working
+    # unchanged.
+    stripe_listing_fee_webhook_secret: str = ""
+    # ZR-PAY-002 Section 13.1: one immutable PDF per SUCCEEDED ListingFeePayment.
+    # Same never-publicly-mounted secure_uploads/ convention as
+    # receipt_document_dir above, own directory/module (core/listing_fee_
+    # receipt_documents.py) since it's its own document series in its own domain.
+    listing_fee_receipt_document_dir: str = "secure_uploads/listing_fee_receipts"
+    # ZR-PAY-002 Section 10/13 'Retention: Minimum/maximum retention...
+    # Follow jurisdiction policy.' A reasonable default for financial
+    # evidence (7 years), not a verified legal figure for any specific
+    # jurisdiction -- same REVIEW_REQUIRED honesty as every other numeric
+    # default in this codebase (e.g. MarketPolicyPack.identity_evidence_
+    # retention_days). Flat platform-wide value rather than a MarketPolicyPack
+    # column: this domain (models/rental_payment.py) is deliberately kept
+    # independent of that table's schema (Section 12.1's architecture rule).
+    rental_payment_evidence_retention_days: int = 2555
+
     # ZR-ENG-CLR-010 Section 20/24, QA-Q19: the same "mandatory above
     # configured thresholds or for safety/legal/manual override cases" rule
     # Section 20 states for financial holds, applied to who may record an

@@ -19,7 +19,7 @@ from app.crud import refund_entitlement as refund_entitlement_crud
 from app.crud import review as review_crud
 from app.crud import sublet as sublet_crud
 from app.crud import termination as termination_crud
-from app.crud.listing import assert_party_does_not_own_listing
+from app.crud.listing import assert_party_does_not_own_listing, resolve_market_release
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
 from app.crud.eligibility import check_offer_eligibility
@@ -31,7 +31,6 @@ from app.db.session import get_db
 from app.models.leasing import Application
 from app.models.listing import Listing
 from app.models.listing_approval import CURRENT_POLICY_VERSION
-from app.models.market_release import MarketRelease
 from app.models.occupancy import Occupancy
 from app.services.booking_expiry import expire_offer_if_overdue
 from app.services.verification_requirements import is_identity_required_at_application
@@ -157,8 +156,8 @@ def submit_rental_application(
     listing = db.get(Listing, payload.listing_id)
 
     jurisdiction_code = None
-    if listing and listing.market_release_id:
-        market_release = db.get(MarketRelease, listing.market_release_id)
+    if listing:
+        market_release = resolve_market_release(db, listing)
         jurisdiction_code = market_release.jurisdiction if market_release else None
     if jurisdiction_code and is_identity_required_at_application(db, jurisdiction_code):
         if not user.party_id or not get_verified_identity_for_party(db, user.party_id):

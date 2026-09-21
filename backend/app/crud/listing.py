@@ -138,6 +138,21 @@ def _resolve_market_release_id_for_room(db: Session, room_id: int | None) -> int
     return release.id if release else None
 
 
+def resolve_market_release(db: Session, listing: Listing) -> MarketRelease | None:
+    """market_release_id is normally set once, at listing create/update time
+    (_resolve_market_release_id_for_room above). A listing created in a window
+    where its jurisdiction had no MarketRelease row yet stays NULL forever
+    after that -- adding the release later never gets backfilled onto it. Every
+    eligibility/activation gate reads a listing's market release through here
+    instead of the column directly, so that gap self-heals live."""
+    if listing.market_release_id is None:
+        resolved_id = _resolve_market_release_id_for_room(db, listing.room_id)
+        if resolved_id is not None:
+            listing.market_release_id = resolved_id
+            db.flush()
+    return db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
+
+
 def _create_new_version(db: Session, listing: Listing) -> ListingVersion:
     """ZR-ENG-CLR-001 Rule 3: every content edit creates a new immutable
     ListingVersion, classified material vs non-material against whichever
@@ -591,7 +606,7 @@ def check_publish_eligibility(db: Session, listing: Listing) -> list[str]:
     if listing.min_stay_nights < 30:
         reasons.append("Minimum stay must be at least 30 nights")
 
-    market_release = db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
+    market_release = resolve_market_release(db, listing)
     if market_release and market_release.status == "active" and listing.min_stay_nights < market_release.min_stay_nights:
         reasons.append(f"Minimum stay must be at least {market_release.min_stay_nights} nights for this market")
 
@@ -602,7 +617,46 @@ def check_publish_eligibility(db: Session, listing: Listing) -> list[str]:
     if not identity:
         reasons.append("Provider identity verification is not approved")
 
+    # ZR-PAY-002 Section 8.3/A7: the Listing Fee is a real publication
+    # requirement once a jurisdiction has a configured policy -- enforced as
+    # a hard gate in publish_listing/_auto_approve_and_publish_low_risk_market
+    # (see _require_listing_fee_paid_if_applicable). Surfaced here too so the
+    # admin review screen shows it before the admin ever clicks publish.
+    # Paying it must never be treated as satisfying the other gates above.
+    from app.crud.listing_fee import listing_fee_is_paid
+
+    if not listing_fee_is_paid(db, listing.id):
+        reasons.append("Listing Fee has not been paid")
+
     return reasons
+
+
+def _require_listing_fee_paid_if_applicable(db: Session, listing: Listing) -> None:
+    """ZR-PAY-002 Section 8.3/A7: 'Listing fee' is one of the checkmarks
+    required for 'Eligible for publication' -- once a jurisdiction has a
+    configured Listing Fee policy, a listing in that jurisdiction cannot be
+    published without a SUCCEEDED payment. A jurisdiction with no policy
+    configured yet has nothing to enforce (there is nothing to pay), so
+    publication is left unblocked for it rather than bricked by a missing
+    admin configuration step."""
+    from app.crud.listing_fee import (
+        DEFAULT_JURISDICTION,
+        listing_fee_is_paid,
+        listing_jurisdiction_code,
+        resolve_listing_fee_policy,
+    )
+
+    jurisdiction_code = listing_jurisdiction_code(listing) or DEFAULT_JURISDICTION
+    try:
+        resolve_listing_fee_policy(db, jurisdiction_code)
+    except HTTPException:
+        return
+
+    if not listing_fee_is_paid(db, listing.id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Listing Fee has not been paid for this listing. Publication is blocked until the fee is paid.",
+        )
 
 
 def submit_listing_for_review(db: Session, listing: Listing) -> Listing:
@@ -661,7 +715,12 @@ def _auto_approve_and_publish_low_risk_market(db: Session, listing: Listing) -> 
     'system', actor=None) instead of admin-attributed, and both decisions
     still get their own distinct audit + domain events (5.1: 'Approval and
     publication must be distinct events even if executed milliseconds
-    apart'), same as publish_listing's own implicit-approval case."""
+    apart'), same as publish_listing's own implicit-approval case.
+
+    Also subject to the same Listing Fee gate as publish_listing (ZR-PAY-002
+    A7) -- an auto-approved low-risk market must not bypass it either."""
+    _require_listing_fee_paid_if_applicable(db, listing)
+
     version = listing.current_draft_version
     version.approval_status = "APPROVED"
     version.approved_at = datetime.now(timezone.utc)
@@ -760,12 +819,15 @@ def approve_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
 
 
 def publish_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
-    """Admin/super-admin only (enforced at the route level). check_publish_eligibility
-    is informational -- it is deliberately NOT consulted here; the admin's decision
-    to approve is the final authority, not an automated compliance gate. Works from
-    any non-published state that has a room (DRAFT for an admin's own quick-publish,
-    APPROVED for the normal review flow, PAUSED to resume a previously-approved
-    listing) -- none of these re-check authority/occupancy/identity.
+    """Admin/super-admin only (enforced at the route level). check_publish_eligibility's
+    other signals (authority/occupancy/identity) are informational -- deliberately NOT
+    consulted here; the admin's decision to approve is the final authority for those,
+    not an automated compliance gate. The Listing Fee is the one exception: see
+    _require_listing_fee_paid_if_applicable (ZR-PAY-002 A7/8.3 -- it is a real
+    publication requirement once a jurisdiction has a configured fee, not just an
+    advisory signal). Works from any non-published state that has a room (DRAFT for
+    an admin's own quick-publish, APPROVED for the normal review flow, PAUSED to
+    resume a previously-approved listing).
 
     ZR-ENG-CLR-001 AC-01: a listing MUST NOT become PUBLISHED without an
     APPROVED, immutable current_public_version behind it. For the normal
@@ -786,6 +848,8 @@ def publish_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
             status.HTTP_403_FORBIDDEN,
             f"Only a super admin can republish a {listing.state.lower()} listing",
         )
+
+    _require_listing_fee_paid_if_applicable(db, listing)
 
     version = listing.current_draft_version or _create_new_version(db, listing)
     # Transient (not a mapped column, same pattern as annotate_availability's

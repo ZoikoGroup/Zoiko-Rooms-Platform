@@ -313,6 +313,7 @@ export interface Application {
   guestId: string;
   guestName: string;
   guestEmail: string;
+  guestPartyId: number | null;
   status: ApplicationStatus;
   message: string;
   desiredMoveIn: string | null;
@@ -485,6 +486,248 @@ export interface ReconciliationRun {
   totals: Record<string, number>;
   mismatches: string[];
   status: ReconciliationStatus;
+}
+
+// --- Listing Fee (ZR-PAY-002 Section 8) ---
+// The only payment Zoiko Rooms collects for itself -- architecturally
+// separate from the "Finance ledger" domain above (rent/deposit custody).
+// Mirrors /api/users/listing-fees/* and /api/finance/listing-fees/*.
+
+export interface ListingFeePolicy {
+  id: number;
+  jurisdictionCode: string;
+  version: number;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  amount: number;
+  currency: string;
+  taxRate: number;
+  quoteValidityMinutes: number;
+  legalEntityName: string;
+  taxRegistrationNumber: string;
+  disclosureText: string;
+  refundEligible: boolean;
+  refundWindowDays: number | null;
+  createdAt: string;
+}
+
+export interface ListingFeeQuote {
+  id: number;
+  listingId: string;
+  amount: number;
+  taxAmount: number;
+  totalAmount: number;
+  currency: string;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface ListingFeeCheckoutSession {
+  id: number;
+  quoteId: number;
+  listingId: string;
+  amount: number;
+  currency: string;
+  status: ListingFeePaymentStatus;
+  /** Empty when Stripe isn't configured server-side -- the payment already
+   *  completed synchronously in that case; nothing to confirm client-side. */
+  clientSecret: string;
+  createdAt: string;
+}
+
+export type ListingFeePaymentStatus = "PENDING" | "SUCCEEDED" | "FAILED";
+
+export interface ListingFeePayment {
+  id: number;
+  quoteId: number;
+  listingId: string;
+  amount: number;
+  currency: string;
+  status: ListingFeePaymentStatus;
+  billingCountry: string;
+  failureMessage: string;
+  createdAt: string;
+  paidAt: string | null;
+  failedAt: string | null;
+  refundEligible: boolean;
+}
+
+export interface ListingFeeReceipt {
+  id: number;
+  paymentId: number;
+  receiptNumber: string;
+  legalEntityName: string;
+  taxRegistrationNumber: string;
+  amount: number;
+  taxRate: number;
+  taxAmount: number;
+  totalAmount: number;
+  currency: string;
+  issuedAt: string;
+}
+
+export type ListingFeeRefundStatus = "REQUESTED" | "PROCESSING" | "PARTIALLY_REFUNDED" | "REFUNDED" | "FAILED";
+
+export interface ListingFeeRefund {
+  id: number;
+  paymentId: number;
+  amount: number;
+  currency: string;
+  reason: string;
+  status: ListingFeeRefundStatus;
+  requestedByAdminId: number;
+  failureMessage: string;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+// --- Rental payment records (ZR-PAY-002 Section 4-11) ---
+// Zoiko Rooms never collects, holds or moves this money -- these are
+// declarations, confirmations, disputes and corrections only. Independent
+// of the "Finance ledger" domain above (see backend's own module docstring
+// for why the two temporarily coexist).
+
+export type RentalPaymentObligationType = "RENT" | "DEPOSIT" | "OTHER";
+
+export type RentalPaymentStatus =
+  | "UPCOMING"
+  | "DUE"
+  | "TENANT_MARKED_PAID"
+  | "AWAITING_CONFIRMATION"
+  | "CONFIRMED_BY_RECIPIENT"
+  | "CONFIRMED_BY_PROVIDER"
+  | "PARTIALLY_PAID"
+  | "OVERDUE"
+  | "DISPUTED"
+  | "REVERSED"
+  | "WAIVED"
+  | "CANCELLED";
+
+export type RentalPaymentProvenance =
+  | "TENANT_DECLARATION"
+  | "RECIPIENT_CONFIRMATION"
+  | "PROVIDER_CONFIRMATION"
+  | "ADMIN_CORRECTION"
+  | "SYSTEM_DERIVATION";
+
+export type RentalPaymentMethodCategory = "BANK_TRANSFER" | "CASH" | "CARD" | "OTHER";
+
+export interface RentalPaymentRecord {
+  id: number;
+  obligationId: number;
+  status: RentalPaymentStatus;
+  provenance: RentalPaymentProvenance;
+  declaredAmount: number;
+  declaredCurrency: string;
+  declaredDate: string;
+  paymentMethodCategory: RentalPaymentMethodCategory;
+  externalReference: string;
+  declaredByGuestId: string;
+  confirmedByPartyId: number | null;
+  /** Null until a confirmation exists. Less than declaredAmount means
+   *  PARTIALLY_PAID (ZR-PAY-002 Section 6). */
+  confirmedAmount: number | null;
+  /** Set only when provenance is PROVIDER_CONFIRMATION -- the external
+   *  provider's own transaction/reconciliation reference. */
+  providerReference: string;
+  confirmedAt: string | null;
+  createdAt: string;
+}
+
+export interface RentalPaymentObligation {
+  id: number;
+  obligationType: RentalPaymentObligationType;
+  agreementId: number | null;
+  occupancyId: number | null;
+  tenantGuestId: string;
+  recipientPartyId: number;
+  amount: number;
+  currency: string;
+  dueDate: string;
+  status: RentalPaymentStatus;
+  /** Jurisdiction-resolved display term -- "rent", or the jurisdiction's own
+   *  word for deposit ("tenancy deposit" / "bond" / "security deposit" / ...).
+   *  Always use this over obligationType for user-facing copy. */
+  displayLabel: string;
+  waivedReason: string;
+  waivedAt: string | null;
+  createdAt: string;
+  records: RentalPaymentRecord[];
+}
+
+export type RentalPaymentDiscrepancyReason =
+  | "NOT_ARRIVED"
+  | "AMOUNT_DIFFERENT"
+  | "REFERENCE_MISMATCH"
+  | "RETURNED_OR_REVERSED"
+  | "OTHER";
+
+export interface RentalPaymentDispute {
+  id: number;
+  recordId: number;
+  reasonCode: RentalPaymentDiscrepancyReason;
+  details: string;
+  status: "OPEN" | "RESOLVED";
+  reportedByGuestId: string | null;
+  reportedByPartyId: number | null;
+  reportedAt: string;
+  resolvedByAdminId: number | null;
+  resolvedAt: string | null;
+  resolutionNotes: string;
+}
+
+export interface RentalPaymentCorrection {
+  id: number;
+  recordId: number;
+  fieldName: string;
+  previousValue: string;
+  newValue: string;
+  reason: string;
+  actorAdminId: number | null;
+  actorGuestId: string | null;
+  actorPartyId: number | null;
+  createdAt: string;
+}
+
+export type RentalPaymentInstructionStatus = "PENDING_VERIFICATION" | "PENDING_REVIEW" | "ACTIVE" | "SUPERSEDED" | "REJECTED";
+
+export interface RentalPaymentInstruction {
+  id: number;
+  partyId: number;
+  status: RentalPaymentInstructionStatus;
+  method: RentalPaymentMethodCategory;
+  recipientName: string;
+  accountIdentifierMasked: string;
+  referenceFormat: string;
+  additionalInstructions: string;
+  verifiedAt: string | null;
+  createdAt: string;
+  isHighRisk: boolean;
+  highRiskReason: string;
+  reviewedAt: string | null;
+  reviewReason: string;
+}
+
+export interface EvidenceArtifact {
+  id: number;
+  relatedEntityType: string;
+  relatedEntityId: string;
+  originalFilename: string;
+  contentType: string;
+  fileSize: number;
+  scanStatus: string;
+  createdAt: string;
+}
+
+export interface RentalPaymentEvidenceHold {
+  id: number;
+  artifactId: number;
+  status: "ACTIVE" | "RELEASED";
+  reason: string;
+  placedByAdminId: number;
+  placedAt: string;
+  releasedByAdminId: number | null;
+  releasedAt: string | null;
 }
 
 // --- USER accounts (renters & hosts) ---
@@ -905,6 +1148,26 @@ export interface MarketPolicyPack {
   requiredPropertyComplianceCodes: string[];
   identityRequiredAtApplication: boolean;
   screeningProhibitedCheckTypes: string[];
+  platformFeeRate: number;
+  fundsFlowProfile: string;
+  permittedPaymentMethodClasses: string[];
+  zoikoLegalEntityName: string;
+  zoikoTaxRegistrationNumber: string;
+  serviceFeeTaxRate: number;
+  terminationNoticeDays: number;
+  alignTerminationToRentCycle: boolean;
+  terminationLiabilityModel: string;
+  terminationBreakFeeRentMultiple: number;
+  terminationLiabilityCapRentMultiple: number | null;
+  disputeDepositAuthorityClass: string;
+  disputeBookingAgreementAuthorityClass: string;
+  disputePropertyConditionAuthorityClass: string;
+  disputeSubletOccupancyAuthorityClass: string;
+  disputeResponseWindowDays: number;
+  disputeEvidenceWindowDays: number;
+  disputeExternalFilingDeadlineDays: number | null;
+  disputeConciliationRequirement: string;
+  disputeNonWaivableClaimFamilies: string[];
   createdAt: string;
 }
 
