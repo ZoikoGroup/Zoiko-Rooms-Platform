@@ -85,7 +85,7 @@ export function FinanceOpsManager() {
         method: "POST",
         body: JSON.stringify({ partyId: Number(payoutForm.partyId), periodKey: payoutForm.periodKey }),
       });
-      showToast(payout.status === "HELD" ? `Payout held: ${payout.holdReason}` : `Payout of ${formatCurrency(payout.amount)} paid`);
+      showToast(payout.status === "HELD" ? `Payout held: ${payout.holdReason}` : `Payout of ${formatCurrency(payout.amount, payout.currency)} paid`);
       setPayoutModalOpen(false);
       setPayoutForm(emptyPayoutForm);
       loadAll();
@@ -185,7 +185,7 @@ export function FinanceOpsManager() {
             <div key={payout.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
               <div>
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                  Party {payout.partyId} · {formatCurrency(payout.amount)} · {payout.periodKey}
+                  Party {payout.partyId} · {formatCurrency(payout.amount, payout.currency)} · {payout.periodKey}
                 </p>
                 {payout.holdReason && <p className="text-xs text-accent-600">{payout.holdReason}</p>}
               </div>
@@ -211,7 +211,7 @@ export function FinanceOpsManager() {
             <div key={refund.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
               <div>
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                  {formatCurrency(refund.amount)} · payment #{refund.paymentId} · obligation #{refund.obligationId}
+                  {formatCurrency(refund.amount, refund.currency)} · payment #{refund.paymentId} · obligation #{refund.obligationId}
                 </p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">{refund.reason || "No reason given"}</p>
               </div>
@@ -355,7 +355,7 @@ export function FinanceOpsManager() {
               <option value="">Select a payment…</option>
               {payments.map((p) => (
                 <option key={p.id} value={p.id}>
-                  #{p.id} · {formatCurrency(p.amount)} · {p.status}
+                  #{p.id} · {formatCurrency(p.amount, p.currency)} · {p.status}
                 </option>
               ))}
             </select>
@@ -371,13 +371,18 @@ export function FinanceOpsManager() {
               <option value="">Select an obligation…</option>
               {obligations.map((o) => (
                 <option key={o.id} value={o.id}>
-                  #{o.id} · {o.obligationType} · {formatCurrency(o.amount)}
+                  #{o.id} · {o.obligationType} · {formatCurrency(o.amount, o.currency)}
                 </option>
               ))}
             </select>
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Amount (₹)</label>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Amount{(() => {
+                const selectedPayment = payments.find((p) => String(p.id) === refundForm.paymentId);
+                return selectedPayment ? ` (${selectedPayment.currency})` : "";
+              })()}
+            </label>
             <input
               type="number"
               min={0}
@@ -413,7 +418,7 @@ export function FinanceOpsManager() {
               <option value="">None</option>
               {payments.map((p) => (
                 <option key={p.id} value={p.id}>
-                  #{p.id} · {formatCurrency(p.amount)}
+                  #{p.id} · {formatCurrency(p.amount, p.currency)}
                 </option>
               ))}
             </select>

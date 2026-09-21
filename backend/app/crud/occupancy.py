@@ -20,7 +20,25 @@ from app.schemas.occupancy import OccupancyRead
 from app.services import inventory as inventory_service
 
 
-def to_occupancy_read(occupancy: Occupancy) -> OccupancyRead:
+def get_reassigned_via_sublet_request_id(db: Session, occupancy_id: int) -> int | None:
+    """ZR-SUB-003 Section 3: the same fact crud/sublet.py:_assert_sublet_permitted
+    already enforces (an occupancy that changed hands once via ASSIGNMENT_FULL/
+    REPLACEMENT_OCCUPANT can't be sublet onward again) -- exposed for read
+    surfaces (admin OccupancyRead, the renter's own UserOccupancyRead) so
+    neither UI offers an action the backend will just 409 on."""
+    from app.models.sublet_request import REPLACING_ARRANGEMENT_TYPES, SubletRequest
+
+    return db.scalar(
+        select(SubletRequest.id).where(
+            SubletRequest.current_occupancy_id == occupancy_id,
+            SubletRequest.status == "approved",
+            SubletRequest.arrangement_type.in_(REPLACING_ARRANGEMENT_TYPES),
+        ).limit(1)
+    )
+
+
+def to_occupancy_read(db: Session, occupancy: Occupancy) -> OccupancyRead:
+    reassigned_via = get_reassigned_via_sublet_request_id(db, occupancy.id)
     return OccupancyRead(
         id=occupancy.id,
         offer_id=occupancy.offer_id,
@@ -40,6 +58,7 @@ def to_occupancy_read(occupancy: Occupancy) -> OccupancyRead:
         termination_effective_date=occupancy.termination_effective_date,
         created_at=occupancy.created_at,
         ended_at=occupancy.ended_at,
+        reassigned_via_sublet_request_id=reassigned_via,
     )
 
 
@@ -202,7 +221,12 @@ def record_handover_event(
         if compatible:
             return existing
         raise HTTPException(status.HTTP_409_CONFLICT, "Conflicting handover evidence already exists")
-    if occupancy.status != "PENDING_MOVE_IN":
+    from app.models.occupancy_activation import MOVE_OUT_HANDOVER_EVENT_TYPES
+
+    if event_type in MOVE_OUT_HANDOVER_EVENT_TYPES:
+        if occupancy.status != "ACTIVE":
+            raise HTTPException(status.HTTP_409_CONFLICT, "Move-out evidence can only be recorded for an active occupancy")
+    elif occupancy.status != "PENDING_MOVE_IN":
         raise HTTPException(status.HTTP_409_CONFLICT, "Handover evidence can only be recorded for pending move-in occupancy")
     event = OccupancyHandoverEvent(
         occupancy_id=occupancy.id,
@@ -299,7 +323,16 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
     )
 
     if occupancy.expected_end_date and next_due > occupancy.expected_end_date:
-        return None
+        # Section 9 gap: opt-in holdover billing -- see
+        # models/market_policy.py:holdover_allowed's own docstring for why
+        # this stays a no-op (the pre-existing, tested behavior) unless the
+        # resolved jurisdiction has explicitly turned holdover on.
+        from app.crud.market_policy import jurisdiction_code_for_occupancy, resolve_market_policy
+
+        policy = resolve_market_policy(db, jurisdiction_code_for_occupancy(occupancy))
+        if not policy.holdover_allowed:
+            return None
+        amount = round(float(amount) * float(policy.holdover_rent_multiple), 2)
 
     already_exists = any(o.due_date == next_due for o in rent_obligations)
     if already_exists:
@@ -409,6 +442,20 @@ def end_occupancy(
                 )
 
     resolved_move_out_date = move_out_date or date.today()
+    # Section 9 gap: if the renter already gave real move-out notice through
+    # the handshake above, use its own timestamp rather than leaving
+    # notice_given_at null just because this caller didn't pass one
+    # explicitly -- never overrides an explicitly-supplied value.
+    if notice_given_at is None:
+        notice_event = db.scalar(
+            select(OccupancyHandoverEvent).where(
+                OccupancyHandoverEvent.occupancy_id == occupancy.id,
+                OccupancyHandoverEvent.event_type == "MOVE_OUT_NOTICE_GIVEN",
+            )
+        )
+        if notice_event is not None:
+            notice_given_at = notice_event.created_at
+
     occupancy.status = "ENDED"
     occupancy.move_out_date = resolved_move_out_date
     occupancy.notice_given_at = notice_given_at
@@ -458,6 +505,171 @@ def end_occupancy(
     return occupancy
 
 
+def _pre_move_in_monthly_rent(db: Session, agreement: Agreement) -> float | None:
+    """Same ACTIVE-PaymentSchedule read as
+    crud/refund_entitlement.py:_monthly_rent_amount -- duplicated, not
+    cross-imported, matching this codebase's own convention for this exact
+    kind of small private helper (see crud/sublet.py's _add_months for the
+    same pattern)."""
+    schedule = db.scalar(
+        select(PaymentSchedule).where(PaymentSchedule.agreement_id == agreement.id, PaymentSchedule.status == "ACTIVE")
+    )
+    return float(schedule.amount) if schedule else None
+
+
+def _resolve_pre_move_in_cancellation_fee(db: Session, occupancy: Occupancy, agreement: Agreement) -> tuple[float, str]:
+    """Section 7 gap: the free-cancellation-window + fee-outside-it rule
+    that previously didn't exist at all for a pre-move-in booking."""
+    from app.crud.market_policy import jurisdiction_code_for_occupancy, resolve_market_policy
+
+    policy = resolve_market_policy(db, jurisdiction_code_for_occupancy(occupancy))
+    hours_since_booking = (datetime.now(timezone.utc) - occupancy.created_at).total_seconds() / 3600
+    if hours_since_booking <= policy.pre_move_in_free_cancellation_hours:
+        return 0.0, (
+            f"Cancelled within the {policy.pre_move_in_free_cancellation_hours}-hour free-cancellation window -- "
+            "full refund, no fee."
+        )
+    if policy.pre_move_in_cancellation_fee_rent_multiple <= 0:
+        return 0.0, "Outside the free-cancellation window, but no cancellation fee is configured -- full refund."
+    monthly_rent = _pre_move_in_monthly_rent(db, agreement)
+    if monthly_rent is None:
+        return 0.0, "Outside the free-cancellation window, but no active payment schedule to derive a fee from -- full refund."
+    fee = round(monthly_rent * float(policy.pre_move_in_cancellation_fee_rent_multiple), 2)
+    return fee, (
+        f"Outside the {policy.pre_move_in_free_cancellation_hours}-hour free-cancellation window -- a "
+        f"{policy.pre_move_in_cancellation_fee_rent_multiple:g}x monthly rent cancellation fee applies."
+    )
+
+
+def cancel_before_move_in(
+    db: Session, occupancy: Occupancy, *,
+    guest: "Guest | None" = None, host_party_id: int | None = None, admin: AdminUser | None = None,
+    reason: str = "", correlation_id: str = "",
+) -> tuple[Occupancy, dict]:
+    """Section 7 gap: the whole pre-move-in cancellation path this codebase
+    was missing -- previously the only way to end a PENDING_MOVE_IN
+    occupancy was the generic end_occupancy (a pure status-flip with zero
+    money logic and zero role-specific entry point). Exactly one of
+    guest/host_party_id/admin identifies who's cancelling (mirrors
+    dispute_evidence.py:upload_evidence's own uploader_count == 1 shape).
+    Renter and Host may each cancel their own booking; an admin may cancel
+    any. Computes a real refund via _resolve_pre_move_in_cancellation_fee,
+    then actually issues it through the same request_refund/decide_refund
+    pipeline every other refund in this codebase goes through -- never a
+    silent status flip with the money left untouched. Returns
+    (occupancy, {'fee_amount', 'fee_note', 'refunded_amount'})."""
+    from app.crud import finance as finance_crud
+    from app.crud.party import assert_provider_access
+    from app.models.leasing import Agreement
+    from app.models.termination_record import TerminationRecord
+    from app.schemas.finance import RefundDecide, RefundRequestCreate
+
+    actor_count = sum(1 for a in (guest, host_party_id, admin) if a is not None)
+    if actor_count != 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Exactly one of guest, host_party_id or admin must cancel")
+
+    if occupancy.status != "PENDING_MOVE_IN":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Only a booking still pending move-in can be cancelled this way (current status: {occupancy.status})",
+        )
+
+    if guest is not None and occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This booking does not belong to you")
+    if host_party_id is not None and party_id_for_listing(occupancy.listing) != host_party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This booking does not belong to your property")
+    if admin is not None:
+        assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
+
+    agreement = db.query(Agreement).filter(Agreement.offer_id == occupancy.offer_id).first()
+    fee_amount, fee_note = (0.0, "No agreement found to derive a fee from -- full refund.")
+    if agreement is not None:
+        fee_amount, fee_note = _resolve_pre_move_in_cancellation_fee(db, occupancy, agreement)
+
+    refunded_amount = 0.0
+    remaining_fee = fee_amount
+    if agreement is not None:
+        # Deposit is deducted from first (a fee is naturally a forfeiture of
+        # part of the security deposit in ordinary practice), then rent.
+        paid_obligations = sorted(
+            (o for o in agreement.obligations if o.status == "PAID" and o.obligation_type in ("DEPOSIT", "RENT")),
+            key=lambda o: 0 if o.obligation_type == "DEPOSIT" else 1,
+        )
+        for obligation in paid_obligations:
+            paid_allocation = next((a for a in obligation.allocations if a.amount_allocated > 0), None)
+            if paid_allocation is None:
+                continue
+            obligation_amount = float(obligation.amount)
+            applied_fee = min(remaining_fee, obligation_amount)
+            remaining_fee = round(remaining_fee - applied_fee, 2)
+            refund_amount = round(obligation_amount - applied_fee, 2)
+            if refund_amount <= 0:
+                continue
+            refund = finance_crud.request_refund(
+                db,
+                RefundRequestCreate(
+                    payment_id=paid_allocation.payment_id, obligation_id=obligation.id, amount=refund_amount,
+                    reason=f"Pre-move-in cancellation of occupancy #{occupancy.id}: {reason or 'no reason given'}",
+                    idempotency_key=f"pre-move-in-cancel-occupancy-{occupancy.id}-obligation-{obligation.id}",
+                ),
+                admin or _system_admin_for_self_service_refund(db),
+            )
+            if refund.status == "REQUESTED":
+                finance_crud.decide_refund(
+                    db, refund, admin or _system_admin_for_self_service_refund(db), RefundDecide(approve=True),
+                )
+            refunded_amount = round(refunded_amount + refund_amount, 2)
+
+    occupancy.status = "CANCELLED"
+    occupancy.move_out_date = date.today()
+    occupancy.ended_at = datetime.now(timezone.utc)
+
+    if agreement is not None:
+        db.add(TerminationRecord(
+            occupancy_id=occupancy.id, agreement_id=agreement.id, basis="PRE_MOVE_IN_CANCELLATION",
+            liability_end_date=date.today(), termination_effective_date=date.today(),
+            physical_move_out_date=date.today(), created_by_admin_id=admin.id if admin else None,
+        ))
+
+    inventory_service.release_hold(
+        db, source_type="offer", source_id=occupancy.offer_id, reason="pre_move_in_cancellation",
+        correlation_id=correlation_id,
+    )
+    db.commit()
+    db.refresh(occupancy)
+
+    listing = occupancy.listing
+    occupancy_guest = db.get(Guest, occupancy.guest_id)
+    if occupancy_guest:
+        notif_crud.notify_user_by_guest(
+            db, occupancy_guest,
+            title="Your booking was cancelled",
+            message=f'Your booking at "{listing.name}" was cancelled before move-in. {fee_note}',
+            notification_type="occupancy.cancelled_before_move_in",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="A booking was cancelled",
+            message=f'A booking at "{listing.name}" was cancelled before move-in.',
+            notification_type="occupancy.cancelled_before_move_in_for_host",
+            related_entity_type="occupancy", related_entity_id=str(occupancy.id),
+        )
+    return occupancy, {"fee_amount": fee_amount, "fee_note": fee_note, "refunded_amount": refunded_amount}
+
+
+def _system_admin_for_self_service_refund(db: Session) -> AdminUser:
+    """A renter or Host cancelling themselves has no AdminUser session to
+    attribute the resulting RefundRequest's requested_by_admin_id to --
+    same system-actor resolution crud/payment_provider.py:get_system_admin
+    already uses for a webhook-triggered action with no human admin behind
+    it."""
+    from app.crud.payment_provider import get_system_admin
+
+    return get_system_admin(db)
+
+
 def list_occupancies_missing_upcoming_rent(db: Session, admin: AdminUser) -> list[Occupancy]:
     """Manual substitute for a cron tick -- surfaces active occupancies with no
     upcoming PENDING rent obligation, since generation is triggered by admin action
@@ -476,3 +688,18 @@ def list_occupancies_missing_upcoming_rent(db: Session, admin: AdminUser) -> lis
         if not upcoming:
             missing.append(occupancy)
     return missing
+
+
+def list_occupancies_in_holdover(db: Session, admin: AdminUser) -> list[Occupancy]:
+    """Section 9 gap: previously nothing surfaced an ACTIVE occupancy that
+    ran past its own expected_end_date with no renewal/termination case --
+    it was a silent no-op (see generate_next_rent_obligation's own
+    holdover_allowed handling above). Surfaces it regardless of whether
+    holdover_allowed is configured for its jurisdiction -- an admin needs to
+    know a tenant is holding over whether or not billing is continuing for
+    it, the same "manual substitute for a cron tick" pattern as
+    list_occupancies_missing_upcoming_rent above."""
+    query = select(Occupancy).where(Occupancy.status == "ACTIVE", Occupancy.expected_end_date < date.today())
+    if admin.role != "super_admin":
+        query = query.join(Listing, Listing.id == Occupancy.listing_id).where(Listing.owner_id == admin.id)
+    return list(db.scalars(query))

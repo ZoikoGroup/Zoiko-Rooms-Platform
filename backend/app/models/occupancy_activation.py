@@ -6,9 +6,26 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 
-HANDOVER_EVENT_TYPES = ("HANDOVER_READY", "POSSESSION_DELIVERED", "RENTER_RECEIPT")
+HANDOVER_EVENT_TYPES = (
+    "HANDOVER_READY", "POSSESSION_DELIVERED", "RENTER_RECEIPT",
+    # Section 9 gap: the move-OUT mirror of the three move-in events above --
+    # previously a naturally-expiring tenancy had no renter-notice/host-
+    # verification handshake at all, only the admin end_occupancy status
+    # flip. MOVE_OUT_NOTICE_GIVEN (renter_user) -> MOVE_OUT_READY (renter_user,
+    # once they've actually vacated) -> HOST_MOVE_OUT_CONFIRMED
+    # (provider_admin, having verified the physical handover) -- see
+    # crud/occupancy.py:record_handover_event's own status-gate handling for
+    # why these three are reachable on an ACTIVE occupancy, unlike the
+    # PENDING_MOVE_IN-only trio above.
+    "MOVE_OUT_NOTICE_GIVEN", "MOVE_OUT_READY", "HOST_MOVE_OUT_CONFIRMED",
+)
 HANDOVER_ACTOR_KINDS = ("provider_admin", "renter_user")
 ACTIVATION_OUTCOMES = ("ACTIVATE", "WAITING_FOR_GATE", "MANUAL_REVIEW", "BLOCKED")
+
+# Section 9 gap: which handover events belong to the ACTIVE-occupancy
+# move-out handshake, as opposed to the PENDING_MOVE_IN-only move-in trio --
+# crud/occupancy.py:record_handover_event's status gate reads this directly.
+MOVE_OUT_HANDOVER_EVENT_TYPES = ("MOVE_OUT_NOTICE_GIVEN", "MOVE_OUT_READY", "HOST_MOVE_OUT_CONFIRMED")
 
 
 class OccupancyHandoverEvent(Base):

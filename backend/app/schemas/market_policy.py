@@ -1,6 +1,15 @@
 from datetime import date, datetime
 
+from pydantic import field_validator
+
+from app.models.market_policy import DEPOSIT_INSTRUMENT_ALLOWED_VALUES
 from app.schemas.common import CamelModel
+
+
+def _validate_deposit_instrument_allowed(value: str | None) -> str | None:
+    if value is not None and value not in DEPOSIT_INSTRUMENT_ALLOWED_VALUES:
+        raise ValueError(f"depositInstrumentAllowed must be one of {DEPOSIT_INSTRUMENT_ALLOWED_VALUES}")
+    return value
 
 
 class MarketPolicyPackCreate(CamelModel):
@@ -15,6 +24,7 @@ class MarketPolicyPackCreate(CamelModel):
     deposit_custody_model: str = "HOST_OR_AGENT"
     deposit_protection_deadline_days: int | None = None
     deposit_release_deadline_days: int = 30
+    advance_rent_max_months: int = 12
 
     sublet_consent_standard: str = "STATUTORY_RESPONSE_DEADLINE"
     sublet_consent_response_days: int = 14
@@ -31,6 +41,8 @@ class MarketPolicyPackCreate(CamelModel):
     required_property_compliance_codes: list[str] = []
     identity_required_at_application: bool = False
     screening_prohibited_check_types: list[str] = []
+
+    _validate_deposit_instrument_allowed = field_validator("deposit_instrument_allowed")(_validate_deposit_instrument_allowed)
 
 
 class MarketPolicyPackUpdate(CamelModel):
@@ -49,6 +61,7 @@ class MarketPolicyPackUpdate(CamelModel):
     deposit_custody_model: str | None = None
     deposit_protection_deadline_days: int | None = None
     deposit_release_deadline_days: int | None = None
+    advance_rent_max_months: int | None = None
 
     sublet_consent_standard: str | None = None
     sublet_consent_response_days: int | None = None
@@ -66,6 +79,8 @@ class MarketPolicyPackUpdate(CamelModel):
     identity_required_at_application: bool | None = None
     screening_prohibited_check_types: list[str] | None = None
 
+    _validate_deposit_instrument_allowed = field_validator("deposit_instrument_allowed")(_validate_deposit_instrument_allowed)
+
 
 class MarketPolicyPackRead(CamelModel):
     id: int
@@ -81,6 +96,7 @@ class MarketPolicyPackRead(CamelModel):
     deposit_custody_model: str
     deposit_protection_deadline_days: int | None = None
     deposit_release_deadline_days: int
+    advance_rent_max_months: int
 
     sublet_consent_standard: str
     sublet_consent_response_days: int

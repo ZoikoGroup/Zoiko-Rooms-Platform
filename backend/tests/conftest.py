@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, event, text, Text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.rate_limit import sublet_document_limiter, sublet_submit_limiter
 from app.core.security import create_access_token, hash_password
 from app.db.base import Base
 from app.db.session import get_db
@@ -23,6 +24,20 @@ from app.main import app
 from app.models.admin_user import AdminUser
 from app.models.market_policy import MarketPolicyPack
 from app.models.user_account import UserAccount
+
+
+@pytest.fixture(autouse=True)
+def _reset_sublet_rate_limiters():
+    """The sublet submit/document-upload limiters (app/core/rate_limit.py)
+    are true module-level singletons, keyed on user.id -- but each test gets
+    a brand-new in-memory SQLite DB (db_engine below), so autoincrement ids
+    restart at 1 every time. Without this reset, an unrelated test earlier
+    in the same pytest run can leave hits recorded against an id a later
+    test's tenant happens to reuse, producing a flaky 429 that has nothing
+    to do with that test's own behavior."""
+    sublet_submit_limiter.reset()
+    sublet_document_limiter.reset()
+    yield
 
 # ---------------------------------------------------------------------------
 # Monkey-patch: teach SQLite's type compiler how to handle PostgreSQL ARRAY

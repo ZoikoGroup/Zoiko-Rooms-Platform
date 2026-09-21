@@ -410,3 +410,63 @@ class TestMultiCadenceSchedules:
             select(Obligation).where(Obligation.agreement_id == agreement_id, Obligation.obligation_type == "RENT")
         )
         assert float(rent_obligation.amount) == 6000.0
+
+    def test_upfront_term_beyond_the_resolved_advance_rent_cap_is_rejected(self, client, db_session: Session):
+        """Section 5 gap: previously nothing stopped an UPFRONT offer from
+        billing an arbitrarily long term as one advance-rent obligation."""
+        user, listing_id = _make_verified_renter_with_published_listing(db_session, email="upfront-cap-renter@test.com")
+        user_cookies = auth_user_cookie(user)
+        admin = _make_admin(db_session, email="upfront-cap-admin@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/users/rentals/applications",
+            json={"listingId": listing_id, "message": "hi", "desiredMoveIn": None},
+            cookies=user_cookies,
+        )
+        application_id = r.json()["id"]
+        assert client.post(
+            f"/api/leasing/applications/{application_id}/decide", json={"decision": "APPROVED"}, cookies=admin_cookies,
+        ).status_code == 200
+        r = client.post(f"/api/leasing/applications/{application_id}/offers", cookies=admin_cookies)
+        offer_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/leasing/offers/{offer_id}/terms",
+            json={
+                "monthlyRent": 1000.0, "depositAmount": 1000.0,
+                "startDate": (date.today() + timedelta(days=5)).isoformat(), "termMonths": 24,
+                "cadence": "UPFRONT",
+            },
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 400, r.text
+        assert "advance" in r.json()["detail"].lower()
+
+    def test_non_upfront_cadence_is_never_capped_by_advance_rent_rule(self, client, db_session: Session):
+        user, listing_id = _make_verified_renter_with_published_listing(db_session, email="monthly-cap-renter@test.com")
+        user_cookies = auth_user_cookie(user)
+        admin = _make_admin(db_session, email="monthly-cap-admin@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/users/rentals/applications",
+            json={"listingId": listing_id, "message": "hi", "desiredMoveIn": None},
+            cookies=user_cookies,
+        )
+        application_id = r.json()["id"]
+        assert client.post(
+            f"/api/leasing/applications/{application_id}/decide", json={"decision": "APPROVED"}, cookies=admin_cookies,
+        ).status_code == 200
+        r = client.post(f"/api/leasing/applications/{application_id}/offers", cookies=admin_cookies)
+        offer_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/leasing/offers/{offer_id}/terms",
+            json={
+                "monthlyRent": 1000.0, "depositAmount": 1000.0,
+                "startDate": (date.today() + timedelta(days=5)).isoformat(), "termMonths": 24,
+            },
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text

@@ -22,6 +22,9 @@ from app.services.dispute_state_machine import transition_evidence_verification
 # may ever see -- never INTERNAL_ONLY/PRIVILEGED_RESTRICTED/
 # EXTERNAL_EXPORT_ELIGIBLE, regardless of who uploaded it (AC-18).
 _PARTY_VISIBLE_DISCLOSURE_CLASSES = ("PARTY_VISIBLE",)
+# Section 6 gap: the renter's own strictly wider set -- RENTER_VISIBLE_ONLY
+# on top of everything a Host may see, never the reverse.
+_RENTER_VISIBLE_DISCLOSURE_CLASSES = ("PARTY_VISIBLE", "RENTER_VISIBLE_ONLY")
 
 
 def _admin_may_see_privileged(admin: AdminUser | None) -> bool:
@@ -128,11 +131,17 @@ def claim_ids_for_evidence(db: Session, evidence: DisputeEvidenceItem) -> list[i
 
 
 def list_evidence_for_case(
-    db: Session, case: DisputeResolutionCase, *, viewer_is_admin: bool, viewer_admin: AdminUser | None = None,
+    db: Session, case: DisputeResolutionCase, *,
+    viewer_is_admin: bool, viewer_admin: AdminUser | None = None, viewer_is_host: bool = False,
 ) -> list[DisputeEvidenceItem]:
     query = select(DisputeEvidenceItem).where(DisputeEvidenceItem.case_id == case.id).order_by(DisputeEvidenceItem.created_at.desc())
     if not viewer_is_admin:
-        query = query.where(DisputeEvidenceItem.disclosure_class.in_(_PARTY_VISIBLE_DISCLOSURE_CLASSES))
+        # Section 6 gap: a Host viewer gets the narrower, Host-safe set --
+        # RENTER_VISIBLE_ONLY evidence (e.g. backing a sensitive/protected-
+        # ground claim) never reaches this query for them, even though it's
+        # visible to the renter on the exact same case.
+        allowed = _PARTY_VISIBLE_DISCLOSURE_CLASSES if viewer_is_host else _RENTER_VISIBLE_DISCLOSURE_CLASSES
+        query = query.where(DisputeEvidenceItem.disclosure_class.in_(allowed))
     elif not _admin_may_see_privileged(viewer_admin):
         # QA-Q40: an admin viewer sees everything an admin normally does
         # EXCEPT PRIVILEGED_RESTRICTED items, unless specialized into
@@ -148,7 +157,11 @@ def assert_evidence_downloadable(
         if evidence.disclosure_class == "PRIVILEGED_RESTRICTED" and not _admin_may_see_privileged(admin):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "This evidence item is restricted to Trust & Safety / Legal-Compliance")
         return
-    if evidence.disclosure_class not in _PARTY_VISIBLE_DISCLOSURE_CLASSES:
+    # Section 6 gap: party_id (a Host, per this module's own call sites --
+    # see api/routes/disputes.py's host_router) gets the narrower set; a
+    # renter (guest) gets RENTER_VISIBLE_ONLY too.
+    allowed = _PARTY_VISIBLE_DISCLOSURE_CLASSES if party_id is not None else _RENTER_VISIBLE_DISCLOSURE_CLASSES
+    if evidence.disclosure_class not in allowed:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This evidence item is not visible to you")
     if evidence.stored_filename is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "This evidence item has no downloadable file")

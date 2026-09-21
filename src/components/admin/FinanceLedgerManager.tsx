@@ -5,6 +5,7 @@ import { CheckCircle2, CreditCard, PiggyBank, Wallet } from "lucide-react";
 import { DepositRecord, Obligation } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 import { apiClientFetch } from "@/lib/api-client";
 import { depositStatusLabel, depositStatusTone, obligationStatusLabel, obligationStatusTone } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
@@ -14,6 +15,10 @@ export function FinanceLedgerManager() {
   const [deposits, setDeposits] = useState<DepositRecord[]>([]);
   const [toast, setToast] = useState("");
   const [payingId, setPayingId] = useState<number | null>(null);
+  // Section 5 gap: recording an off-platform cash/cheque payment previously
+  // had no evidence field at all to attach a receipt/reference number to.
+  const [evidenceFor, setEvidenceFor] = useState<Obligation | null>(null);
+  const [evidenceRef, setEvidenceRef] = useState("");
 
   function showToast(message: string) {
     setToast(message);
@@ -37,7 +42,14 @@ export function FinanceLedgerManager() {
     loadAll();
   }, [loadAll]);
 
-  async function payInFull(obligation: Obligation) {
+  function openEvidenceModal(obligation: Obligation) {
+    setEvidenceFor(obligation);
+    setEvidenceRef("");
+  }
+
+  async function payInFull() {
+    const obligation = evidenceFor;
+    if (!obligation) return;
     setPayingId(obligation.id);
     try {
       const idempotencyKey = `PAY-${obligation.id}-${crypto.randomUUID()}`;
@@ -52,9 +64,13 @@ export function FinanceLedgerManager() {
       });
       await apiClientFetch(`/api/finance/payments/${payment.id}/confirm`, {
         method: "POST",
-        body: JSON.stringify({ allocations: [{ obligationId: obligation.id, amount: obligation.amount }] }),
+        body: JSON.stringify({
+          allocations: [{ obligationId: obligation.id, amount: obligation.amount }],
+          evidenceRef: evidenceRef.trim(),
+        }),
       });
       showToast(`Recorded ${obligation.obligationType.toLowerCase()} obligation as paid in full`);
+      setEvidenceFor(null);
       loadAll();
     } catch {
       showToast("Could not record this payment");
@@ -107,7 +123,7 @@ export function FinanceLedgerManager() {
             >
               <div>
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                  {obligation.obligationType} · {formatCurrency(obligation.amount)}
+                  {obligation.obligationType} · {formatCurrency(obligation.amount, obligation.currency)}
                 </p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   Owed by guest {obligation.guestId} · due {formatDate(obligation.dueDate)} · {obligation.moneyPlane.toLowerCase()} plane
@@ -116,7 +132,7 @@ export function FinanceLedgerManager() {
               <div className="flex items-center gap-2">
                 <Badge tone={obligationStatusTone[obligation.status]}>{obligationStatusLabel[obligation.status] ?? obligation.status}</Badge>
                 {(obligation.status === "PENDING" || obligation.status === "PARTIALLY_PAID") && (
-                  <Button size="sm" variant="primary" disabled={payingId === obligation.id} onClick={() => payInFull(obligation)}>
+                  <Button size="sm" variant="primary" disabled={payingId === obligation.id} onClick={() => openEvidenceModal(obligation)}>
                     <CreditCard className="h-3.5 w-3.5" /> {payingId === obligation.id ? "Recording…" : "Record Payment in Full"}
                   </Button>
                 )}
@@ -142,9 +158,9 @@ export function FinanceLedgerManager() {
               className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-white/10"
             >
               <div>
-                <p className="text-sm font-semibold text-primary-900 dark:text-white">{formatCurrency(deposit.heldAmount)} held</p>
+                <p className="text-sm font-semibold text-primary-900 dark:text-white">{formatCurrency(deposit.heldAmount, deposit.currency)} held</p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {formatCurrency(deposit.releasedAmount)} released{deposit.notes ? ` · ${deposit.notes}` : ""}
+                  {formatCurrency(deposit.releasedAmount, deposit.currency)} released{deposit.notes ? ` · ${deposit.notes}` : ""}
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -165,6 +181,35 @@ export function FinanceLedgerManager() {
           {deposits.length === 0 && <p className="text-sm text-slate-400 dark:text-slate-400">No deposits yet.</p>}
         </div>
       </section>
+
+      <Modal open={Boolean(evidenceFor)} onClose={() => setEvidenceFor(null)} title="Record Off-Platform Payment">
+        <div className="space-y-3.5">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {evidenceFor && (
+              <>
+                Recording {evidenceFor.obligationType.toLowerCase()} obligation {" "}
+                {formatCurrency(evidenceFor.amount, evidenceFor.currency)} as paid off-platform (cash/cheque/bank
+                transfer). Attach the receipt or reference number below so this can be verified later.
+              </>
+            )}
+          </p>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Receipt / Reference Number
+            </label>
+            <input
+              type="text"
+              value={evidenceRef}
+              onChange={(e) => setEvidenceRef(e.target.value)}
+              placeholder="e.g. cheque #1234, bank ref ABC123"
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <Button variant="primary" fullWidth disabled={payingId === evidenceFor?.id} onClick={payInFull}>
+            {payingId === evidenceFor?.id ? "Recording…" : "Confirm Payment"}
+          </Button>
+        </div>
+      </Modal>
 
       {toast && (
         <div className="animate-fade-up fixed bottom-6 right-6 z-[300] flex max-w-sm items-center gap-2 rounded-xl bg-primary-900 px-4 py-3 text-sm font-medium text-white shadow-2xl">

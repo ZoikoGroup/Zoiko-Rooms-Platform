@@ -37,6 +37,7 @@ from app.models.agreement_clause import ClauseDefinition
 from app.models.agreement_clause_translation import ClauseTranslation
 from app.models.agreement_amendment import AgreementAmendment
 from app.models.agreement_form_template import AgreementFormTemplate
+from app.models.agreement_legal_hold import AgreementLegalHold
 from app.models.agreement_party import AgreementParty
 from app.models.agreement_version_detail import AgreementPremises, CommercialTermsSnapshot, ExecutionCertificate
 from app.models.disclosure_requirement import DisclosureRequirement
@@ -45,6 +46,7 @@ from app.models.termination_record import TerminationRecord
 from app.models.termination_case import MitigationRecord, TerminationCase, TerminationDecision
 from app.models.refund_entitlement import RefundEntitlement, RefundEntitlementLineItem
 from app.models.habitability_incident import HabitabilityIncident
+from app.models.host_entry_visit import HostEntryVisit
 from app.models.guest import Guest
 from app.models.leasing import (
     Agreement,
@@ -65,6 +67,7 @@ from app.models.membership import Membership
 from app.models.occupancy import Occupancy, OccupancyCoTenant
 from app.models.occupancy_activation import OccupancyActivationDecision, OccupancyHandoverEvent
 from app.models.occupancy_classification import OccupancyClassification
+from app.models.occupancy_condition_report import OccupancyConditionReportItem
 from app.models.party import Party
 from app.models.payment import Payment
 from app.models.property import Property
@@ -86,6 +89,7 @@ from app.models.handoff import AiHandoff
 from app.models.kb import KbChunk, KbDocument, KbRelease
 from app.models.public_rate_limit import PublicRateLimit
 from app.models.notification import Notification
+from app.models.notification_preference import NotificationPreference
 from app.models.contact_email import ContactEmail
 from app.models.feature_flag import FeatureFlag
 from app.models.room_alert import RoomAlert
@@ -128,6 +132,7 @@ __all__ = [
     "ClauseTranslation",
     "AgreementAmendment",
     "AgreementFormTemplate",
+    "AgreementLegalHold",
     "AgreementParty",
     "AgreementPremises",
     "CommercialTermsSnapshot",
@@ -144,6 +149,7 @@ __all__ = [
     "OccupancyCoTenant",
     "OccupancyHandoverEvent",
     "OccupancyActivationDecision",
+    "OccupancyConditionReportItem",
     "Obligation",
     "SimulatedPayment",
     "PaymentAllocation",
@@ -189,6 +195,7 @@ __all__ = [
     "KbRelease",
     "PublicRateLimit",
     "Notification",
+    "NotificationPreference",
     "ContactEmail",
     "FeatureFlag",
     "RoomAlert",

@@ -193,3 +193,128 @@ class TestResolveChargebackDispute:
         assert hold is not None
         assert hold.severity == "HIGH"
         assert hold.status == "OPEN"
+
+
+class TestNoDoubleRecoveryBetweenRefundAndChargeback:
+    """Section 6 gap: nothing previously stopped a renter being refunded by
+    Zoiko AND separately winning a bank chargeback on the exact same
+    payment. decide_refund and resolve_dispute now each check the other
+    side before completing."""
+
+    def test_refund_is_blocked_while_a_chargeback_is_open(self, client, db_session: Session):
+        obligation, payment_id, _admin, admin_cookies, _party_id = _confirm_a_payment(client, db_session, suffix="nodouble1")
+
+        r = client.post(
+            "/api/finance/disputes",
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 1000.0,
+                "category": "CHARGEBACK", "description": "card issuer opened a chargeback",
+            },
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 201, r.text
+
+        r = client.post(
+            "/api/finance/refunds",
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 1000.0, "reason": "test",
+                "idempotencyKey": "nodouble1-refund",
+            },
+            cookies=admin_cookies,
+        )
+        refund_id = r.json()["id"]
+        r = client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
+        assert r.status_code == 409, r.text
+
+    def test_refund_is_blocked_after_a_chargeback_was_lost(self, client, db_session: Session):
+        obligation, payment_id, _admin, admin_cookies, _party_id = _confirm_a_payment(client, db_session, suffix="nodouble2")
+
+        r = client.post(
+            "/api/finance/disputes",
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 1000.0,
+                "category": "CHARGEBACK", "description": "x",
+            },
+            cookies=admin_cookies,
+        )
+        dispute_id = r.json()["id"]
+        r = client.post(
+            f"/api/finance/disputes/{dispute_id}/resolve",
+            json={"status": "RESOLVED", "chargebackOutcome": "LOST"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+
+        r = client.post(
+            "/api/finance/refunds",
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 1000.0, "reason": "test",
+                "idempotencyKey": "nodouble2-refund",
+            },
+            cookies=admin_cookies,
+        )
+        refund_id = r.json()["id"]
+        r = client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
+        assert r.status_code == 409, r.text
+
+    def test_refund_still_succeeds_when_a_chargeback_was_won(self, client, db_session: Session):
+        obligation, payment_id, _admin, admin_cookies, _party_id = _confirm_a_payment(client, db_session, suffix="nodouble3")
+
+        r = client.post(
+            "/api/finance/disputes",
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 1000.0,
+                "category": "CHARGEBACK", "description": "x",
+            },
+            cookies=admin_cookies,
+        )
+        dispute_id = r.json()["id"]
+        r = client.post(
+            f"/api/finance/disputes/{dispute_id}/resolve",
+            json={"status": "RESOLVED", "chargebackOutcome": "WON"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+
+        r = client.post(
+            "/api/finance/refunds",
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 1000.0, "reason": "unrelated goodwill refund",
+                "idempotencyKey": "nodouble3-refund",
+            },
+            cookies=admin_cookies,
+        )
+        refund_id = r.json()["id"]
+        r = client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+
+    def test_chargeback_lost_is_blocked_after_a_refund_already_completed(self, client, db_session: Session):
+        obligation, payment_id, _admin, admin_cookies, _party_id = _confirm_a_payment(client, db_session, suffix="nodouble4")
+
+        r = client.post(
+            "/api/finance/refunds",
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 1000.0, "reason": "test",
+                "idempotencyKey": "nodouble4-refund",
+            },
+            cookies=admin_cookies,
+        )
+        refund_id = r.json()["id"]
+        r = client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+
+        r = client.post(
+            "/api/finance/disputes",
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 1000.0,
+                "category": "CHARGEBACK", "description": "arrived after the refund",
+            },
+            cookies=admin_cookies,
+        )
+        dispute_id = r.json()["id"]
+        r = client.post(
+            f"/api/finance/disputes/{dispute_id}/resolve",
+            json={"status": "RESOLVED", "chargebackOutcome": "LOST"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 409, r.text

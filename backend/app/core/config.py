@@ -141,6 +141,13 @@ class Settings(BaseSettings):
     login_rate_limit_max: int = 10
     login_rate_limit_window_seconds: int = 60
 
+    # ZR-SUB-003 Section 10: "Rate-limit submission and document workflows."
+    # Per-authenticated-actor, same keying discipline as chat above.
+    sublet_submit_rate_limit_max: int = 5
+    sublet_submit_rate_limit_window_seconds: int = 3600
+    sublet_document_rate_limit_max: int = 20
+    sublet_document_rate_limit_window_seconds: int = 3600
+
     # ZR-ENG-CLR-001 Rule 7 / policy key booking.acceptance_hold_duration:
     # once an offer is accepted, the room is held (see services/inventory.py)
     # but the renter must reach a confirmed move-in within this window or the

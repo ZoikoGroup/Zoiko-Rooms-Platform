@@ -109,3 +109,86 @@ class TestEvidenceRetentionSweep:
         r = client.post("/api/verification/evidence-artifacts/sweep-retention", cookies=auth_admin_cookie(super_admin))
         assert r.status_code == 200, r.text
         assert r.json()["deletedCount"] == 1
+
+
+class TestSweepExpiredDisputeEvidence:
+    """Section 12 gap: identity verification was previously the only
+    evidence type with any retention_days concept -- dispute evidence had
+    hold/redact/manual-delete but no time-bound expiry."""
+
+    def _open_case_with_evidence(self, client, db_session: Session, *, suffix: str):
+        from tests.conftest import auth_user_cookie
+        from tests.test_disputes import _make_occupancy_with_parties
+
+        _host, renter, occ = _make_occupancy_with_parties(db_session, host_email=f"evrd-host-{suffix}@test.com", renter_email=f"evrd-renter-{suffix}@test.com")
+        renter_cookies = auth_user_cookie(renter)
+        r = client.post(
+            "/api/users/rentals/disputes",
+            json={"occupancyId": occ.id, "claim": {"claimCode": "DEDUCTION", "claimFamily": "DEPOSIT", "amount": 600}},
+            cookies=renter_cookies,
+        )
+        assert r.status_code == 201, r.text
+        case_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/users/rentals/disputes/{case_id}/evidence",
+            files={"file": ("receipt.pdf", b"%PDF-1.4 fake evidence", "application/pdf")},
+            cookies=renter_cookies,
+        )
+        assert r.status_code == 201, r.text
+        return case_id, r.json()["id"]
+
+    def test_not_configured_leaves_evidence_untouched(self, client, db_session: Session):
+        from app.services.evidence_retention import sweep_expired_dispute_evidence
+
+        case_id, evidence_id = self._open_case_with_evidence(client, db_session, suffix="evrd1")
+        deleted = sweep_expired_dispute_evidence(db_session)
+        assert deleted == []
+
+    def test_deletes_expired_evidence_once_configured(self, client, db_session: Session):
+        from app.models.dispute_evidence import DisputeEvidenceItem
+        from app.services.evidence_retention import sweep_expired_dispute_evidence
+
+        _case_id, evidence_id = self._open_case_with_evidence(client, db_session, suffix="evrd2")
+        _policy_pack_dispute(db_session, jurisdiction="England", retention_days=30)
+
+        item = db_session.get(DisputeEvidenceItem, evidence_id)
+        item.created_at = datetime.now(timezone.utc) - timedelta(days=31)
+        db_session.commit()
+
+        deleted = sweep_expired_dispute_evidence(db_session)
+        assert len(deleted) == 1
+        db_session.refresh(item)
+        assert item.deleted_at is not None
+        assert item.stored_filename is None
+
+    def test_active_legal_hold_blocks_deletion(self, client, db_session: Session):
+        from app.models.dispute_evidence import DisputeEvidenceItem
+        from app.services.evidence_retention import sweep_expired_dispute_evidence
+
+        _case_id, evidence_id = self._open_case_with_evidence(client, db_session, suffix="evrd3")
+        _policy_pack_dispute(db_session, jurisdiction="England", retention_days=30)
+
+        item = db_session.get(DisputeEvidenceItem, evidence_id)
+        item.created_at = datetime.now(timezone.utc) - timedelta(days=31)
+        item.legal_hold = True
+        db_session.commit()
+
+        deleted = sweep_expired_dispute_evidence(db_session)
+        assert deleted == []
+        db_session.refresh(item)
+        assert item.deleted_at is None
+
+
+def _policy_pack_dispute(db: Session, *, jurisdiction: str, retention_days: int) -> MarketPolicyPack:
+    existing = db.scalar(select(MarketPolicyPack).where(MarketPolicyPack.jurisdiction_code == jurisdiction))
+    if existing:
+        existing.dispute_evidence_retention_days = retention_days
+        db.commit()
+        db.refresh(existing)
+        return existing
+    pack = MarketPolicyPack(jurisdiction_code=jurisdiction, version=1, effective_from=date.today(), dispute_evidence_retention_days=retention_days)
+    db.add(pack)
+    db.commit()
+    db.refresh(pack)
+    return pack

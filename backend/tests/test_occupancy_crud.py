@@ -220,6 +220,28 @@ class TestGenerateNextRentObligation:
         beyond_lease_end = crud.generate_next_rent_obligation(db_session, occupancy, admin)
         assert beyond_lease_end is None
 
+    def test_holdover_billing_continues_at_the_configured_multiple_when_opted_in(self, db_session: Session):
+        """Section 9 gap: opt-in only -- see market_policy.py:holdover_allowed's
+        own docstring for why the default (tested above) must stay unchanged."""
+        from app.models.market_policy import MarketPolicyPack
+
+        admin = _make_admin(db_session, email="occ-holdover1@test.com", role="admin")
+        agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin, term_months=1, monthly_rent=1000.0)
+        occupancy = crud.confirm_move_in(db_session, agreement, admin)
+
+        policy = db_session.query(MarketPolicyPack).filter_by(jurisdiction_code="England").one()
+        policy.holdover_allowed = True
+        policy.holdover_rent_multiple = 1.5
+        db_session.commit()
+
+        final_period = crud.generate_next_rent_obligation(db_session, occupancy, admin)
+        assert final_period is not None
+
+        holdover_period = crud.generate_next_rent_obligation(db_session, occupancy, admin)
+        assert holdover_period is not None
+        assert float(holdover_period.amount) == 1500.0
+        assert holdover_period.due_date > occupancy.expected_end_date
+
     def test_rejects_generation_for_a_non_active_occupancy(self, db_session: Session):
         admin = _make_admin(db_session, email="occ-rent4@test.com", role="admin")
         agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin)

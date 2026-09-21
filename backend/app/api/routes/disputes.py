@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_admin, get_current_user
+from app.api.deps import get_current_admin, get_current_user, require_super_admin
 from app.core.correlation import get_correlation_id
 from app.core.dispute_evidence_uploads import resolve_dispute_evidence_path
 from app.crud import dispute_deadline as deadline_crud
@@ -475,7 +475,7 @@ async def post_upload_evidence_as_host(
 def get_evidence_as_host(case_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     case = crud.get_case_or_404(db, case_id)
     crud.assert_party_can_access_case(case, _host_party_id(user))
-    items = evidence_crud.list_evidence_for_case(db, case, viewer_is_admin=False)
+    items = evidence_crud.list_evidence_for_case(db, case, viewer_is_admin=False, viewer_is_host=True)
     return [_to_evidence_read(db, e) for e in items]
 
 
@@ -894,6 +894,23 @@ def post_request_evidence_deletion_as_admin(
     log_audit_event(db, admin, "dispute_evidence.delete_requested", "dispute_evidence_item", str(evidence_id), get_correlation_id(request))
     db.commit()
     return _to_evidence_read(db, updated)
+
+
+@admin_router.post("/evidence/sweep-retention", dependencies=[Depends(require_super_admin)])
+def post_sweep_expired_dispute_evidence(admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db)):
+    """Section 12 gap: the dispute-evidence counterpart to
+    verification.py's own evidence-artifact retention sweep -- manual
+    substitute for a cron tick, same shape as every other sweep in this
+    stack (no scheduler exists here)."""
+    from app.services.evidence_retention import sweep_expired_dispute_evidence
+
+    deleted = sweep_expired_dispute_evidence(db)
+    log_audit_event(
+        db, admin, "dispute_evidence.retention_sweep", "dispute_evidence_item", "bulk",
+        reason=f"deleted {len(deleted)} item(s)",
+    )
+    db.commit()
+    return {"deletedCount": len(deleted), "evidenceIds": [e.id for e in deleted]}
 
 
 @admin_router.post("/{case_id}/external-proceedings", response_model=DisputeExternalProceedingRead, status_code=status.HTTP_201_CREATED)
