@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Building2, CalendarClock, CreditCard, DoorOpen, Download, Repeat, Search, TrendingUp } from "lucide-react";
+import { Building2, CalendarClock, ClipboardList, CreditCard, DoorOpen, Download, Repeat, Search, TrendingUp } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
@@ -78,6 +78,7 @@ import {
   withdrawOwnTerminationCase,
 } from "@/lib/user-api";
 import { Card, EmptyState, Field, Toast, inputClass, useToast } from "@/components/user/ui";
+import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
 
 const PAYMENT_METHOD_LABELS: Record<string, string> = {
   CARD: "Card",
@@ -194,6 +195,7 @@ export function RentalsManager() {
   const [payingObligationId, setPayingObligationId] = useState<number | null>(null);
   const [autopayMandates, setAutopayMandates] = useState<AutopayMandate[]>([]);
   const [autopayBusyOccupancyId, setAutopayBusyOccupancyId] = useState<number | null>(null);
+  const [recordFor, setRecordFor] = useState<UserOccupancy | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -924,6 +926,10 @@ export function RentalsManager() {
                 </div>
               );
             })()}
+
+            <Button size="sm" variant="ghost" className="mt-3 w-full" onClick={() => setRecordFor(occupancy)}>
+              <ClipboardList className="h-3.5 w-3.5" /> View full transaction record
+            </Button>
 
             {occupancy.status === "PENDING_MOVE_IN" && (
               <div className="mt-4 space-y-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
@@ -1749,6 +1755,10 @@ export function RentalsManager() {
             </Button>
           </div>
         </form>
+      </Modal>
+
+      <Modal open={Boolean(recordFor)} onClose={() => setRecordFor(null)} title="Rental transaction record" size="xl">
+        {recordFor && <RentalTransactionRecord occupancyId={recordFor.id} role="renter" />}
       </Modal>
 
       <Toast toast={toast} />

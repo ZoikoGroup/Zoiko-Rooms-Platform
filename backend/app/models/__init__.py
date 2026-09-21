@@ -80,12 +80,14 @@ from app.models.break_glass_access import BreakGlassAccessGrant
 from app.models.evidence_artifact import EvidenceArtifact
 from app.models.occupancy_eligibility_check import OccupancyEligibilityCheck
 from app.models.property_compliance_credential import PropertyComplianceCredential
+from app.models.property_verification import PropertyVerification
 from app.models.screening_check import ScreeningCheck
 from app.models.verification_credential import VerificationCredential
 from app.models.password_reset_token import PasswordResetToken
 from app.models.chat import ChatConversation, ChatMessage
 from app.models.handoff import AiHandoff
 from app.models.kb import KbChunk, KbDocument, KbRelease
+from app.models.public_rate_limit import PublicRateLimit
 from app.models.notification import Notification
 from app.models.notification_preference import NotificationPreference
 from app.models.contact_email import ContactEmail
@@ -191,6 +193,7 @@ __all__ = [
     "KbChunk",
     "KbDocument",
     "KbRelease",
+    "PublicRateLimit",
     "Notification",
     "NotificationPreference",
     "ContactEmail",

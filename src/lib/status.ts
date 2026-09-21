@@ -385,6 +385,22 @@ export const authorityRecordStatusLabel = {
   revoked: "Revoked",
 } as const;
 
+export const propertyVerificationStatusTone = {
+  pending: "warning",
+  verified: "success",
+  rejected: "danger",
+  additional_evidence_required: "warning",
+  revoked: "danger",
+} as const;
+
+export const propertyVerificationStatusLabel = {
+  pending: "Pending verification",
+  verified: "Verified",
+  rejected: "Rejected",
+  additional_evidence_required: "Additional evidence required",
+  revoked: "Revoked",
+} as const;
+
 export const marketReleaseStatusTone = {
   draft: "neutral",
   active: "success",
@@ -493,6 +509,7 @@ export const renterVerificationStatusTone: Record<string, "neutral" | "warning" 
   verified: "success",
   rejected: "danger",
   expired: "danger",
+  revoked: "danger",
   additional_evidence_required: "warning",
   IN_PROGRESS: "warning",
   PASS: "success",

@@ -8,6 +8,7 @@ from app.crud.eligibility import check_move_in_eligibility
 from app.crud import notification as notif_crud
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.models.admin_user import AdminUser
+from app.models.user_account import UserAccount
 from app.models.finance import CADENCE_INTERVAL_DAYS, OBLIGATION_TYPE_TO_PLANE, Obligation, PaymentSchedule
 from app.models.guest import Guest
 from app.models.leasing import Agreement
@@ -255,6 +256,20 @@ def list_occupancies_for(db: Session, admin: AdminUser) -> list[Occupancy]:
     if admin.role != "super_admin":
         query = query.join(Listing, Listing.id == Occupancy.listing_id).where(Listing.owner_id == admin.id)
     return list(db.scalars(query))
+
+
+def list_occupancies_for_room_owned_by(db: Session, user: UserAccount, room: Room) -> list[Occupancy]:
+    """Host self-service counterpart to list_occupancies_for above -- that one
+    is AdminUser+Listing.owner_id-scoped (the legacy provider-admin console);
+    a self-service host authenticates as a UserAccount instead, so this uses
+    the same room.property.owner_party_id ownership check already
+    established for authority/property-verification host routes in
+    api/routes/user_hosting.py, rather than Listing.owner_id."""
+    if not user.party_id or not room.property or room.property.owner_party_id != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view occupancies for your own room")
+    return list(
+        db.scalars(select(Occupancy).where(Occupancy.room_id == room.id).order_by(Occupancy.created_at.desc()))
+    )
 
 
 def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: AdminUser) -> Obligation | None:

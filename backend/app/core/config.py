@@ -23,7 +23,13 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440
-    cors_origins: str = "http://localhost:3000"
+    # Comma-separated allow-list. Includes the authenticated platform frontend
+    # and the public marketing site (local dev + deployed) so the anonymous
+    # assistant widget can call /api/public/assistant cross-origin.
+    cors_origins: str = (
+        "http://localhost:3000,http://localhost:3001,"
+        "https://zoikorooms.com,https://www.zoikorooms.com,https://app.zoikorooms.com"
+    )
     cookie_secure: bool = False
     # None scopes the cookie to the exact request host (required for localhost, and
     # for cross-domain setups like Vercel + Render). Set to ".zoikorooms.com" in
@@ -153,6 +159,10 @@ class Settings(BaseSettings):
     # the initial rent+deposit obligations before the checkout session expires
     # (see services/booking_expiry.py). Spec default is 30 minutes.
     payment_checkout_lock_minutes: int = 30
+    # Anonymous public assistant. Shared Postgres-backed bucket keyed by hashed
+    # client IP, fixed window (requests per IP per window).
+    public_assistant_rate_limit_max: int = 10
+    public_assistant_rate_limit_window_seconds: int = 60
 
     @property
     def is_production(self) -> bool:

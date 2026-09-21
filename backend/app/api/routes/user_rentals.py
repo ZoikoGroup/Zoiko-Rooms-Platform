@@ -25,6 +25,7 @@ from app.crud import review as review_crud
 from app.crud import sublet as sublet_crud
 from app.crud import termination as termination_crud
 from app.crud.listing import assert_party_does_not_own_listing
+from app.crud.rental_transaction_record import build_rental_transaction_record
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
 from app.crud.eligibility import check_offer_eligibility
@@ -69,6 +70,7 @@ from app.schemas.leasing import (
 )
 from app.schemas.activation_gate import HandoverEventCreate, HandoverEventRead
 from app.schemas.occupancy import ConditionReportItemRead, PreMoveInCancellationRead, PreMoveInCancellationRequest
+from app.schemas.rental_transaction_record import RentalTransactionRecordRead
 from app.schemas.review import ReviewCreate, ReviewRead
 from app.schemas.sublet_document import SubletDocumentRead
 from app.schemas.termination import (
@@ -780,6 +782,29 @@ def cancel_own_booking_before_move_in(
     emit_event(db, "occupancy.cancelled_before_move_in", "occupancy", str(occupancy_id), result)
     db.commit()
     return PreMoveInCancellationRead(occupancy=occupancy_crud.to_occupancy_read(db, updated), **result)
+
+
+@router.get("/occupancies/{occupancy_id}/transaction-record", response_model=RentalTransactionRecordRead)
+def get_own_rental_transaction_record(
+    occupancy_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Rental Transaction Record wireframe: a computed, read-only composite
+    over this occupancy's own Application/Offer/Agreement, payments,
+    handover/activation, sublet, and termination records -- see
+    crud/rental_transaction_record.py:build_rental_transaction_record.
+    Same ownership check as get_occupancy_details above. include_identity=True
+    because this is the renter viewing their own identity claim."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own occupancies")
+
+    return build_rental_transaction_record(db, occupancy, include_identity=True)
 
 
 @router.post(

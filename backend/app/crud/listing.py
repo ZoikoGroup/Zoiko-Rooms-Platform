@@ -10,6 +10,7 @@ from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
 from app.crud.ids import new_id, slugify
 from app.crud.identity_verification import get_verified_identity_for_party
+from app.crud.property_verification import get_valid_property_verification_for_room
 from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
 from app.models.leasing import Agreement, Offer
@@ -601,6 +602,10 @@ def check_publish_eligibility(db: Session, listing: Listing) -> list[str]:
     identity = get_verified_identity_for_party(db, provider_party_id)
     if not identity:
         reasons.append("Provider identity verification is not approved")
+
+    property_verification = get_valid_property_verification_for_room(db, listing.room_id)
+    if not property_verification:
+        reasons.append("Property verification is not approved")
 
     return reasons
 
