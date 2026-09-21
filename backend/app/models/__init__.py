@@ -77,6 +77,7 @@ from app.models.break_glass_access import BreakGlassAccessGrant
 from app.models.evidence_artifact import EvidenceArtifact
 from app.models.occupancy_eligibility_check import OccupancyEligibilityCheck
 from app.models.property_compliance_credential import PropertyComplianceCredential
+from app.models.property_verification import PropertyVerification
 from app.models.screening_check import ScreeningCheck
 from app.models.verification_credential import VerificationCredential
 from app.models.password_reset_token import PasswordResetToken

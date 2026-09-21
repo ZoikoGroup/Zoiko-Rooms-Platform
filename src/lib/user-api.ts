@@ -2,18 +2,23 @@ import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
   Agreement,
   Application,
+  AuthorityRecord,
+  AuthorityRelationshipType,
   BookingChangeRequest,
   DisclosureRequirement,
   HandoverEvent,
   HostedListing,
   IdentityDocumentType,
   IdentityVerificationRecord,
+  Occupancy,
   Offer,
   PaymentPreview,
   Property,
+  PropertyVerification,
   PublicListing,
   PublicListingsPage,
   PublishEligibility,
+  RentalTransactionRecord,
   RenterVerificationStatus,
   Room,
   SimulatedPayment,
@@ -183,6 +188,15 @@ export function listOccupancies(): Promise<UserOccupancy[]> {
 
 export function getOccupancy(occupancyId: number): Promise<UserOccupancy> {
   return apiClientFetch<UserOccupancy>(`/api/users/rentals/occupancies/${occupancyId}`);
+}
+
+/** Rental Transaction Record wireframe: a computed, read-only composite over
+ *  this occupancy's own Application/Offer/Agreement, payments, handover,
+ *  sublet and termination records -- see backend/app/crud/
+ *  rental_transaction_record.py. Renter-scoped: 403s for another renter's
+ *  occupancy, same as getOccupancy above. */
+export function getRentalTransactionRecord(occupancyId: number): Promise<RentalTransactionRecord> {
+  return apiClientFetch<RentalTransactionRecord>(`/api/users/rentals/occupancies/${occupancyId}/transaction-record`);
 }
 
 export function confirmHandoverReceipt(occupancyId: number): Promise<HandoverEvent> {
@@ -356,6 +370,52 @@ export function updateHostedRoom(
     method: "PUT",
     body: JSON.stringify(payload),
   });
+}
+
+// Lister, Property & Authority Verification wireframe: host self-service
+// submission of authority-to-list and property evidence for a room they
+// own -- separate claims from identity (see VerificationStatusSummary).
+
+export function listHostedRoomAuthorityRecords(roomId: number): Promise<AuthorityRecord[]> {
+  return apiClientFetch<AuthorityRecord[]>(`/api/users/hosting/rooms/${roomId}/authority-records`);
+}
+
+export function declareHostedAuthorityRecord(
+  roomId: number,
+  payload: { relationshipType: AuthorityRelationshipType; evidenceRef: string }
+): Promise<AuthorityRecord> {
+  return apiClientFetch<AuthorityRecord>(`/api/users/hosting/rooms/${roomId}/authority-records`, {
+    method: "POST",
+    body: JSON.stringify({ roomId, ...payload }),
+  });
+}
+
+export function listHostedRoomPropertyVerifications(roomId: number): Promise<PropertyVerification[]> {
+  return apiClientFetch<PropertyVerification[]>(`/api/users/hosting/rooms/${roomId}/property-verifications`);
+}
+
+export function declareHostedPropertyVerification(roomId: number, payload: { evidenceRef: string }): Promise<PropertyVerification> {
+  return apiClientFetch<PropertyVerification>(`/api/users/hosting/rooms/${roomId}/property-verifications`, {
+    method: "POST",
+    body: JSON.stringify({ roomId, ...payload }),
+  });
+}
+
+/** Rental Transaction Record wireframe, host view -- lists the occupancies
+ *  (current and past tenancies) for a room the calling host's own party
+ *  owns, so the host UI has an occupancy id to request a transaction
+ *  record for. Same room ownership scoping as listHostedRoomAuthorityRecords
+ *  above. */
+export function listHostedRoomOccupancies(roomId: number): Promise<Occupancy[]> {
+  return apiClientFetch<Occupancy[]>(`/api/users/hosting/rooms/${roomId}/occupancies`);
+}
+
+/** Rental Transaction Record wireframe, host view -- scoped to a room the
+ *  calling host's own party owns (room.property.ownerPartyId). Never
+ *  includes the renter's own identity-verification claim -- see
+ *  backend/app/api/routes/user_hosting.py's own route docstring. */
+export function getHostedRentalTransactionRecord(occupancyId: number): Promise<RentalTransactionRecord> {
+  return apiClientFetch<RentalTransactionRecord>(`/api/users/hosting/occupancies/${occupancyId}/transaction-record`);
 }
 
 export interface HostedListingInput {

@@ -35,8 +35,8 @@ export function VerificationStatusSummary() {
     };
   }, []);
 
-  function row(item: RenterVerificationStatusItem, label: string) {
-    const key = `${item.requirementCode}-${item.jurisdictionCode}`;
+  function row(item: RenterVerificationStatusItem, label: string, keySuffix: string | number = item.jurisdictionCode) {
+    const key = `${item.requirementCode}-${keySuffix}`;
     const expanded = expandedKey === key;
     const hasDetails = Boolean(item.sharingScope || item.retentionNote || item.alternativeMethodNote);
     return (
@@ -106,6 +106,11 @@ export function VerificationStatusSummary() {
             {status.occupancyEligibility.map((item) =>
               row(item, `Occupancy eligibility — ${item.jurisdictionCode}`)
             )}
+            {/* Lister, Property & Authority Verification wireframe: separate
+                claims from identity above -- one per room the user hosts.
+                Never implies identity verification proves either of these. */}
+            {status.propertyVerification.map((item, i) => row(item, "Property verification", `property-${i}`))}
+            {status.authorityToList.map((item, i) => row(item, "Authority to list", `authority-${i}`))}
           </>
         )}
       </div>

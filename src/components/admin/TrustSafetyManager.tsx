@@ -2,7 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { CheckCircle2, ClipboardCheck, Landmark, Plus, ShieldCheck, ShieldX, XCircle } from "lucide-react";
-import { AuthorityRecord, MarketRelease, OccupancyClassification, OccupancyReviewState, Property, Room } from "@/lib/types";
+import {
+  AuthorityRecord,
+  AuthorityRelationshipType,
+  MarketRelease,
+  OccupancyClassification,
+  OccupancyReviewState,
+  Property,
+  PropertyVerification,
+  Room,
+} from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -16,17 +25,20 @@ import {
   marketReleaseStatusTone,
   occupancyReviewStateLabel,
   occupancyReviewStateTone,
+  propertyVerificationStatusLabel,
+  propertyVerificationStatusTone,
 } from "@/lib/status";
 
 type RoomOption = Room & { property: Property };
 
 const emptyReleaseForm = { jurisdiction: "IN", minStayNights: "30" };
 const emptyClassifyForm = { classification: "shared_residential_room", confidence: "1", evidenceRef: "", reviewState: "APPROVED" as OccupancyReviewState };
-const emptyAuthorityForm = { roomId: "", authorityType: "lease_agreement", evidenceRef: "" };
+const emptyAuthorityForm = { roomId: "", relationshipType: "OWNER" as AuthorityRelationshipType, authorityType: "lease_agreement", evidenceRef: "" };
 
 export function TrustSafetyManager() {
   const [releases, setReleases] = useState<MarketRelease[]>([]);
   const [authorityRecords, setAuthorityRecords] = useState<AuthorityRecord[]>([]);
+  const [propertyVerifications, setPropertyVerifications] = useState<PropertyVerification[]>([]);
   const [rooms, setRooms] = useState<RoomOption[]>([]);
   const [classifications, setClassifications] = useState<Record<number, OccupancyClassification | null>>({});
   const [toast, setToast] = useState("");
@@ -38,6 +50,8 @@ export function TrustSafetyManager() {
   const [authorityForm, setAuthorityForm] = useState(emptyAuthorityForm);
   const [revokeRecordId, setRevokeRecordId] = useState<number | null>(null);
   const [revokeReason, setRevokeReason] = useState("");
+  const [revokePropertyVerificationId, setRevokePropertyVerificationId] = useState<number | null>(null);
+  const [revokePropertyVerificationReason, setRevokePropertyVerificationReason] = useState("");
 
   function showToast(message: string) {
     setToast(message);
@@ -71,6 +85,13 @@ export function TrustSafetyManager() {
           )
         );
         setClassifications(Object.fromEntries(classificationEntries));
+
+        const propertyVerificationLists = await Promise.all(
+          roomOptions.map((room) =>
+            apiClientFetch<PropertyVerification[]>(`/api/verification/property-verifications/room/${room.id}`)
+          )
+        );
+        setPropertyVerifications(propertyVerificationLists.flat());
       } catch {
         showToast("Failed to load trust & safety data");
       }
@@ -117,6 +138,7 @@ export function TrustSafetyManager() {
         body: JSON.stringify({
           roomId: Number(authorityForm.roomId),
           authorityType: authorityForm.authorityType.trim(),
+          relationshipType: authorityForm.relationshipType,
           evidenceRef: authorityForm.evidenceRef.trim(),
         }),
       });
@@ -163,6 +185,61 @@ export function TrustSafetyManager() {
       showToast("Authority record revoked");
     } catch {
       showToast("Failed to revoke authority record");
+    }
+  }
+
+  async function verifyPropertyVerification(id: number) {
+    try {
+      const updated = await apiClientFetch<PropertyVerification>(`/api/verification/property-verifications/${id}/verify`, {
+        method: "POST",
+      });
+      setPropertyVerifications((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      showToast("Property verification verified");
+    } catch {
+      showToast("Failed to verify property verification");
+    }
+  }
+
+  async function rejectPropertyVerification(id: number) {
+    try {
+      const updated = await apiClientFetch<PropertyVerification>(`/api/verification/property-verifications/${id}/reject`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setPropertyVerifications((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      showToast("Property verification rejected");
+    } catch {
+      showToast("Failed to reject property verification");
+    }
+  }
+
+  async function requestAdditionalPropertyEvidence(id: number) {
+    try {
+      const updated = await apiClientFetch<PropertyVerification>(
+        `/api/verification/property-verifications/${id}/request-additional-evidence`,
+        { method: "POST", body: JSON.stringify({}) }
+      );
+      setPropertyVerifications((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      showToast("Additional evidence requested");
+    } catch {
+      showToast("Failed to request additional evidence");
+    }
+  }
+
+  async function submitRevokePropertyVerification(e: React.FormEvent) {
+    e.preventDefault();
+    if (revokePropertyVerificationId === null || !revokePropertyVerificationReason.trim()) return;
+    try {
+      const updated = await apiClientFetch<PropertyVerification>(
+        `/api/verification/property-verifications/${revokePropertyVerificationId}/revoke`,
+        { method: "POST", body: JSON.stringify({ reason: revokePropertyVerificationReason.trim() }) }
+      );
+      setPropertyVerifications((prev) => prev.map((r) => (r.id === revokePropertyVerificationId ? updated : r)));
+      setRevokePropertyVerificationId(null);
+      setRevokePropertyVerificationReason("");
+      showToast("Property verification revoked");
+    } catch {
+      showToast("Failed to revoke property verification");
     }
   }
 
@@ -273,6 +350,7 @@ export function TrustSafetyManager() {
               <div>
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
                   {room ? room.property.address : `Room #${record.roomId}`} — {record.authorityType}
+                  {record.relationshipType && ` (${record.relationshipType.toLowerCase()})`}
                 </p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   Evidence: {record.evidenceRef || "—"}
@@ -309,6 +387,74 @@ export function TrustSafetyManager() {
           })}
           {authorityRecords.length === 0 && (
             <p className="text-sm text-slate-400 dark:text-slate-400">No authority records submitted yet.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
+          <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Property Verification</h2>
+        </div>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          Property Verification is evidence that the property/address itself is real (e.g. a title deed or utility
+          bill) -- a separate claim from Authority Records above (right to list) and from per-jurisdiction
+          compliance documents. Submitted by the Host from their own listing flow; this is an informational
+          compliance signal for admin review and does not automatically block publishing a listing.
+        </p>
+        <div className="mt-4 space-y-2">
+          {propertyVerifications.map((record) => {
+            const room = rooms.find((r) => r.id === record.roomId);
+            return (
+              <div
+                key={record.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-white/10"
+              >
+                <div>
+                  <p className="text-sm font-semibold text-primary-900 dark:text-white">
+                    {room ? room.property.address : `Room #${record.roomId}`}
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Evidence: {record.evidenceRef || "—"}
+                    {record.expiresAt && ` · expires ${formatDate(record.expiresAt)}`}
+                    {record.verifierNotes && ` · ${record.verifierNotes}`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge tone={propertyVerificationStatusTone[record.status]}>{propertyVerificationStatusLabel[record.status]}</Badge>
+                  {(record.status === "pending" || record.status === "additional_evidence_required") && (
+                    <>
+                      <Button size="sm" variant="primary" onClick={() => verifyPropertyVerification(record.id)}>
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Verify
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => rejectPropertyVerification(record.id)}>
+                        <XCircle className="h-3.5 w-3.5" /> Reject
+                      </Button>
+                      {record.status === "pending" && (
+                        <Button size="sm" variant="outline" onClick={() => requestAdditionalPropertyEvidence(record.id)}>
+                          Request more evidence
+                        </Button>
+                      )}
+                    </>
+                  )}
+                  {record.status === "verified" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setRevokePropertyVerificationId(record.id);
+                        setRevokePropertyVerificationReason("");
+                      }}
+                    >
+                      <XCircle className="h-3.5 w-3.5" /> Revoke
+                    </Button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {propertyVerifications.length === 0 && (
+            <p className="text-sm text-slate-400 dark:text-slate-400">No property verification evidence submitted yet.</p>
           )}
         </div>
       </section>
@@ -408,6 +554,21 @@ export function TrustSafetyManager() {
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Relationship Type
+            </label>
+            <select
+              value={authorityForm.relationshipType}
+              onChange={(e) => setAuthorityForm((f) => ({ ...f, relationshipType: e.target.value as AuthorityRelationshipType }))}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              required
+            >
+              <option value="OWNER">Owner</option>
+              <option value="AGENT">Agent</option>
+              <option value="MANAGER">Manager</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Authority Type
             </label>
             <input
@@ -458,6 +619,34 @@ export function TrustSafetyManager() {
             />
           </div>
           <Button type="submit" variant="primary" fullWidth disabled={!revokeReason.trim()}>
+            Revoke
+          </Button>
+        </form>
+      </Modal>
+
+      <Modal
+        open={revokePropertyVerificationId !== null}
+        onClose={() => { setRevokePropertyVerificationId(null); setRevokePropertyVerificationReason(""); }}
+        title="Revoke Property Verification"
+      >
+        <form onSubmit={submitRevokePropertyVerification} className="space-y-3.5">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            This immediately invalidates the property evidence for eligibility checks, even though it hasn&apos;t
+            expired yet -- e.g. the evidence turned out to be fraudulent or forged.
+          </p>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Reason (required)
+            </label>
+            <textarea
+              value={revokePropertyVerificationReason}
+              onChange={(e) => setRevokePropertyVerificationReason(e.target.value)}
+              rows={3}
+              required
+              className="w-full resize-none rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <Button type="submit" variant="primary" fullWidth disabled={!revokePropertyVerificationReason.trim()}>
             Revoke
           </Button>
         </form>
