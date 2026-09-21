@@ -8,9 +8,11 @@ from app.core.correlation import get_correlation_id
 from app.core.image_uploads import save_listing_images
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
+from app.crud import authority as authority_crud
 from app.crud import leasing as leasing_crud
 from app.crud import listing as listing_crud
-from app.crud.property import get_property, list_rooms_for_property
+from app.crud import property_verification as property_verification_crud
+from app.crud.property import get_property, get_room, list_rooms_for_property
 from app.db.session import get_db
 from app.models.user_account import UserAccount
 from app.schemas.leasing import (
@@ -25,8 +27,9 @@ from app.schemas.leasing import (
     OfferTermsRead,
     UserAgreementSignRequest,
 )
-from app.schemas.marketplace import PropertyCreate, PropertyRead, RoomCreate, RoomRead
+from app.schemas.marketplace import AuthorityRecordDeclare, AuthorityRecordRead, PropertyCreate, PropertyRead, RoomCreate, RoomRead
 from app.schemas.listing import ListingCreate, ListingRead, ListingUpdate
+from app.schemas.verification import PropertyVerificationDeclare, PropertyVerificationRead
 
 router = APIRouter(prefix="/api/users/hosting", tags=["user-hosting"], dependencies=[Depends(get_current_user)])
 
@@ -487,3 +490,80 @@ def sign_hosted_agreement(
         )
     db.commit()
     return updated
+
+
+# --- Lister, Property & Authority Verification: Host self-service submission ---
+# Deliberately separate from IdentityVerification (who the lister is). Both
+# routes below scope themselves to a room the calling host's own party
+# actually owns via get_room + the crud layer's own ownership check --
+# same shape as _get_property_or_404 above, just at the room level.
+
+
+@router.get("/rooms/{room_id}/authority-records", response_model=list[AuthorityRecordRead])
+def list_hosted_room_authority_records(
+    room_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    return authority_crud.list_authority_records_for_room_owned_by(db, user, room)
+
+
+@router.post(
+    "/rooms/{room_id}/authority-records", response_model=AuthorityRecordRead, status_code=status.HTTP_201_CREATED,
+)
+def declare_hosted_authority_record(
+    room_id: int,
+    payload: AuthorityRecordDeclare,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if payload.room_id != room_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "roomId in the body must match the room in the URL")
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    record = authority_crud.declare_authority_record(
+        db, user, room, relationship_type=payload.relationship_type, evidence_ref=payload.evidence_ref,
+    )
+    emit_event(
+        db, "authority_record.declared", "authority_record", str(record.id),
+        {"roomId": room_id}, correlation_id=get_correlation_id(request),
+    )
+    db.commit()
+    return record
+
+
+@router.get("/rooms/{room_id}/property-verifications", response_model=list[PropertyVerificationRead])
+def list_hosted_room_property_verifications(
+    room_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    return property_verification_crud.list_property_verifications_for_room_owned_by(db, user, room)
+
+
+@router.post(
+    "/rooms/{room_id}/property-verifications", response_model=PropertyVerificationRead, status_code=status.HTTP_201_CREATED,
+)
+def declare_hosted_property_verification(
+    room_id: int,
+    payload: PropertyVerificationDeclare,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if payload.room_id != room_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "roomId in the body must match the room in the URL")
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    record = property_verification_crud.declare_property_verification(db, user, room, evidence_ref=payload.evidence_ref)
+    emit_event(
+        db, "property_verification.declared", "property_verification", str(record.id),
+        {"roomId": room_id}, correlation_id=get_correlation_id(request),
+    )
+    db.commit()
+    return record

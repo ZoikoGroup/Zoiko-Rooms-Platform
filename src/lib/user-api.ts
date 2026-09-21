@@ -2,6 +2,8 @@ import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
   Agreement,
   Application,
+  AuthorityRecord,
+  AuthorityRelationshipType,
   BookingChangeRequest,
   DisclosureRequirement,
   HandoverEvent,
@@ -11,6 +13,7 @@ import {
   Offer,
   PaymentPreview,
   Property,
+  PropertyVerification,
   PublicListing,
   PublicListingsPage,
   PublishEligibility,
@@ -355,6 +358,35 @@ export function updateHostedRoom(
   return apiClientFetch<Room>(`/api/users/hosting/properties/${propertyId}/rooms/${roomId}`, {
     method: "PUT",
     body: JSON.stringify(payload),
+  });
+}
+
+// Lister, Property & Authority Verification wireframe: host self-service
+// submission of authority-to-list and property evidence for a room they
+// own -- separate claims from identity (see VerificationStatusSummary).
+
+export function listHostedRoomAuthorityRecords(roomId: number): Promise<AuthorityRecord[]> {
+  return apiClientFetch<AuthorityRecord[]>(`/api/users/hosting/rooms/${roomId}/authority-records`);
+}
+
+export function declareHostedAuthorityRecord(
+  roomId: number,
+  payload: { relationshipType: AuthorityRelationshipType; evidenceRef: string }
+): Promise<AuthorityRecord> {
+  return apiClientFetch<AuthorityRecord>(`/api/users/hosting/rooms/${roomId}/authority-records`, {
+    method: "POST",
+    body: JSON.stringify({ roomId, ...payload }),
+  });
+}
+
+export function listHostedRoomPropertyVerifications(roomId: number): Promise<PropertyVerification[]> {
+  return apiClientFetch<PropertyVerification[]>(`/api/users/hosting/rooms/${roomId}/property-verifications`);
+}
+
+export function declareHostedPropertyVerification(roomId: number, payload: { evidenceRef: string }): Promise<PropertyVerification> {
+  return apiClientFetch<PropertyVerification>(`/api/users/hosting/rooms/${roomId}/property-verifications`, {
+    method: "POST",
+    body: JSON.stringify({ roomId, ...payload }),
   });
 }
 

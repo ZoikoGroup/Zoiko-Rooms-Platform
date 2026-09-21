@@ -1,8 +1,14 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
 from app.schemas.common import CamelModel
+
+# Lister, Property & Authority Verification wireframe: the structured
+# landlord/agent/manager relationship, kept separate from the pre-existing
+# free-text authority_type (evidence basis, e.g. "lease_agreement").
+AuthorityRelationshipType = Literal["OWNER", "AGENT", "MANAGER"]
 
 
 class MarketReleaseCreate(CamelModel):
@@ -70,7 +76,18 @@ class RoomRead(CamelModel):
 class AuthorityRecordCreate(CamelModel):
     room_id: int
     authority_type: str
+    relationship_type: AuthorityRelationshipType | None = None
     evidence_ref: str = ""
+
+
+class AuthorityRecordDeclare(CamelModel):
+    """Host self-service submission -- scoped server-side to a room the
+    calling host's own party actually owns (see
+    api/routes/user_hosting.py:declare_hosted_authority_record)."""
+
+    room_id: int
+    relationship_type: AuthorityRelationshipType
+    evidence_ref: str = Field(min_length=1)
 
 
 class AuthorityRecordRevoke(CamelModel):
@@ -85,6 +102,7 @@ class AuthorityRecordRead(CamelModel):
     party_id: int
     room_id: int
     authority_type: str
+    relationship_type: str | None = None
     evidence_ref: str
     verified_at: datetime | None
     expires_at: datetime | None

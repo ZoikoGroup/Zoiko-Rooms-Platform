@@ -116,11 +116,14 @@ export type AuthorityStatus =
   | "review_required"
   | "revoked";
 
+export type AuthorityRelationshipType = "OWNER" | "AGENT" | "MANAGER";
+
 export interface AuthorityRecord {
   id: number;
   partyId: number;
   roomId: number;
   authorityType: string;
+  relationshipType: AuthorityRelationshipType | null;
   evidenceRef: string;
   verifiedAt: string | null;
   expiresAt: string | null;
@@ -830,6 +833,27 @@ export interface RenterVerificationStatusItem {
 export interface RenterVerificationStatus {
   identity: RenterVerificationStatusItem;
   occupancyEligibility: RenterVerificationStatusItem[];
+  // Lister, Property & Authority Verification wireframe: separate claims from
+  // identity above -- one item per room the calling user hosts (empty for a
+  // renter with no hosted rooms). Never implies identity verification proves
+  // either of these.
+  propertyVerification: RenterVerificationStatusItem[];
+  authorityToList: RenterVerificationStatusItem[];
+}
+
+export type PropertyVerificationStatus = "pending" | "verified" | "rejected" | "additional_evidence_required" | "revoked";
+
+export interface PropertyVerification {
+  id: number;
+  partyId: number;
+  roomId: number;
+  evidenceRef: string;
+  status: PropertyVerificationStatus;
+  verifierAdminId: number | null;
+  verifierNotes: string;
+  verifiedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
 }
 
 export type ScreeningDecisionStatus = "AUTHORIZED" | "PASS" | "FAIL" | "INCONCLUSIVE" | "DISPUTED_SOURCE";

@@ -7,12 +7,14 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Switch } from "@/components/ui/Switch";
-import { Property, Room } from "@/lib/types";
+import { AuthorityRelationshipType, Property, Room } from "@/lib/types";
 import {
   HostedListingInput,
   createHostedListing,
   createHostedProperty,
   createHostedRoom,
+  declareHostedAuthorityRecord,
+  declareHostedPropertyVerification,
   errorMessage,
   listHostedProperties,
   listHostedRooms,
@@ -99,6 +101,12 @@ export function ListARoomWizard({
   const [propertyChoice, setPropertyChoice] = useState<PropertyChoice>({ mode: "new", address: "", city: "" });
   const [roomChoice, setRoomChoice] = useState<RoomChoice>({ mode: "new", size: "", hasEnsuite: false });
   const [details, setDetails] = useState<ListingDetailsForm>(emptyDetails(contact));
+  // Lister, Property & Authority Verification wireframe: optional, best-effort
+  // evidence -- submitted after the room exists (see handleFinish) and never
+  // blocks listing creation if left blank or if the submission call fails.
+  const [propertyEvidenceRef, setPropertyEvidenceRef] = useState("");
+  const [authorityRelationshipType, setAuthorityRelationshipType] = useState<AuthorityRelationshipType>("OWNER");
+  const [authorityEvidenceRef, setAuthorityEvidenceRef] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -110,6 +118,9 @@ export function ListARoomWizard({
     setStep(0);
     setError("");
     setDetails(emptyDetails(contact));
+    setPropertyEvidenceRef("");
+    setAuthorityRelationshipType("OWNER");
+    setAuthorityEvidenceRef("");
     setLoadingContext(true);
     listHostedProperties()
       .then((owned) => {
@@ -224,6 +235,28 @@ export function ListARoomWizard({
           hasEnsuite: roomChoice.hasEnsuite,
         });
         roomId = createdRoom.id;
+      }
+
+      // Lister, Property & Authority Verification wireframe: optional
+      // evidence, submitted best-effort -- never blocks listing creation.
+      // Verification stays a separate, informational admin review step
+      // (see PublishEligibility), not a hard gate on this wizard.
+      if (propertyEvidenceRef.trim()) {
+        try {
+          await declareHostedPropertyVerification(roomId, { evidenceRef: propertyEvidenceRef.trim() });
+        } catch {
+          // Best-effort -- surfaced later via the verification status summary, not here.
+        }
+      }
+      if (authorityEvidenceRef.trim()) {
+        try {
+          await declareHostedAuthorityRecord(roomId, {
+            relationshipType: authorityRelationshipType,
+            evidenceRef: authorityEvidenceRef.trim(),
+          });
+        } catch {
+          // Best-effort -- surfaced later via the verification status summary, not here.
+        }
       }
 
       const payload: HostedListingInput = {
@@ -594,6 +627,46 @@ export function ListARoomWizard({
                     </Link>
                   </div>
                 )}
+
+                <div className="space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-100 dark:bg-slate-800/60 dark:ring-white/10">
+                  <p className="text-xs font-semibold text-primary-900 dark:text-white">
+                    Property &amp; authority evidence <span className="font-normal text-slate-400">(optional, can be added later)</span>
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    These are separate from your identity verification above — they confirm the property itself is
+                    real, and that you have the right (owner, agent, or manager) to list it. An admin reviews them
+                    independently; the status is shown on your account&apos;s verification page.
+                  </p>
+                  <Field label="Property evidence reference" hint="e.g. title deed, utility bill, or uploaded document ID">
+                    <input
+                      value={propertyEvidenceRef}
+                      onChange={(e) => setPropertyEvidenceRef(e.target.value)}
+                      placeholder="Document ID or reference"
+                      className={inputClass}
+                    />
+                  </Field>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <Field label="Your relationship to this property">
+                      <select
+                        value={authorityRelationshipType}
+                        onChange={(e) => setAuthorityRelationshipType(e.target.value as AuthorityRelationshipType)}
+                        className={inputClass}
+                      >
+                        <option value="OWNER">Owner</option>
+                        <option value="AGENT">Agent</option>
+                        <option value="MANAGER">Manager</option>
+                      </select>
+                    </Field>
+                    <Field label="Authority evidence reference" hint="e.g. lease, ownership deed, or NOC">
+                      <input
+                        value={authorityEvidenceRef}
+                        onChange={(e) => setAuthorityEvidenceRef(e.target.value)}
+                        placeholder="Document ID or reference"
+                        className={inputClass}
+                      />
+                    </Field>
+                  </div>
+                </div>
 
                 <div className="overflow-hidden rounded-xl ring-1 ring-slate-100 dark:ring-white/10">
                   {details.images[0] ? (

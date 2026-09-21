@@ -6,21 +6,32 @@ signed-in renter, scoped to their own party (never another renter's, per
 Section 15's "joint renters cannot see each other's raw verification
 documents by default")."""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.crud.authority import get_valid_authority_for_room
 from app.crud.identity_verification import get_valid_identity_credential, list_user_identity_verifications
 from app.crud.market_policy import resolve_market_policy
 from app.crud.occupancy_eligibility import list_occupancy_eligibility_checks_for_party
+from app.crud.property_verification import get_valid_property_verification_for_room
 from app.db.session import get_db
+from app.models.authority_record import AuthorityRecord
+from app.models.property import Property
+from app.models.property_verification import PropertyVerification
 from app.models.party import Party
 from app.models.user_account import UserAccount
 from app.schemas.verification import (
     OCCUPANCY_ELIGIBILITY_SHARING_SCOPE,
+    PROPERTY_VERIFICATION_SHARING_SCOPE,
     RenterVerificationStatus,
     RenterVerificationStatusItem,
 )
+
+_AUTHORITY_TO_LIST_SHARING_SCOPE = "Visible to admins and the property's own Host. Never exposed to renters."
 
 router = APIRouter(prefix="/api/users/verification-status", tags=["user-verification-status"], dependencies=[Depends(get_current_user)])
 
@@ -39,6 +50,20 @@ def _retention_note(db: Session, jurisdiction_code: str | None) -> str:
     except HTTPException:
         return "Retention period depends on your jurisdiction and has not been configured yet."
     return f"Evidence is retained for {policy.identity_evidence_retention_days} days, then automatically deleted."
+
+
+def _effective_status(record, now: datetime) -> str:
+    """AuthorityRecord/PropertyVerification rows never get flipped to
+    'expired' in the background -- get_valid_authority_for_room /
+    get_valid_property_verification_for_room only check expires_at live, so
+    a 'verified' row past its own expires_at stays stored as 'verified'
+    forever. Reporting that raw value here would misrepresent a lapsed
+    claim as still current, so it's recomputed as 'expired' instead. Any
+    other stored status (pending/rejected/additional_evidence_required/
+    revoked) is already accurate and passed through as-is."""
+    if record.status == "verified" and record.expires_at is not None and record.expires_at <= now:
+        return "expired"
+    return record.status
 
 
 @router.get("", response_model=RenterVerificationStatus)
@@ -83,4 +108,68 @@ def get_my_verification_status(user: UserAccount = Depends(get_current_user), db
         for check in list_occupancy_eligibility_checks_for_party(db, user.party_id)
     ]
 
-    return RenterVerificationStatus(identity=identity_item, occupancy_eligibility=occupancy_items)
+    # Lister, Property & Authority Verification wireframe: these two are
+    # deliberately kept as separate claims from identity above -- neither is
+    # derived from identity_status, each reads its own model, and each is
+    # per-room (a host may have zero rooms yet, or several).
+    room_ids = [
+        room.id
+        for property_row in db.scalars(select(Property).where(Property.owner_party_id == user.party_id))
+        for room in property_row.rooms
+    ]
+
+    now = datetime.now(timezone.utc)
+    property_verification_items = []
+    authority_to_list_items = []
+    for room_id in room_ids:
+        property_record = get_valid_property_verification_for_room(db, room_id)
+        if property_record:
+            property_status = "verified"
+        else:
+            # No currently valid record -- fall back to the latest submission's
+            # own status (pending/rejected/additional_evidence_required/revoked/
+            # expired) rather than reporting "not_submitted" for a room that has,
+            # in fact, had evidence submitted before. Same fallback shape as
+            # identity_status above.
+            latest_property_submission = db.scalar(
+                select(PropertyVerification)
+                .where(PropertyVerification.room_id == room_id)
+                .order_by(PropertyVerification.id.desc())
+            )
+            property_status = (
+                _effective_status(latest_property_submission, now) if latest_property_submission else "not_submitted"
+            )
+        property_verification_items.append(
+            RenterVerificationStatusItem(
+                requirement_code="PROPERTY_VERIFICATION",
+                status=property_status,
+                expires_at=property_record.expires_at if property_record else None,
+                explanation=f"Confirms room #{room_id}'s property/address is real and evidenced.",
+                sharing_scope=PROPERTY_VERIFICATION_SHARING_SCOPE,
+            )
+        )
+
+        authority_record = get_valid_authority_for_room(db, room_id)
+        if authority_record:
+            authority_status = "verified"
+        else:
+            latest_authority_submission = db.scalar(
+                select(AuthorityRecord).where(AuthorityRecord.room_id == room_id).order_by(AuthorityRecord.id.desc())
+            )
+            authority_status = (
+                _effective_status(latest_authority_submission, now) if latest_authority_submission else "not_submitted"
+            )
+        authority_to_list_items.append(
+            RenterVerificationStatusItem(
+                requirement_code="AUTHORITY_TO_LIST",
+                status=authority_status,
+                expires_at=authority_record.expires_at if authority_record else None,
+                explanation=f"Confirms you have the right (owner, agent, or manager) to list room #{room_id}.",
+                sharing_scope=_AUTHORITY_TO_LIST_SHARING_SCOPE,
+            )
+        )
+
+    return RenterVerificationStatus(
+        identity=identity_item, occupancy_eligibility=occupancy_items,
+        property_verification=property_verification_items, authority_to_list=authority_to_list_items,
+    )
