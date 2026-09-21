@@ -23,6 +23,7 @@ from app.models.listing_fee import ListingFeePayment, ListingFeeQuote
 from app.models.market_release import MarketRelease
 from app.models.occupancy_classification import OccupancyClassification
 from app.models.property import Property
+from app.models.property_verification import PropertyVerification
 from app.models.room import Room
 from app.services.eligibility import jurisdiction_gates_pass, listing_publication_eligible
 from tests.conftest import _make_admin
@@ -42,9 +43,11 @@ def _make_room_with_good_standing(db: Session, admin) -> tuple[Room, MarketRelea
     db.add(AuthorityRecord(party_id=owner_party.id, room_id=room.id, authority_type="lease", status="verified"))
     db.add(OccupancyClassification(room_id=room.id, classification="long_term_residential", review_state="APPROVED"))
     # check_publish_eligibility (unlike jurisdiction_gates_pass/check_marketplace_standing)
-    # also requires the provider's identity verification -- a check unique to the
-    # Listing Service's admin-review screen, not part of the shared gate.
+    # also requires the provider's identity verification and a verified
+    # PropertyVerification -- checks unique to the Listing Service's
+    # admin-review screen, not part of the shared gate.
     db.add(IdentityVerification(party_id=owner_party.id, document_type="passport", status="verified"))
+    db.add(PropertyVerification(party_id=owner_party.id, room_id=room.id, evidence_ref="deed.pdf", status="verified"))
     db.flush()
     return room, market_release
 

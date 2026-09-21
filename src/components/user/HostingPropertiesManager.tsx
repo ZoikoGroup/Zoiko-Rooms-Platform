@@ -2,23 +2,27 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { BedDouble, Building2, MapPin, Pencil, Plus } from "lucide-react";
+import { BedDouble, Building2, ClipboardList, MapPin, Pencil, Plus } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
-import { Property, Room } from "@/lib/types";
+import { Occupancy, Property, Room } from "@/lib/types";
 import { Switch } from "@/components/ui/Switch";
 import {
   createHostedProperty,
   createHostedRoom,
   errorMessage,
   listHostedProperties,
+  listHostedRoomOccupancies,
   listHostedRooms,
   updateHostedProperty,
   updateHostedRoom,
 } from "@/lib/user-api";
 import { ListARoomWizard } from "@/components/user/ListARoomWizard";
+import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
+import { occupancyStatusTone } from "@/lib/status";
+import { formatDate } from "@/lib/utils";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 
@@ -30,6 +34,7 @@ export function HostingPropertiesManager() {
   const { toast, showToast } = useToast();
   const [properties, setProperties] = useState<Property[]>([]);
   const [roomsByProperty, setRoomsByProperty] = useState<Record<number, Room[]>>({});
+  const [occupanciesByRoom, setOccupanciesByRoom] = useState<Record<number, Occupancy[]>>({});
   const [loading, setLoading] = useState(true);
 
   const [propertyForm, setPropertyForm] = useState<PropertyForm | null>(null);
@@ -37,6 +42,7 @@ export function HostingPropertiesManager() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [recordOccupancyId, setRecordOccupancyId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -46,6 +52,12 @@ export function HostingPropertiesManager() {
         owned.map((property) => listHostedRooms(property.id).catch(() => [] as Room[]))
       );
       setRoomsByProperty(Object.fromEntries(owned.map((property, i) => [property.id, roomLists[i]])));
+
+      const allRooms = roomLists.flat();
+      const occupancyLists = await Promise.all(
+        allRooms.map((room) => listHostedRoomOccupancies(room.id).catch(() => [] as Occupancy[]))
+      );
+      setOccupanciesByRoom(Object.fromEntries(allRooms.map((room, i) => [room.id, occupancyLists[i]])));
     } catch (err) {
       showToast(errorMessage(err, "Could not load your properties."), "error");
     } finally {
@@ -194,36 +206,62 @@ export function HostingPropertiesManager() {
                     </p>
                   ) : (
                     <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {rooms.map((room) => (
+                      {rooms.map((room) => {
+                        const occupancies = occupanciesByRoom[room.id] ?? [];
+                        return (
                         <li
                           key={room.id}
-                          className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800/60"
+                          className="space-y-2 rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800/60"
                         >
-                          <div>
-                            <p className="flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
-                              <BedDouble className="h-4 w-4 text-primary-600" /> Room #{room.id}
-                            </p>
-                            <p className="mt-0.5 text-xs text-slate-400">
-                              {room.size > 0 ? `${room.size} sq ft` : "Size not set"} ·{" "}
-                              {room.hasEnsuite ? "En-suite" : "Shared bathroom"}
-                            </p>
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                                <BedDouble className="h-4 w-4 text-primary-600" /> Room #{room.id}
+                              </p>
+                              <p className="mt-0.5 text-xs text-slate-400">
+                                {room.size > 0 ? `${room.size} sq ft` : "Size not set"} ·{" "}
+                                {room.hasEnsuite ? "En-suite" : "Shared bathroom"}
+                              </p>
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() =>
+                                setRoomForm({
+                                  propertyId: property.id,
+                                  id: room.id,
+                                  size: String(room.size),
+                                  hasEnsuite: room.hasEnsuite,
+                                })
+                              }
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
                           </div>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() =>
-                              setRoomForm({
-                                propertyId: property.id,
-                                id: room.id,
-                                size: String(room.size),
-                                hasEnsuite: room.hasEnsuite,
-                              })
-                            }
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
+
+                          {occupancies.length > 0 && (
+                            <div className="space-y-1.5 border-t border-slate-200 pt-2 dark:border-white/10">
+                              {occupancies.map((occupancy) => (
+                                <div key={occupancy.id} className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                                    <Badge tone={occupancyStatusTone[occupancy.status] ?? "neutral"}>
+                                      {occupancy.status.replace(/_/g, " ")}
+                                    </Badge>
+                                    <span>
+                                      {occupancy.guestName || "Renter"}
+                                      {occupancy.moveInDate ? ` · since ${formatDate(occupancy.moveInDate)}` : ""}
+                                    </span>
+                                  </div>
+                                  <Button size="sm" variant="ghost" onClick={() => setRecordOccupancyId(occupancy.id)}>
+                                    <ClipboardList className="h-3.5 w-3.5" /> Transaction record
+                                  </Button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </li>
-                      ))}
+                        );
+                      })}
                     </ul>
                   )}
                 </div>
@@ -339,6 +377,10 @@ export function HostingPropertiesManager() {
           );
         }}
       />
+
+      <Modal open={recordOccupancyId !== null} onClose={() => setRecordOccupancyId(null)} title="Rental transaction record" size="xl">
+        {recordOccupancyId !== null && <RentalTransactionRecord occupancyId={recordOccupancyId} role="host" />}
+      </Modal>
 
       <Toast toast={toast} />
     </div>

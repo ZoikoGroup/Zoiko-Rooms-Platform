@@ -4,10 +4,12 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.crud.audit import log_audit_event
 from app.crud.party import party_id_for_room
 from app.models.admin_user import AdminUser
 from app.models.authority_record import AuthorityRecord
 from app.models.room import Room
+from app.models.user_account import UserAccount
 from app.schemas.marketplace import AuthorityRecordCreate
 
 AUTHORITY_VALIDITY_DAYS = 365
@@ -46,6 +48,7 @@ def submit_authority_record(db: Session, admin: AdminUser, room: Room, data: Aut
         party_id=party_id_for_room(room),
         room_id=room.id,
         authority_type=data.authority_type,
+        relationship_type=data.relationship_type,
         evidence_ref=data.evidence_ref,
         status="pending",
     )
@@ -53,6 +56,54 @@ def submit_authority_record(db: Session, admin: AdminUser, room: Room, data: Aut
     db.commit()
     db.refresh(record)
     return record
+
+
+def declare_authority_record(
+    db: Session, user: UserAccount, room: Room, *, relationship_type: str, evidence_ref: str,
+) -> AuthorityRecord:
+    """Host self-service submission -- the Lister, Property & Authority
+    Verification wireframe's own missing piece: unlike
+    property_compliance.py's declare_property_compliance_credential (which
+    is invoked by an AdminUser via the legacy Membership-based provider
+    system), a Host managing their own listing authenticates as a
+    UserAccount (see api/routes/user_hosting.py) -- so this reuses that
+    router's own ownership-check shape (user.party_id ==
+    room.property.owner_party_id) rather than assert_provider_access, which
+    only ever recognizes an AdminUser's Membership.
+
+    Lands in the same 'pending' status submit_authority_record already
+    uses (no new status introduced) -- an admin still verifies/rejects it
+    through the existing, unchanged verify_authority_record/
+    reject_authority_record workflow."""
+    if not user.party_id or room.property.owner_party_id != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only submit authority evidence for your own room")
+
+    record = AuthorityRecord(
+        party_id=user.party_id,
+        room_id=room.id,
+        authority_type=relationship_type.lower(),
+        relationship_type=relationship_type,
+        evidence_ref=evidence_ref,
+        status="pending",
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    log_audit_event(
+        db, None, "authority_record.declare", "authority_record", str(record.id),
+        reason=f"user:{user.id}; room={room.id}; relationship={relationship_type}",
+    )
+    db.commit()
+    return record
+
+
+def list_authority_records_for_room_owned_by(db: Session, user: UserAccount, room: Room) -> list[AuthorityRecord]:
+    if not user.party_id or room.property.owner_party_id != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view authority records for your own room")
+    return list(
+        db.scalars(select(AuthorityRecord).where(AuthorityRecord.room_id == room.id).order_by(AuthorityRecord.id.desc()))
+    )
 
 
 def verify_authority_record(db: Session, record: AuthorityRecord, verifier: AdminUser) -> AuthorityRecord:

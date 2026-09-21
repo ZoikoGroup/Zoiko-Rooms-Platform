@@ -88,6 +88,44 @@ class PropertyComplianceCredentialRead(CamelModel):
     sharing_scope: str = PROPERTY_COMPLIANCE_SHARING_SCOPE
 
 
+PROPERTY_VERIFICATION_SHARING_SCOPE = "Visible to admins and the property's own Host. Never exposed to renters as raw evidence."
+
+
+class PropertyVerificationDeclare(CamelModel):
+    """Host self-service submission -- scoped server-side to a room the
+    calling host's own party actually owns (see
+    api/routes/user_hosting.py:declare_hosted_property_verification)."""
+
+    room_id: int
+    evidence_ref: str
+
+
+class PropertyVerificationReject(CamelModel):
+    notes: str = ""
+
+
+class PropertyVerificationRequestAdditionalEvidence(CamelModel):
+    notes: str = ""
+
+
+class PropertyVerificationRevoke(CamelModel):
+    reason: str = ""
+
+
+class PropertyVerificationRead(CamelModel):
+    id: int
+    party_id: int
+    room_id: int
+    evidence_ref: str
+    status: str
+    verifier_admin_id: int | None = None
+    verifier_notes: str = ""
+    verified_at: datetime | None = None
+    expires_at: datetime | None = None
+    created_at: datetime
+    sharing_scope: str = PROPERTY_VERIFICATION_SHARING_SCOPE
+
+
 class ScreeningCheckCreate(CamelModel):
     party_id: int
     jurisdiction_code: str
@@ -142,6 +180,13 @@ class RenterVerificationStatusItem(CamelModel):
 class RenterVerificationStatus(CamelModel):
     identity: RenterVerificationStatusItem
     occupancy_eligibility: list[RenterVerificationStatusItem]
+    # Lister, Property & Authority Verification wireframe: two additional,
+    # deliberately SEPARATE claims -- one item per room the calling user
+    # hosts (empty for a renter with no hosted rooms). Never implies
+    # identity verification proves either of these; each is read from its
+    # own model (PropertyVerification / AuthorityRecord respectively).
+    property_verification: list[RenterVerificationStatusItem] = []
+    authority_to_list: list[RenterVerificationStatusItem] = []
 
 
 class VerificationOperationalMetricsRead(CamelModel):

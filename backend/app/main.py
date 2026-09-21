@@ -33,6 +33,7 @@ from app.api.routes import (
     payments,
     properties,
     public,
+    public_assistant,
     rental_payments,
     reviews,
     room_passport,
@@ -125,6 +126,7 @@ app.include_router(analytics.router)
 app.include_router(settings_routes.router)
 app.include_router(admin_users.router)
 app.include_router(public.router)
+app.include_router(public_assistant.router)
 app.include_router(uploads.router)
 app.include_router(search.router)
 app.include_router(market_releases.router)
