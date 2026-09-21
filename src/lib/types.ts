@@ -333,7 +333,10 @@ export interface Occupancy {
   id: number;
   offerId: number;
   listingId: string;
+  listingName: string;
   roomId: number;
+  propertyAddress: string;
+  propertyCity: string;
   guestId: string;
   guestName: string;
   status: OccupancyStatus;
@@ -949,4 +952,77 @@ export interface ScreeningCheck {
   createdAt: string;
   disputeReason: string;
   disputedAt: string | null;
+}
+
+// --- Rental Transaction Record ---
+// A computed, read-only composite over existing authoritative records
+// (Occupancy is the root) -- see backend/app/schemas/rental_transaction_record.py.
+// Composed from the interfaces above wherever one already exists, rather
+// than redeclaring their fields.
+
+export interface ActivationDecision {
+  id: number;
+  occupancyId: number;
+  decisionVersion: number;
+  gateRuleVersion: number;
+  outcome: string;
+  reasonCodes: string[];
+  checks: Record<string, unknown>;
+  trigger: string;
+  evaluatingAdminId: number | null;
+  correlationId: string;
+  evaluatedAt: string;
+}
+
+export interface TerminationCase {
+  id: number;
+  occupancyId: number;
+  agreementId: number;
+  initiatorGuestId: string | null;
+  initiatorAdminId: number | null;
+  causeCode: string;
+  status: string;
+  notes: string;
+  noticeCreatedAt: string;
+  noticeServedAt: string | null;
+  earliestEffectiveDate: string | null;
+  effectiveTerminationDate: string | null;
+  withdrawnAt: string | null;
+}
+
+export interface TerminationRecord {
+  id: number;
+  occupancyId: number;
+  agreementId: number;
+  basis: string;
+  noticeGivenAt: string | null;
+  liabilityEndDate: string | null;
+  terminationEffectiveDate: string | null;
+  physicalMoveOutDate: string | null;
+  createdAt: string;
+}
+
+export interface RentalTransactionTimelineEntry {
+  timestamp: string;
+  source: string;
+  eventType: string;
+  detail: Record<string, unknown>;
+}
+
+export interface RentalTransactionRecord {
+  occupancy: Occupancy;
+  application: Application | null;
+  amendments: AgreementAmendment[];
+  obligations: ObligationRead[];
+  payments: SimulatedPayment[];
+  deposit: DepositRecord | null;
+  handoverEvents: HandoverEvent[];
+  activationDecisions: ActivationDecision[];
+  subletRequests: SubletRequest[];
+  terminationCases: TerminationCase[];
+  terminationRecord: TerminationRecord | null;
+  propertyVerification: RenterVerificationStatusItem | null;
+  authorityToList: RenterVerificationStatusItem | null;
+  identityVerification: RenterVerificationStatusItem | null;
+  timeline: RentalTransactionTimelineEntry[];
 }

@@ -22,6 +22,24 @@ from app.models.user_account import UserAccount
 PROPERTY_VERIFICATION_VALIDITY_DAYS = 365
 
 
+def effective_verification_status(record, now: datetime) -> str:
+    """Shared by user_verification.py's status summary and
+    crud/rental_transaction_record.py: AuthorityRecord/PropertyVerification
+    rows never get flipped to 'expired' in the background --
+    get_valid_authority_for_room/get_valid_property_verification_for_room
+    only check expires_at live, so a 'verified' row past its own expires_at
+    stays stored as 'verified' forever. Reporting that raw value would
+    misrepresent a lapsed claim as still current, so it's recomputed as
+    'expired' instead. Any other stored status (pending/rejected/
+    additional_evidence_required/revoked) is already accurate and passed
+    through as-is. Duck-typed on .status/.expires_at so it works for both
+    AuthorityRecord and PropertyVerification without importing either model
+    here."""
+    if record.status == "verified" and record.expires_at is not None and record.expires_at <= now:
+        return "expired"
+    return record.status
+
+
 def get_property_verification_or_404(db: Session, verification_id: int) -> PropertyVerification:
     record = db.get(PropertyVerification, verification_id)
     if not record:

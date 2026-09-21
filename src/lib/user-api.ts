@@ -10,6 +10,7 @@ import {
   HostedListing,
   IdentityDocumentType,
   IdentityVerificationRecord,
+  Occupancy,
   Offer,
   PaymentPreview,
   Property,
@@ -17,6 +18,7 @@ import {
   PublicListing,
   PublicListingsPage,
   PublishEligibility,
+  RentalTransactionRecord,
   RenterVerificationStatus,
   Room,
   SimulatedPayment,
@@ -186,6 +188,15 @@ export function listOccupancies(): Promise<UserOccupancy[]> {
 
 export function getOccupancy(occupancyId: number): Promise<UserOccupancy> {
   return apiClientFetch<UserOccupancy>(`/api/users/rentals/occupancies/${occupancyId}`);
+}
+
+/** Rental Transaction Record wireframe: a computed, read-only composite over
+ *  this occupancy's own Application/Offer/Agreement, payments, handover,
+ *  sublet and termination records -- see backend/app/crud/
+ *  rental_transaction_record.py. Renter-scoped: 403s for another renter's
+ *  occupancy, same as getOccupancy above. */
+export function getRentalTransactionRecord(occupancyId: number): Promise<RentalTransactionRecord> {
+  return apiClientFetch<RentalTransactionRecord>(`/api/users/rentals/occupancies/${occupancyId}/transaction-record`);
 }
 
 export function confirmHandoverReceipt(occupancyId: number): Promise<HandoverEvent> {
@@ -388,6 +399,23 @@ export function declareHostedPropertyVerification(roomId: number, payload: { evi
     method: "POST",
     body: JSON.stringify({ roomId, ...payload }),
   });
+}
+
+/** Rental Transaction Record wireframe, host view -- lists the occupancies
+ *  (current and past tenancies) for a room the calling host's own party
+ *  owns, so the host UI has an occupancy id to request a transaction
+ *  record for. Same room ownership scoping as listHostedRoomAuthorityRecords
+ *  above. */
+export function listHostedRoomOccupancies(roomId: number): Promise<Occupancy[]> {
+  return apiClientFetch<Occupancy[]>(`/api/users/hosting/rooms/${roomId}/occupancies`);
+}
+
+/** Rental Transaction Record wireframe, host view -- scoped to a room the
+ *  calling host's own party owns (room.property.ownerPartyId). Never
+ *  includes the renter's own identity-verification claim -- see
+ *  backend/app/api/routes/user_hosting.py's own route docstring. */
+export function getHostedRentalTransactionRecord(occupancyId: number): Promise<RentalTransactionRecord> {
+  return apiClientFetch<RentalTransactionRecord>(`/api/users/hosting/occupancies/${occupancyId}/transaction-record`);
 }
 
 export interface HostedListingInput {

@@ -11,9 +11,12 @@ from app.crud.events import emit_event
 from app.crud import authority as authority_crud
 from app.crud import leasing as leasing_crud
 from app.crud import listing as listing_crud
+from app.crud import occupancy as occupancy_crud
 from app.crud import property_verification as property_verification_crud
 from app.crud.property import get_property, get_room, list_rooms_for_property
+from app.crud.rental_transaction_record import build_rental_transaction_record
 from app.db.session import get_db
+from app.models.occupancy import Occupancy
 from app.models.user_account import UserAccount
 from app.schemas.leasing import (
     AgreementCreateRequest,
@@ -29,6 +32,8 @@ from app.schemas.leasing import (
 )
 from app.schemas.marketplace import AuthorityRecordDeclare, AuthorityRecordRead, PropertyCreate, PropertyRead, RoomCreate, RoomRead
 from app.schemas.listing import ListingCreate, ListingRead, ListingUpdate
+from app.schemas.occupancy import OccupancyRead
+from app.schemas.rental_transaction_record import RentalTransactionRecordRead
 from app.schemas.verification import PropertyVerificationDeclare, PropertyVerificationRead
 
 router = APIRouter(prefix="/api/users/hosting", tags=["user-hosting"], dependencies=[Depends(get_current_user)])
@@ -567,3 +572,42 @@ def declare_hosted_property_verification(
     )
     db.commit()
     return record
+
+
+# --- Rental Transaction Record: host-facing read-only view --------------
+# Same computed-composite build as the renter route (user_rentals.py's own
+# GET .../occupancies/{id}/transaction-record) -- ownership is checked
+# against the room's own owner_party_id (this file's established pattern),
+# never Listing.owner_id, since a self-service host authenticates as a
+# UserAccount, not the legacy AdminUser a Listing.owner_id check assumes.
+# include_identity is never set here -- a host must never see the renter's
+# own identity-verification claim.
+
+
+@router.get("/rooms/{room_id}/occupancies", response_model=list[OccupancyRead])
+def list_hosted_room_occupancies(
+    room_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The host-facing entry point into the Rental Transaction Record: lets
+    a host discover which occupancies (current and past tenancies) exist
+    for a room they own, so the UI has an occupancy_id to request a
+    transaction record for -- mirrors list_hosted_room_authority_records/
+    list_hosted_room_property_verifications above exactly."""
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    return [occupancy_crud.to_occupancy_read(o) for o in occupancy_crud.list_occupancies_for_room_owned_by(db, user, room)]
+
+
+@router.get("/occupancies/{occupancy_id}/transaction-record", response_model=RentalTransactionRecordRead)
+def get_hosted_rental_transaction_record(
+    occupancy_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    if not user.party_id or not occupancy.room or occupancy.room.property.owner_party_id != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view rental records for your own rooms")
+    return build_rental_transaction_record(db, occupancy, include_identity=False)

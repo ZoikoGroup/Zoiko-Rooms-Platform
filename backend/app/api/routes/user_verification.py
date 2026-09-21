@@ -17,7 +17,7 @@ from app.crud.authority import get_valid_authority_for_room
 from app.crud.identity_verification import get_valid_identity_credential, list_user_identity_verifications
 from app.crud.market_policy import resolve_market_policy
 from app.crud.occupancy_eligibility import list_occupancy_eligibility_checks_for_party
-from app.crud.property_verification import get_valid_property_verification_for_room
+from app.crud.property_verification import effective_verification_status, get_valid_property_verification_for_room
 from app.db.session import get_db
 from app.models.authority_record import AuthorityRecord
 from app.models.property import Property
@@ -50,20 +50,6 @@ def _retention_note(db: Session, jurisdiction_code: str | None) -> str:
     except HTTPException:
         return "Retention period depends on your jurisdiction and has not been configured yet."
     return f"Evidence is retained for {policy.identity_evidence_retention_days} days, then automatically deleted."
-
-
-def _effective_status(record, now: datetime) -> str:
-    """AuthorityRecord/PropertyVerification rows never get flipped to
-    'expired' in the background -- get_valid_authority_for_room /
-    get_valid_property_verification_for_room only check expires_at live, so
-    a 'verified' row past its own expires_at stays stored as 'verified'
-    forever. Reporting that raw value here would misrepresent a lapsed
-    claim as still current, so it's recomputed as 'expired' instead. Any
-    other stored status (pending/rejected/additional_evidence_required/
-    revoked) is already accurate and passed through as-is."""
-    if record.status == "verified" and record.expires_at is not None and record.expires_at <= now:
-        return "expired"
-    return record.status
 
 
 @router.get("", response_model=RenterVerificationStatus)
@@ -137,7 +123,7 @@ def get_my_verification_status(user: UserAccount = Depends(get_current_user), db
                 .order_by(PropertyVerification.id.desc())
             )
             property_status = (
-                _effective_status(latest_property_submission, now) if latest_property_submission else "not_submitted"
+                effective_verification_status(latest_property_submission, now) if latest_property_submission else "not_submitted"
             )
         property_verification_items.append(
             RenterVerificationStatusItem(
@@ -157,7 +143,7 @@ def get_my_verification_status(user: UserAccount = Depends(get_current_user), db
                 select(AuthorityRecord).where(AuthorityRecord.room_id == room_id).order_by(AuthorityRecord.id.desc())
             )
             authority_status = (
-                _effective_status(latest_authority_submission, now) if latest_authority_submission else "not_submitted"
+                effective_verification_status(latest_authority_submission, now) if latest_authority_submission else "not_submitted"
             )
         authority_to_list_items.append(
             RenterVerificationStatusItem(
