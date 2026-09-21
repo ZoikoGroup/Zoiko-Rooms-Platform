@@ -12,8 +12,9 @@ from datetime import date, datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.crud import payment_provider as payment_provider_crud
 from app.models.authority_record import AuthorityRecord
-from app.models.finance import LedgerAccount, LedgerEntry, Obligation, PayoutBeneficiary
+from app.models.finance import LedgerAccount, LedgerEntry, Obligation, PayoutBeneficiary, RefundRequest
 from app.models.guest import Guest
 from app.models.leasing import Agreement, Application, Offer
 from app.models.listing import Listing
@@ -168,6 +169,51 @@ class TestConfirmPaymentPostsLedgerEntries:
         assert credit.party_id == party_id
 
 
+class TestExternalPaymentEvidence:
+    """Section 5 gap: an off-platform cash/cheque confirm previously had no
+    field at all to attach a receipt/reference to -- now captured (but not
+    hard-required, to avoid breaking the many existing fixtures across this
+    suite that confirm an EXTERNAL payment purely as setup)."""
+
+    def test_evidence_ref_is_stored_when_given(self, client, db_session: Session):
+        obligation, admin, guest, _party_id = _make_provider_rent_obligation(db_session, suffix="evid1")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/finance/payments",
+            json={"guestId": guest.id, "amount": 500.0, "currency": "INR", "idempotencyKey": "evid-payment-1"},
+            cookies=admin_cookies,
+        )
+        payment_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/finance/payments/{payment_id}/confirm",
+            json={"allocations": [{"obligationId": obligation.id, "amount": 500.0}], "evidenceRef": "cheque #4471"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["evidenceRef"] == "cheque #4471"
+
+    def test_evidence_ref_defaults_to_blank_when_omitted(self, client, db_session: Session):
+        obligation, admin, guest, _party_id = _make_provider_rent_obligation(db_session, suffix="evid2")
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/finance/payments",
+            json={"guestId": guest.id, "amount": 500.0, "currency": "INR", "idempotencyKey": "evid-payment-2"},
+            cookies=admin_cookies,
+        )
+        payment_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/finance/payments/{payment_id}/confirm",
+            json={"allocations": [{"obligationId": obligation.id, "amount": 500.0}]},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["evidenceRef"] == ""
+
+
 class TestRunPayoutPostsFeeAndNetEntries:
     def test_payout_posts_fee_and_net_entries_summing_to_gross(self, client, db_session: Session):
         obligation, admin, guest, party_id = _make_provider_rent_obligation(db_session, suffix="payout1", amount=1000.0)
@@ -315,6 +361,75 @@ class TestDecideRefundPostsReversingEntry:
         assert debit.account_type == "HOST_PAYABLE"
         assert debit.party_id == party_id
         assert credit.account_type == "PLATFORM_CLEARING"
+
+
+class TestDecideRefundReversesRealPspTransaction:
+    """Section 5 gap: decide_refund previously only ever reversed Zoiko's
+    own ledger -- it never actually pulled the money back out of Stripe.
+    Stripe isn't configured in tests, so stripe_client.create_refund falls
+    back to its simulated id the same way create_payment_intent already
+    does -- what's under test is that decide_refund calls it at all, and
+    only when there's a real ProcessorTransaction to reverse."""
+
+    def test_refunding_a_psp_dispatched_payment_sets_a_psp_refund_id(self, client, db_session: Session):
+        from app.core.config import settings
+
+        obligation, admin, guest, _party_id = _make_provider_rent_obligation(db_session, suffix="pspref1", amount=500.0)
+        admin_cookies = auth_admin_cookie(admin)
+        # renter_pay_obligation attributes the synthetic-callback step to the
+        # platform's seeded system admin (get_system_admin) -- give tests one.
+        _make_admin(db_session, email=settings.seed_admin_email, role="super_admin")
+
+        payment = payment_provider_crud.renter_pay_obligation(db_session, guest, obligation, method_class="CARD")
+        assert payment.status == "SUCCEEDED"
+
+        r = client.post(
+            "/api/finance/refunds",
+            json={
+                "paymentId": payment.id, "obligationId": obligation.id, "amount": 500.0, "reason": "test",
+                "idempotencyKey": "psp-refund-request-1",
+            },
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 201, r.text
+        refund_id = r.json()["id"]
+
+        r = client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        assert r.json()["pspRefundId"] != ""
+
+        refund = db_session.get(RefundRequest, refund_id)
+        assert refund.psp_refund_id.startswith("RE-")
+
+    def test_refunding_an_external_cash_payment_leaves_psp_refund_id_blank(self, client, db_session: Session):
+        obligation, admin, guest, _party_id = _make_provider_rent_obligation(db_session, suffix="pspref2", amount=500.0)
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/finance/payments",
+            json={"guestId": guest.id, "amount": 500.0, "currency": "INR", "idempotencyKey": "ext-refund-1"},
+            cookies=admin_cookies,
+        )
+        payment_id = r.json()["id"]
+        r = client.post(
+            f"/api/finance/payments/{payment_id}/confirm",
+            json={"allocations": [{"obligationId": obligation.id, "amount": 500.0}]},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+
+        r = client.post(
+            "/api/finance/refunds",
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 500.0, "reason": "test",
+                "idempotencyKey": "ext-refund-request-1",
+            },
+            cookies=admin_cookies,
+        )
+        refund_id = r.json()["id"]
+        r = client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        assert r.json()["pspRefundId"] == ""
 
 
 class TestGetBalanceHelper:

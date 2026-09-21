@@ -745,11 +745,21 @@ export function LeasingManager() {
                       )}
                     </>
                   )}
-                  {agreement.status === "SIGNED" && (
-                    <Button size="sm" variant="accent" onClick={() => confirmMoveIn(agreement.id)}>
-                      <DoorOpen className="h-3.5 w-3.5" /> Confirm Move-In
-                    </Button>
-                  )}
+                  {agreement.status === "SIGNED" && (() => {
+                    const occupancy = occupancyByOfferId[offer.id];
+                    if (occupancy && occupancy.status !== "PENDING_MOVE_IN") {
+                      return (
+                        <Badge tone={occupancy.status === "ACTIVE" ? "success" : "neutral"}>
+                          {occupancy.status === "ACTIVE" ? "Move-in confirmed ✓" : occupancy.status}
+                        </Badge>
+                      );
+                    }
+                    return (
+                      <Button size="sm" variant="accent" onClick={() => confirmMoveIn(agreement.id)}>
+                        <DoorOpen className="h-3.5 w-3.5" /> Confirm Move-In
+                      </Button>
+                    );
+                  })()}
                   <Button size="sm" variant="outline" onClick={() => downloadAgreementPdf(agreement.id)}>
                     <Download className="h-3.5 w-3.5" /> Download PDF
                   </Button>

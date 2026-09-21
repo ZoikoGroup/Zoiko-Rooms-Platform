@@ -5,7 +5,7 @@ from fastapi import HTTPException, status
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -375,7 +375,6 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
             f"This payment was dispatched via a real payment provider ({payment.method_class}) -- it can only be "
             "completed through that provider's own callback, not a direct confirmation",
         )
-
     requested_total = _round2(sum(a.amount for a in data.allocations))
     if requested_total != _round2(payment.amount):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Allocations must sum to the full payment amount")
@@ -458,6 +457,8 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
 
     payment.status = "SUCCEEDED"
     payment.confirmed_at = datetime.now(timezone.utc)
+    if payment.method_class == "EXTERNAL":
+        payment.evidence_ref = data.evidence_ref.strip()
     notif_crud.notify_user_by_guest(
         db, payment.guest,
         title="Payment received",
@@ -2056,11 +2057,71 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
         db.refresh(refund)
         return refund
 
+    # Section 6 gap: no-double-recovery guard -- a renter could otherwise be
+    # refunded here AND separately win a bank chargeback on the exact same
+    # payment (resolve_dispute's own LOST-outcome reversal). Mirrors the
+    # chargeback-blocks-payout check already enforced at payout time
+    # (get_payout_eligibility's own "AC-19/Section 9.2: No active dispute,
+    # chargeback... hold blocks release" check) -- this is that same
+    # invariant's missing other half, at the refund-approval choke point.
+    conflicting_chargeback = db.scalar(
+        select(DisputeCase).where(
+            DisputeCase.category == "CHARGEBACK", DisputeCase.payment_id == refund.payment_id,
+            or_(
+                DisputeCase.status == "OPEN",
+                and_(DisputeCase.status == "RESOLVED", DisputeCase.chargeback_outcome == "LOST"),
+            ),
+        )
+    )
+    if conflicting_chargeback is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"This payment has a chargeback dispute (#{conflicting_chargeback.id}, "
+            f"{conflicting_chargeback.status.lower()}) -- resolve it first to avoid refunding the renter twice",
+        )
+
+    # Section 10 gap: a MANUAL_OPERATIONAL_HOLD or NEGATIVE_ACCOUNT_BALANCE
+    # FinancialHold already blocks this party's payout (get_payout_eligibility's
+    # own AC-19 check) -- previously nothing checked either before a refund,
+    # which pulls from the exact same party balances a payout does. Same
+    # two reason codes, same "an open hold blocks money movement" invariant,
+    # just checked at the refund choke point too.
+    refund_party_id = _obligation_party_id(refund.obligation)
+    if refund_party_id is not None:
+        blocking_hold = db.scalar(
+            select(FinancialHold).where(
+                FinancialHold.source_type == "party", FinancialHold.source_id == str(refund_party_id),
+                FinancialHold.status == "OPEN", FinancialHold.reason_code == "MANUAL_OPERATIONAL_HOLD",
+            )
+        )
+        if blocking_hold is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"An operational hold is open on this provider: {blocking_hold.description}",
+            )
+
     obligation = refund.obligation
     db.add(PaymentAllocation(payment_id=refund.payment_id, obligation_id=obligation.id, amount_allocated=-refund.amount))
     db.flush()
     db.refresh(obligation)
     recompute_obligation_status(db, obligation)
+
+    # Section 5 gap: pull the money back out of Stripe itself, not just
+    # Zoiko's own ledger -- only possible when the original payment actually
+    # went through a real PSP transaction (SUCCEEDED ProcessorTransaction);
+    # an EXTERNAL/cash payment has nothing to reverse here, same as before.
+    if refund.amount > 0:
+        processor_txn = db.scalar(
+            select(ProcessorTransaction).where(
+                ProcessorTransaction.payment_id == refund.payment_id, ProcessorTransaction.status == "SUCCEEDED",
+            )
+        )
+        if processor_txn is not None:
+            refund.psp_refund_id = stripe_client.create_refund(
+                payment_intent_id=processor_txn.provider_transaction_id,
+                amount=refund.amount, currency=refund.payment.currency,
+                metadata={"refund_request_id": str(refund.id), "obligation_id": str(obligation.id)},
+            )
 
     # ZR-ENG-CLR-005 ledger foundation: reverse the original collection entry --
     # cash goes back out to the renter from whichever side originally received
@@ -2341,6 +2402,21 @@ def resolve_dispute(db: Session, dispute: DisputeCase, admin: AdminUser, data: D
         dispute.chargeback_outcome = data.chargeback_outcome
 
         if data.chargeback_outcome == "LOST":
+            # Section 6 gap: the symmetric no-double-recovery guard to the
+            # one in decide_refund -- if this exact payment was already
+            # refunded through Zoiko's own flow, reversing it AGAIN here
+            # would be the same double payout from the other direction.
+            conflicting_refund = db.scalar(
+                select(RefundRequest).where(
+                    RefundRequest.payment_id == dispute.payment_id, RefundRequest.status == "COMPLETED",
+                )
+            )
+            if conflicting_refund is not None:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"This payment already has a completed refund (#{conflicting_refund.id}) -- resolve that "
+                    "first to avoid reversing the same money twice",
+                )
             # Section 20 "Chargeback lost": same reversal decide_refund posts
             # for an approved refund -- a reversing PaymentAllocation (so the
             # obligation's own status stops reading PAID), then the ledger
@@ -2472,6 +2548,33 @@ def run_reconciliation(db: Session, admin: AdminUser) -> ReconciliationRun:
             f"Ledger-recorded collections ({total_ledger_collected}) do not match positive allocations ({total_allocated_positive})",
         ))
 
+    # Section 5 gap: every check above only ever compares this platform's
+    # own internal tables against each other -- none of them would ever
+    # catch a real Stripe-side discrepancy (e.g. a manually-issued Stripe
+    # refund/dispute that never round-tripped back through this platform's
+    # own webhook handling). A no-op when Stripe isn't configured -- there's
+    # nothing real to check against without credentials, same disclosed-
+    # simulation posture as every other stripe_client caller.
+    psp_checked = 0
+    if stripe_client.is_configured():
+        succeeded_transactions = db.scalars(
+            select(ProcessorTransaction).where(ProcessorTransaction.status == "SUCCEEDED")
+        ).all()
+        for txn in succeeded_transactions:
+            remote = stripe_client.retrieve_payment_intent(payment_intent_id=txn.provider_transaction_id)
+            if remote is None:
+                continue
+            psp_checked += 1
+            payment = txn.payment
+            expected_minor_units = stripe_client.to_minor_units(float(payment.amount), payment.currency)
+            if remote["amount_received"] != expected_minor_units:
+                failed_checks.append((
+                    "PSP_AMOUNT_MISMATCH", "CRITICAL",
+                    f"Stripe PaymentIntent {txn.provider_transaction_id} shows {remote['amount_received']} minor "
+                    f"units received, but payment #{payment.id} records {expected_minor_units} -- Stripe's own "
+                    "records disagree with this platform's",
+                ))
+
     mismatches = [message for _reason_code, _severity, message in failed_checks]
 
     run = ReconciliationRun(
@@ -2485,6 +2588,7 @@ def run_reconciliation(db: Session, admin: AdminUser) -> ReconciliationRun:
             "totalChargebackReversals": total_chargeback_reversals,
             "ledgerTrialBalance": trial_balance,
             "totalLedgerCollected": total_ledger_collected,
+            "pspTransactionsChecked": psp_checked,
         },
         mismatches=mismatches,
         status="DISCREPANCIES_FOUND" if mismatches else "CLEAN",

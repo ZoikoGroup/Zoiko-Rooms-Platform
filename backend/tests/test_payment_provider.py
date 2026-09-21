@@ -11,8 +11,11 @@ from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
+from sqlalchemy import select
+
 from app.models.finance import Obligation, ProcessorTransaction, SimulatedPayment
-from tests.conftest import _make_admin, auth_admin_cookie
+from app.models.notification import Notification
+from tests.conftest import _make_admin, _make_user, auth_admin_cookie
 from tests.test_ledger import _make_provider_rent_obligation
 
 
@@ -136,6 +139,32 @@ class TestIngestProviderCallback:
         assert payment.status == "FAILED"
         db_session.refresh(obligation)
         assert obligation.status == "PENDING"
+
+    def test_a_failed_payment_notifies_the_renter(self, client, db_session: Session):
+        """Section 11 gap: the success path already notifies the renter --
+        nothing did on failure, at either FAILED-transition site."""
+        obligation, admin, guest, _party_id = _make_provider_rent_obligation(db_session, suffix="pp-notify1", amount=500.0)
+        renter = _make_user(db_session, email=guest.email)
+        guest.user_account_id = renter.id
+        db_session.commit()
+        admin_cookies = auth_admin_cookie(admin)
+        payment_id = _create_pending_payment(client, admin_cookies, guest.id, 500.0, obligation.currency, "pp-notify1")
+        dispatched = self._dispatch(client, admin_cookies, payment_id, obligation.id, 500.0)
+
+        payload = {
+            "providerEventId": "pay-evt-fail-notify-001", "providerTransactionId": dispatched["providerTransactionId"],
+            "eventType": "PAYMENT_FAILED",
+        }
+        r = client.post("/api/finance/payments/provider-callback/simulate", json=payload, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+
+        notification = db_session.scalar(
+            select(Notification).where(
+                Notification.recipient_user_id == renter.id, Notification.notification_type == "payment.failed",
+            )
+        )
+        assert notification is not None
+        assert notification.related_entity_id == str(payment_id)
 
     def test_unknown_provider_transaction_id_is_404(self, client, db_session: Session):
         admin = _make_admin(db_session, email="pp-unknown-admin@test.com", role="super_admin")

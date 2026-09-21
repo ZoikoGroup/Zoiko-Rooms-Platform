@@ -24,6 +24,7 @@ class MarketPolicyPackCreate(CamelModel):
     deposit_custody_model: str = "HOST_OR_AGENT"
     deposit_protection_deadline_days: int | None = None
     deposit_release_deadline_days: int = 30
+    advance_rent_max_months: int = 12
 
     sublet_consent_standard: str = "STATUTORY_RESPONSE_DEADLINE"
     sublet_consent_response_days: int = 14
@@ -60,6 +61,7 @@ class MarketPolicyPackUpdate(CamelModel):
     deposit_custody_model: str | None = None
     deposit_protection_deadline_days: int | None = None
     deposit_release_deadline_days: int | None = None
+    advance_rent_max_months: int | None = None
 
     sublet_consent_standard: str | None = None
     sublet_consent_response_days: int | None = None
@@ -94,6 +96,7 @@ class MarketPolicyPackRead(CamelModel):
     deposit_custody_model: str
     deposit_protection_deadline_days: int | None = None
     deposit_release_deadline_days: int
+    advance_rent_max_months: int
 
     sublet_consent_standard: str
     sublet_consent_response_days: int

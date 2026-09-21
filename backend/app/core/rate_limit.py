@@ -68,3 +68,14 @@ chat_limiter = RateLimiter(max_requests=CHAT_RATE_LIMIT, window_seconds=CHAT_RAT
 
 # Module-level singleton shared by the login route and tests.
 login_limiter = RateLimiter(max_requests=LOGIN_RATE_LIMIT, window_seconds=LOGIN_RATE_WINDOW)
+
+# ZR-SUB-003 Section 10: "Rate-limit submission and document workflows" --
+# previously no sublet route enforced any limit at all. Same fixed-window,
+# per-authenticated-actor pattern as chat_limiter above.
+SUBLET_SUBMIT_RATE_LIMIT = settings.sublet_submit_rate_limit_max
+SUBLET_SUBMIT_RATE_WINDOW = settings.sublet_submit_rate_limit_window_seconds
+SUBLET_DOCUMENT_RATE_LIMIT = settings.sublet_document_rate_limit_max
+SUBLET_DOCUMENT_RATE_WINDOW = settings.sublet_document_rate_limit_window_seconds
+
+sublet_submit_limiter = RateLimiter(max_requests=SUBLET_SUBMIT_RATE_LIMIT, window_seconds=SUBLET_SUBMIT_RATE_WINDOW)
+sublet_document_limiter = RateLimiter(max_requests=SUBLET_DOCUMENT_RATE_LIMIT, window_seconds=SUBLET_DOCUMENT_RATE_WINDOW)

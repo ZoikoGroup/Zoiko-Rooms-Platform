@@ -1,19 +1,25 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.correlation import get_correlation_id
 from app.core.image_uploads import save_listing_images
+from app.core.rate_limit import sublet_document_limiter
+from app.core.signed_urls import verify_signed_download_token
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
 from app.crud import leasing as leasing_crud
 from app.crud import listing as listing_crud
+from app.crud import occupancy as occupancy_crud
 from app.crud import sublet as sublet_crud
+from app.crud import sublet_documents as sublet_documents_crud
 from app.crud.property import get_property, list_rooms_for_property
 from app.db.session import get_db
 from app.models.user_account import UserAccount
+from app.schemas.occupancy import PreMoveInCancellationRead, PreMoveInCancellationRequest
+from app.schemas.sublet_document import SubletDocumentRead
 from app.schemas.leasing import (
     AgreementCreateRequest,
     AgreementRead,
@@ -24,6 +30,7 @@ from app.schemas.leasing import (
     OfferRead,
     OfferTermsCreate,
     OfferTermsRead,
+    SubletChronologyEvent,
     SubletRequestDecision,
     SubletRequestRead,
     UserAgreementSignRequest,
@@ -56,6 +63,33 @@ def _get_property_or_404(db: Session, property_id: int, user: UserAccount):
     if not user.party_id or prop.owner_party_id != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only manage your own properties")
     return prop
+
+
+@router.post("/occupancies/{occupancy_id}/cancel-before-move-in", response_model=PreMoveInCancellationRead)
+def cancel_hosted_booking_before_move_in(
+    occupancy_id: int,
+    request: Request,
+    payload: PreMoveInCancellationRequest = PreMoveInCancellationRequest(),
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Section 7 gap: a Host cancelling a signed-but-not-moved-in booking on
+    their own property -- previously there was no Host-initiated pre-move-in
+    cancellation path at all (open_host_termination_case requires ACTIVE)."""
+    if not user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No host party on this account")
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    correlation_id = get_correlation_id(request)
+    updated, result = occupancy_crud.cancel_before_move_in(
+        db, occupancy, host_party_id=user.party_id, reason=payload.reason, correlation_id=correlation_id,
+    )
+    log_audit_event(
+        db, None, "occupancy.cancel_before_move_in", "occupancy", str(occupancy_id), correlation_id,
+        reason=f"host_user:{user.id}; {payload.reason}",
+    )
+    emit_event(db, "occupancy.cancelled_before_move_in", "occupancy", str(occupancy_id), result)
+    db.commit()
+    return PreMoveInCancellationRead(occupancy=occupancy_crud.to_occupancy_read(db, updated), **result)
 
 
 @router.get("/properties", response_model=list[PropertyRead])
@@ -541,7 +575,10 @@ def request_hosted_sublet_more_info(
 ):
     """The Host asks the tenant for more information before deciding."""
     sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
-    updated = sublet_crud.request_more_sublet_info(db, sublet_request, user, payload.notes)
+    updated = sublet_crud.request_more_sublet_info(
+        db, sublet_request, user, payload.notes,
+        requested_document_types=payload.requested_document_types, due_at=payload.due_at,
+    )
     log_audit_event(
         db, None, "user_sublet_request.request_info", "sublet_request", str(sublet_request_id),
         get_correlation_id(request), reason=f"user:{user.id}",
@@ -564,6 +601,9 @@ def approve_hosted_sublet_request(
     approved = sublet_crud.approve_sublet_request(
         db, sublet_request, user,
         payload.notes if payload else "", payload.conditions if payload else "", payload.expires_at if payload else None,
+        condition_list=payload.condition_list if payload else None,
+        authority_confirmed=payload.authority_confirmed if payload else False,
+        step_up_password=payload.step_up_password if payload else "",
     )
     log_audit_event(
         db, None, "user_sublet_request.approve", "sublet_request", str(sublet_request_id),
@@ -588,7 +628,9 @@ def decline_hosted_sublet_request(
 ):
     """The Host declines a sublet request for their own listing."""
     sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
-    declined = sublet_crud.reject_sublet_request(db, sublet_request, user, payload.notes if payload else "")
+    declined = sublet_crud.reject_sublet_request(
+        db, sublet_request, user, payload.notes if payload else "", payload.decline_reason_code if payload else "",
+    )
     log_audit_event(
         db, None, "user_sublet_request.decline", "sublet_request", str(sublet_request_id),
         get_correlation_id(request), reason=f"user:{user.id}",
@@ -597,3 +639,60 @@ def decline_hosted_sublet_request(
     db.commit()
     db.refresh(declined)
     return sublet_crud.to_sublet_request_read(db, declined)
+
+
+@router.get("/sublet-requests/{sublet_request_id}/audit", response_model=list[SubletChronologyEvent])
+def get_hosted_sublet_request_audit_trail(
+    sublet_request_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Section 12/Wireframe J: 'The provider sees the same
+    canonical decision facts.' The Host's own privileged audit view."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    return sublet_crud.build_sublet_audit_trail(sublet_request)
+
+
+@router.post(
+    "/sublet-requests/{sublet_request_id}/documents", response_model=SubletDocumentRead, status_code=status.HTTP_201_CREATED,
+)
+async def upload_hosted_sublet_document(
+    sublet_request_id: int, request: Request, file: UploadFile = File(...),
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The Host's own document upload (e.g. a landlord consent letter) on a
+    sublet request for their own listing."""
+    if not sublet_document_limiter.allow(f"sublet_document_upload:user:{user.id}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many documents uploaded -- please wait before trying again.")
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    document = await sublet_documents_crud.upload_sublet_document(db, sublet_request, file, uploaded_by_user_id=user.id)
+    log_audit_event(
+        db, None, "user_sublet_document.upload", "evidence_artifact", str(document.id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    db.commit()
+    return sublet_documents_crud.to_sublet_document_read(
+        document, download_path=f"/api/users/hosting/sublet-requests/{sublet_request_id}/documents/{document.id}/file",
+    )
+
+
+@router.get("/sublet-requests/{sublet_request_id}/documents", response_model=list[SubletDocumentRead])
+def list_hosted_sublet_documents(
+    sublet_request_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    return [
+        sublet_documents_crud.to_sublet_document_read(
+            d, download_path=f"/api/users/hosting/sublet-requests/{sublet_request_id}/documents/{d.id}/file",
+        )
+        for d in sublet_documents_crud.list_sublet_documents(db, sublet_request)
+    ]
+
+
+@router.get("/sublet-requests/{sublet_request_id}/documents/{document_id}/file")
+def download_hosted_sublet_document(
+    sublet_request_id: int, document_id: int, token: str,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    document = sublet_documents_crud.get_sublet_document_or_404(db, sublet_request, document_id)
+    verify_signed_download_token(token, "sublet_document", str(document.id))
+    return sublet_documents_crud.sublet_document_file_response(document)

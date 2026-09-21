@@ -130,6 +130,25 @@ def create_transfer(*, amount: float, currency: str, destination_account_id: str
     return transfer.id
 
 
+def create_refund(*, payment_intent_id: str, amount: float, currency: str, metadata: dict) -> str:
+    """Returns the provider refund id -- a real Stripe Refund id (re_...)
+    when configured, otherwise a generated placeholder. Section 5 gap: this
+    was the missing counterpart to create_payment_intent above --
+    decide_refund (crud/finance.py) previously only ever reversed Zoiko's
+    own ledger, never actually moved money back out of Stripe to the
+    renter's card/bank. Stripe itself enforces the refund ceiling (cannot
+    exceed the PaymentIntent's own captured amount) when real credentials
+    are configured; the simulated fallback trusts the caller's own amount
+    the same way every other simulated path in this module does."""
+    if not is_configured():
+        return new_id("RE")
+    stripe = _client()
+    refund = stripe.Refund.create(
+        payment_intent=payment_intent_id, amount=to_minor_units(amount, currency), metadata=metadata,
+    )
+    return refund.id
+
+
 def create_setup_intent(*, customer_email: str, metadata: dict) -> str:
     """Returns the provider setup-intent id -- a real Stripe SetupIntent id
     (seti_...) when configured, otherwise a generated placeholder. This is
@@ -161,6 +180,22 @@ def reverse_transfer(*, transfer_id: str, amount: float, currency: str, metadata
         transfer_id, amount=to_minor_units(amount, currency), metadata=metadata,
     )
     return reversal.id
+
+
+def retrieve_payment_intent(*, payment_intent_id: str) -> dict | None:
+    """Section 5 gap: reconciliation (crud/finance.py:run_reconciliation)
+    previously only ever checked this platform's own internal tables
+    against each other -- never against what Stripe itself actually
+    recorded for a real-PSP-dispatched payment. Returns
+    {amount_received, currency, status} when configured, None otherwise --
+    there's nothing real to check without credentials, so the caller treats
+    None as "skip this check", the same disclosed-simulation posture as
+    every other function in this module."""
+    if not is_configured():
+        return None
+    stripe = _client()
+    intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+    return {"amount_received": int(intent.amount_received), "currency": intent.currency, "status": intent.status}
 
 
 def construct_webhook_event(*, payload: bytes, signature_header: str):

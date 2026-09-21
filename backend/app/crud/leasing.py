@@ -418,6 +418,18 @@ def add_offer_terms(
     elif data.custom_interval_days is not None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "customIntervalDays only applies to CUSTOM cadence")
 
+    # Section 5 gap: an UPFRONT schedule bills the entire term as one advance
+    # payment (create_agreement: monthly_rent * term_months) -- without a
+    # ceiling, this could collect a whole multi-year lease's rent in a single
+    # obligation. Only UPFRONT is capped: every other cadence never collects
+    # more than one period's rent ahead of its own due date by construction.
+    if data.cadence == "UPFRONT" and data.term_months > policy.advance_rent_max_months:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"UPFRONT cadence would collect {data.term_months} months of rent in advance, exceeding the resolved "
+            f"market cap of {policy.advance_rent_max_months} month(s) (jurisdiction={policy.jurisdiction_code})",
+        )
+
     next_version = offer.current_version + 1
     terms = OfferTerms(
         offer_id=offer.id,

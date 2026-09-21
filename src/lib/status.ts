@@ -89,7 +89,60 @@ export const occupancyStatusTone = {
   PENDING_MOVE_IN: "warning",
   ACTIVE: "success",
   ENDED: "neutral",
+  CANCELLED: "danger",
 } as const;
+
+export const terminationCaseStatusTone: Record<string, "warning" | "success" | "danger" | "neutral"> = {
+  OPENED: "warning",
+  SURRENDER_PROPOSED: "warning",
+  SURRENDER_DECLINED: "danger",
+  PENDING_REVIEW: "warning",
+  REJECTED_PATHWAY: "danger",
+  EFFECTIVE_DATE_SET: "success",
+  TERMINATED: "neutral",
+  WITHDRAWN: "neutral",
+};
+
+export const terminationCauseCodeLabel: Record<string, string> = {
+  RENTER_ORDINARY_EARLY_EXIT: "Ending my stay early (ordinary notice)",
+  RENTER_CONTRACT_BREAK: "Breaking my contract",
+  RENTER_STATUTORY_RIGHT: "A protected/statutory right (e.g. safety, domestic violence)",
+  MUTUAL_SURRENDER: "Mutual agreement with my host",
+  ASSIGNMENT_OR_REPLACEMENT: "Assignment/replacement tenant arranged",
+  HOST_FAULT_OR_NONPERFORMANCE: "Host fault or non-performance",
+  HOST_LAWFUL_POSSESSION_ACTION: "Host lawful possession action",
+  RENTER_BREACH: "Renter breach",
+  PROPERTY_UNINHABITABLE: "Property uninhabitable",
+  CASUALTY_OR_FORCE_EVENT: "Casualty / force majeure event",
+  ABANDONMENT_REPORTED: "Abandonment reported",
+  PLATFORM_SAFETY_INTERVENTION: "Platform safety intervention",
+  LEGAL_OR_REGULATORY_ORDER: "Legal/regulatory order",
+  OTHER_COUNSEL_APPROVED: "Other (counsel-approved)",
+};
+
+// Section 6 gap: the only cause codes a renter may self-invoke through
+// POST .../termination-cases (RENTER_ONLY plus the shared MUTUAL code) --
+// mirrors crud/termination.py's own HOST_ONLY_CAUSE_CODES rejection so the
+// picker never offers a choice the backend would 400 on anyway.
+export const RENTER_TERMINATION_CAUSE_CODES = [
+  "RENTER_ORDINARY_EARLY_EXIT",
+  "RENTER_CONTRACT_BREAK",
+  "RENTER_STATUTORY_RIGHT",
+  "MUTUAL_SURRENDER",
+  "ASSIGNMENT_OR_REPLACEMENT",
+  "LEGAL_OR_REGULATORY_ORDER",
+  "OTHER_COUNSEL_APPROVED",
+] as const;
+
+export const refundEntitlementLineItemLabel: Record<string, string> = {
+  EARNED_RENT: "Earned rent (kept)",
+  REFUNDABLE_UNEARNED_RENT: "Refundable unearned rent",
+  NOTICE_LIABILITY: "Early-termination charge",
+  MITIGATION_CREDIT: "Mitigation credit",
+  RENTER_FEE: "Fee",
+  TAX: "Tax",
+  OTHER_CREDIT: "Other credit",
+};
 
 export const obligationStatusTone = {
   PENDING: "warning",
@@ -202,22 +255,44 @@ export const identityStatusLabel = {
 } as const;
 
 export const subletRequestStatusTone = {
+  draft: "neutral",
   pending_verification: "warning",
   pending_admin_review: "warning",
   more_information_requested: "warning",
+  tenant_response_submitted: "warning",
   approved: "success",
   rejected: "danger",
   withdrawn: "neutral",
+  expired: "neutral",
+  superseded: "neutral",
+  cancelled_by_authority: "danger",
 } as const;
 
 export const subletRequestStatusLabel = {
+  draft: "Draft",
   pending_verification: "Pending Verification",
   pending_admin_review: "Pending Admin Review",
   more_information_requested: "More Information Requested",
+  tenant_response_submitted: "Tenant Responded",
   approved: "Approved",
   rejected: "Rejected",
   withdrawn: "Withdrawn",
+  expired: "Expired",
+  superseded: "Superseded",
+  cancelled_by_authority: "Cancelled by Authority",
 } as const;
+
+// ZR-SUB-003 Section 5.3 FAIRNESS CONTROL: a decline must carry a
+// centrally-configured reason code, not free text.
+export const subletDeclineReasonCodeLabel: Record<string, string> = {
+  PROPERTY_UNSUITABLE_FOR_ARRANGEMENT: "Property unsuitable for this arrangement",
+  PROPOSED_OCCUPANT_NOT_ELIGIBLE: "Proposed occupant not eligible",
+  INSUFFICIENT_INFORMATION_PROVIDED: "Insufficient information provided",
+  TERMS_NOT_ACCEPTABLE: "Terms not acceptable",
+  POLICY_OR_JURISDICTION_RESTRICTION: "Policy or jurisdiction restriction",
+  AUTHORITY_OR_OWNERSHIP_CONCERN: "Authority or ownership concern",
+  OTHER: "Other (explanation required)",
+};
 
 // ZR-ENG-CLR-003 Section 3's arrangement-type taxonomy, in renter-facing (first-person) terms.
 export const subletArrangementTypeLabel = {
@@ -242,6 +317,12 @@ export const subletArrangementTypeAdminLabel = {
 // Types that create a second, independent tenancy alongside the existing one --
 // these are the only ones where a proposed rent for that new tenancy applies.
 export const CO_TENANCY_ARRANGEMENT_TYPES = ["SUBLEASE_PARTIAL", "ADD_CO_TENANT", "LODGER_OR_LICENSEE"] as const;
+
+// ZR-SUB-003 Section 10 step-up authentication: these are the one real
+// "risk signal" this taxonomy has -- an irreversible full handover of the
+// tenancy to a new occupant. Mirrors backend models/sublet_request.py's
+// REPLACING_ARRANGEMENT_TYPES exactly.
+export const REPLACING_ARRANGEMENT_TYPES = ["ASSIGNMENT_FULL", "REPLACEMENT_OCCUPANT"] as const;
 
 export const bookingChangeRequestStatusTone = {
   AWAITING_HOST: "warning",
@@ -422,4 +503,95 @@ export const renterVerificationStatusTone: Record<string, "neutral" | "warning" 
   EXPIRED: "neutral",
   WAIVED_POLICY: "primary",
   SUSPENDED: "neutral",
+};
+
+// -- Section 10 gap: ZR-ENG-CLR-010 general-purpose Dispute Resolution
+// engine -- distinct from the finance.DisputeCase (chargeback) tones above.
+export const disputeCaseStatusTone: Record<string, "primary" | "accent" | "success" | "warning" | "neutral" | "danger"> = {
+  SUBMITTED: "warning",
+  TRIAGED: "primary",
+  LEGAL_REVIEW_REQUIRED: "danger",
+  IN_PROGRESS: "primary",
+  PARTIALLY_RESOLVED: "warning",
+  RESOLVED: "success",
+  CLOSED: "neutral",
+  ON_HOLD: "neutral",
+  EXTERNAL_PENDING: "warning",
+  REOPENED: "danger",
+};
+
+export const disputeClaimStatusTone: Record<string, "primary" | "accent" | "success" | "warning" | "neutral" | "danger"> = {
+  OPEN: "warning",
+  RESPONSE_DUE: "warning",
+  EVIDENCE: "primary",
+  NEGOTIATION: "primary",
+  INTERNAL_REVIEW: "danger",
+  EXTERNAL_REFERRAL: "warning",
+  UPHELD: "success",
+  PARTLY_UPHELD: "success",
+  NOT_UPHELD: "neutral",
+  SETTLED: "success",
+  WITHDRAWN: "neutral",
+};
+
+export const disputeSeverityTone: Record<string, "primary" | "accent" | "success" | "warning" | "neutral" | "danger"> = {
+  "SEV-0": "danger",
+  "SEV-1": "danger",
+  "SEV-2": "warning",
+  "SEV-3": "neutral",
+};
+
+export const disputeSettlementStatusTone: Record<string, "primary" | "accent" | "success" | "warning" | "neutral" | "danger"> = {
+  SENT: "warning",
+  COUNTERED: "primary",
+  ACCEPTED: "success",
+  REJECTED: "danger",
+  EXPIRED: "neutral",
+  EFFECTIVE: "success",
+  VOID: "neutral",
+};
+
+export const disputeFinancialHoldStatusTone: Record<string, "primary" | "accent" | "success" | "warning" | "neutral" | "danger"> = {
+  PROPOSED: "warning",
+  ACTIVE: "danger",
+  RELEASE_PENDING: "warning",
+  RELEASED: "success",
+  CLOSED: "neutral",
+};
+
+export const disputeDeadlineStatusTone: Record<string, "primary" | "accent" | "success" | "warning" | "neutral" | "danger"> = {
+  PENDING: "warning",
+  MET: "success",
+  EXTENDED: "primary",
+  CANCELLED: "neutral",
+};
+
+export const disputeExternalProceedingStatusTone: Record<string, "primary" | "accent" | "success" | "warning" | "neutral" | "danger"> = {
+  FILED: "warning",
+  ACCEPTED: "primary",
+  PENDING: "warning",
+  DISMISSED: "neutral",
+  WITHDRAWN: "neutral",
+};
+
+export const disputeClaimFamilyLabel: Record<string, string> = {
+  DEPOSIT: "Deposit",
+  PAYMENT: "Payment",
+  REFUND_PAYOUT: "Refund / Payout",
+  PROPERTY_CONDITION: "Property Condition",
+  BOOKING_AGREEMENT: "Booking Agreement",
+  SUBLET_OCCUPANCY: "Sublet / Occupancy",
+  MARKETPLACE_CONDUCT: "Marketplace Conduct",
+  PROTECTED_SAFETY: "Protected / Safety",
+  VERIFICATION_FRAUD: "Verification / Fraud",
+  ZOIKO_SERVICE: "Zoiko Service",
+};
+
+export const disputeCaseReopenGroundsLabel: Record<string, string> = {
+  MATERIAL_NEW_EVIDENCE: "Material new evidence",
+  PROCESSING_ERROR: "Processing error",
+  EXTERNAL_DECISION: "External decision",
+  FRAUD_FINDING: "Fraud finding",
+  INTERNAL_REVIEW_REQUESTED: "Internal review requested",
+  OTHER: "Other",
 };

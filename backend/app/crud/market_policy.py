@@ -92,6 +92,7 @@ def to_termination_policy_snapshot(policy: MarketPolicyPack) -> dict:
             float(policy.termination_liability_cap_rent_multiple)
             if policy.termination_liability_cap_rent_multiple is not None else None
         ),
+        "termination_break_fee_bands": list(policy.termination_break_fee_bands or []),
     })
     return snapshot
 

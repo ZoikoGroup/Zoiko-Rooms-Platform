@@ -142,7 +142,7 @@ def _admin_tool_list_obligations(db: Session, admin: AdminUser, args: dict) -> l
 
 
 def _admin_tool_list_occupancies(db: Session, admin: AdminUser, _args: dict) -> list[dict]:
-    return _rows([crud_occupancy.to_occupancy_read(o) for o in crud_occupancy.list_occupancies_for(db, admin)])
+    return _rows([crud_occupancy.to_occupancy_read(db, o) for o in crud_occupancy.list_occupancies_for(db, admin)])
 
 
 def _admin_tool_list_applications(db: Session, admin: AdminUser, _args: dict) -> list[dict]:
@@ -242,7 +242,7 @@ def _user_tool_my_occupancies(db: Session, user: UserAccount, _args: dict) -> li
     occupancies = db.scalars(
         select(Occupancy).where(Occupancy.guest_id == guest.id).order_by(Occupancy.created_at.desc())
     )
-    return _rows([crud_occupancy.to_occupancy_read(o) for o in occupancies])
+    return _rows([crud_occupancy.to_occupancy_read(db, o) for o in occupancies])
 
 
 def _user_tool_my_obligations(db: Session, user: UserAccount, _args: dict) -> list[dict]:

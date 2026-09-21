@@ -438,13 +438,19 @@ class UserOccupancyRead(CamelModel):
     # link to /agreements/{id}/extension-requests etc. -- occupancy itself
     # has no direct reference to it.
     agreement_id: int | None = None
+    # ZR-SUB-003 Section 3: mirrors OccupancyRead's own field -- an occupancy
+    # already reassigned once via ASSIGNMENT_FULL/REPLACEMENT_OCCUPANT can't
+    # be sublet onward again (crud/sublet.py:_assert_sublet_permitted already
+    # enforces this server-side); the renter's own "Request to sublet" button
+    # needs this to know not to offer an action that will just 409.
+    reassigned_via_sublet_request_id: int | None = None
 
 
 class SubletRequestCreate(CamelModel):
     """User submitting a sublet request."""
 
     occupancy_id: int
-    proposed_renter_party_id: int
+    proposed_renter_party_id: int | None
     # Defaults to the platform's existing behavior (a full occupant swap) so the
     # already-shipped frontend "Request to sublet" flow keeps working unchanged --
     # this field is additive for callers (like our own tests/API clients) that
@@ -456,8 +462,20 @@ class SubletRequestCreate(CamelModel):
     # provided, validated against the market pack's resolved cap
     # (ZR-ENG-CLR-003 Rule 4.4 / Section 6).
     proposed_monthly_rent: float | None = None
+    # ZR-SUB-003 Section 3 Step 2 Wireframe B: "Proposed start date / Proposed
+    # end date." Both optional (never in the original build) -- when given,
+    # crud/sublet.py:submit_sublet_request validates start<end and both fall
+    # within the current occupancy's own remaining lease window.
+    proposed_start_date: date | None = None
+    proposed_end_date: date | None = None
     # ZR-SUB-003 Section 3 Step 2 Wireframe B: the tenant's own stated reason.
     reason: str = ""
+    # ZR-SUB-003 Section 12: "Creates draft; idempotency key required." A
+    # retry with the same key returns the already-created row instead of a
+    # duplicate -- see models/sublet_request.py's own field docstring.
+    # Optional here (not "required") so this stays additive for existing
+    # callers; a blank key just skips the replay-detection lookup.
+    idempotency_key: str = ""
 
 
 class SubletRenterLookup(CamelModel):
@@ -479,7 +497,9 @@ class SubletRequestRead(CamelModel):
 
     id: int
     current_occupancy_id: int
-    proposed_renter_party_id: int
+    # ZR-SUB-003 Section 3 Step 1: a DRAFT "carries no proposed occupant yet"
+    # -- crud/sublet.py:create_draft_sublet_request sets this to None.
+    proposed_renter_party_id: int | None
     status: str
     authority_evidence_ref: str
     admin_decision: str
@@ -492,7 +512,13 @@ class SubletRequestRead(CamelModel):
     info_requested_at: datetime | None = None
     info_response_note: str = ""
     info_responded_at: datetime | None = None
+    info_requested_document_types: list[str] = []
+    info_request_due_at: datetime | None = None
+    proposed_start_date: date | None = None
+    proposed_end_date: date | None = None
     approval_conditions: str = ""
+    approval_condition_list: list[str] = []
+    approved_with_authority_confirmation: bool = False
     approval_expires_at: datetime | None = None
     withdrawn_at: datetime | None = None
     reason: str = ""
@@ -515,15 +541,77 @@ class SubletRequestRead(CamelModel):
     current_tenant_name: str = ""
     proposed_renter_name: str = ""
 
+    version: int = 1
+    decline_reason_code: str = ""
+    superseded_by_sublet_request_id: int | None = None
+    expired_at: datetime | None = None
+    cancelled_by_authority_at: datetime | None = None
+    cancelled_by_authority_admin_id: int | None = None
+    cancelled_by_authority_reason: str = ""
+
 
 class SubletRequestDecision(CamelModel):
-    """Optional review notes recorded with a sublet approval or rejection.
-    conditions/expires_at are only meaningful on an approval (ZR-SUB-003
-    Section 5.2) -- ignored by decline/request-info/respond."""
+    """Optional review notes recorded with a sublet approval, decline, or
+    request-for-more-information -- fields only meaningful for one of those
+    three are simply ignored by the other two.
+    conditions/condition_list/expires_at/authority_confirmed: approval only
+    (ZR-SUB-003 Section 5.2). decline_reason_code: decline only (Section
+    5.3 FAIRNESS CONTROL) -- must be one of models.sublet_request.
+    SUBLET_DECLINE_REASON_CODES. requested_document_types/due_at: request-
+    info only (Section 5.1 Wireframe G)."""
 
     notes: str = ""
     conditions: str = ""
+    condition_list: list[str] = []
     expires_at: datetime | None = None
+    # ZR-SUB-003 Section 5.2 Wireframe H: "[ ] I confirm I am authorized to
+    # make this decision for this rental." crud/sublet.py:approve_sublet_request
+    # requires this true.
+    authority_confirmed: bool = False
+    decline_reason_code: str = ""
+    requested_document_types: list[str] = []
+    due_at: datetime | None = None
+    # ZR-SUB-003 Section 10: "Apply step-up authentication to approval/
+    # decline actions where risk signals require it." This build has no
+    # risk-scoring system, so the concrete, real "risk signal" used is the
+    # existing REPLACING_ARRANGEMENT_TYPES distinction (ASSIGNMENT_FULL/
+    # REPLACEMENT_OCCUPANT) -- approving one of those irreversibly hands the
+    # whole tenancy to a new occupant, unlike a co-tenancy/additional-
+    # occupant approval. Required (re-verified against the deciding actor's
+    # own account password) only for that approval; ignored everywhere else.
+    step_up_password: str = ""
+
+
+class SubletDecisionAuthorityCancel(CamelModel):
+    """ZR-SUB-003 Section 6 CANCELLED_BY_AUTHORITY -- a Super Admin's own
+    record-level correction, never an automatic reversal (see the model's
+    own field docstring)."""
+
+    reason: str
+
+
+class SubletSupersede(CamelModel):
+    new_sublet_request_id: int
+
+
+class SubletTerminologyRead(CamelModel):
+    """ZR-SUB-003 Section 8: sublet.uiTerm -- 'Localized user-facing term:
+    sublet, sublease or approved equivalent.' Resolved from the occupancy's
+    own jurisdiction before the create flow renders, so the wizard can show
+    the jurisdiction-correct word instead of a hardcoded "sublet"."""
+
+    ui_term: str
+
+
+class SubletChronologyEvent(CamelModel):
+    """ZR-SUB-003 Section 12: 'GET /{id}/audit: Privileged audit view; not
+    ordinary user endpoint.' Reconstructed from the request's own timestamp
+    fields -- same approach as DisputeChronologyEvent
+    (services/dispute_case_export.py), not a separate audit-event table."""
+
+    timestamp: datetime
+    event_type: str
+    summary: str
 
 
 class BookingChangeRequestCreate(CamelModel):

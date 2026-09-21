@@ -15,8 +15,15 @@ import {
   hostSubletDecisionRecordUrl,
   listHostedSubletRequests,
   requestHostedSubletMoreInfo,
+  signHostedAgreement,
 } from "@/lib/user-api";
-import { subletArrangementTypeAdminLabel, subletRequestStatusLabel, subletRequestStatusTone } from "@/lib/status";
+import {
+  REPLACING_ARRANGEMENT_TYPES,
+  subletArrangementTypeAdminLabel,
+  subletDeclineReasonCodeLabel,
+  subletRequestStatusLabel,
+  subletRequestStatusTone,
+} from "@/lib/status";
 import { Card, EmptyState, SectionHeading, Toast, useToast } from "@/components/user/ui";
 
 /** ZR-SUB-003 IMPLEMENTATION LOCK: "A tenant's request for permission to sublet
@@ -30,11 +37,18 @@ export function HostSubletRequestsManager() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [declineTarget, setDeclineTarget] = useState<SubletRequest | null>(null);
   const [declineNotes, setDeclineNotes] = useState("");
+  const [declineReasonCode, setDeclineReasonCode] = useState("");
   const [infoTarget, setInfoTarget] = useState<SubletRequest | null>(null);
   const [infoNote, setInfoNote] = useState("");
+  const [infoDocumentTypes, setInfoDocumentTypes] = useState("");
+  const [infoDueAt, setInfoDueAt] = useState("");
   const [approveTarget, setApproveTarget] = useState<SubletRequest | null>(null);
   const [approveConditions, setApproveConditions] = useState("");
+  const [approveConditionList, setApproveConditionList] = useState<string[]>([]);
+  const [approveConditionDraft, setApproveConditionDraft] = useState("");
   const [approveExpiresAt, setApproveExpiresAt] = useState("");
+  const [approveAuthorityConfirmed, setApproveAuthorityConfirmed] = useState(false);
+  const [approveStepUpPassword, setApproveStepUpPassword] = useState("");
   const { toast, showToast } = useToast();
 
   const load = useCallback(async () => {
@@ -55,21 +69,40 @@ export function HostSubletRequestsManager() {
   function openApprove(request: SubletRequest) {
     setApproveTarget(request);
     setApproveConditions("");
+    setApproveConditionList([]);
+    setApproveConditionDraft("");
     setApproveExpiresAt("");
+    setApproveAuthorityConfirmed(false);
+    setApproveStepUpPassword("");
   }
 
+  function addApproveCondition() {
+    if (!approveConditionDraft.trim()) return;
+    setApproveConditionList((prev) => [...prev, approveConditionDraft.trim()]);
+    setApproveConditionDraft("");
+  }
+
+  const approveRequiresStepUp = Boolean(
+    approveTarget && (REPLACING_ARRANGEMENT_TYPES as readonly string[]).includes(approveTarget.arrangementType)
+  );
+
   async function submitApprove() {
-    if (!approveTarget) return;
+    if (!approveTarget || !approveAuthorityConfirmed) return;
+    if (approveRequiresStepUp && !approveStepUpPassword) return;
     setBusyId(approveTarget.id);
     try {
       const updated = await approveHostedSubletRequest(approveTarget.id, {
         conditions: approveConditions.trim(),
+        conditionList: approveConditionList,
         expiresAt: approveExpiresAt ? new Date(approveExpiresAt).toISOString() : null,
+        authorityConfirmed: approveAuthorityConfirmed,
+        stepUpPassword: approveStepUpPassword,
       });
       setRequests((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
       showToast("Sublet request approved — occupancy transferred.");
       setApproveTarget(null);
     } catch (err) {
+      setApproveStepUpPassword("");
       showToast(errorMessage(err, "Could not approve this sublet request."), "error");
     } finally {
       setBusyId(null);
@@ -79,13 +112,21 @@ export function HostSubletRequestsManager() {
   function openRequestInfo(request: SubletRequest) {
     setInfoTarget(request);
     setInfoNote("");
+    setInfoDocumentTypes("");
+    setInfoDueAt("");
   }
 
   async function submitRequestInfo() {
     if (!infoTarget || !infoNote.trim()) return;
     setBusyId(infoTarget.id);
     try {
-      const updated = await requestHostedSubletMoreInfo(infoTarget.id, infoNote.trim());
+      const updated = await requestHostedSubletMoreInfo(infoTarget.id, infoNote.trim(), {
+        requestedDocumentTypes: infoDocumentTypes
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean),
+        dueAt: infoDueAt ? new Date(infoDueAt).toISOString() : null,
+      });
       setRequests((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
       showToast("Asked the tenant for more information.");
       setInfoTarget(null);
@@ -96,16 +137,38 @@ export function HostSubletRequestsManager() {
     }
   }
 
+  async function handleSignCoTenantAgreement(request: SubletRequest) {
+    if (!request.newAgreementId) return;
+    setBusyId(request.id);
+    try {
+      await signHostedAgreement(request.newAgreementId);
+      showToast("Agreement signed. Waiting on the co-tenant's own signature and payment.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not sign this agreement — it may already be signed."), "error");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   function openDecline(request: SubletRequest) {
     setDeclineTarget(request);
     setDeclineNotes("");
+    setDeclineReasonCode("");
   }
 
   async function submitDecline() {
     if (!declineTarget) return;
+    if (!declineReasonCode) {
+      showToast("Choose a reason for declining this request.", "error");
+      return;
+    }
+    if (declineReasonCode === "OTHER" && !declineNotes.trim()) {
+      showToast("Add a short explanation when the reason is \"Other\".", "error");
+      return;
+    }
     setBusyId(declineTarget.id);
     try {
-      const updated = await declineHostedSubletRequest(declineTarget.id, declineNotes.trim());
+      const updated = await declineHostedSubletRequest(declineTarget.id, declineNotes.trim(), declineReasonCode);
       setRequests((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
       showToast("Sublet request declined.");
       setDeclineTarget(null);
@@ -118,7 +181,9 @@ export function HostSubletRequestsManager() {
 
   if (loading) return <Loader label="Loading sublet requests" />;
 
-  const pending = requests.filter((r) => r.status === "pending_admin_review" || r.status === "pending_verification");
+  const pending = requests.filter(
+    (r) => r.status === "pending_admin_review" || r.status === "pending_verification" || r.status === "tenant_response_submitted",
+  );
   const awaitingTenant = requests.filter((r) => r.status === "more_information_requested");
   const decided = requests.filter((r) => !pending.includes(r) && !awaitingTenant.includes(r));
 
@@ -165,9 +230,19 @@ export function HostSubletRequestsManager() {
                         &ldquo;{request.reason}&rdquo;
                       </p>
                     )}
+                    {(request.proposedStartDate || request.proposedEndDate) && (
+                      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                        Proposed period: {request.proposedStartDate ? formatDate(request.proposedStartDate) : "—"} to{" "}
+                        {request.proposedEndDate ? formatDate(request.proposedEndDate) : "—"}
+                      </p>
+                    )}
                     {request.infoRequestNote && (
                       <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
                         You asked: &ldquo;{request.infoRequestNote}&rdquo;
+                        {request.infoRequestedDocumentTypes.length > 0 && (
+                          <> — documents: {request.infoRequestedDocumentTypes.join(", ")}</>
+                        )}
+                        {request.infoRequestDueAt && <> — due {formatDate(request.infoRequestDueAt)}</>}
                       </p>
                     )}
                     {request.infoResponseNote && (
@@ -175,13 +250,18 @@ export function HostSubletRequestsManager() {
                         Tenant replied: &ldquo;{request.infoResponseNote}&rdquo;
                       </p>
                     )}
-                    {request.status === "approved" && (request.approvalConditions || request.approvalExpiresAt) && (
-                      <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300">
-                        {request.approvalConditions && <>Conditions: {request.approvalConditions}</>}
-                        {request.approvalConditions && request.approvalExpiresAt && " · "}
-                        {request.approvalExpiresAt && <>Expires {formatDate(request.approvalExpiresAt)}</>}
-                      </p>
-                    )}
+                    {request.status === "approved" &&
+                      (request.approvalConditions || request.approvalConditionList.length > 0 || request.approvalExpiresAt) && (
+                        <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300">
+                          {request.approvalConditionList.length > 0 && (
+                            <>Conditions: {request.approvalConditionList.join("; ")}</>
+                          )}
+                          {request.approvalConditionList.length > 0 && request.approvalConditions && " · "}
+                          {request.approvalConditions && <>Notes: {request.approvalConditions}</>}
+                          {(request.approvalConditionList.length > 0 || request.approvalConditions) && request.approvalExpiresAt && " · "}
+                          {request.approvalExpiresAt && <>Expires {formatDate(request.approvalExpiresAt)}</>}
+                        </p>
+                      )}
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <Badge tone={subletRequestStatusTone[request.status] ?? "neutral"}>
@@ -199,6 +279,16 @@ export function HostSubletRequestsManager() {
                           <ThumbsDown className="h-3.5 w-3.5" /> Decline
                         </Button>
                       </>
+                    )}
+                    {decided.includes(request) && request.status === "approved" && request.newAgreementId && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        loading={busyId === request.id}
+                        onClick={() => handleSignCoTenantAgreement(request)}
+                      >
+                        Sign co-tenant agreement
+                      </Button>
                     )}
                     {decided.includes(request) && (
                       <a href={hostSubletDecisionRecordUrl(request.id)} download>
@@ -225,12 +315,48 @@ export function HostSubletRequestsManager() {
             <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Conditions (optional)
             </label>
+            {approveConditionList.length > 0 && (
+              <ul className="mb-2 space-y-1">
+                {approveConditionList.map((c, i) => (
+                  <li
+                    key={i}
+                    className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-1.5 text-xs text-slate-600 dark:bg-slate-800/60 dark:text-slate-300"
+                  >
+                    {c}
+                    <button
+                      type="button"
+                      className="text-slate-400 hover:text-accent-600"
+                      onClick={() => setApproveConditionList((prev) => prev.filter((_, idx) => idx !== i))}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="flex gap-2">
+              <input
+                value={approveConditionDraft}
+                onChange={(e) => setApproveConditionDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addApproveCondition();
+                  }
+                }}
+                placeholder="e.g. No additional occupants"
+                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              />
+              <Button type="button" variant="outline" onClick={addApproveCondition}>
+                + Add condition
+              </Button>
+            </div>
             <textarea
               value={approveConditions}
               onChange={(e) => setApproveConditions(e.target.value)}
-              rows={3}
-              placeholder="e.g. No additional occupants. No pets."
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              rows={2}
+              placeholder="Any other notes on the conditions (optional)"
+              className="mt-2 w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
             />
           </div>
           <div>
@@ -244,11 +370,43 @@ export function HostSubletRequestsManager() {
               className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
             />
           </div>
+          <label className="flex items-start gap-2 text-xs text-slate-600 dark:text-slate-300">
+            <input
+              type="checkbox"
+              checked={approveAuthorityConfirmed}
+              onChange={(e) => setApproveAuthorityConfirmed(e.target.checked)}
+              className="mt-0.5"
+            />
+            I confirm I am authorized to make this decision for this rental.
+          </label>
+          {approveRequiresStepUp && (
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                Confirm your password
+              </label>
+              <p className="mb-1.5 text-xs text-slate-500 dark:text-slate-400">
+                This hands the tenancy over to a new occupant and can&apos;t be undone — re-enter your password to
+                confirm.
+              </p>
+              <input
+                type="password"
+                value={approveStepUpPassword}
+                onChange={(e) => setApproveStepUpPassword(e.target.value)}
+                placeholder="Your account password"
+                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              />
+            </div>
+          )}
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setApproveTarget(null)}>
               Cancel
             </Button>
-            <Button variant="primary" loading={busyId === approveTarget?.id} onClick={submitApprove}>
+            <Button
+              variant="primary"
+              loading={busyId === approveTarget?.id}
+              disabled={!approveAuthorityConfirmed || (approveRequiresStepUp && !approveStepUpPassword)}
+              onClick={submitApprove}
+            >
               <ThumbsUp className="h-3.5 w-3.5" /> Approve request
             </Button>
           </div>
@@ -268,6 +426,28 @@ export function HostSubletRequestsManager() {
             placeholder="e.g. Please share the proposed occupant's employer reference."
             className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
           />
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Requested document types (optional)
+            </label>
+            <input
+              value={infoDocumentTypes}
+              onChange={(e) => setInfoDocumentTypes(e.target.value)}
+              placeholder="e.g. Employer reference, Proof of income (comma-separated)"
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Response due date (optional)
+            </label>
+            <input
+              type="date"
+              value={infoDueAt}
+              onChange={(e) => setInfoDueAt(e.target.value)}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setInfoTarget(null)}>
               Cancel
@@ -281,8 +461,27 @@ export function HostSubletRequestsManager() {
 
       <Modal open={Boolean(declineTarget)} onClose={() => setDeclineTarget(null)} title="Decline sublet request">
         <div className="space-y-3.5">
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Reason
+            </label>
+            <select
+              value={declineReasonCode}
+              onChange={(e) => setDeclineReasonCode(e.target.value)}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            >
+              <option value="">Select a reason…</option>
+              {Object.entries(subletDeclineReasonCodeLabel).map(([code, label]) => (
+                <option key={code} value={code}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            Optionally tell the renter why — they will see this note.
+            {declineReasonCode === "OTHER"
+              ? "Explain your reason — the renter will see this note."
+              : "Optionally add more detail — the renter will see this note."}
           </p>
           <textarea
             value={declineNotes}
@@ -295,7 +494,12 @@ export function HostSubletRequestsManager() {
             <Button variant="ghost" onClick={() => setDeclineTarget(null)}>
               Cancel
             </Button>
-            <Button variant="accent" loading={busyId === declineTarget?.id} onClick={submitDecline}>
+            <Button
+              variant="accent"
+              loading={busyId === declineTarget?.id}
+              disabled={!declineReasonCode || (declineReasonCode === "OTHER" && !declineNotes.trim())}
+              onClick={submitDecline}
+            >
               Decline request
             </Button>
           </div>

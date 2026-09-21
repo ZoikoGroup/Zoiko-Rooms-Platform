@@ -5,7 +5,7 @@ from app.api.deps import get_current_admin
 from app.crud import notification as crud
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
-from app.schemas.notification import NotificationRead, UnreadCountRead
+from app.schemas.notification import NotificationPreferenceRead, NotificationPreferenceUpdate, NotificationRead, UnreadCountRead
 
 # Shared by both "admin" and "super_admin" roles -- every query below is scoped to
 # the caller's own admin.id, so a regular admin can never see another admin's rows
@@ -37,3 +37,19 @@ def mark_read(notification_id: int, admin: AdminUser = Depends(get_current_admin
 def mark_all_read(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     updated = crud.mark_all_read_for_admin(db, admin.id)
     return {"updated": updated}
+
+
+@router.get("/preferences", response_model=NotificationPreferenceRead)
+def get_preferences(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    return crud.get_or_create_preference_for_admin(db, admin.id)
+
+
+@router.put("/preferences", response_model=NotificationPreferenceRead)
+def put_preferences(
+    payload: NotificationPreferenceUpdate, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    pref = crud.get_or_create_preference_for_admin(db, admin.id)
+    return crud.update_preference(
+        db, pref, opted_out_categories=payload.opted_out_categories, quiet_hours_enabled=payload.quiet_hours_enabled,
+        quiet_hours_start_minute=payload.quiet_hours_start_minute, quiet_hours_end_minute=payload.quiet_hours_end_minute,
+    )

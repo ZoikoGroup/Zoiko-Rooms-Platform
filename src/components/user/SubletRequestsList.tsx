@@ -21,19 +21,27 @@ import { Card, EmptyState, Toast, useToast } from "@/components/user/ui";
 
 type StatusFilter = "all" | keyof typeof subletRequestStatusLabel;
 
-const COMPLETED_STATUSES = new Set(["approved", "rejected", "withdrawn"]);
+const COMPLETED_STATUSES = new Set(["approved", "rejected", "withdrawn", "expired", "superseded", "cancelled_by_authority"]);
 
 const STATUS_FILTERS: StatusFilter[] = [
   "all",
+  "draft",
   "pending_verification",
   "pending_admin_review",
   "more_information_requested",
+  "tenant_response_submitted",
   "approved",
   "rejected",
   "withdrawn",
+  "expired",
+  "superseded",
+  "cancelled_by_authority",
 ];
 
-const WITHDRAWABLE_STATUSES = new Set(["pending_verification", "pending_admin_review", "more_information_requested"]);
+// Mirrors backend crud/sublet.py's _WITHDRAWABLE_STATUSES.
+const WITHDRAWABLE_STATUSES = new Set([
+  "pending_verification", "pending_admin_review", "more_information_requested", "tenant_response_submitted",
+]);
 
 export function SubletRequestsList() {
   const { toast, showToast } = useToast();
@@ -136,6 +144,21 @@ export function SubletRequestsList() {
 
   return (
     <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          Request permission to sublet, and track decisions for your rentals.
+        </p>
+        {/* ZR-SUB-003 Wireframe A's own landing-page CTA -- creation itself
+            still happens from the specific rental's own card (My Rentals),
+            since the form needs that occupancy's context (arrangement
+            options, identity checks); this routes there rather than
+            duplicating that flow here. */}
+        <Link href="/account/rentals">
+          <Button size="sm" variant="primary">
+            + New sublet request
+          </Button>
+        </Link>
+      </div>
       <div className="flex flex-wrap gap-2">
         {STATUS_FILTERS.map((s) => (
           <button
@@ -171,6 +194,12 @@ export function SubletRequestsList() {
               <span>Proposed renter party #{request.proposedRenterPartyId}</span>
               {request.decidedAt && <span>Decided {formatDate(request.decidedAt)}</span>}
             </p>
+            {(request.proposedStartDate || request.proposedEndDate) && (
+              <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                Proposed period: {request.proposedStartDate ? formatDate(request.proposedStartDate) : "—"} to{" "}
+                {request.proposedEndDate ? formatDate(request.proposedEndDate) : "—"}
+              </p>
+            )}
             {request.reason && (
               <p className="mt-2 max-w-xl text-xs text-slate-500 dark:text-slate-400">
                 Your reason: &ldquo;{request.reason}&rdquo;
@@ -184,6 +213,10 @@ export function SubletRequestsList() {
             {request.infoRequestNote && (
               <p className="mt-2 max-w-xl rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
                 Your host asked: &ldquo;{request.infoRequestNote}&rdquo;
+                {request.infoRequestedDocumentTypes.length > 0 && (
+                  <> — please send: {request.infoRequestedDocumentTypes.join(", ")}</>
+                )}
+                {request.infoRequestDueAt && <> — by {formatDate(request.infoRequestDueAt)}</>}
               </p>
             )}
             {request.infoResponseNote && (
@@ -191,11 +224,22 @@ export function SubletRequestsList() {
                 Your response: &ldquo;{request.infoResponseNote}&rdquo;
               </p>
             )}
-            {request.status === "approved" && (request.approvalConditions || request.approvalExpiresAt) && (
-              <p className="mt-2 max-w-xl rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300">
-                {request.approvalConditions && <>Conditions: {request.approvalConditions}</>}
-                {request.approvalConditions && request.approvalExpiresAt && " · "}
-                {request.approvalExpiresAt && <>Expires {formatDate(request.approvalExpiresAt)}</>}
+            {request.status === "approved" &&
+              (request.approvalConditions || request.approvalConditionList.length > 0 || request.approvalExpiresAt) && (
+                <p className="mt-2 max-w-xl rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300">
+                  {request.approvalConditionList.length > 0 && (
+                    <>Conditions: {request.approvalConditionList.join("; ")}</>
+                  )}
+                  {request.approvalConditionList.length > 0 && request.approvalConditions && " · "}
+                  {request.approvalConditions && <>Notes: {request.approvalConditions}</>}
+                  {(request.approvalConditionList.length > 0 || request.approvalConditions) && request.approvalExpiresAt && " · "}
+                  {request.approvalExpiresAt && <>Expires {formatDate(request.approvalExpiresAt)}</>}
+                </p>
+              )}
+            {request.status === "approved" && (
+              <p className="mt-2 max-w-xl text-[11px] text-slate-400">
+                Approved — permission may still be subject to your host&apos;s conditions above and any applicable
+                legal or contractual requirements.
               </p>
             )}
           </div>

@@ -35,6 +35,7 @@ from app.models.leasing import Agreement, Offer
 from app.models.occupancy import Occupancy
 from app.models.user_account import UserAccount
 from app.schemas.leasing import BookingChangeRequestRead
+from app.services import inventory as inventory_service
 from app.services.booking_change_consent import assert_proposal_unchanged, compute_proposal_hash
 from app.services.booking_change_state_machine import transition
 
@@ -109,6 +110,7 @@ def _record_terminal_failure(
     this one."""
     transition(bcr, to_status, note=note)
     bcr.decision_note = note
+    _release_premises_change_hold(db, bcr, reason=f"premises_change_request_{to_status.lower()}")
     db.commit()
     db.refresh(bcr)
 
@@ -130,9 +132,22 @@ def _record_terminal_failure(
     db.commit()
 
 
+def _release_premises_change_hold(db: Session, bcr: BookingChangeRequest, *, reason: str) -> None:
+    """Section 8 gap: the counterpart to request_premises_change's own
+    create_hold -- releases the target room the instant this request stops
+    being AWAITING_HOST, whichever way it leaves that state (approved,
+    declined, withdrawn, expired). A no-op if no hold exists (idempotent,
+    same as inventory_service.release_hold itself), so it's always safe to
+    call unconditionally on every PREMISES_CHANGE BCR leaving AWAITING_HOST."""
+    if bcr.change_type != "PREMISES_CHANGE":
+        return
+    inventory_service.release_hold(db, source_type="premises_change_request", source_id=bcr.id, reason=reason)
+
+
 def _expire_if_overdue(db: Session, bcr: BookingChangeRequest) -> BookingChangeRequest:
     if bcr.status == "AWAITING_HOST" and bcr.expires_at <= datetime.now(timezone.utc):
         transition(bcr, "EXPIRED")
+        _release_premises_change_hold(db, bcr, reason="premises_change_request_expired")
         db.commit()
         db.refresh(bcr)
 
@@ -448,7 +463,20 @@ def request_premises_change(
         expires_at=datetime.now(timezone.utc) + REQUEST_EXPIRY,
     )
     bcr.proposal_hash = compute_proposal_hash(bcr)
-    db.add(bcr)
+
+    # Section 8 gap: without a hold, the target room stays fully bookable by
+    # anyone else for the entire AWAITING_HOST window (up to REQUEST_EXPIRY,
+    # 7 days) -- a host could approve this request only to find someone else
+    # already took the room in the meantime. Same SAVEPOINT discipline as
+    # crud/leasing.py:_accept_offer_and_hold_room -- the BCR insert and the
+    # hold attempt must both live inside one nested transaction, or a failed
+    # hold would leave a BCR created with nothing actually reserved for it.
+    with db.begin_nested():
+        db.add(bcr)
+        db.flush()
+        inventory_service.create_hold(
+            db, room_id=target_listing.room_id, source_type="premises_change_request", source_id=bcr.id,
+        )
     db.commit()
     db.refresh(bcr)
 
@@ -810,6 +838,14 @@ def _approve_premises_change(db: Session, bcr: BookingChangeRequest, admin: Admi
         _record_terminal_failure(db, bcr, "CONFLICT", admin, "Target listing is no longer published")
         raise HTTPException(status.HTTP_409_CONFLICT, "Target listing is no longer published")
 
+    # Section 8 gap: release the speculative hold *before* submit_application
+    # below -- is_listing_available (crud/listing.py:_occupied_room_ids)
+    # treats any held room as unavailable, so leaving this hold in place
+    # would make the renter's own pre-approved application fail against
+    # their own reservation. The fresh Application's own future Offer-accept
+    # step places the real, durable hold from here on.
+    _release_premises_change_hold(db, bcr, reason="premises_change_request_approved")
+
     try:
         application = submit_application(db, ApplicationCreate(
             listing_id=target_listing.id, guest_id=bcr.requested_by_guest_id,
@@ -953,6 +989,7 @@ def decline_change_request(db: Session, bcr: BookingChangeRequest, admin: AdminU
     bcr.decided_by_admin_id = admin.id
     bcr.decided_at = datetime.now(timezone.utc)
     bcr.decision_note = decision_note
+    _release_premises_change_hold(db, bcr, reason="premises_change_request_declined")
     db.commit()
     db.refresh(bcr)
 
@@ -1128,6 +1165,7 @@ def withdraw_change_request(db: Session, user: UserAccount, bcr: BookingChangeRe
         raise HTTPException(status.HTTP_409_CONFLICT, f"Only an AWAITING_HOST request can be withdrawn (current status: {bcr.status})")
 
     transition(bcr, "WITHDRAWN")
+    _release_premises_change_hold(db, bcr, reason="premises_change_request_withdrawn")
     db.commit()
     db.refresh(bcr)
 

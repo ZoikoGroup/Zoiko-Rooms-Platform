@@ -15,6 +15,7 @@ import {
   LogOut,
   MessageCircle,
   Repeat,
+  Scale,
   Search,
   ShieldCheck,
   UserCircle2,
@@ -45,6 +46,7 @@ const navGroups = [
       { href: "/account/host/listings", label: "My Listings", icon: BedDouble },
       { href: "/account/host/applications", label: "Applications", icon: ClipboardCheck },
       { href: "/account/host/sublet-requests", label: "Sublet Requests", icon: Repeat },
+      { href: "/account/host/disputes", label: "Disputes", icon: Scale },
     ],
   },
   {

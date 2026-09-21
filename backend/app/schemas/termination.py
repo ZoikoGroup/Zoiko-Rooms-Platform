@@ -101,7 +101,19 @@ class TerminationCaseRead(CamelModel):
     # termination_case.py's own field docstring).
     adjudicated_effective_date: date | None
     adjudicated_effective_date_reason: str
+    notice_service_proof_ref: str
+    notice_service_recorded_by_admin_id: int | None
     created_at: datetime
+
+
+class TerminationNoticeServiceRecord(CamelModel):
+    """Section 11 gap: a Host/Admin's own attestation that real-world
+    delivery occurred for a non-PORTAL notice_method -- see
+    models/termination_case.py's own field docstring for why this can't be
+    verified automatically."""
+
+    served_at: datetime
+    proof_ref: str
 
 
 class TerminationCaseTribunalLiability(CamelModel):

@@ -182,6 +182,11 @@ class SimulatedPayment(Base):
     # actually dispatched to Stripe, which is what then blocks a host-side
     # admin from confirming it directly -- see PAYMENT_METHOD_CLASSES.
     method_class: Mapped[str] = mapped_column(String(20), default="EXTERNAL")
+    # Section 5 gap: a receipt/cheque/bank-reference number backing an
+    # EXTERNAL confirm call -- required by crud/finance.py:confirm_payment
+    # whenever method_class == "EXTERNAL", blank for every real-PSP-
+    # dispatched payment (that evidence is the ProcessorTransaction itself).
+    evidence_ref: Mapped[str] = mapped_column(String(500), default="")
 
     guest: Mapped["Guest"] = relationship(foreign_keys=[guest_id])
     payer_guest: Mapped["Guest | None"] = relationship(foreign_keys=[payer_guest_id])
@@ -482,6 +487,12 @@ class RefundRequest(Base):
     decided_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Section 5 gap: previously a completed refund only ever reversed
+    # Zoiko's own ledger -- this is the real Stripe Refund id (re_...) once
+    # crud/finance.py:decide_refund actually pulls the money back through
+    # Stripe, blank when the underlying payment was never a real PSP
+    # transaction (e.g. EXTERNAL/cash) or Stripe isn't configured.
+    psp_refund_id: Mapped[str] = mapped_column(String(100), default="")
 
     payment: Mapped["SimulatedPayment"] = relationship()
     obligation: Mapped["Obligation"] = relationship()

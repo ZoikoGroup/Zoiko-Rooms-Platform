@@ -118,6 +118,21 @@ def _notify_case_opened(db: Session, case: DisputeResolutionCase) -> None:
     )
 
 
+def _notify_case_participants(db: Session, case: DisputeResolutionCase, *, title: str, message: str, notification_type: str) -> None:
+    """Section 10 gap: the same 'notify whichever side is the party, not
+    the opener' shape as _notify_case_opened above, reused for every other
+    silent event this system previously never told anyone about (claim
+    decisions, case close/reopen, settlement accept/reject)."""
+    if case.property_id:
+        prop = db.get(Property, case.property_id)
+        if prop:
+            notif_crud.notify_user_by_party(db, prop.owner_party_id, title=title, message=message, notification_type=notification_type)
+    if case.occupancy_id:
+        occ = db.get(Occupancy, case.occupancy_id)
+        if occ and occ.guest:
+            notif_crud.notify_user_by_guest(db, occ.guest, title=title, message=message, notification_type=notification_type)
+
+
 def _build_platform_snapshot(db: Session, occupancy: Occupancy) -> dict:
     """ZR-ENG-CLR-010 Section 21 'Platform snapshots'/Section 2 Governing
     Doctrine: freeze the occupancy/agreement/deposit facts as they stood at
@@ -725,7 +740,14 @@ def decide_claim(db: Session, claim: DisputeResolutionClaim, admin: AdminUser, d
     ))
 
     _sync_case_status_after_claim_change(claim.case)
+    db.commit()
 
+    _notify_case_participants(
+        db, claim.case,
+        title="A dispute claim was decided",
+        message=f"Claim #{claim.id} was decided: {data.outcome.replace('_', ' ').title()}.",
+        notification_type="dispute_claim.decided",
+    )
     db.commit()
     db.refresh(claim)
     return claim
@@ -905,6 +927,11 @@ def close_case(db: Session, case: DisputeResolutionCase, admin: AdminUser, *, fo
     case.closed_by_admin_id = admin.id
 
     db.commit()
+    _notify_case_participants(
+        db, case, title="Your dispute case was closed",
+        message=f"Dispute case #{case.id} has been closed.", notification_type="dispute_case.closed",
+    )
+    db.commit()
     db.refresh(case)
     return case
 
@@ -954,6 +981,12 @@ def reopen_case(
             raise HTTPException(status.HTTP_409_CONFLICT, f"Claim {claim_id} is not in a resolved state (currently {claim.status})")
         transition_claim(claim, "EVIDENCE", note="case reopened")
 
+    db.commit()
+    _notify_case_participants(
+        db, case, title="Your dispute case was reopened",
+        message=f"Dispute case #{case.id} has been reopened ({grounds.replace('_', ' ').lower()}).",
+        notification_type="dispute_case.reopened",
+    )
     db.commit()
     db.refresh(case)
     return case
