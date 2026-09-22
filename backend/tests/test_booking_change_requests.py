@@ -23,6 +23,7 @@ from app.models.occupancy import Occupancy
 from app.models.party import Party
 from app.models.property import Property
 from app.models.room import Room
+from app.models.room_hold import RoomHold
 from tests.conftest import _make_admin, auth_admin_cookie, auth_user_cookie, deliver_all_disclosures
 from tests.test_agreement_engine_extensions_2 import _full_signed_agreement, _pay_off_agreement_obligations
 from tests.test_renter_offer_agreement_flow import _make_agreement_eligible
@@ -577,6 +578,99 @@ class TestRequestPremisesChange:
         assert r.status_code == 404, r.text
 
 
+class TestPremisesChangeRoomHold:
+    """Section 8 gap: without a hold, the target room stayed fully bookable
+    by anyone else for the whole AWAITING_HOST window."""
+
+    def test_target_room_is_held_and_shows_unavailable_while_awaiting_host(self, client, db_session: Session):
+        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="pch1", start_date=date.today() - timedelta(days=5),
+        )
+        target_id = _make_second_listing(db_session, listing_id="L-TARGET-PCH1")
+
+        r = client.get(f"/api/public/listings/{target_id}")
+        assert r.status_code == 200, r.text
+
+        r = client.post(
+            f"/api/users/rentals/agreements/{agreement_id}/premises-change-requests",
+            json={"targetListingId": target_id}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        bcr_id = r.json()["id"]
+
+        hold = db_session.scalar(
+            select(RoomHold).where(RoomHold.source_type == "premises_change_request", RoomHold.source_id == bcr_id)
+        )
+        assert hold is not None
+        assert hold.released_at is None
+
+        # is_listing_available (crud/listing.py) treats any held room as
+        # unavailable -- the public detail route 404s for it, same as an
+        # already-occupied listing.
+        r = client.get(f"/api/public/listings/{target_id}")
+        assert r.status_code == 404, r.text
+
+    def test_hold_is_released_on_decline(self, client, db_session: Session):
+        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="pch2", start_date=date.today() - timedelta(days=5),
+        )
+        target_id = _make_second_listing(db_session, listing_id="L-TARGET-PCH2")
+        r = client.post(
+            f"/api/users/rentals/agreements/{agreement_id}/premises-change-requests",
+            json={"targetListingId": target_id}, cookies=auth_user_cookie(renter),
+        )
+        bcr_id = r.json()["id"]
+
+        r = client.post(f"/api/leasing/booking-change-requests/{bcr_id}/decline", json={}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+
+        hold = db_session.scalar(
+            select(RoomHold).where(RoomHold.source_type == "premises_change_request", RoomHold.source_id == bcr_id)
+        )
+        assert hold is not None
+        assert hold.released_at is not None
+
+    def test_hold_is_released_on_withdraw(self, client, db_session: Session):
+        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="pch3", start_date=date.today() - timedelta(days=5),
+        )
+        target_id = _make_second_listing(db_session, listing_id="L-TARGET-PCH3")
+        r = client.post(
+            f"/api/users/rentals/agreements/{agreement_id}/premises-change-requests",
+            json={"targetListingId": target_id}, cookies=auth_user_cookie(renter),
+        )
+        bcr_id = r.json()["id"]
+
+        r = client.post(f"/api/users/rentals/change-requests/{bcr_id}/withdraw", cookies=auth_user_cookie(renter))
+        assert r.status_code == 200, r.text
+
+        hold = db_session.scalar(
+            select(RoomHold).where(RoomHold.source_type == "premises_change_request", RoomHold.source_id == bcr_id)
+        )
+        assert hold is not None
+        assert hold.released_at is not None
+
+    def test_hold_is_released_once_approved_so_the_renters_own_application_can_proceed(self, client, db_session: Session):
+        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="pch4", start_date=date.today() - timedelta(days=5),
+        )
+        target_id = _make_second_listing(db_session, listing_id="L-TARGET-PCH4")
+        r = client.post(
+            f"/api/users/rentals/agreements/{agreement_id}/premises-change-requests",
+            json={"targetListingId": target_id}, cookies=auth_user_cookie(renter),
+        )
+        bcr_id = r.json()["id"]
+
+        r = client.post(f"/api/leasing/booking-change-requests/{bcr_id}/approve", json={}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+
+        hold = db_session.scalar(
+            select(RoomHold).where(RoomHold.source_type == "premises_change_request", RoomHold.source_id == bcr_id)
+        )
+        assert hold is not None
+        assert hold.released_at is not None
+
+
 class TestApprovePremisesChange:
     def test_approval_opens_a_pre_approved_application_without_touching_the_original(self, client, db_session: Session):
         agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
@@ -776,3 +870,69 @@ class TestApproveFinancialChange:
         )
         assert r.status_code == 409, r.text
         assert "days between rent changes" in r.json()["detail"]
+
+
+class TestFinancialChangeDepositTopup:
+    """Section 2 gap: a deposit top-up can now be bundled with a rent-change
+    request -- previously there was no way to associate the two, and even a
+    contractual deposit_amount bump via an amendment never actually billed
+    the tenant for the difference."""
+
+    def test_topup_below_current_deposit_is_rejected_at_request_time(self, client, db_session: Session):
+        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="35", start_date=date.today() - timedelta(days=5),
+        )
+        r = client.post(
+            f"/api/users/rentals/agreements/{agreement_id}/financial-change-requests",
+            json={"proposedMonthlyRent": 600, "proposedDepositAmount": 400}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 400, r.text
+
+    def test_approving_a_bundled_topup_bills_only_the_difference(self, client, db_session: Session):
+        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="36", start_date=date.today() - timedelta(days=5),
+        )
+        r = client.post(
+            f"/api/users/rentals/agreements/{agreement_id}/financial-change-requests",
+            json={"proposedMonthlyRent": 600, "proposedDepositAmount": 650, "reason": "raising rent"},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["proposedDepositAmount"] == 650.0
+        bcr_id = r.json()["id"]
+
+        r = client.post(f"/api/leasing/booking-change-requests/{bcr_id}/approve", json={}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+
+        client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=auth_user_cookie(renter))
+        client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
+
+        agreement = db_session.get(Agreement, agreement_id)
+        db_session.refresh(agreement)
+        offer = db_session.get(Offer, agreement.offer_id)
+        db_session.refresh(offer)
+        assert offer.terms[-1].monthly_rent == 600.0
+        assert offer.terms[-1].deposit_amount == 650.0
+
+        deposit_obligations = [o for o in agreement.obligations if o.obligation_type == "DEPOSIT"]
+        assert len(deposit_obligations) == 2
+        topup = next(o for o in deposit_obligations if float(o.amount) == 150.0)
+        assert topup.due_date == date.today()
+
+    def test_a_rent_change_without_a_bundled_deposit_creates_no_extra_obligation(self, client, db_session: Session):
+        agreement_id, admin_cookies, renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="37", start_date=date.today() - timedelta(days=5),
+        )
+        r = client.post(
+            f"/api/users/rentals/agreements/{agreement_id}/financial-change-requests",
+            json={"proposedMonthlyRent": 600}, cookies=auth_user_cookie(renter),
+        )
+        bcr_id = r.json()["id"]
+        client.post(f"/api/leasing/booking-change-requests/{bcr_id}/approve", json={}, cookies=admin_cookies)
+        client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=auth_user_cookie(renter))
+        client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
+
+        agreement = db_session.get(Agreement, agreement_id)
+        db_session.refresh(agreement)
+        deposit_obligations = [o for o in agreement.obligations if o.obligation_type == "DEPOSIT"]
+        assert len(deposit_obligations) == 1

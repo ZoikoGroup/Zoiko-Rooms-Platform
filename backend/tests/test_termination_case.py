@@ -8,7 +8,7 @@ which links the case and flips it to TERMINATED."""
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -1655,3 +1655,105 @@ class TestJointTenancyRouting:
         )
         assert r.status_code == 201, r.text
         assert r.json()["status"] == "EFFECTIVE_DATE_SET"
+
+
+class TestRecordNoticeService:
+    """Section 11 gap: a non-PORTAL notice_method previously left
+    notice_served_at permanently null with no way to ever record real-world
+    delivery proof -- see models/termination_case.py's own field docstring."""
+
+    def test_recording_service_for_a_non_portal_method_sets_served_at(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="notice-svc-admin@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="noticesvc1")
+        renter = _make_user(db_session, email="notice-svc-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT", "noticeMethod": "POSTAL"},
+            cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 201, r.text
+        case_id = r.json()["id"]
+        assert r.json()["noticeServedAt"] is None
+
+        served_at = datetime.now(timezone.utc).isoformat()
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/notice-service",
+            json={"servedAt": served_at, "proofRef": "courier-receipt-778"},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["noticeServedAt"] is not None
+        assert body["noticeServiceProofRef"] == "courier-receipt-778"
+        assert body["noticeServiceRecordedByAdminId"] == admin.id
+
+    def test_cannot_record_service_twice(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="notice-svc-twice-admin@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="noticesvc2")
+        renter = _make_user(db_session, email="notice-svc-twice-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT", "noticeMethod": "EMAIL"},
+            cookies=auth_user_cookie(renter),
+        )
+        case_id = r.json()["id"]
+        served_at = datetime.now(timezone.utc).isoformat()
+        client.post(
+            f"/api/occupancy/termination-cases/{case_id}/notice-service",
+            json={"servedAt": served_at, "proofRef": "email-read-receipt"},
+            cookies=auth_admin_cookie(admin),
+        )
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/notice-service",
+            json={"servedAt": served_at, "proofRef": "second-attempt"},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 409
+
+    def test_cannot_record_service_for_a_portal_case(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="notice-svc-portal-admin@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="noticesvc3")
+        renter = _make_user(db_session, email="notice-svc-portal-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(renter),
+        )
+        case_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/notice-service",
+            json={"servedAt": datetime.now(timezone.utc).isoformat(), "proofRef": "n/a"},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 409
+
+    def test_a_blank_proof_ref_is_rejected(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="notice-svc-blank-admin@test.com", role="super_admin")
+        occupancy, guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="noticesvc4")
+        renter = _make_user(db_session, email="notice-svc-blank-renter@test.com")
+        guest.user_account_id = renter.id
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy.id}/termination-cases",
+            json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT", "noticeMethod": "SMS"},
+            cookies=auth_user_cookie(renter),
+        )
+        case_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/occupancy/termination-cases/{case_id}/notice-service",
+            json={"servedAt": datetime.now(timezone.utc).isoformat(), "proofRef": "  "},
+            cookies=auth_admin_cookie(admin),
+        )
+        assert r.status_code == 400

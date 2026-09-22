@@ -5,9 +5,9 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 // A locale isn't derivable from a currency code, so each supported currency gets
-// a sensible display locale here. Anything not listed falls back to "en-IN" --
-// matching the app's original single-currency behavior exactly, so every existing
-// single-argument formatCurrency(amount) call keeps rendering identically.
+// a sensible display locale here. Anything not listed falls back to "en-US" --
+// this platform is multi-jurisdiction (England/GBP, India/INR, etc.), so there is
+// no single "home" currency to assume when one isn't specified.
 const CURRENCY_LOCALES: Record<string, string> = {
   INR: "en-IN",
   GBP: "en-GB",
@@ -20,11 +20,12 @@ const CURRENCY_LOCALES: Record<string, string> = {
   NZD: "en-NZ",
 };
 
-/** `currency` is optional and defaults to "INR" -- the app's original, and still
- *  overwhelmingly common, currency -- so every pre-existing call site that only
- *  ever passed an amount continues to render exactly as before. */
-export function formatCurrency(amount: number, currency: string = "INR") {
-  const locale = CURRENCY_LOCALES[currency] ?? "en-IN";
+/** `currency` is optional and defaults to "USD" as a neutral international
+ *  fallback -- only used when a call site genuinely has no currency to pass
+ *  (e.g. a cross-currency aggregate). Prefer always passing the record's own
+ *  `currency` field when one exists; this platform is not India-only. */
+export function formatCurrency(amount: number, currency: string = "USD") {
+  const locale = CURRENCY_LOCALES[currency] ?? "en-US";
   return new Intl.NumberFormat(locale, {
     style: "currency",
     currency,

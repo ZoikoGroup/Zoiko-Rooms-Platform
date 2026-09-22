@@ -39,6 +39,48 @@ def _round2(amount) -> float:
     return round(float(amount), 2)
 
 
+def _add_months(d: date, months: int) -> date:
+    """Duplicated (not cross-imported) from crud/occupancy.py's private
+    _add_months -- same convention crud/sublet.py already follows for this
+    exact helper."""
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(d.day, [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
+    return date(year, month, day)
+
+
+def _whole_months_elapsed(start: date, end: date) -> int:
+    """The largest N such that _add_months(start, N) <= end."""
+    months = (end.year - start.year) * 12 + (end.month - start.month)
+    if _add_months(start, months) > end:
+        months -= 1
+    return max(months, 0)
+
+
+def _resolve_break_fee_multiple(case: TerminationCase, flat_multiple: float, bands: list[dict]) -> tuple[float, str]:
+    """Section 6 gap: a market pack can now taper the break fee down by how
+    much of the lease the renter had already lived through before leaving,
+    instead of one flat multiple regardless of timing. No occupancy/move-in
+    date or effective_termination_date to measure elapsed time against ->
+    falls back to the flat multiple unchanged (defensive; every case that
+    reaches liability computation has both by construction)."""
+    if not bands:
+        return flat_multiple, ""
+    occupancy = case.occupancy
+    if occupancy is None or occupancy.move_in_date is None or case.effective_termination_date is None:
+        return flat_multiple, ""
+
+    elapsed_months = _whole_months_elapsed(occupancy.move_in_date, case.effective_termination_date)
+    for band in bands:
+        if elapsed_months <= int(band["maxElapsedMonths"]):
+            return float(band["multiple"]), (
+                f" (tapered: {elapsed_months} whole month(s) into the tenancy, within the "
+                f"<={band['maxElapsedMonths']}-month band)"
+            )
+    return 0.0, f" (tapered: {elapsed_months} whole month(s) into the tenancy exceeds every configured band -- no fee)"
+
+
 def _monthly_rent_amount(db: Session, case: TerminationCase) -> float | None:
     """Break-fee/contract-break/capped-compensation multiples (Section 11.1,
     MarketPolicyPack.termination_break_fee_rent_multiple) are expressed
@@ -94,6 +136,10 @@ def _compute_policy_liability(db: Session, case: TerminationCase) -> tuple[float
     model = snapshot.get("termination_liability_model", "NOTICE_RENT")
     multiple = float(snapshot.get("termination_break_fee_rent_multiple") or 0.0)
     cap_multiple = snapshot.get("termination_liability_cap_rent_multiple")
+    band_note = ""
+    bands = snapshot.get("termination_break_fee_bands") or []
+    if bands and model in ("STATUTORY_BREAK_FEE", "CONTRACT_BREAK_AMOUNT", "MIXED", "CAPPED_COMPENSATION"):
+        multiple, band_note = _resolve_break_fee_multiple(case, multiple, bands)
 
     # IMMEDIATE_CAUSE_CODES (Host-fault/habitability/no-fault-event) and
     # EVIDENCE_GATED_CAUSE_CODES (a substantiated protected/statutory right)
@@ -115,9 +161,11 @@ def _compute_policy_liability(db: Session, case: TerminationCase) -> tuple[float
 
     if model in ("STATUTORY_BREAK_FEE", "CONTRACT_BREAK_AMOUNT", "MIXED"):
         if multiple <= 0:
+            if band_note:
+                return 0.0, f"{model} model: no charge.{band_note}", 0.0, ""
             return 0.0, f"{model} model: market pack has not configured a break-fee rent multiple -- no charge.", 0.0, ""
         amount = _round2(monthly_rent * multiple)
-        note = f"{model} model: {multiple:g}x one month's rent ({monthly_rent:.2f}), per the resolved market-pack policy."
+        note = f"{model} model: {multiple:g}x one month's rent ({monthly_rent:.2f}), per the resolved market-pack policy.{band_note}"
         return amount, note, 0.0, ""
     if model == "CAPPED_COMPENSATION":
         raw = _round2(monthly_rent * multiple) if multiple > 0 else 0.0
@@ -126,10 +174,10 @@ def _compute_policy_liability(db: Session, case: TerminationCase) -> tuple[float
             amount = min(raw, cap)
             note = (
                 f"CAPPED_COMPENSATION model: {multiple:g}x rent ({raw:.2f}) capped at {float(cap_multiple):g}x rent "
-                f"({cap:.2f}), per the resolved market-pack policy."
+                f"({cap:.2f}), per the resolved market-pack policy.{band_note}"
             )
             return amount, note, 0.0, ""
-        return raw, f"CAPPED_COMPENSATION model: {multiple:g}x rent, uncapped (no ceiling configured).", 0.0, ""
+        return raw, f"CAPPED_COMPENSATION model: {multiple:g}x rent, uncapped (no ceiling configured).{band_note}", 0.0, ""
     if model == "ACTUAL_REASONABLE_LOSS":
         raw_loss = _round2(sum(float(r.reasonable_reletting_costs) for r in case.mitigation_records if r.reasonable_reletting_costs))
         if raw_loss <= 0:

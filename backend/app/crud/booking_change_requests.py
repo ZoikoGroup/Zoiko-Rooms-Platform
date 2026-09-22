@@ -35,6 +35,7 @@ from app.models.leasing import Agreement, Offer
 from app.models.occupancy import Occupancy
 from app.models.user_account import UserAccount
 from app.schemas.leasing import BookingChangeRequestRead
+from app.services import inventory as inventory_service
 from app.services.booking_change_consent import assert_proposal_unchanged, compute_proposal_hash
 from app.services.booking_change_state_machine import transition
 
@@ -70,6 +71,7 @@ def to_booking_change_request_read(bcr: BookingChangeRequest) -> BookingChangeRe
         authority_evidence_ref=bcr.authority_evidence_ref,
         original_deposit_amount=float(bcr.original_deposit_amount) if bcr.original_deposit_amount is not None else None,
         proposed_deposit_amount=float(bcr.proposed_deposit_amount) if bcr.proposed_deposit_amount is not None else None,
+        currency=listing.currency if listing else "USD",
         listing_name=listing.name if listing else "",
         target_listing_name=bcr.target_listing.name if bcr.target_listing else "",
         guest_name=guest.name if guest else "",
@@ -108,6 +110,7 @@ def _record_terminal_failure(
     this one."""
     transition(bcr, to_status, note=note)
     bcr.decision_note = note
+    _release_premises_change_hold(db, bcr, reason=f"premises_change_request_{to_status.lower()}")
     db.commit()
     db.refresh(bcr)
 
@@ -129,9 +132,22 @@ def _record_terminal_failure(
     db.commit()
 
 
+def _release_premises_change_hold(db: Session, bcr: BookingChangeRequest, *, reason: str) -> None:
+    """Section 8 gap: the counterpart to request_premises_change's own
+    create_hold -- releases the target room the instant this request stops
+    being AWAITING_HOST, whichever way it leaves that state (approved,
+    declined, withdrawn, expired). A no-op if no hold exists (idempotent,
+    same as inventory_service.release_hold itself), so it's always safe to
+    call unconditionally on every PREMISES_CHANGE BCR leaving AWAITING_HOST."""
+    if bcr.change_type != "PREMISES_CHANGE":
+        return
+    inventory_service.release_hold(db, source_type="premises_change_request", source_id=bcr.id, reason=reason)
+
+
 def _expire_if_overdue(db: Session, bcr: BookingChangeRequest) -> BookingChangeRequest:
     if bcr.status == "AWAITING_HOST" and bcr.expires_at <= datetime.now(timezone.utc):
         transition(bcr, "EXPIRED")
+        _release_premises_change_hold(db, bcr, reason="premises_change_request_expired")
         db.commit()
         db.refresh(bcr)
 
@@ -447,7 +463,20 @@ def request_premises_change(
         expires_at=datetime.now(timezone.utc) + REQUEST_EXPIRY,
     )
     bcr.proposal_hash = compute_proposal_hash(bcr)
-    db.add(bcr)
+
+    # Section 8 gap: without a hold, the target room stays fully bookable by
+    # anyone else for the entire AWAITING_HOST window (up to REQUEST_EXPIRY,
+    # 7 days) -- a host could approve this request only to find someone else
+    # already took the room in the meantime. Same SAVEPOINT discipline as
+    # crud/leasing.py:_accept_offer_and_hold_room -- the BCR insert and the
+    # hold attempt must both live inside one nested transaction, or a failed
+    # hold would leave a BCR created with nothing actually reserved for it.
+    with db.begin_nested():
+        db.add(bcr)
+        db.flush()
+        inventory_service.create_hold(
+            db, room_id=target_listing.room_id, source_type="premises_change_request", source_id=bcr.id,
+        )
     db.commit()
     db.refresh(bcr)
 
@@ -465,12 +494,17 @@ def request_premises_change(
 
 def request_financial_change(
     db: Session, user: UserAccount, agreement: Agreement, proposed_monthly_rent: float, reason: str = "",
+    proposed_deposit_amount: float | None = None,
 ) -> BookingChangeRequest:
     """ZR-ENG-CLR-008 Section 10/AC-24: renter requesting a new monthly rent.
     Gated by MarketPolicyPack.rent_change_min_interval_days -- both the doc's
     own NSW ('once in 12 months') and Ontario rent-guideline examples cite a
     minimum interval, not a blanket ban, so this checks the last EFFECTIVE
-    financial change on this agreement rather than refusing every repeat."""
+    financial change on this agreement rather than refusing every repeat.
+
+    proposed_deposit_amount optionally bundles a deposit top-up with the
+    rent change -- see FinancialChangeRequestCreate's own docstring for why
+    this is distinct from request_deposit_change's deposit-only path."""
     guest = get_guest_for_user(db, user)
     if not guest or guest.id != agreement.offer.guest_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This agreement does not belong to you")
@@ -511,10 +545,18 @@ def request_financial_change(
                 f"{policy.rent_change_min_interval_days} days between rent changes (jurisdiction={policy.jurisdiction_code})",
             )
 
+    if proposed_deposit_amount is not None and proposed_deposit_amount < _current_deposit_amount(agreement):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A deposit bundled with a rent change must be a top-up (greater than or equal to the current deposit)",
+        )
+
     bcr = BookingChangeRequest(
         agreement_id=agreement.id, requested_by_guest_id=guest.id, change_type="FINANCIAL_CHANGE", status="AWAITING_HOST",
         original_start_date=current_start, proposed_start_date=current_start,
         original_monthly_rent=current_rent, proposed_monthly_rent=proposed_monthly_rent, reason=reason,
+        original_deposit_amount=_current_deposit_amount(agreement) if proposed_deposit_amount is not None else None,
+        proposed_deposit_amount=proposed_deposit_amount,
         expires_at=datetime.now(timezone.utc) + REQUEST_EXPIRY,
     )
     bcr.proposal_hash = compute_proposal_hash(bcr)
@@ -524,10 +566,13 @@ def request_financial_change(
 
     listing = offer.listing
     if listing and listing.party_id:
+        message = f'A tenant has requested a new monthly rent for "{listing.name}".'
+        if proposed_deposit_amount is not None:
+            message += " A deposit top-up is bundled with this request."
         notif_crud.notify_user_by_party(
             db, listing.party_id,
             title="Rent change requested",
-            message=f'A tenant has requested a new monthly rent for "{listing.name}".',
+            message=message,
             notification_type="booking_change_request.submitted",
             related_entity_type="booking_change_request", related_entity_id=str(bcr.id),
         )
@@ -535,10 +580,17 @@ def request_financial_change(
 
 
 def _current_deposit_amount(agreement: Agreement) -> float:
-    for obligation in agreement.obligations:
-        if obligation.obligation_type == "DEPOSIT" and obligation.deposit_record is not None:
-            return float(obligation.deposit_record.held_amount)
-    return 0.0
+    """Sums every DEPOSIT obligation's held custody amount, not just the
+    first -- an agreement can have more than one once a rent-change-bundled
+    top-up has actually been paid (see
+    crud/leasing.py:_generate_deposit_topup_obligation), each becoming its
+    own separate DepositRecord (crud/finance.py's existing one-record-per-
+    paid-obligation pattern)."""
+    return sum(
+        float(obligation.deposit_record.held_amount)
+        for obligation in agreement.obligations
+        if obligation.obligation_type == "DEPOSIT" and obligation.deposit_record is not None
+    )
 
 
 def request_deposit_change(
@@ -786,6 +838,14 @@ def _approve_premises_change(db: Session, bcr: BookingChangeRequest, admin: Admi
         _record_terminal_failure(db, bcr, "CONFLICT", admin, "Target listing is no longer published")
         raise HTTPException(status.HTTP_409_CONFLICT, "Target listing is no longer published")
 
+    # Section 8 gap: release the speculative hold *before* submit_application
+    # below -- is_listing_available (crud/listing.py:_occupied_room_ids)
+    # treats any held room as unavailable, so leaving this hold in place
+    # would make the renter's own pre-approved application fail against
+    # their own reservation. The fresh Application's own future Offer-accept
+    # step places the real, durable hold from here on.
+    _release_premises_change_hold(db, bcr, reason="premises_change_request_approved")
+
     try:
         application = submit_application(db, ApplicationCreate(
             listing_id=target_listing.id, guest_id=bcr.requested_by_guest_id,
@@ -841,6 +901,8 @@ def _proposed_terms_and_default_reason(bcr: BookingChangeRequest) -> tuple[dict,
         default_reason = "Renter-requested stay extension" if bcr.change_type == "EXTENSION" else "Renter-requested stay shortening"
     elif bcr.change_type == "FINANCIAL_CHANGE":
         proposed_terms = {"monthlyRent": float(bcr.proposed_monthly_rent)}
+        if bcr.proposed_deposit_amount is not None:
+            proposed_terms["depositAmount"] = float(bcr.proposed_deposit_amount)
         default_reason = "Renter-requested rent change"
     elif bcr.change_type == "TERM_SHIFT":
         # additional_term_months is the new term's ABSOLUTE length here, not
@@ -927,6 +989,7 @@ def decline_change_request(db: Session, bcr: BookingChangeRequest, admin: AdminU
     bcr.decided_by_admin_id = admin.id
     bcr.decided_at = datetime.now(timezone.utc)
     bcr.decision_note = decision_note
+    _release_premises_change_hold(db, bcr, reason="premises_change_request_declined")
     db.commit()
     db.refresh(bcr)
 
@@ -1102,6 +1165,7 @@ def withdraw_change_request(db: Session, user: UserAccount, bcr: BookingChangeRe
         raise HTTPException(status.HTTP_409_CONFLICT, f"Only an AWAITING_HOST request can be withdrawn (current status: {bcr.status})")
 
     transition(bcr, "WITHDRAWN")
+    _release_premises_change_hold(db, bcr, reason="premises_change_request_withdrawn")
     db.commit()
     db.refresh(bcr)
 

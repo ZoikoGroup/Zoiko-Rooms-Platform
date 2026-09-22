@@ -129,6 +129,45 @@ class TestDisclosureFiltering:
         assert r.status_code in (400, 403), r.text
 
 
+class TestRenterVisibleOnlyHiddenFromHost:
+    """Section 6 gap: evidence backing a sensitive/protected-ground claim
+    must reach the renter and staff but never the Host on the same case."""
+
+    def test_renter_visible_only_evidence_is_hidden_from_the_host_on_the_same_case(self, client, db_session: Session):
+        host, renter, occ = _make_occupancy_with_parties(db_session, host_email="ehost8@test.com", renter_email="erenter8@test.com")
+        renter_cookies = auth_user_cookie(renter)
+        host_cookies = auth_user_cookie(host)
+        r = client.post(
+            "/api/users/rentals/disputes",
+            json={"occupancyId": occ.id, "claim": {"claimCode": "DEDUCTION", "claimFamily": "DEPOSIT", "amount": 600}},
+            cookies=renter_cookies,
+        )
+        assert r.status_code == 201, r.text
+        case_id = r.json()["id"]
+
+        admin = _make_admin(db_session, email="ev-admin2@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(admin)
+        r = client.post(
+            f"/api/admin/disputes/{case_id}/evidence",
+            data={"note_text": "Sensitive protected-ground detail", "disclosure_class": "RENTER_VISIBLE_ONLY"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 201, r.text
+        sensitive_id = r.json()["id"]
+        assert r.json()["disclosureClass"] == "RENTER_VISIBLE_ONLY"
+
+        r = client.get(f"/api/users/rentals/disputes/{case_id}/evidence", cookies=renter_cookies)
+        assert r.status_code == 200, r.text
+        assert any(item["id"] == sensitive_id for item in r.json())
+
+        r = client.get(f"/api/users/hosting/disputes/{case_id}/evidence", cookies=host_cookies)
+        assert r.status_code == 200, r.text
+        assert all(item["id"] != sensitive_id for item in r.json())
+
+        r = client.get(f"/api/admin/disputes/{case_id}/evidence", cookies=admin_cookies)
+        assert any(item["id"] == sensitive_id for item in r.json())
+
+
 class TestRedactionAndLegalHold:
     def test_redaction_creates_a_new_row_and_leaves_the_original_untouched(self, client, db_session: Session):
         _host, renter, _occ = _make_occupancy_with_parties(db_session, host_email="ehost7@test.com", renter_email="erenter7@test.com")

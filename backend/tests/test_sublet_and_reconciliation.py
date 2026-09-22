@@ -32,6 +32,11 @@ def _make_active_tenancy_with_sublet_request(db: Session):
     owner_party = Party(party_type="provider", status="active", jurisdiction="IN")
     db.add(owner_party)
     db.flush()
+    # A real listing always has a verified Host login attached -- required
+    # since crud/sublet.py started blocking submission without one (ZR-SUB-003
+    # Section 15: "No verified landlord/agent").
+    host_user = _make_user(db, email="sublet-host@test.com")
+    host_user.party_id = owner_party.id
 
     prop = Property(owner_party_id=owner_party.id, address="1 Test St", city="Bengaluru", status="active")
     db.add(prop)
@@ -103,7 +108,10 @@ class TestSubletDecisionNotifications:
         admin = _make_admin(db_session, email="super@test.com", role="super_admin")
         admin_cookies = auth_admin_cookie(admin)
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", cookies=admin_cookies)
+        r = client.post(
+            f"/api/occupancy/sublet-requests/{sublet_request.id}/approve",
+            json={"stepUpPassword": "password123"}, cookies=admin_cookies,
+        )
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "approved"
 
@@ -242,7 +250,7 @@ class TestSubletHostVisibility:
         assert submitted_notification.related_entity_id == str(sublet_request.id)
 
         admin = _make_admin(db_session, email="hostvis-admin@test.com", role="super_admin")
-        sublet_crud.approve_sublet_request(db_session, sublet_request, admin)
+        sublet_crud.approve_sublet_request(db_session, sublet_request, admin, step_up_password="password123")
 
         approved_notification = db_session.scalar(
             select(Notification).where(

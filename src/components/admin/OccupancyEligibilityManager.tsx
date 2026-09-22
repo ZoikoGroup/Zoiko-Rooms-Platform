@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, ShieldCheck } from "lucide-react";
-import { OccupancyEligibilityCheck, OccupancyEligibilityMethod } from "@/lib/types";
+import { Guest, OccupancyEligibilityCheck, OccupancyEligibilityMethod } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -30,8 +30,10 @@ export function OccupancyEligibilityManager() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [toast, setToast] = useState("");
 
+  const [guests, setGuests] = useState<Guest[]>([]);
+
   const [openTarget, setOpenTarget] = useState(false);
-  const [openPartyId, setOpenPartyId] = useState("");
+  const [openGuestId, setOpenGuestId] = useState("");
   const [openJurisdiction, setOpenJurisdiction] = useState("England");
   const [openMethod, setOpenMethod] = useState<OccupancyEligibilityMethod>("MANUAL_DOCUMENT_CHECK");
   const [openShareCode, setOpenShareCode] = useState("");
@@ -49,8 +51,12 @@ export function OccupancyEligibilityManager() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiClientFetch<OccupancyEligibilityCheck[]>("/api/verification/occupancy-eligibility-checks");
-      setChecks(data);
+      const [checksData, guestsData] = await Promise.all([
+        apiClientFetch<OccupancyEligibilityCheck[]>("/api/verification/occupancy-eligibility-checks"),
+        apiClientFetch<Guest[]>("/api/guests"),
+      ]);
+      setChecks(checksData);
+      setGuests(guestsData);
     } catch {
       showToast("Failed to load occupancy eligibility checks");
     } finally {
@@ -63,7 +69,7 @@ export function OccupancyEligibilityManager() {
   }, [load]);
 
   function openOpenModal() {
-    setOpenPartyId("");
+    setOpenGuestId("");
     setOpenJurisdiction("England");
     setOpenMethod("MANUAL_DOCUMENT_CHECK");
     setOpenShareCode("");
@@ -71,8 +77,10 @@ export function OccupancyEligibilityManager() {
   }
 
   async function submitOpen() {
-    const partyId = Number(openPartyId);
-    if (!Number.isInteger(partyId) || partyId <= 0) return showToast("Enter a valid party ID");
+    const guest = guests.find((g) => g.id === openGuestId);
+    if (!guest) return showToast("Choose a renter");
+    if (guest.partyId == null) return showToast("This guest has no linked Zoiko account, so a check can't be opened for them");
+    const partyId = guest.partyId;
     if (!openJurisdiction.trim()) return showToast("Enter a jurisdiction");
 
     try {
@@ -171,13 +179,20 @@ export function OccupancyEligibilityManager() {
       <Modal open={openTarget} onClose={() => setOpenTarget(false)} title="Open an occupancy eligibility check">
         <div className="space-y-3.5">
           <div>
-            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Party ID</label>
-            <input
-              type="number"
-              value={openPartyId}
-              onChange={(e) => setOpenPartyId(e.target.value)}
+            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Renter</label>
+            <select
+              value={openGuestId}
+              onChange={(e) => setOpenGuestId(e.target.value)}
               className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
+            >
+              <option value="">Choose a renter…</option>
+              {guests.map((g) => (
+                <option key={g.id} value={g.id} disabled={g.partyId == null}>
+                  {g.name} — {g.email}
+                  {g.partyId == null ? " (no Zoiko account)" : ""}
+                </option>
+              ))}
+            </select>
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Jurisdiction</label>

@@ -16,6 +16,7 @@ import {
   MessageCircle,
   Receipt,
   Repeat,
+  Scale,
   Search,
   ShieldCheck,
   UserCircle2,
@@ -47,6 +48,8 @@ const navGroups = [
       { href: "/account/host/listings", label: "My Listings", icon: BedDouble },
       { href: "/account/host/applications", label: "Applications", icon: ClipboardCheck },
       { href: "/account/host/payments", label: "Payments", icon: Receipt },
+      { href: "/account/host/sublet-requests", label: "Sublet Requests", icon: Repeat },
+      { href: "/account/host/disputes", label: "Disputes", icon: Scale },
     ],
   },
   {

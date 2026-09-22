@@ -24,6 +24,12 @@ class OccupancyRead(CamelModel):
     termination_effective_date: date | None = None
     created_at: datetime
     ended_at: datetime | None
+    # ZR-SUB-003 Section 3: an occupancy that already changed hands once via
+    # ASSIGNMENT_FULL/REPLACEMENT_OCCUPANT can never be sublet onward again
+    # (crud/sublet.py:_assert_sublet_permitted already enforces this) -- this
+    # surfaces that same fact to the UI instead of leaving it undiscoverable
+    # outside the raw sublet_requests table.
+    reassigned_via_sublet_request_id: int | None = None
 
 
 class OccupancyEndRequest(CamelModel):
@@ -42,6 +48,33 @@ class OccupancyEndRequest(CamelModel):
     # an active occupancy early with no termination_case_id -- a Super
     # Admin's own logged override reason.
     override_reason: str = ""
+
+
+class PreMoveInCancellationRequest(CamelModel):
+    reason: str = ""
+
+
+class ConditionReportItemRead(CamelModel):
+    id: int
+    occupancy_id: int
+    report_type: str
+    area: str
+    condition_rating: str | None
+    notes: str
+    original_filename: str
+    content_type: str
+    size_bytes: int
+    recorded_by_guest_id: str | None
+    recorded_by_admin_id: int | None
+    created_at: datetime
+    has_file: bool = False
+
+
+class PreMoveInCancellationRead(CamelModel):
+    occupancy: OccupancyRead
+    fee_amount: float
+    fee_note: str
+    refunded_amount: float
 
 
 class TerminationRecordRead(CamelModel):

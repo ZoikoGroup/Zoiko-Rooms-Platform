@@ -66,6 +66,11 @@ export interface PublishEligibility {
   reasons: string[];
 }
 
+export interface OptionalClauseChoice {
+  clauseId: string;
+  title: string;
+}
+
 export type PartyType = "provider" | "renter" | "institution" | "zoiko_operator";
 
 export interface Party {
@@ -185,6 +190,9 @@ export interface Guest {
   totalSpent: number;
   joinedAt: string;
   status: "active" | "inactive";
+  /** Null when this guest has no linked Zoiko login (e.g. an admin-recorded
+   *  walk-in) -- Party-keyed features like Occupancy Eligibility can't target them. */
+  partyId: number | null;
 }
 
 export interface Review {
@@ -328,7 +336,7 @@ export interface Application {
 
 // --- Occupancy ---
 
-export type OccupancyStatus = "PENDING_MOVE_IN" | "ACTIVE" | "ENDED";
+export type OccupancyStatus = "PENDING_MOVE_IN" | "ACTIVE" | "ENDED" | "CANCELLED";
 
 export interface Occupancy {
   id: number;
@@ -346,9 +354,12 @@ export interface Occupancy {
   moveOutDate: string | null;
   createdAt: string;
   endedAt: string | null;
+  reassignedViaSubletRequestId: number | null;
 }
 
-export type HandoverEventType = "HANDOVER_READY" | "POSSESSION_DELIVERED" | "RENTER_RECEIPT";
+export type HandoverEventType =
+  | "HANDOVER_READY" | "POSSESSION_DELIVERED" | "RENTER_RECEIPT"
+  | "MOVE_OUT_NOTICE_GIVEN" | "MOVE_OUT_READY" | "HOST_MOVE_OUT_CONFIRMED";
 
 export interface HandoverEvent {
   id: number;
@@ -356,6 +367,25 @@ export interface HandoverEvent {
   eventType: HandoverEventType;
   actorKind: string;
   createdAt: string;
+}
+
+export type ConditionReportType = "MOVE_IN" | "MOVE_OUT";
+export type ConditionRating = "GOOD" | "FAIR" | "DAMAGED";
+
+export interface ConditionReportItem {
+  id: number;
+  occupancyId: number;
+  reportType: ConditionReportType;
+  area: string;
+  conditionRating: ConditionRating | null;
+  notes: string;
+  originalFilename: string;
+  contentType: string;
+  sizeBytes: number;
+  recordedByGuestId: string | null;
+  recordedByAdminId: number | null;
+  createdAt: string;
+  hasFile: boolean;
 }
 
 export interface ActivationGateStatus {
@@ -428,6 +458,17 @@ export interface PaymentPreview {
   remainingScheduledCount: number;
 }
 
+export interface AutopayMandate {
+  id: number;
+  occupancyId: number;
+  payerGuestId: string;
+  providerRef: string;
+  status: string;
+  consentSnapshot: Record<string, unknown>;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
 export type DepositStatus = "HELD" | "RELEASED" | "FORFEITED" | "PARTIALLY_RELEASED";
 
 export interface DepositRecord {
@@ -438,6 +479,7 @@ export interface DepositRecord {
   releasedAmount: number;
   releasedAt: string | null;
   notes: string;
+  currency: string;
 }
 
 export type PayoutStatus = "PENDING" | "PAID" | "FAILED" | "HELD";
@@ -467,6 +509,7 @@ export interface RefundRequest {
   decidedByAdminId: number | null;
   createdAt: string;
   decidedAt: string | null;
+  currency: string;
 }
 
 export type DisputeCategory = "CHARGEBACK" | "COMPENSATION" | "OTHER";
@@ -861,6 +904,435 @@ export interface UserOccupancy {
   createdAt: string;
   endedAt: string | null;
   agreementId: number | null;
+  currency: string;
+  reassignedViaSubletRequestId: number | null;
+}
+
+export interface PreMoveInCancellationResult {
+  occupancy: { id: number; status: string; moveOutDate: string | null; endedAt: string | null };
+  feeAmount: number;
+  feeNote: string;
+  refundedAmount: number;
+}
+
+// -- Section 6 gap: termination cases + refund entitlements (ZR-ENG-CLR-006) --
+
+export type TerminationCauseCode =
+  | "RENTER_ORDINARY_EARLY_EXIT"
+  | "RENTER_CONTRACT_BREAK"
+  | "RENTER_STATUTORY_RIGHT"
+  | "MUTUAL_SURRENDER"
+  | "ASSIGNMENT_OR_REPLACEMENT"
+  | "HOST_FAULT_OR_NONPERFORMANCE"
+  | "HOST_LAWFUL_POSSESSION_ACTION"
+  | "RENTER_BREACH"
+  | "PROPERTY_UNINHABITABLE"
+  | "CASUALTY_OR_FORCE_EVENT"
+  | "ABANDONMENT_REPORTED"
+  | "PLATFORM_SAFETY_INTERVENTION"
+  | "LEGAL_OR_REGULATORY_ORDER"
+  | "OTHER_COUNSEL_APPROVED";
+
+export type TerminationCaseStatus =
+  | "OPENED"
+  | "SURRENDER_PROPOSED"
+  | "SURRENDER_DECLINED"
+  | "PENDING_REVIEW"
+  | "REJECTED_PATHWAY"
+  | "EFFECTIVE_DATE_SET"
+  | "TERMINATED"
+  | "WITHDRAWN";
+
+export interface TerminationCase {
+  id: number;
+  occupancyId: number;
+  agreementId: number;
+  initiatorGuestId: string | null;
+  initiatorAdminId: number | null;
+  causeCode: TerminationCauseCode;
+  status: TerminationCaseStatus;
+  notes: string;
+  noticeCreatedAt: string;
+  noticeServedAt: string | null;
+  noticeMethod: string;
+  evidenceRefs: string[];
+  earliestEffectiveDate: string | null;
+  effectiveTerminationDate: string | null;
+  withdrawnAt: string | null;
+  tribunalLiabilityAmount: number;
+  tribunalLiabilityReason: string;
+  adjudicatedEffectiveDate: string | null;
+  adjudicatedEffectiveDateReason: string;
+  createdAt: string;
+}
+
+export interface TerminationCasePreview {
+  causeCode: TerminationCauseCode;
+  resolvedStatus: string;
+  requiresHostConsent: boolean;
+  requiresEvidenceToResolveNow: boolean;
+  earliestEffectiveDate: string | null;
+  estimatedEarnedRent: number | null;
+  estimatedRefundableUnearnedRent: number | null;
+  estimatedLiabilityAmount: number | null;
+  estimatedLiabilityNote: string;
+  estimatedMitigationCredit: number | null;
+  estimatedNetRefund: number | null;
+  depositDisclaimer: string;
+  alternativesNote: string;
+}
+
+export interface MitigationRecord {
+  id: number;
+  terminationCaseId: number;
+  marketedForRelettingAt: string | null;
+  listingChannels: string[];
+  replacementBookingId: number | null;
+  replacementOccupancyStart: string | null;
+  replacementRentAmount: number | null;
+  reasonableRelettingCosts: number | null;
+  evidenceRefs: string[];
+  notes: string;
+  recordedByAdminId: number | null;
+  createdAt: string;
+}
+
+export type RefundEntitlementStatus = "CALCULATED" | "APPROVED" | "EXECUTED";
+
+export interface RefundEntitlementLineItem {
+  id: number;
+  type: string;
+  sourceObligationId: number | null;
+  periodDueDate: string | null;
+  amount: number;
+  basisNote: string;
+  refundRequestId: number | null;
+}
+
+export interface RefundEntitlement {
+  id: number;
+  terminationCaseId: number;
+  version: number;
+  currency: string;
+  grossRefundable: number;
+  netRefund: number;
+  status: RefundEntitlementStatus;
+  calculatedByAdminId: number | null;
+  calculatedAt: string;
+  approvedByAdminId: number | null;
+  approvedAt: string | null;
+  executedByAdminId: number | null;
+  executedAt: string | null;
+  lineItems: RefundEntitlementLineItem[];
+}
+
+// -- Section 10 gap: ZR-ENG-CLR-010 general-purpose Dispute Resolution
+// engine (DisputeResolutionCase et al, backend/app/models/dispute*.py) --
+// entirely separate from the older, simpler finance.DisputeCase
+// (chargeback/PSP-reversal-adjacent) already surfaced in
+// FinanceOpsManager.tsx's "Disputes" section. Field names mirror the
+// backend CamelModel schemas exactly (backend/app/schemas/disputes.py and
+// dispute_*.py).
+export type DisputeClaimFamily =
+  | "DEPOSIT" | "PAYMENT" | "REFUND_PAYOUT" | "PROPERTY_CONDITION" | "BOOKING_AGREEMENT"
+  | "SUBLET_OCCUPANCY" | "MARKETPLACE_CONDUCT" | "PROTECTED_SAFETY" | "VERIFICATION_FRAUD" | "ZOIKO_SERVICE";
+
+export type DisputeAuthorityClass = "A0" | "A1" | "A2" | "A3" | "A4" | "A5" | "A6";
+export type DisputeClaimantRole = "RENTER" | "HOST";
+export type DisputeResolverConfidence = "RESOLVED" | "LEGAL_REVIEW_REQUIRED";
+
+export type DisputeCaseStatus =
+  | "SUBMITTED" | "TRIAGED" | "LEGAL_REVIEW_REQUIRED" | "IN_PROGRESS"
+  | "PARTIALLY_RESOLVED" | "RESOLVED" | "CLOSED" | "ON_HOLD" | "EXTERNAL_PENDING" | "REOPENED";
+
+export type DisputeClaimStatus =
+  | "OPEN" | "RESPONSE_DUE" | "EVIDENCE" | "NEGOTIATION" | "INTERNAL_REVIEW"
+  | "EXTERNAL_REFERRAL" | "UPHELD" | "PARTLY_UPHELD" | "NOT_UPHELD" | "SETTLED" | "WITHDRAWN";
+
+export type DisputeCaseReopenGrounds =
+  | "MATERIAL_NEW_EVIDENCE" | "PROCESSING_ERROR" | "EXTERNAL_DECISION" | "FRAUD_FINDING"
+  | "INTERNAL_REVIEW_REQUESTED" | "OTHER";
+
+export type DisputeCaseTeam = "DISPUTE_OPERATIONS" | "TRUST_AND_SAFETY" | "LEGAL_COMPLIANCE" | "FINANCE";
+
+export type DisputeFinancialHoldStatus = "PROPOSED" | "ACTIVE" | "RELEASE_PENDING" | "RELEASED" | "CLOSED";
+
+export type DisputeEvidenceProvenance = "RENTER_SUBMITTED" | "HOST_SUBMITTED" | "ADMIN_COLLECTED" | "SYSTEM_GENERATED";
+export type DisputeEvidenceDisclosureClass = "ALL_PARTIES" | "HOST_VISIBLE_ONLY" | "RENTER_VISIBLE_ONLY" | "INTERNAL_ONLY";
+export type DisputeEvidenceVerificationStatus = "RECEIVED" | "VERIFIED" | "UNVERIFIED" | "ARCHIVED";
+
+export type DisputeSettlementStatus = "SENT" | "COUNTERED" | "ACCEPTED" | "REJECTED" | "EXPIRED" | "EFFECTIVE" | "VOID";
+export type DisputeSettlementProposerRole = "RENTER" | "HOST";
+export type DisputeSettlementRespondAction = "ACCEPT" | "REJECT" | "COUNTER";
+
+export type DisputeDeadlineType = "PARTY_RESPONSE" | "EVIDENCE_CLOSE" | "INTERNAL_REVIEW";
+export type DisputeDeadlineStatus = "PENDING" | "MET" | "EXTENDED" | "CANCELLED";
+export type DisputeDeadlineSource = "SYSTEM_DEFAULT" | "ADMIN_SET";
+
+export type DisputePartyRole = "RENTER" | "HOST" | "REPRESENTATIVE";
+export type DisputePartyRepresentationType = "SELF" | "PROPERTY_MANAGER" | "LEGAL_COUNSEL" | "OTHER_AUTHORIZED";
+
+export type DisputeExternalProceedingAuthorityType = string;
+export type DisputeExternalProceedingStatus = "FILED" | "ACCEPTED" | "PENDING" | "DISMISSED" | "WITHDRAWN";
+export type DisputeExternalProceedingFinalityState = "FINAL" | "UNDER_REVIEW";
+export type DisputeExternalProceedingOutcome = "UPHELD" | "PARTLY_UPHELD" | "NOT_UPHELD" | "SETTLED";
+
+export type DisputeMessageSenderRole = "RENTER" | "HOST" | "ADMIN";
+export type DisputeMessageVisibilityClass = "PARTY_VISIBLE" | "INTERNAL_ONLY";
+export type DisputeMessageModerationState = "VISIBLE" | "HIDDEN";
+
+export type DisputeClaimDecideOutcome = "UPHELD" | "PARTLY_UPHELD" | "NOT_UPHELD";
+
+export interface DisputeClaimCreate {
+  claimCode: string;
+  claimFamily: DisputeClaimFamily;
+  amount?: number | null;
+  currency?: string;
+  requestedRemedy?: string;
+  safetyFlag?: boolean;
+}
+
+export interface DisputeCaseCreate {
+  occupancyId?: number | null;
+  claim: DisputeClaimCreate;
+}
+
+export interface DisputeClaimRead {
+  id: number;
+  caseId: number;
+  claimCode: string;
+  claimFamily: DisputeClaimFamily;
+  claimantRole: DisputeClaimantRole;
+  amount: number | null;
+  currency: string;
+  requestedRemedy: string;
+  authorityClass: DisputeAuthorityClass | null;
+  resolverConfidence: DisputeResolverConfidence;
+  resolverNotes: string;
+  policyPackId: number | null;
+  policyPackVersion: number | null;
+  sourceRecordType: string | null;
+  sourceRecordId: string | null;
+  sourceRecordSnapshot: Record<string, unknown>;
+  status: DisputeClaimStatus;
+  outcome: DisputeClaimDecideOutcome | null;
+  reasonCode: string;
+  createdAt: string;
+  decidedAt: string | null;
+  decidedByAdminId: number | null;
+  version: number;
+}
+
+export interface DisputeMoneyStatusByCurrency {
+  currency: string;
+  amountDisputed: number;
+  amountHeld: number;
+  amountUndisputed: number;
+  amountSettled: number;
+}
+
+export interface DisputeCaseRead {
+  id: number;
+  occupancyId: number | null;
+  propertyId: number | null;
+  openedByGuestId: string | null;
+  openedByPartyId: number | null;
+  severity: string;
+  status: DisputeCaseStatus;
+  primaryClaimFamily: DisputeClaimFamily;
+  externalDependencyFlag: boolean;
+  openedAt: string;
+  closedAt: string | null;
+  reopenedAt: string | null;
+  reopenedByAdminId: number | null;
+  reopenGrounds: string | null;
+  reopenNote: string;
+  assignedTeam: DisputeCaseTeam | null;
+  assignedAdminId: number | null;
+  partialClosureReason: string;
+  version: number;
+  moneyStatus: DisputeMoneyStatusByCurrency[];
+  claims: DisputeClaimRead[];
+}
+
+export interface DisputeEvidenceRead {
+  id: number;
+  caseId: number;
+  provenance: DisputeEvidenceProvenance;
+  uploadedByGuestId: string | null;
+  uploadedByPartyId: number | null;
+  uploadedByAdminId: number | null;
+  originalFilename: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256Hash: string;
+  noteText: string;
+  disclosureClass: DisputeEvidenceDisclosureClass;
+  legalHold: boolean;
+  verificationStatus: DisputeEvidenceVerificationStatus;
+  redactedOfEvidenceId: number | null;
+  claimIds: number[];
+  deletionRequestedAt: string | null;
+  deletedAt: string | null;
+  deletionRefusedReason: string;
+  createdAt: string;
+  capturedAt: string | null;
+}
+
+export interface DisputeLegalHoldRead {
+  id: number;
+  evidenceId: number;
+  caseId: number;
+  status: "ACTIVE" | "RELEASED";
+  reason: string;
+  placedByAdminId: number;
+  placedAt: string;
+  releasedByAdminId: number | null;
+  releasedAt: string | null;
+}
+
+export interface DisputeSettlementRead {
+  id: number;
+  caseId: number;
+  proposedByRole: DisputeSettlementProposerRole;
+  proposedByGuestId: string | null;
+  proposedByPartyId: number | null;
+  status: DisputeSettlementStatus;
+  termsText: string;
+  amount: number | null;
+  currency: string;
+  termsHash: string;
+  acknowledgesNoNonwaivableWaiver: boolean;
+  offeredAt: string;
+  expiresAt: string | null;
+  respondedByGuestId: string | null;
+  respondedByPartyId: number | null;
+  respondedAt: string | null;
+  responseNote: string;
+  effectiveAt: string | null;
+  supersedesSettlementId: number | null;
+  claimIds: number[];
+  createdAt: string;
+  version: number;
+  acceptedPartySnapshot: Record<string, unknown>;
+}
+
+export interface DisputeCaseMessageRead {
+  id: number;
+  caseId: number;
+  senderRole: DisputeMessageSenderRole;
+  senderGuestId: string | null;
+  senderPartyId: number | null;
+  senderAdminId: number | null;
+  body: string;
+  visibilityClass: DisputeMessageVisibilityClass;
+  moderationState: DisputeMessageModerationState;
+  moderatedByAdminId: number | null;
+  moderatedAt: string | null;
+  createdAt: string;
+}
+
+export interface DisputePartyRead {
+  id: number;
+  caseId: number;
+  partyRole: DisputePartyRole;
+  guestId: string | null;
+  partyId: number | null;
+  represents: string | null;
+  representationType: DisputePartyRepresentationType;
+  authorityVerifiedAt: string | null;
+  authorityEvidenceRef: string;
+  communicationRestrictions: string;
+  addedAt: string;
+  addedByAdminId: number | null;
+}
+
+export interface DisputeDeadlineRead {
+  id: number;
+  caseId: number;
+  claimId: number | null;
+  deadlineType: DisputeDeadlineType;
+  dueAt: string;
+  originalDueAt: string | null;
+  status: DisputeDeadlineStatus;
+  extensionBasis: string;
+  source: DisputeDeadlineSource;
+  createdByAdminId: number | null;
+  createdAt: string;
+  reminderAt: string | null;
+  isOverdue: boolean;
+  isReminderDue: boolean;
+}
+
+export interface DisputeExternalProceedingRead {
+  id: number;
+  caseId: number;
+  authorityType: string;
+  authorityName: string;
+  externalReference: string;
+  status: DisputeExternalProceedingStatus;
+  finalityState: DisputeExternalProceedingFinalityState | null;
+  filedAt: string | null;
+  decisionDate: string | null;
+  outcomeEvidenceId: number | null;
+  outcomeSummary: string;
+  filedByAdminId: number;
+  decidedByAdminId: number | null;
+  claimIds: number[];
+  createdAt: string;
+  version: number;
+  externalDeadlineAt: string | null;
+  filedAfterDeadline: boolean;
+}
+
+export interface DisputeDecisionRead {
+  id: number;
+  claimId: number;
+  caseId: number;
+  outcome: string;
+  decisionBasis: string;
+  authority: "admin" | "external_proceeding" | "settlement";
+  decidedByAdminId: number | null;
+  reasonCode: string;
+  reasonCategory: string;
+  externalProceedingId: number | null;
+  settlementId: number | null;
+  decidedAt: string;
+}
+
+export interface DisputeFinancialHoldRead {
+  id: number;
+  claimId: number;
+  amount: number;
+  currency: string;
+  authorityBasis: string;
+  status: DisputeFinancialHoldStatus;
+  version: number;
+  reasonCode: string;
+  createdByAdminId: number;
+  createdAt: string;
+  approvedByAdminId: number | null;
+  approvedAt: string | null;
+  releaseRequestedByAdminId: number | null;
+  releaseRequestedAt: string | null;
+  releasedAt: string | null;
+  releaseReason: string;
+  reviewAt: string | null;
+  isOverdueForReview: boolean;
+}
+
+export interface DisputeChronologyEvent {
+  timestamp: string;
+  eventType: string;
+  summary: string;
+}
+
+export interface DisputeCaseExportRead {
+  case: DisputeCaseRead;
+  evidenceIndex: DisputeEvidenceRead[];
+  chronology: DisputeChronologyEvent[];
+  generatedAt: string;
+  note: string;
 }
 
 export type BookingChangeType =
@@ -912,13 +1384,30 @@ export interface BookingChangeRequest {
   authorityEvidenceRef: string;
   originalDepositAmount: number | null;
   proposedDepositAmount: number | null;
+  currency: string;
 }
 
 export type SubletRequestStatus =
+  | "draft"
   | "pending_verification"
   | "pending_admin_review"
+  | "more_information_requested"
+  | "tenant_response_submitted"
   | "approved"
-  | "rejected";
+  | "rejected"
+  | "withdrawn"
+  | "expired"
+  | "superseded"
+  | "cancelled_by_authority";
+
+export type SubletDeclineReasonCode =
+  | "PROPERTY_UNSUITABLE_FOR_ARRANGEMENT"
+  | "PROPOSED_OCCUPANT_NOT_ELIGIBLE"
+  | "INSUFFICIENT_INFORMATION_PROVIDED"
+  | "TERMS_NOT_ACCEPTABLE"
+  | "POLICY_OR_JURISDICTION_RESTRICTION"
+  | "AUTHORITY_OR_OWNERSHIP_CONCERN"
+  | "OTHER";
 
 export type SubletArrangementType =
   | "ASSIGNMENT_FULL"
@@ -931,14 +1420,29 @@ export type SubletArrangementType =
 export interface SubletRequest {
   id: number;
   currentOccupancyId: number;
-  proposedRenterPartyId: number;
+  proposedRenterPartyId: number | null;
   status: SubletRequestStatus;
   authorityEvidenceRef: string;
   adminDecision: string;
   adminNotes: string;
   decidedByAdminId: number | null;
+  decidedByUserId: number | null;
   createdAt: string;
   decidedAt: string | null;
+  infoRequestNote: string;
+  infoRequestedAt: string | null;
+  infoResponseNote: string;
+  infoRespondedAt: string | null;
+  infoRequestedDocumentTypes: string[];
+  infoRequestDueAt: string | null;
+  proposedStartDate: string | null;
+  proposedEndDate: string | null;
+  approvalConditions: string;
+  approvalConditionList: string[];
+  approvedWithAuthorityConfirmation: boolean;
+  approvalExpiresAt: string | null;
+  withdrawnAt: string | null;
+  reason: string;
   arrangementType: SubletArrangementType;
   listingName: string;
   listingCity: string;
@@ -948,6 +1452,24 @@ export interface SubletRequest {
   bathrooms: number;
   currentTenantName: string;
   proposedRenterName: string;
+  version: number;
+  declineReasonCode: string;
+  supersededBySubletRequestId: number | null;
+  expiredAt: string | null;
+  cancelledByAuthorityAt: string | null;
+  cancelledByAuthorityAdminId: number | null;
+  cancelledByAuthorityReason: string;
+  // Only set for SUBLEASE_PARTIAL/ADD_CO_TENANT/LODGER_OR_LICENSEE -- the
+  // co-tenant's own new agreement. When sublet.signatureMode is
+  // E_SIGNATURE for this jurisdiction, it's left unsigned until both
+  // parties actually sign it (see signOwnAgreement/signHostedAgreement).
+  newAgreementId: number | null;
+}
+
+export interface SubletChronologyEvent {
+  timestamp: string;
+  eventType: string;
+  summary: string;
 }
 
 export interface SubletRenterLookup {
@@ -1006,6 +1528,9 @@ export interface PublicListingsPage {
 // /api/users/notifications (user) -- each endpoint only ever returns the
 // authenticated caller's own rows). ---
 
+export type NotificationCategory = "PAYMENTS" | "LEASING" | "OCCUPANCY" | "DISPUTES_AND_SAFETY";
+export type NotificationPriority = "NORMAL" | "HIGH";
+
 export interface AppNotification {
   id: number;
   title: string;
@@ -1013,9 +1538,21 @@ export interface AppNotification {
   notificationType: string;
   relatedEntityType: string;
   relatedEntityId: string;
+  category: NotificationCategory;
+  priority: NotificationPriority;
   isRead: boolean;
   createdAt: string;
   readAt: string | null;
+}
+
+// Section 11 gap: category opt-out + quiet hours -- DISPUTES_AND_SAFETY is
+// deliberately not in NOTIFICATION_OPTABLE_CATEGORIES (backend/app/models/
+// notification.py) and is filtered out server-side if sent anyway.
+export interface NotificationPreference {
+  optedOutCategories: NotificationCategory[];
+  quietHoursEnabled: boolean;
+  quietHoursStartMinute: number;
+  quietHoursEndMinute: number;
 }
 
 // --- Verification (ZR-ENG-CLR-012) ---
@@ -1235,22 +1772,6 @@ export interface ActivationDecision {
   evaluatingAdminId: number | null;
   correlationId: string;
   evaluatedAt: string;
-}
-
-export interface TerminationCase {
-  id: number;
-  occupancyId: number;
-  agreementId: number;
-  initiatorGuestId: string | null;
-  initiatorAdminId: number | null;
-  causeCode: string;
-  status: string;
-  notes: string;
-  noticeCreatedAt: string;
-  noticeServedAt: string | null;
-  earliestEffectiveDate: string | null;
-  effectiveTerminationDate: string | null;
-  withdrawnAt: string | null;
 }
 
 export interface TerminationRecord {

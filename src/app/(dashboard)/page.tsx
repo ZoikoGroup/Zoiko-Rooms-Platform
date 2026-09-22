@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { BedDouble, CalendarRange, IndianRupee, Users } from "lucide-react";
+import { BedDouble, CalendarRange, Users, Wallet } from "lucide-react";
 import { StatCard } from "@/components/admin/StatCard";
 import { RevenueChart, RevenueTrendPoint } from "@/components/admin/charts/RevenueChart";
 import { BookingsByTypeChart, BookingsByTypePoint } from "@/components/admin/charts/BookingsByTypeChart";
@@ -39,7 +39,7 @@ export default async function AdminDashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Total Revenue" value={formatCurrency(totalRevenue)} change="+12.4%" icon={IndianRupee} index={0} />
+        <StatCard label="Total Revenue" value={formatCurrency(totalRevenue)} change="+12.4%" icon={Wallet} index={0} />
         <StatCard label="Total Bookings" value={String(bookings.length)} change="+8.1%" icon={CalendarRange} index={1} />
         <StatCard label="Active Guests" value={String(activeGuests)} change="+4.6%" icon={Users} index={2} />
         <StatCard label="Avg. Rating" value={`${avgRating} / 5`} change="+0.2" icon={BedDouble} index={3} />

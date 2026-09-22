@@ -1,5 +1,5 @@
 import { apiClientFetch } from "@/lib/api-client";
-import { AppNotification } from "@/lib/types";
+import { AppNotification, NotificationPreference } from "@/lib/types";
 
 /**
  * Shared client for the notification bell, used by both the Admin and USER
@@ -23,6 +23,19 @@ export function markNotificationRead(basePath: string, id: number): Promise<AppN
 
 export function markAllNotificationsRead(basePath: string): Promise<{ updated: number }> {
   return apiClientFetch<{ updated: number }>(`${basePath}/read-all`, { method: "PATCH" });
+}
+
+// Section 11 gap: category opt-out + quiet hours, shared by both topbars the
+// same way the four functions above are.
+export function getNotificationPreferences(basePath: string): Promise<NotificationPreference> {
+  return apiClientFetch<NotificationPreference>(`${basePath}/preferences`);
+}
+
+export function updateNotificationPreferences(basePath: string, payload: NotificationPreference): Promise<NotificationPreference> {
+  return apiClientFetch<NotificationPreference>(`${basePath}/preferences`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 }
 
 /**

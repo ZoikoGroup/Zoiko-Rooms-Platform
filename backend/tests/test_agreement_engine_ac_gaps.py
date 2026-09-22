@@ -25,6 +25,29 @@ from tests.test_renter_offer_agreement_flow import _make_agreement_eligible
 from tests.test_room_hold_atomicity import _apply_and_send_offer, _make_listing_with_room, _make_verified_renter
 
 
+def _make_signed_agreement(client, db_session: Session, admin_cookies: dict, renter, listing_id: str) -> int:
+    """Drives an offer all the way to a fully SIGNED agreement -- the
+    precondition request_amendment itself requires (see
+    crud/agreement_amendments.py)."""
+    _app_id, offer_id = _apply_send_accept_add_terms(
+        client, db_session, admin_cookies, renter, listing_id, start_date=date.today(),
+    )
+    offer = db_session.get(Offer, offer_id)
+    _make_agreement_eligible(db_session, offer.listing_id)
+    r = client.post(f"/api/leasing/offers/{offer_id}/agreement", cookies=admin_cookies)
+    agreement_id = r.json()["id"]
+    client.post(f"/api/leasing/agreements/{agreement_id}/send", cookies=admin_cookies)
+    deliver_all_disclosures(client, admin_cookies, agreement_id)
+    client.post(f"/api/users/rentals/agreements/{agreement_id}/sign", cookies=auth_user_cookie(renter))
+    client.post(f"/api/leasing/agreements/{agreement_id}/sign", json={"asParty": "provider"}, cookies=admin_cookies)
+
+    from tests.test_agreement_engine_foundation import _pay_off_agreement_obligations
+    _pay_off_agreement_obligations(client, db_session, admin_cookies, agreement_id)
+    agreement = db_session.get(Agreement, agreement_id)
+    assert agreement.status == "SIGNED"
+    return agreement_id
+
+
 def _apply_send_accept_add_terms(client, db_session: Session, admin_cookies: dict, renter, listing_id: str, *, start_date: date, term_months: int = 6):
     _app_id, offer_id = _apply_and_send_offer(client, db_session, renter, listing_id, admin_cookies)
     r = client.post(
@@ -354,6 +377,216 @@ class TestApprovedOptionalClauseSelection:
             cookies=admin_cookies,
         )
         assert r.status_code == 400, r.text
+
+
+class TestOptionalClauseChoicesDiscoverable:
+    """Section 4 gap: before AC-17's allow-list can be used, the admin/host
+    needs a way to discover what the approved optional clauses even are --
+    previously there was no endpoint at all, so the frontend always POSTed
+    an empty selectedOptionalClauseIds."""
+
+    def test_clause_options_lists_the_resolved_optional_clauses_with_titles(self, client, db_session: Session):
+        listing_id, _room_id = _make_listing_with_room(db_session)
+        super_admin = _make_admin(db_session, email="clauseopts-admin1@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(super_admin)
+        renter = _make_verified_renter(db_session, email="clauseopts-renter1@test.com")
+
+        _app_id, offer_id = _apply_send_accept_add_terms(
+            client, db_session, admin_cookies, renter, listing_id, start_date=date.today() + timedelta(days=5),
+        )
+        offer = db_session.get(Offer, offer_id)
+        _make_agreement_eligible(db_session, offer.listing_id)
+
+        r = client.get(f"/api/leasing/offers/{offer_id}/clause-options", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        clause_ids = {choice["clauseId"] for choice in r.json()}
+        assert "pets_and_animals_policy" in clause_ids
+        assert "parking_and_storage" in clause_ids
+        for choice in r.json():
+            assert choice["title"]
+
+    def test_clause_options_feed_directly_into_a_valid_create_agreement_call(self, client, db_session: Session):
+        listing_id, _room_id = _make_listing_with_room(db_session)
+        super_admin = _make_admin(db_session, email="clauseopts-admin2@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(super_admin)
+        renter = _make_verified_renter(db_session, email="clauseopts-renter2@test.com")
+
+        _app_id, offer_id = _apply_send_accept_add_terms(
+            client, db_session, admin_cookies, renter, listing_id, start_date=date.today() + timedelta(days=5),
+        )
+        offer = db_session.get(Offer, offer_id)
+        _make_agreement_eligible(db_session, offer.listing_id)
+
+        r = client.get(f"/api/leasing/offers/{offer_id}/clause-options", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        chosen = [r.json()[0]["clauseId"]]
+
+        r = client.post(
+            f"/api/leasing/offers/{offer_id}/agreement",
+            json={"selectedOptionalClauseIds": chosen},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+
+
+class TestAgentSigningAuthority:
+    """Section 4 gap: AgreementParty.party_type="agent"/authority_evidence_ref
+    (models/agreement_party.py) existed but nothing ever set them -- whoever
+    created the agreement was always recorded as an "individual" provider,
+    even when they were really a managing agent signing on behalf of the
+    actual landlord/company. create_agreement now accepts signing_as_agent
+    + agent_authority_evidence_ref and requires evidence before recording
+    the provider party as an agent."""
+
+    def test_signing_as_agent_without_evidence_is_rejected(self, client, db_session: Session):
+        listing_id, _room_id = _make_listing_with_room(db_session)
+        super_admin = _make_admin(db_session, email="agentauth-admin1@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(super_admin)
+        renter = _make_verified_renter(db_session, email="agentauth-renter1@test.com")
+
+        _app_id, offer_id = _apply_send_accept_add_terms(
+            client, db_session, admin_cookies, renter, listing_id, start_date=date.today() + timedelta(days=5),
+        )
+        offer = db_session.get(Offer, offer_id)
+        _make_agreement_eligible(db_session, offer.listing_id)
+
+        r = client.post(
+            f"/api/leasing/offers/{offer_id}/agreement",
+            json={"signingAsAgent": True, "agentAuthorityEvidenceRef": ""},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 400, r.text
+
+    def test_signing_as_agent_with_evidence_is_recorded_on_the_provider_party(self, client, db_session: Session):
+        listing_id, _room_id = _make_listing_with_room(db_session)
+        super_admin = _make_admin(db_session, email="agentauth-admin2@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(super_admin)
+        renter = _make_verified_renter(db_session, email="agentauth-renter2@test.com")
+
+        _app_id, offer_id = _apply_send_accept_add_terms(
+            client, db_session, admin_cookies, renter, listing_id, start_date=date.today() + timedelta(days=5),
+        )
+        offer = db_session.get(Offer, offer_id)
+        _make_agreement_eligible(db_session, offer.listing_id)
+
+        r = client.post(
+            f"/api/leasing/offers/{offer_id}/agreement",
+            json={"signingAsAgent": True, "agentAuthorityEvidenceRef": "letting-agent-mandate-2026-04.pdf"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        agreement = db_session.get(Agreement, r.json()["id"])
+        provider_party = next(p for p in agreement.parties if p.role == "provider")
+        assert provider_party.party_type == "agent"
+        assert provider_party.authority_evidence_ref == "letting-agent-mandate-2026-04.pdf"
+
+    def test_default_provider_party_is_still_an_individual(self, client, db_session: Session):
+        listing_id, _room_id = _make_listing_with_room(db_session)
+        super_admin = _make_admin(db_session, email="agentauth-admin3@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(super_admin)
+        renter = _make_verified_renter(db_session, email="agentauth-renter3@test.com")
+
+        _app_id, offer_id = _apply_send_accept_add_terms(
+            client, db_session, admin_cookies, renter, listing_id, start_date=date.today() + timedelta(days=5),
+        )
+        offer = db_session.get(Offer, offer_id)
+        _make_agreement_eligible(db_session, offer.listing_id)
+
+        r = client.post(f"/api/leasing/offers/{offer_id}/agreement", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        agreement = db_session.get(Agreement, r.json()["id"])
+        provider_party = next(p for p in agreement.parties if p.role == "provider")
+        assert provider_party.party_type == "individual"
+        assert provider_party.authority_evidence_ref == ""
+
+
+class TestAgreementLegalHold:
+    """Section 4 gap: agreements had no retention/legal-hold model at all
+    (spec API 'POST /retention/legal-hold | Apply scoped preservation hold
+    with authority'). Placing a hold requires both a reason and authority
+    evidence, and a real enforcement point -- request_amendment refuses
+    while a hold is active, mirroring dispute_evidence.py's own
+    archive_evidence-vs-DisputeLegalHold shape."""
+
+    def test_placing_a_hold_without_authority_evidence_is_rejected(self, client, db_session: Session):
+        listing_id, _room_id = _make_listing_with_room(db_session)
+        super_admin = _make_admin(db_session, email="legalhold-admin1@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(super_admin)
+        renter = _make_verified_renter(db_session, email="legalhold-renter1@test.com")
+        agreement_id = _make_signed_agreement(client, db_session, admin_cookies, renter, listing_id)
+
+        r = client.post(
+            f"/api/leasing/agreements/{agreement_id}/legal-hold",
+            json={"reason": "Pending litigation", "authorityEvidenceRef": ""},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 400, r.text
+
+    def test_a_non_super_admin_cannot_place_a_hold(self, client, db_session: Session):
+        listing_id, _room_id = _make_listing_with_room(db_session)
+        super_admin = _make_admin(db_session, email="legalhold-admin2@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(super_admin)
+        ordinary_admin = _make_admin(db_session, email="legalhold-admin2b@test.com", role="admin")
+        ordinary_cookies = auth_admin_cookie(ordinary_admin)
+        renter = _make_verified_renter(db_session, email="legalhold-renter2@test.com")
+        agreement_id = _make_signed_agreement(client, db_session, admin_cookies, renter, listing_id)
+
+        r = client.post(
+            f"/api/leasing/agreements/{agreement_id}/legal-hold",
+            json={"reason": "Pending litigation", "authorityEvidenceRef": "court-order-2026-11.pdf"},
+            cookies=ordinary_cookies,
+        )
+        assert r.status_code == 403, r.text
+
+    def test_active_hold_blocks_amendment_requests_and_release_unblocks_them(self, client, db_session: Session):
+        listing_id, _room_id = _make_listing_with_room(db_session)
+        super_admin = _make_admin(db_session, email="legalhold-admin3@test.com", role="super_admin")
+        admin_cookies = auth_admin_cookie(super_admin)
+        renter = _make_verified_renter(db_session, email="legalhold-renter3@test.com")
+        agreement_id = _make_signed_agreement(client, db_session, admin_cookies, renter, listing_id)
+
+        r = client.post(
+            f"/api/leasing/agreements/{agreement_id}/legal-hold",
+            json={"reason": "Pending litigation", "authorityEvidenceRef": "court-order-2026-11.pdf"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "ACTIVE"
+
+        r = client.post(
+            f"/api/leasing/agreements/{agreement_id}/amendments",
+            json={"reason": "Renter wants to add a guarantor"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 409, r.text
+
+        # A second hold cannot be placed while one is already active.
+        r = client.post(
+            f"/api/leasing/agreements/{agreement_id}/legal-hold",
+            json={"reason": "Second reason", "authorityEvidenceRef": "another-ref.pdf"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 409, r.text
+
+        r = client.post(f"/api/leasing/agreements/{agreement_id}/legal-hold/release", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "RELEASED"
+
+        # Releasing twice in a row has nothing left to release.
+        r = client.post(f"/api/leasing/agreements/{agreement_id}/legal-hold/release", cookies=admin_cookies)
+        assert r.status_code == 409, r.text
+
+        r = client.post(
+            f"/api/leasing/agreements/{agreement_id}/amendments",
+            json={"reason": "Renter wants to add a guarantor"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+
+        r = client.get(f"/api/leasing/agreements/{agreement_id}/legal-holds", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        assert len(r.json()) == 1
+        assert r.json()[0]["status"] == "RELEASED"
 
 
 class TestOccupancyTerminationDates:

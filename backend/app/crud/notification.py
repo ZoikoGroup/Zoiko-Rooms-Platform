@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.models.admin_user import AdminUser
 from app.models.guest import Guest
-from app.models.notification import Notification
+from app.models.notification import Notification, category_for_notification_type, priority_for_notification_type
+from app.models.notification_preference import NotificationPreference
 from app.models.user_account import UserAccount
 
 logger = logging.getLogger("uvicorn.error")
@@ -36,6 +37,27 @@ def _never_raises(fn):
     return wrapper
 
 
+def _is_suppressed_by_preference(db: Session, recipient_key: str, *, category: str, priority: str) -> bool:
+    """Section 11 gap: a hard category opt-out always suppresses (never
+    overridden by priority -- an explicit "don't notify me about X" choice);
+    quiet hours only ever suppress a NORMAL-priority notification -- see
+    models/notification_preference.py's own docstring for both the UTC-only
+    caveat and why this can only ever mean "don't create it", not "deliver
+    it later"."""
+    pref = db.scalar(select(NotificationPreference).where(NotificationPreference.recipient_key == recipient_key))
+    if pref is None:
+        return False
+    if category in pref.opted_out_categories:
+        return True
+    if pref.quiet_hours_enabled and priority != "HIGH":
+        now_minute = datetime.now(timezone.utc).hour * 60 + datetime.now(timezone.utc).minute
+        start, end = pref.quiet_hours_start_minute, pref.quiet_hours_end_minute
+        in_window = (start <= now_minute < end) if start <= end else (now_minute >= start or now_minute < end)
+        if in_window:
+            return True
+    return False
+
+
 def _create(
     db: Session,
     *,
@@ -50,11 +72,18 @@ def _create(
 ) -> Notification | None:
     """Creates one notification row, silently no-op on an exact duplicate (same
     type/entity/recipient -- see the model's unique constraint) instead of
-    raising. Runs in a SAVEPOINT so neither a duplicate nor any other failure
-    here can abort the caller's outer transaction -- notifying is always
-    best-effort with respect to the business change that triggered it, which is
-    why this is always called well before the caller's own db.commit()."""
+    raising, or on a recipient's own preference suppressing it (see
+    _is_suppressed_by_preference). Runs in a SAVEPOINT so neither a duplicate
+    nor any other failure here can abort the caller's outer transaction --
+    notifying is always best-effort with respect to the business change that
+    triggered it, which is why this is always called well before the
+    caller's own db.commit()."""
     recipient_key = f"user:{recipient_user_id}" if recipient_type == "user" else f"admin:{recipient_admin_id}"
+    category = category_for_notification_type(notification_type)
+    priority = priority_for_notification_type(notification_type)
+    if _is_suppressed_by_preference(db, recipient_key, category=category, priority=priority):
+        logger.info("notification: suppressed by recipient preference (type=%s recipient=%s)", notification_type, recipient_key)
+        return None
     notification = Notification(
         recipient_type=recipient_type,
         recipient_user_id=recipient_user_id,
@@ -65,6 +94,8 @@ def _create(
         notification_type=notification_type,
         related_entity_type=related_entity_type,
         related_entity_id=related_entity_id,
+        category=category,
+        priority=priority,
     )
     try:
         with db.begin_nested():
@@ -275,3 +306,46 @@ def mark_all_read_for_admin(db: Session, admin_id: int) -> int:
         row.read_at = now
     db.commit()
     return len(rows)
+
+
+def _get_or_create_preference(db: Session, *, recipient_type: str, recipient_user_id: int | None, recipient_admin_id: int | None) -> NotificationPreference:
+    recipient_key = f"user:{recipient_user_id}" if recipient_type == "user" else f"admin:{recipient_admin_id}"
+    pref = db.scalar(select(NotificationPreference).where(NotificationPreference.recipient_key == recipient_key))
+    if pref is not None:
+        return pref
+    pref = NotificationPreference(
+        recipient_type=recipient_type, recipient_user_id=recipient_user_id, recipient_admin_id=recipient_admin_id,
+        recipient_key=recipient_key,
+    )
+    db.add(pref)
+    db.commit()
+    db.refresh(pref)
+    return pref
+
+
+def get_or_create_preference_for_user(db: Session, user_id: int) -> NotificationPreference:
+    return _get_or_create_preference(db, recipient_type="user", recipient_user_id=user_id, recipient_admin_id=None)
+
+
+def get_or_create_preference_for_admin(db: Session, admin_id: int) -> NotificationPreference:
+    return _get_or_create_preference(db, recipient_type="admin", recipient_user_id=None, recipient_admin_id=admin_id)
+
+
+def update_preference(
+    db: Session, pref: NotificationPreference, *,
+    opted_out_categories: list[str], quiet_hours_enabled: bool, quiet_hours_start_minute: int, quiet_hours_end_minute: int,
+) -> NotificationPreference:
+    """Section 11 gap: NOTIFICATION_OPTABLE_CATEGORIES is the whitelist --
+    DISPUTES_AND_SAFETY (or any future non-optable category) is silently
+    dropped from whatever the caller sent rather than rejected outright,
+    same fail-closed-but-forgiving posture as other preference-shaped
+    settings in this codebase."""
+    from app.models.notification import NOTIFICATION_OPTABLE_CATEGORIES
+
+    pref.opted_out_categories = [c for c in opted_out_categories if c in NOTIFICATION_OPTABLE_CATEGORIES]
+    pref.quiet_hours_enabled = quiet_hours_enabled
+    pref.quiet_hours_start_minute = max(0, min(1439, quiet_hours_start_minute))
+    pref.quiet_hours_end_minute = max(0, min(1439, quiet_hours_end_minute))
+    db.commit()
+    db.refresh(pref)
+    return pref

@@ -44,6 +44,19 @@ def resolve_market_policy(db: Session, jurisdiction_code: str = DEFAULT_JURISDIC
             status.HTTP_409_CONFLICT,
             f"No market policy pack configured for jurisdiction '{jurisdiction_code}' as of {as_of} -- REVIEW_REQUIRED",
         )
+    # ZR-ENG-CLR-003 Section 13.2 FAIL-SAFE RULE: an EMERGENCY_BLOCK pack means
+    # a known active legal problem with this jurisdiction's rules -- every
+    # caller of this single resolution point (deposit + sublet processing)
+    # must stop, not silently keep using a pack flagged unsafe. REVIEW_REQUIRED
+    # (every pack this platform ships with today) is deliberately NOT blocking
+    # here -- that's the documented, already-normal "not yet legally verified"
+    # state, not a fail-safe trigger.
+    if policy.confidence == "EMERGENCY_BLOCK":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Market policy pack for '{jurisdiction_code}' v{policy.version} is under an emergency block -- "
+            "this action cannot proceed until Legal/Compliance clears it",
+        )
     return policy
 
 
@@ -79,6 +92,7 @@ def to_termination_policy_snapshot(policy: MarketPolicyPack) -> dict:
             float(policy.termination_liability_cap_rent_multiple)
             if policy.termination_liability_cap_rent_multiple is not None else None
         ),
+        "termination_break_fee_bands": list(policy.termination_break_fee_bands or []),
     })
     return snapshot
 

@@ -116,3 +116,55 @@ class TestChatEndpointRateLimit:
     def test_resets_global_limiter(self):
         chat_limiter.reset()
         assert True
+
+
+class TestSubletRateLimit:
+    """ZR-SUB-003 Section 10: 'Rate-limit submission and document
+    workflows.' Same low-budget patch-in pattern as TestChatEndpointRateLimit
+    above, applied to the sublet submit/document-upload routes."""
+
+    def test_sublet_submission_is_rate_limited(self, client, db_session):
+        from tests.test_sublet_arrangement_classification import _make_active_tenancy
+        from tests.conftest import auth_user_cookie
+
+        tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="ratelimit1")
+
+        low = RateLimiter(max_requests=1, window_seconds=60)
+        with patch("app.api.routes.user_rentals.sublet_submit_limiter", low):
+            r = client.post(
+                f"/api/users/rentals/occupancies/{occupancy_id}/sublet-request",
+                json={"occupancyId": occupancy_id, "proposedRenterPartyId": proposed_party_id},
+                cookies=auth_user_cookie(tenant_user),
+            )
+            assert r.status_code == 201, r.text
+
+            r = client.post(
+                f"/api/users/rentals/occupancies/{occupancy_id}/sublet-request",
+                json={"occupancyId": occupancy_id, "proposedRenterPartyId": proposed_party_id},
+                cookies=auth_user_cookie(tenant_user),
+            )
+            assert r.status_code == 429
+
+    def test_sublet_document_upload_is_rate_limited(self, client, db_session):
+        from tests.test_sublet_arrangement_classification import _make_active_tenancy
+        from tests.conftest import auth_user_cookie
+        from app.crud import sublet as sublet_crud
+
+        tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="ratelimit2")
+        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id)
+
+        low = RateLimiter(max_requests=1, window_seconds=60)
+        with patch("app.api.routes.user_rentals.sublet_document_limiter", low):
+            r = client.post(
+                f"/api/users/rentals/sublet-requests/{sublet_request.id}/documents",
+                files={"file": ("a.pdf", b"%PDF-1.4 x", "application/pdf")},
+                cookies=auth_user_cookie(tenant_user),
+            )
+            assert r.status_code == 201, r.text
+
+            r = client.post(
+                f"/api/users/rentals/sublet-requests/{sublet_request.id}/documents",
+                files={"file": ("b.pdf", b"%PDF-1.4 y", "application/pdf")},
+                cookies=auth_user_cookie(tenant_user),
+            )
+            assert r.status_code == 429

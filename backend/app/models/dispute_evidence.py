@@ -21,8 +21,17 @@ DISPUTE_EVIDENCE_PROVENANCE = (
 # restricting a party upload) are ever set by this phase's write paths.
 # PRIVILEGED_RESTRICTED/EXTERNAL_EXPORT_ELIGIBLE exist as valid values an
 # admin's disclosure-class update can reach later, not inferred here.
+#
+# Section 6 gap: PARTY_VISIBLE alone can't express "visible to the renter
+# and to staff, but never to the Host" -- e.g. evidence backing a sensitive/
+# protected-ground termination cause (domestic violence, harassment) where
+# the underlying material must never reach the party the renter is fleeing
+# from. RENTER_VISIBLE_ONLY is that third tier: renter + admin (subject to
+# the same PRIVILEGED_RESTRICTED-style staff gate as everything else), never
+# the Host -- see crud/dispute_evidence.py:list_evidence_for_case/
+# assert_evidence_downloadable for enforcement.
 DISPUTE_EVIDENCE_DISCLOSURE_CLASSES = (
-    "PARTY_VISIBLE", "INTERNAL_ONLY", "PRIVILEGED_RESTRICTED", "EXTERNAL_EXPORT_ELIGIBLE",
+    "PARTY_VISIBLE", "RENTER_VISIBLE_ONLY", "INTERNAL_ONLY", "PRIVILEGED_RESTRICTED", "EXTERNAL_EXPORT_ELIGIBLE",
 )
 
 # Section 22: an independent state machine from disclosure_class/legal_hold

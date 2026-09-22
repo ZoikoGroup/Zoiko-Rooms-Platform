@@ -683,7 +683,7 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
             </div>
             <div>
               <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                Price /night (₹)
+                Price /night
               </label>
               <input
                 type="number"

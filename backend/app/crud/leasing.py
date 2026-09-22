@@ -24,6 +24,7 @@ from app.crud.party import assert_provider_access, assert_provider_access_any, p
 from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
 from app.models.agreement_amendment import AgreementAmendment
+from app.models.agreement_clause import ClauseDefinition
 from app.models.agreement_party import AgreementParty
 from app.models.agreement_version_detail import AgreementPremises, CommercialTermsSnapshot, ExecutionCertificate
 from app.models.disclosure_requirement import DisclosureRequirement
@@ -386,6 +387,20 @@ def add_offer_terms(
             f"Deposit amount {data.deposit_amount:.2f} exceeds the resolved market cap of "
             f"{max_deposit:.2f} ({policy.deposit_max_rent_multiple}x monthly rent, jurisdiction={policy.jurisdiction_code})",
         )
+    # ZR-ENG-CLR-002 Section 2: deposit_instrument_allowed was previously stored
+    # but never read anywhere -- a PROHIBITED market could still have a deposit
+    # added, and a REQUIRED one could still have none. This is the single place
+    # a deposit amount is actually set, matching the cap check right above it.
+    if policy.deposit_instrument_allowed == "PROHIBITED" and data.deposit_amount > 0:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"A deposit is not permitted in this jurisdiction ({policy.jurisdiction_code}) -- deposit amount must be 0",
+        )
+    if policy.deposit_instrument_allowed == "REQUIRED" and data.deposit_amount <= 0:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"A deposit is required in this jurisdiction ({policy.jurisdiction_code}) -- deposit amount must be greater than 0",
+        )
 
     # ZR-ENG-CLR-005 AC-06: the cadence these terms will seed a PaymentSchedule
     # with (create_agreement) -- reject anything outside the supported set up
@@ -403,6 +418,18 @@ def add_offer_terms(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "customIntervalDays is required (a positive integer) for CUSTOM cadence")
     elif data.custom_interval_days is not None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "customIntervalDays only applies to CUSTOM cadence")
+
+    # Section 5 gap: an UPFRONT schedule bills the entire term as one advance
+    # payment (create_agreement: monthly_rent * term_months) -- without a
+    # ceiling, this could collect a whole multi-year lease's rent in a single
+    # obligation. Only UPFRONT is capped: every other cadence never collects
+    # more than one period's rent ahead of its own due date by construction.
+    if data.cadence == "UPFRONT" and data.term_months > policy.advance_rent_max_months:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"UPFRONT cadence would collect {data.term_months} months of rent in advance, exceeding the resolved "
+            f"market cap of {policy.advance_rent_max_months} month(s) (jurisdiction={policy.jurisdiction_code})",
+        )
 
     next_version = offer.current_version + 1
     terms = OfferTerms(
@@ -742,19 +769,34 @@ def _build_agreement_snapshot(
     }
 
 
-def _populate_agreement_parties(db: Session, agreement: Agreement, offer: Offer) -> None:
+def _populate_agreement_parties(
+    db: Session, agreement: Agreement, offer: Offer, *,
+    signing_as_agent: bool = False, agent_authority_evidence_ref: str = "",
+) -> None:
     """ZR-ENG-CLR-004 Section 13.1 agreement_party: the real per-party
     roster, populated once at create_agreement time from the same verified
     listing/guest facts _build_agreement_snapshot reads -- never Host free
     text (Section 5.2 lists 'legal label/authority of a party' among the
-    fields Host must not control)."""
+    fields Host must not control).
+
+    signing_as_agent/agent_authority_evidence_ref wire up the previously
+    unused party_type="agent"/authority_evidence_ref columns on
+    AgreementParty (models/agreement_party.py) for the one case this
+    codebase actually has: whoever created the agreement (admin or Host
+    UserAccount) may not be the property's own legal owner/company, and is
+    instead an authorized agent signing on its behalf -- see
+    create_agreement's own validation, which requires evidence before this
+    is ever set."""
     listing = offer.listing
     guest = offer.guest
     provider_name = listing.contact_name or (listing.owner.full_name if listing.owner else "Host")
     provider_email = listing.contact_email or (listing.owner.email if listing.owner else "")
     db.add(AgreementParty(
-        agreement_id=agreement.id, role="provider", party_type="individual",
+        agreement_id=agreement.id,
+        role="provider",
+        party_type="agent" if signing_as_agent else "individual",
         legal_name=provider_name, contact_email=provider_email,
+        authority_evidence_ref=agent_authority_evidence_ref if signing_as_agent else "",
     ))
     db.add(AgreementParty(
         agreement_id=agreement.id, role="renter", party_type="individual",
@@ -783,8 +825,32 @@ def _populate_version_detail_rows(db: Session, version: AgreementVersion, offer:
     ))
 
 
+def list_optional_clause_choices(db: Session, listing: Listing) -> list[dict]:
+    """ZR-ENG-CLR-004 AC-17: the Host's real, resolved choice set of approved
+    optional clauses (e.g. pets, parking) for Screen G -- previously only
+    reachable by already knowing a clause_id, since create_agreement's own
+    AC-17 validation is the only thing that ever read
+    profile.optional_clause_ids. Returns [] (not an error) when there's no
+    resolvable profile at all -- create_agreement's own fail-closed check is
+    what actually blocks agreement creation in that case."""
+    profile = resolve_agreement_profile(db, listing, listing.room)
+    if profile is None or not profile.optional_clause_ids:
+        return []
+    rows = db.scalars(
+        select(ClauseDefinition).where(ClauseDefinition.clause_id.in_(profile.optional_clause_ids))
+    ).all()
+    by_id_version = {(r.clause_id, r.version): r for r in rows}
+    choices = []
+    for clause_id in profile.optional_clause_ids:
+        row = by_id_version.get((clause_id, profile.clause_versions.get(clause_id)))
+        if row is not None:
+            choices.append({"clause_id": clause_id, "title": row.title})
+    return choices
+
+
 def create_agreement(
     db: Session, offer: Offer, admin: AdminUser | UserAccount, selected_optional_clause_ids: list[str] | None = None,
+    *, signing_as_agent: bool = False, agent_authority_evidence_ref: str = "",
 ) -> Agreement:
     assert_provider_access_any(db, admin, party_id_for_listing(offer.listing))
     reasons = check_agreement_eligibility(db, offer)
@@ -815,6 +881,12 @@ def create_agreement(
             f"Not an approved optional clause for this agreement: {invalid}",
         )
 
+    if signing_as_agent and not agent_authority_evidence_ref.strip():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Authority evidence is required when signing on behalf of the landlord/company as an agent",
+        )
+
     agreement = Agreement(offer_id=offer.id)
     db.add(agreement)
     db.flush()
@@ -827,7 +899,10 @@ def create_agreement(
     db.add(version)
     db.flush()
     _populate_version_detail_rows(db, version, offer, latest_terms)
-    _populate_agreement_parties(db, agreement, offer)
+    _populate_agreement_parties(
+        db, agreement, offer,
+        signing_as_agent=signing_as_agent, agent_authority_evidence_ref=agent_authority_evidence_ref.strip(),
+    )
 
     # ZR-ENG-CLR-004 Section 6.8/13.1: the disclosure checklist this
     # agreement must clear before signing -- see _apply_signature's gate
@@ -1719,6 +1794,7 @@ def freeze_agreement_version(db: Session, agreement: Agreement) -> DocumentArtif
         pending_amendment.executed_at = now
         pending_amendment.effective_at = now
         _supersede_payment_schedule_if_rent_changed(db, agreement, pending_amendment)
+        _generate_deposit_topup_obligation(db, agreement, pending_amendment)
 
         # ZR-ENG-CLR-008 Section 8: if this amendment was generated from a
         # renter-initiated BookingChangeRequest, that request is only
@@ -1799,4 +1875,38 @@ def _supersede_payment_schedule_if_rent_changed(db: Session, agreement: Agreemen
         amount=float(amendment.proposed_terms["monthlyRent"]),
         first_due=date_.today(),
         anchor_day=current.anchor_day,
+    ))
+
+
+def _generate_deposit_topup_obligation(db: Session, agreement: Agreement, amendment: AgreementAmendment) -> None:
+    """Section 2 gap: a deposit top-up bundled with a rent change
+    (crud/booking_change_requests.py:request_financial_change) updates the
+    contractual deposit_amount figure via the same _merged_snapshot path any
+    other amendment uses, but that alone never actually bills the tenant for
+    the difference. Mirrors _supersede_payment_schedule_if_rent_changed's
+    shape: a no-op for the common case (no depositAmount in this amendment,
+    or a same/decreased figure -- a decrease is a refund, handled by Section
+    2's own deposit release path, not this one). Creates one new DEPOSIT
+    Obligation for exactly the incremental amount, due immediately -- the
+    original, already-paid obligation is never touched, so it becomes its
+    own separate DepositRecord once paid (crud/finance.py's existing
+    one-record-per-paid-obligation pattern), not a silent rewrite of the
+    first one's held_amount."""
+    if "depositAmount" not in amendment.proposed_terms:
+        return
+
+    source_version = db.get(AgreementVersion, amendment.source_version_id)
+    old_deposit = float(source_version.snapshot.get("deposit_amount", 0))
+    new_deposit = float(amendment.proposed_terms["depositAmount"])
+    topup = round(new_deposit - old_deposit, 2)
+    if topup <= 0:
+        return
+
+    db.add(Obligation(
+        obligation_type="DEPOSIT",
+        money_plane=OBLIGATION_TYPE_TO_PLANE["DEPOSIT"],
+        amount=topup,
+        currency=agreement.offer.listing.currency,
+        due_date=date_.today(),
+        agreement_id=agreement.id,
     ))
