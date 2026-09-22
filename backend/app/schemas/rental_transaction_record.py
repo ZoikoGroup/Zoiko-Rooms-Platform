@@ -19,6 +19,7 @@ from app.schemas.finance import DepositRecordRead, ObligationRead, SimulatedPaym
 from app.schemas.leasing import AgreementAmendmentRead, ApplicationRead, SubletRequestRead
 from app.schemas.activation_gate import ActivationDecisionRead, HandoverEventRead
 from app.schemas.occupancy import OccupancyRead, TerminationRecordRead
+from app.schemas.rental_payment import RentalPaymentObligationRead
 from app.schemas.termination import TerminationCaseRead
 from app.schemas.verification import RenterVerificationStatusItem
 
@@ -54,6 +55,12 @@ class RentalTransactionRecordRead(CamelModel):
     obligations: list[ObligationRead] = []
     payments: list[SimulatedPaymentRead] = []
     deposit: DepositRecordRead | None = None
+    # ZR-PAY-002's own record/evidence-layer obligations (models/rental_payment.py)
+    # -- kept alongside `obligations` above rather than replacing it; the two
+    # domains deliberately coexist (see RentalPaymentObligation's own model
+    # docstring). Never money-moving -- declarations/confirmations/disputes
+    # only, each record nesting its own disputes/corrections.
+    rental_payment_obligations: list[RentalPaymentObligationRead] = []
 
     # --- Move-in / handover ---
     handover_events: list[HandoverEventRead] = []

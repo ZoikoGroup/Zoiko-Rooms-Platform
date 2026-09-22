@@ -105,7 +105,7 @@ class TestMixedPaymentsScenario:
 
         assert r["totalRentalPaymentObligations"] == 2
         assert r["totalRentalPaymentRecords"] == 2
-        assert r["recordsByStatus"].get("CONFIRMED_BY_RECIPIENT") == 1
+        assert r["recordsByStatus"].get("CONFIRMED") == 1
         assert r["recordsByStatus"].get("DISPUTED") == 1
         assert r["avgRentalPaymentConfirmationTurnaroundDays"] is not None
         # 1 of 2 records has ever had a dispute opened against it.

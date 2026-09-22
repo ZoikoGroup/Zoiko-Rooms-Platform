@@ -16,6 +16,7 @@ import {
   RentalPaymentMethodCategory,
   RentalPaymentObligation,
   RentalPaymentObligationType,
+  RentalPaymentProviderAccount,
   RentalPaymentRecord,
 } from "@/lib/types";
 import {
@@ -28,17 +29,25 @@ import {
 import { formatDate, formatDateTime, formatMoney } from "@/lib/utils";
 import {
   confirmRentalPaymentInstruction,
+  confirmRentalPaymentProviderAccountChange,
   confirmRentalPaymentReceipt,
+  connectRentalPaymentProviderAccount,
   downloadListingFeeReceipt,
   errorMessage,
+  getRentalPaymentProviderAccount,
   listListingFeeRefundsForPayment,
   listMyListingFeePayments,
   listMyRentalPaymentInstructions,
   listRecipientRentalPaymentObligations,
+  refreshRentalPaymentProviderAccount,
   reportRentalPaymentDiscrepancyAsRecipient,
+  requestRentalPaymentProviderAccountChange,
   resendRentalPaymentInstructionCode,
+  resendRentalPaymentProviderAccountChangeCode,
+  simulateRentalPaymentProviderAccountOnboardingComplete,
   submitRentalPaymentInstruction,
 } from "@/lib/user-api";
+import { ApiError } from "@/lib/api-client";
 
 const METHOD_OPTIONS: { value: RentalPaymentMethodCategory; label: string }[] = [
   { value: "BANK_TRANSFER", label: "Bank transfer" },
@@ -63,7 +72,7 @@ const TYPE_FILTERS: { value: RentalPaymentObligationType | "ALL"; label: string 
 ];
 
 type Tab = "overview" | "amounts-due" | "records" | "instructions" | "listing-fees";
-const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "AWAITING_CONFIRMATION", "TENANT_MARKED_PAID", "DISPUTED"]);
+const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "RECIPIENT_CONFIRMATION_PENDING", "PAYER_RECORDED", "DISPUTED"]);
 
 export function RecipientRentalPaymentsManager() {
   const { toast, showToast } = useToast();
@@ -97,7 +106,7 @@ export function RecipientRentalPaymentsManager() {
     () => [...obligations].filter((o) => OPEN_STATUSES.has(o.status)).sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
     [obligations]
   );
-  const awaitingConfirmationCount = obligations.filter((o) => o.status === "AWAITING_CONFIRMATION").length;
+  const awaitingConfirmationCount = obligations.filter((o) => o.status === "RECIPIENT_CONFIRMATION_PENDING").length;
   const upcomingCount = obligations.filter((o) => o.status === "UPCOMING" || o.status === "DUE").length;
 
   const allRecords = useMemo(
@@ -186,7 +195,7 @@ export function RecipientRentalPaymentsManager() {
                         {formatMoney(o.amount, o.currency)} &middot; Due {formatDate(o.dueDate)}
                       </p>
                     </div>
-                    {(o.status === "AWAITING_CONFIRMATION" || o.status === "TENANT_MARKED_PAID" || o.status === "DISPUTED") && (
+                    {(o.status === "RECIPIENT_CONFIRMATION_PENDING" || o.status === "PAYER_RECORDED" || o.status === "DISPUTED") && (
                       <Button size="sm" onClick={() => openReview(o)}>
                         Review
                       </Button>
@@ -265,7 +274,12 @@ export function RecipientRentalPaymentsManager() {
         </div>
       )}
 
-      {tab === "instructions" && <InstructionsManager instructions={instructions} onChanged={load} />}
+      {tab === "instructions" && (
+        <div className="space-y-6">
+          <ProviderAccountManager />
+          <InstructionsManager instructions={instructions} onChanged={load} />
+        </div>
+      )}
 
       {tab === "listing-fees" && (
         <div className="space-y-4">
@@ -393,7 +407,7 @@ function ReviewModal({
 
   if (!entry) return null;
   const { record, obligation } = entry;
-  const canAct = record.status === "TENANT_MARKED_PAID" || record.status === "DISPUTED";
+  const canAct = record.status === "PAYER_RECORDED" || record.status === "DISPUTED";
 
   async function handleConfirm() {
     setConfirming(true);
@@ -505,6 +519,263 @@ function Row({ label, value }: { label: string; value: string }) {
       <span className="text-xs text-slate-400">{label}</span>
       <span className="text-right font-semibold text-slate-700 dark:text-slate-200">{value}</span>
     </div>
+  );
+}
+
+/** ZR-PAY-LINK-003 Section 6/Wireframe C: the online-payment rail's own
+ *  destination, alongside InstructionsManager's direct-instruction one
+ *  below -- "Manual bank transfer and provider-hosted digital payment are
+ *  two rails over the same relationship" (Section 1.1). */
+function ProviderAccountManager() {
+  const { toast, showToast } = useToast();
+  const [loading, setLoading] = useState(true);
+  const [account, setAccount] = useState<RentalPaymentProviderAccount | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [simulating, setSimulating] = useState(false);
+  const [email, setEmail] = useState("");
+  const [country, setCountry] = useState("GB");
+  const [changingAccount, setChangingAccount] = useState(false);
+
+  function load() {
+    setLoading(true);
+    getRentalPaymentProviderAccount()
+      .then(setAccount)
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 404) {
+          setAccount(null);
+        } else {
+          showToast(errorMessage(err, "Could not load your payment account."), "error");
+        }
+      })
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function handleConnect() {
+    if (!email.trim()) {
+      showToast("Enter the email Stripe should use for this account.", "error");
+      return;
+    }
+    setConnecting(true);
+    try {
+      const result = await connectRentalPaymentProviderAccount({ country, email: email.trim() });
+      setAccount(result.account);
+      if (result.onboardingUrl) {
+        window.location.href = result.onboardingUrl;
+      }
+    } catch (err) {
+      showToast(errorMessage(err, "Could not connect a payment account."), "error");
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function handleRefresh() {
+    setRefreshing(true);
+    try {
+      setAccount(await refreshRentalPaymentProviderAccount());
+    } catch (err) {
+      showToast(errorMessage(err, "Could not refresh your account status."), "error");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function handleSimulate() {
+    setSimulating(true);
+    try {
+      setAccount(await simulateRentalPaymentProviderAccountOnboardingComplete());
+      showToast("Onboarding marked complete (dev/test only).");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not simulate onboarding completion."), "error");
+    } finally {
+      setSimulating(false);
+    }
+  }
+
+  if (loading) return <Loader label="Loading payment account" />;
+
+  return (
+    <Card>
+      <SectionHeading title="Secure online payment" subtitle="Connect a Stripe account so tenants can pay you directly online." />
+      {!account ? (
+        <div className="mt-3 space-y-3">
+          <Field label="Country">
+            <input value={country} onChange={(e) => setCountry(e.target.value.toUpperCase())} className={inputClass} maxLength={2} />
+          </Field>
+          <Field label="Email for this Stripe account">
+            <input value={email} onChange={(e) => setEmail(e.target.value)} className={inputClass} type="email" />
+          </Field>
+          <Button size="sm" loading={connecting} onClick={handleConnect}>
+            Connect payment account
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-3">
+          <div className="flex items-center gap-2">
+            <Badge tone={account.status === "COMPLETE" ? "success" : "warning"}>
+              {account.status === "COMPLETE" ? "Connected" : "Onboarding incomplete"}
+            </Badge>
+            {account.chargesEnabled && <span className="text-xs text-slate-500 dark:text-slate-400">Ready to accept payments</span>}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" loading={refreshing} onClick={handleRefresh}>
+              Refresh status
+            </Button>
+            {account.status !== "COMPLETE" && (
+              <Button size="sm" variant="ghost" loading={simulating} onClick={handleSimulate}>
+                Simulate onboarding complete (dev)
+              </Button>
+            )}
+            {account.status === "COMPLETE" && !changingAccount && (
+              <Button size="sm" variant="ghost" onClick={() => setChangingAccount(true)}>
+                Change account
+              </Button>
+            )}
+          </div>
+          {changingAccount && (
+            <ProviderAccountChangeForm
+              onCancel={() => setChangingAccount(false)}
+              onChanged={(updated) => {
+                setChangingAccount(false);
+                setAccount(updated);
+                showToast("Payment account changed -- complete onboarding for the new account.");
+              }}
+            />
+          )}
+        </div>
+      )}
+      <Toast toast={toast} />
+    </Card>
+  );
+}
+
+/** ZR-PAY-LINK-003 Section 14.1: the step-up confirmation for a payment
+ *  account CHANGE -- same shape as PaymentRecipientSetup.tsx's own
+ *  ConfirmChangeForm, for the sibling destination-change governance flow. */
+function ProviderAccountChangeForm({
+  onCancel,
+  onChanged,
+}: {
+  onCancel: () => void;
+  onChanged: (account: RentalPaymentProviderAccount) => void;
+}) {
+  const [requested, setRequested] = useState(false);
+  const [requesting, setRequesting] = useState(false);
+  const [code, setCode] = useState("");
+  const [newCountry, setNewCountry] = useState("GB");
+  const [newEmail, setNewEmail] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [resent, setResent] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleRequest() {
+    setRequesting(true);
+    setError("");
+    try {
+      await requestRentalPaymentProviderAccountChange();
+      setRequested(true);
+    } catch (err) {
+      setError(errorMessage(err, "Could not request this change."));
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  async function handleResend() {
+    setResending(true);
+    try {
+      await resendRentalPaymentProviderAccountChangeCode();
+      setResent(true);
+    } catch (err) {
+      setError(errorMessage(err, "Could not resend the code."));
+    } finally {
+      setResending(false);
+    }
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    if (!newEmail.trim()) {
+      setError("Enter the email the new Stripe account should use.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const result = await confirmRentalPaymentProviderAccountChange({
+        code: code.trim(), country: newCountry, email: newEmail.trim(),
+      });
+      if (result.onboardingUrl) {
+        window.location.href = result.onboardingUrl;
+        return;
+      }
+      onChanged(result.account);
+    } catch (err) {
+      setError(errorMessage(err, "Could not confirm this change."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (!requested) {
+    return (
+      <Card className="!bg-amber-50 !ring-amber-200 dark:!bg-amber-500/10 dark:!ring-amber-500/20">
+        <p className="text-xs text-slate-600 dark:text-slate-300">
+          We&apos;ll email a confirmation code to your account before you can connect a new payment account.
+        </p>
+        {error && <p className="mt-2 text-xs text-rose-600 dark:text-rose-300">{error}</p>}
+        <div className="mt-3 flex gap-2">
+          <Button size="sm" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button size="sm" loading={requesting} onClick={handleRequest}>
+            Send confirmation code
+          </Button>
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="!bg-amber-50 !ring-amber-200 dark:!bg-amber-500/10 dark:!ring-amber-500/20">
+      <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">Confirm this change</p>
+      <form onSubmit={handleSubmit} className="mt-3 space-y-3">
+        {error && (
+          <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">
+            {error}
+          </p>
+        )}
+        <Field label="Confirmation code *">
+          <input
+            required value={code} onChange={(e) => setCode(e.target.value)} className={inputClass}
+            inputMode="numeric" maxLength={6} autoComplete="one-time-code"
+          />
+        </Field>
+        <Field label="Country for the new account">
+          <input value={newCountry} onChange={(e) => setNewCountry(e.target.value.toUpperCase())} className={inputClass} maxLength={2} />
+        </Field>
+        <Field label="Email for the new account">
+          <input required value={newEmail} onChange={(e) => setNewEmail(e.target.value)} className={inputClass} type="email" />
+        </Field>
+        <div className="flex items-center justify-between gap-2">
+          <Button type="button" variant="ghost" size="sm" loading={resending} onClick={handleResend}>
+            {resent ? "Code resent" : "Resend code"}
+          </Button>
+          <div className="flex gap-2">
+            <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button type="submit" size="sm" loading={submitting}>
+              Confirm change
+            </Button>
+          </div>
+        </div>
+      </form>
+    </Card>
   );
 }
 

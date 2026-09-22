@@ -188,8 +188,8 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
       const updated = await apiClientFetch<Listing>(`/api/listings/${id}/publish`, { method: "POST" });
       setItems((prev) => prev.map((l) => (l.id === id ? updated : l)));
       showToast("Listing published");
-    } catch {
-      showToast("Failed to publish listing");
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "Failed to publish listing");
     }
   }
 

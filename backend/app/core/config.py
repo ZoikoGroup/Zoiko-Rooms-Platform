@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     # stripe_webhook_secret so a single-endpoint Stripe setup keeps working
     # unchanged.
     stripe_listing_fee_webhook_secret: str = ""
+    # ZR-PAY-LINK-003 Section 6: this domain's own Stripe Connect events
+    # (direct charges on a recipient's connected account) -- same
+    # separate-endpoint-with-its-own-secret, falls-back-to-shared-secret
+    # pattern as stripe_listing_fee_webhook_secret above.
+    stripe_rental_payment_webhook_secret: str = ""
     # ZR-PAY-002 Section 13.1: one immutable PDF per SUCCEEDED ListingFeePayment.
     # Same never-publicly-mounted secure_uploads/ convention as
     # receipt_document_dir above, own directory/module (core/listing_fee_

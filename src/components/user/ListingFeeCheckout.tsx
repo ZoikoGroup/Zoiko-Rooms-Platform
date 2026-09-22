@@ -1,12 +1,11 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
-import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
+import { useEffect, useState } from "react";
 import { CheckCircle2, Download, ShieldCheck, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Card, Field, Toast, inputClass, useToast } from "@/components/user/ui";
-import { ListingFeeCheckoutSession, ListingFeeQuote, PublishEligibility } from "@/lib/types";
+import { ListingFeeQuote, PublishEligibility } from "@/lib/types";
 import { formatMoney } from "@/lib/utils";
 import {
   createListingFeeCheckoutSession,
@@ -15,8 +14,8 @@ import {
   errorMessage,
   getHostedListingPublishEligibility,
   getListingFeePayment,
+  resolveListingFeeCheckoutSession,
 } from "@/lib/user-api";
-import { getStripe } from "@/lib/stripe";
 
 /** ZR-PAY-002 Section 8.3: the checklist a Listing Fee payment is ONE line
  *  of, never the whole of -- paying it must never be shown as if it alone
@@ -107,92 +106,114 @@ function SuccessScreen({ listingId, paymentId }: { listingId: string; paymentId:
   );
 }
 
-function StripePaymentForm({
+/** Shown once the customer is back from Stripe's own hosted page but the
+ *  webhook (the actual source of truth -- see crud/listing_fee.py's
+ *  _complete_payment_success) hasn't landed yet. Bounded to ~2 minutes:
+ *  real webhook delivery is near-instant in production, so anything past
+ *  that is worth surfacing rather than polling forever. */
+function ConfirmingPayment({
   paymentId,
-  totalAmount,
-  currency,
   onSucceeded,
   onFailed,
 }: {
   paymentId: number;
-  totalAmount: number;
-  currency: string;
   onSucceeded: () => void;
   onFailed: (message: string) => void;
 }) {
-  const stripe = useStripe();
-  const elements = useElements();
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
+  const [message, setMessage] = useState("Confirming your payment with Stripe -- this only takes a few seconds...");
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!stripe || !elements) return;
-    setSubmitting(true);
-    setError("");
-    // ZR-PAY-002 Section 8.2 PCI boundary: this application never sees card
-    // PAN/CVV -- Stripe's own PaymentElement collects it directly, and
-    // confirmPayment talks to Stripe, not our backend.
-    const { error: confirmError, paymentIntent } = await stripe.confirmPayment({
-      elements,
-      redirect: "if_required",
-    });
+  useEffect(() => {
+    let cancelled = false;
+    let attempt = 0;
 
-    if (confirmError) {
-      // Section 8.4: 'Show a neutral failure message; do not expose gateway
-      // diagnostics.' confirmError.message is Stripe's own user-safe decline
-      // reason (e.g. "Your card was declined."), never a raw stack trace.
-      setError(confirmError.message ?? "Your payment could not be completed.");
-      setSubmitting(false);
-      return;
+    async function poll() {
+      if (cancelled) return;
+      attempt += 1;
+      try {
+        const payment = await getListingFeePayment(paymentId);
+        if (payment.status === "SUCCEEDED") {
+          onSucceeded();
+          return;
+        }
+        if (payment.status === "FAILED") {
+          onFailed(payment.failureMessage || "Your payment did not go through.");
+          return;
+        }
+      } catch {
+        // Transient read failure -- keep polling within the window.
+      }
+      if (cancelled) return;
+      if (attempt >= 24) {
+        setMessage("Your payment is taking longer than usual to confirm. Refresh this page in a moment to check its status.");
+        return;
+      }
+      setTimeout(poll, 5000);
     }
 
-    if (paymentIntent?.status === "succeeded") {
-      onSucceeded();
-      return;
-    }
-
-    // Any other status (processing, requires_action already redirected,
-    // etc.) -- poll our own record once rather than guessing; the webhook
-    // is the actual source of truth for SUCCEEDED/FAILED.
-    try {
-      const payment = await getListingFeePayment(paymentId);
-      if (payment.status === "SUCCEEDED") onSucceeded();
-      else if (payment.status === "FAILED") onFailed(payment.failureMessage || "Your payment did not go through.");
-      else setError("Your payment is still processing. Refresh in a moment to check its status.");
-    } catch {
-      setError("Your payment is still processing. Refresh in a moment to check its status.");
-    }
-    setSubmitting(false);
-  }
+    poll();
+    return () => {
+      cancelled = true;
+    };
+  }, [paymentId, onSucceeded, onFailed]);
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      {error && (
-        <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">
-          {error}
-        </p>
-      )}
-      <PaymentElement />
-      <Button type="submit" fullWidth loading={submitting} disabled={!stripe}>
-        Pay {formatMoney(totalAmount, currency)}
-      </Button>
-    </form>
+    <Card>
+      <Loader label={message} />
+    </Card>
   );
 }
 
-export function ListingFeeCheckout({ listingId }: { listingId: string }) {
+export function ListingFeeCheckout({
+  listingId,
+  returningCheckoutSessionId,
+}: {
+  listingId: string;
+  /** Set once the customer is redirected back from Stripe's own hosted
+   *  checkout page (see HostingListingsManager.tsx reading the
+   *  `checkoutSessionId` query param Stripe substitutes into
+   *  success_url/cancel_url). Skips straight to resolving that payment's
+   *  status instead of starting a fresh quote/checkout flow. */
+  returningCheckoutSessionId?: string;
+}) {
   const { toast, showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [alreadyPaid, setAlreadyPaid] = useState(false);
   const [quote, setQuote] = useState<ListingFeeQuote | null>(null);
-  const [session, setSession] = useState<ListingFeeCheckoutSession | null>(null);
+  const [paymentId, setPaymentId] = useState<number | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const [billingCountry, setBillingCountry] = useState("GB");
   const [agreed, setAgreed] = useState(false);
-  const [creatingSession, setCreatingSession] = useState(false);
+  const [startingCheckout, setStartingCheckout] = useState(false);
   const [failure, setFailure] = useState("");
 
+  async function loadQuoteForRetry() {
+    try {
+      setQuote(await createListingFeeQuote(listingId));
+    } catch {
+      // Fee already paid via a different path, or no policy configured --
+      // the render below handles a null quote gracefully either way.
+    }
+  }
+
   useEffect(() => {
+    if (returningCheckoutSessionId) {
+      resolveListingFeeCheckoutSession(returningCheckoutSessionId)
+        .then(async (payment) => {
+          setPaymentId(payment.id);
+          if (payment.status === "SUCCEEDED") {
+            setAlreadyPaid(true);
+          } else if (payment.status === "FAILED") {
+            setFailure(payment.failureMessage || "Your payment did not go through.");
+            await loadQuoteForRetry();
+          } else {
+            setConfirming(true);
+          }
+        })
+        .catch((err) => showToast(errorMessage(err, "Could not confirm your payment."), "error"))
+        .finally(() => setLoading(false));
+      return;
+    }
+
     getHostedListingPublishEligibility(listingId)
       .then((eligibility) => {
         const feeAlreadyPaid = !eligibility.reasons.some((r) => r.toLowerCase().includes("listing fee"));
@@ -201,11 +222,12 @@ export function ListingFeeCheckout({ listingId }: { listingId: string }) {
       })
       .catch((err) => showToast(errorMessage(err, "Could not load the Listing Fee for this listing."), "error"))
       .finally(() => setLoading(false));
-  }, [listingId]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listingId, returningCheckoutSessionId]);
 
   async function handleStartCheckout() {
     if (!quote) return;
-    setCreatingSession(true);
+    setStartingCheckout(true);
     setFailure("");
     try {
       const created = await createListingFeeCheckoutSession({
@@ -213,23 +235,30 @@ export function ListingFeeCheckout({ listingId }: { listingId: string }) {
         idempotencyKey: crypto.randomUUID(),
         billingCountry,
       });
-      setSession(created);
       if (created.status === "SUCCEEDED") {
         // Stripe not configured server-side -- completed synchronously,
-        // nothing to confirm client-side.
+        // nothing to redirect to.
         setAlreadyPaid(true);
+        return;
       }
+      if (created.checkoutUrl) {
+        // A real browser navigation to Stripe's own hosted payment page --
+        // this app never renders its own card form (ZR-PAY-002 Section
+        // 8.2's PCI boundary).
+        window.location.href = created.checkoutUrl;
+        return;
+      }
+      showToast("Could not start the Listing Fee checkout.", "error");
     } catch (err) {
       showToast(errorMessage(err, "Could not start the Listing Fee checkout."), "error");
     } finally {
-      setCreatingSession(false);
+      setStartingCheckout(false);
     }
   }
 
   if (loading) return <Loader label="Loading Listing Fee" />;
 
   if (alreadyPaid) {
-    const paymentId = session?.id;
     return paymentId ? (
       <SuccessScreen listingId={listingId} paymentId={paymentId} />
     ) : (
@@ -238,6 +267,23 @@ export function ListingFeeCheckout({ listingId }: { listingId: string }) {
           <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> The Listing Fee for this listing has already been paid.
         </p>
       </Card>
+    );
+  }
+
+  if (confirming && paymentId) {
+    return (
+      <ConfirmingPayment
+        paymentId={paymentId}
+        onSucceeded={() => {
+          setConfirming(false);
+          setAlreadyPaid(true);
+        }}
+        onFailed={async (message) => {
+          setConfirming(false);
+          setFailure(message);
+          await loadQuoteForRetry();
+        }}
+      />
     );
   }
 
@@ -250,10 +296,6 @@ export function ListingFeeCheckout({ listingId }: { listingId: string }) {
         <Toast toast={toast} />
       </Card>
     );
-  }
-
-  if (session?.status === "SUCCEEDED") {
-    return <SuccessScreen listingId={listingId} paymentId={session.id} />;
   }
 
   return (
@@ -285,50 +327,33 @@ export function ListingFeeCheckout({ listingId }: { listingId: string }) {
         </p>
       )}
 
-      {!session?.clientSecret ? (
-        <div className="mt-4 space-y-4">
-          <Field label="Billing country/region *">
-            <input
-              value={billingCountry}
-              onChange={(e) => setBillingCountry(e.target.value.toUpperCase().slice(0, 2))}
-              placeholder="GB"
-              maxLength={2}
-              className={inputClass}
-            />
-          </Field>
-          <label className="flex items-start gap-2 text-sm text-slate-600 dark:text-slate-300">
-            <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} className="mt-0.5 h-4 w-4" />
-            I agree to the applicable Listing Fee Terms.
-          </label>
-          <Button
-            fullWidth
-            disabled={!agreed || billingCountry.length !== 2}
-            loading={creatingSession}
-            onClick={handleStartCheckout}
-          >
-            Pay {formatMoney(quote.totalAmount, quote.currency)}
-          </Button>
-          <p className="flex items-center gap-1.5 text-xs text-slate-400">
-            <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> Card details are handled directly by our payment provider -- Zoiko
-            Rooms never stores your card number.
-          </p>
-        </div>
-      ) : (
-        <div className="mt-4">
-          <Elements stripe={getStripe()} options={{ clientSecret: session.clientSecret }}>
-            <StripePaymentForm
-              paymentId={session.id}
-              totalAmount={quote.totalAmount}
-              currency={quote.currency}
-              onSucceeded={() => setAlreadyPaid(true)}
-              onFailed={(message) => {
-                setFailure(message);
-                setSession(null);
-              }}
-            />
-          </Elements>
-        </div>
-      )}
+      <div className="mt-4 space-y-4">
+        <Field label="Billing country/region *">
+          <input
+            value={billingCountry}
+            onChange={(e) => setBillingCountry(e.target.value.toUpperCase().slice(0, 2))}
+            placeholder="GB"
+            maxLength={2}
+            className={inputClass}
+          />
+        </Field>
+        <label className="flex items-start gap-2 text-sm text-slate-600 dark:text-slate-300">
+          <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} className="mt-0.5 h-4 w-4" />
+          I agree to the applicable Listing Fee Terms.
+        </label>
+        <Button
+          fullWidth
+          disabled={!agreed || billingCountry.length !== 2}
+          loading={startingCheckout}
+          onClick={handleStartCheckout}
+        >
+          Pay {formatMoney(quote.totalAmount, quote.currency)} on Stripe
+        </Button>
+        <p className="flex items-center gap-1.5 text-xs text-slate-400">
+          <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> You&apos;ll be redirected to Stripe&apos;s own secure
+          payment page -- Zoiko Rooms never sees or stores your card number.
+        </p>
+      </div>
       <Toast toast={toast} />
     </Card>
   );

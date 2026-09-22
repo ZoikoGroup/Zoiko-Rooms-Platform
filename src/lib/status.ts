@@ -385,6 +385,43 @@ export const authorityRecordStatusLabel = {
   revoked: "Revoked",
 } as const;
 
+// ZR-PAY-LINK-003 Section 1.1/2: a separate claim from AuthorityRecord's own
+// list-authority one -- "authority to receive payments" for a room.
+export const paymentRecipientAuthorityStatusTone = {
+  pending_step_up: "warning",
+  pending: "warning",
+  verified: "success",
+  failed: "danger",
+  revoked: "danger",
+} as const;
+
+export const paymentRecipientAuthorityStatusLabel = {
+  pending_step_up: "Confirm this change",
+  pending: "Pending verification",
+  verified: "Verified",
+  failed: "Failed",
+  revoked: "Revoked",
+} as const;
+
+// ZR-PAY-LINK-003 Section 3.1: the consolidated recipient+destination
+// connection status for a room (distinct from paymentRecipientAuthorityStatusTone
+// above, which is just the authority claim's own status).
+export const paymentConnectionStatusTone = {
+  DRAFT: "neutral",
+  RECIPIENT_SETUP_REQUIRED: "warning",
+  PENDING_VERIFICATION: "warning",
+  ACTIVE: "success",
+  SUSPENDED: "danger",
+} as const;
+
+export const paymentConnectionStatusLabel = {
+  DRAFT: "Payment setup pending",
+  RECIPIENT_SETUP_REQUIRED: "Payment destination required",
+  PENDING_VERIFICATION: "Pending verification",
+  ACTIVE: "Payments active",
+  SUSPENDED: "Payments suspended",
+} as const;
+
 export const propertyVerificationStatusTone = {
   pending: "warning",
   verified: "success",
@@ -538,18 +575,19 @@ export const listingFeeRefundStatusTone = {
   FAILED: "danger",
 } as const;
 
-// --- ZR-PAY-002: rental payment records (evidence/workflow only) ---
-// Section 6.1's display rule: never collapse TENANT_MARKED_PAID /
-// CONFIRMED_BY_RECIPIENT / CONFIRMED_BY_PROVIDER into one generic "Paid"
-// tone -- each keeps its own distinguishable tone here.
+// --- ZR-PAY-LINK-003 Section 16: rental payment records (evidence/workflow
+// only) --- CONFIRMED collapses the ZR-PAY-002-era CONFIRMED_BY_RECIPIENT/
+// CONFIRMED_BY_PROVIDER pair -- "who confirmed" is still shown separately
+// via record.provenance wherever this status is rendered, never lost.
 
 export const rentalPaymentStatusTone = {
   UPCOMING: "neutral",
   DUE: "warning",
-  TENANT_MARKED_PAID: "primary",
-  AWAITING_CONFIRMATION: "primary",
-  CONFIRMED_BY_RECIPIENT: "success",
-  CONFIRMED_BY_PROVIDER: "success",
+  PAYMENT_SESSION_STARTED: "primary",
+  PROVIDER_PROCESSING: "primary",
+  PAYER_RECORDED: "primary",
+  RECIPIENT_CONFIRMATION_PENDING: "primary",
+  CONFIRMED: "success",
   PARTIALLY_PAID: "warning",
   OVERDUE: "danger",
   DISPUTED: "danger",
@@ -561,10 +599,11 @@ export const rentalPaymentStatusTone = {
 export const rentalPaymentStatusLabel = {
   UPCOMING: "Upcoming",
   DUE: "Payment due",
-  TENANT_MARKED_PAID: "Marked as paid",
-  AWAITING_CONFIRMATION: "Awaiting confirmation",
-  CONFIRMED_BY_RECIPIENT: "Confirmed by recipient",
-  CONFIRMED_BY_PROVIDER: "Confirmed by provider",
+  PAYMENT_SESSION_STARTED: "Secure payment in progress",
+  PROVIDER_PROCESSING: "Processing",
+  PAYER_RECORDED: "Marked as paid",
+  RECIPIENT_CONFIRMATION_PENDING: "Awaiting confirmation",
+  CONFIRMED: "Confirmed",
   PARTIALLY_PAID: "Partially paid",
   OVERDUE: "Overdue",
   DISPUTED: "Disputed",

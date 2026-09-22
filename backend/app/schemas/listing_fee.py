@@ -83,7 +83,7 @@ class ListingFeeCheckoutSessionRead(CamelModel):
     amount: float
     currency: str
     status: str
-    client_secret: str
+    checkout_url: str
     created_at: datetime
 
 

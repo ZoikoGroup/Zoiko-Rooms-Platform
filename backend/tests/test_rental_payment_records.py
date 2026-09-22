@@ -55,10 +55,10 @@ class TestMarkPaid:
             db_session, tenant, obligation, amount=850, currency="GBP", declared_date=date.today(),
             payment_method_category="BANK_TRANSFER",
         )
-        assert record.status == "TENANT_MARKED_PAID"
+        assert record.status == "PAYER_RECORDED"
         assert record.provenance == "TENANT_DECLARATION"
         db_session.refresh(obligation)
-        assert obligation.status == "AWAITING_CONFIRMATION"
+        assert obligation.status == "RECIPIENT_CONFIRMATION_PENDING"
 
     def test_other_tenant_cannot_mark_paid(self, db_session: Session):
         obligation, _tenant, _recipient = _make_obligation(db_session)
@@ -88,10 +88,10 @@ class TestConfirmReceipt:
             payment_method_category="BANK_TRANSFER",
         )
         confirmed = rp_crud.confirm_receipt(db_session, recipient, record)
-        assert confirmed.status == "CONFIRMED_BY_RECIPIENT"
+        assert confirmed.status == "CONFIRMED"
         assert confirmed.provenance == "RECIPIENT_CONFIRMATION"
         db_session.refresh(obligation)
-        assert obligation.status == "CONFIRMED_BY_RECIPIENT"
+        assert obligation.status == "CONFIRMED"
 
     def test_tenant_cannot_confirm_their_own_receipt(self, db_session: Session):
         """A15/must-test negative scenario: 'Tenant attempts to confirm their
@@ -142,7 +142,7 @@ class TestConfirmReceipt:
             payment_method_category="BANK_TRANSFER",
         )
         confirmed = rp_crud.confirm_receipt(db_session, recipient, record, amount=850)
-        assert confirmed.status == "CONFIRMED_BY_RECIPIENT"
+        assert confirmed.status == "CONFIRMED"
         assert float(confirmed.confirmed_amount) == 850.0
 
     def test_confirmed_amount_cannot_exceed_declared_amount(self, db_session: Session):
@@ -157,10 +157,11 @@ class TestConfirmReceipt:
 
 
 class TestProviderConfirmation:
-    """ZR-PAY-002 Section 6: CONFIRMED_BY_PROVIDER -- 'Verified provider
-    event,' restricted to an admin recording an authoritative confirmation
-    obtained from a verified external source (no live provider integration
-    exists to call this automatically -- see
+    """ZR-PAY-002 Section 6: status CONFIRMED via PROVIDER_CONFIRMATION
+    provenance, restricted to an admin recording an authoritative
+    confirmation obtained from a verified external source -- the
+    manual-reconciliation fallback alongside the automated
+    external-payment-session webhook (see
     crud/rental_payment.py:confirm_receipt_as_provider's own docstring)."""
 
     def test_admin_can_confirm_as_provider_with_reference_and_reason(self, db_session: Session):
@@ -173,12 +174,12 @@ class TestProviderConfirmation:
         confirmed = rp_crud.confirm_receipt_as_provider(
             db_session, admin, record, provider_reference="TXN-EXT-99123", reason="Matched against provider's own settlement report",
         )
-        assert confirmed.status == "CONFIRMED_BY_PROVIDER"
+        assert confirmed.status == "CONFIRMED"
         assert confirmed.provenance == "PROVIDER_CONFIRMATION"
         assert confirmed.provider_reference == "TXN-EXT-99123"
         assert float(confirmed.confirmed_amount) == 850.0
         db_session.refresh(obligation)
-        assert obligation.status == "CONFIRMED_BY_PROVIDER"
+        assert obligation.status == "CONFIRMED"
 
     def test_requires_both_reference_and_reason(self, db_session: Session):
         obligation, tenant, _recipient = _make_obligation(db_session)
@@ -208,17 +209,32 @@ class TestProviderConfirmation:
 
     def test_provider_and_recipient_confirmation_remain_distinguishable(self, db_session: Session):
         """A4: 'Recipient and provider confirmations remain distinguishable
-        in UI and data.'"""
-        obligation, tenant, _recipient = _make_obligation(db_session)
-        record = rp_crud.mark_paid(
+        in UI and data.' ZR-PAY-LINK-003 Section 16 collapses
+        CONFIRMED_BY_RECIPIENT/CONFIRMED_BY_PROVIDER into one CONFIRMED
+        status -- the distinction now lives entirely on provenance (the
+        field the frontend already renders as its own "Confirmation
+        source"), never lost, just no longer duplicated onto status too."""
+        obligation, tenant, recipient = _make_obligation(db_session)
+        provider_record = rp_crud.mark_paid(
             db_session, tenant, obligation, amount=850, currency="GBP", declared_date=date.today(),
             payment_method_category="BANK_TRANSFER",
         )
         admin = _make_admin(db_session)
-        confirmed = rp_crud.confirm_receipt_as_provider(db_session, admin, record, provider_reference="TXN-1", reason="reason")
-        assert confirmed.status != "CONFIRMED_BY_RECIPIENT"
-        assert confirmed.provenance != "RECIPIENT_CONFIRMATION"
-        assert confirmed.provenance != "ADMIN_CORRECTION"
+        provider_confirmed = rp_crud.confirm_receipt_as_provider(
+            db_session, admin, provider_record, provider_reference="TXN-1", reason="reason",
+        )
+
+        other_obligation, other_tenant, other_recipient = _make_obligation(db_session)
+        recipient_record = rp_crud.mark_paid(
+            db_session, other_tenant, other_obligation, amount=850, currency="GBP", declared_date=date.today(),
+            payment_method_category="BANK_TRANSFER",
+        )
+        recipient_confirmed = rp_crud.confirm_receipt(db_session, other_recipient, recipient_record)
+
+        assert provider_confirmed.status == recipient_confirmed.status == "CONFIRMED"
+        assert provider_confirmed.provenance == "PROVIDER_CONFIRMATION"
+        assert recipient_confirmed.provenance == "RECIPIENT_CONFIRMATION"
+        assert provider_confirmed.provenance != recipient_confirmed.provenance
 
 
 class TestDiscrepancyAndCorrection:
@@ -294,6 +310,117 @@ class TestDiscrepancyAndCorrection:
         assert reversed_record.provenance == "ADMIN_CORRECTION"
         db_session.refresh(obligation)
         assert obligation.status == "REVERSED"
+
+
+class TestRecordTimeline:
+    """ZR-PAY-LINK-003 Section 19 GET /rental-payment-records/{id}/timeline
+    -- crud/rental_payment.py:build_record_timeline merges this record's own
+    DomainEvent rows (plus each of its disputes' own, since dispute-resolve
+    events are emitted against the dispute's resource id, not the record's)
+    into one chronological view."""
+
+    def test_declared_and_confirmed_appear_in_order(self, db_session: Session):
+        obligation, tenant, recipient = _make_obligation(db_session)
+        record = rp_crud.mark_paid(
+            db_session, tenant, obligation, amount=850, currency="GBP", declared_date=date.today(),
+            payment_method_category="BANK_TRANSFER",
+        )
+        rp_crud.confirm_receipt(db_session, recipient, record)
+
+        timeline = rp_crud.build_record_timeline(db_session, record)
+        event_types = [e.event_type for e in timeline]
+        assert "rental_payment.marked_paid" in event_types
+        assert "rental_payment.receipt_confirmed" in event_types
+        assert event_types.index("rental_payment.marked_paid") < event_types.index("rental_payment.receipt_confirmed")
+        timestamps = [e.timestamp for e in timeline]
+        assert timestamps == sorted(timestamps)
+
+    def test_dispute_and_resolution_appear_even_though_scoped_to_the_dispute_resource(self, db_session: Session):
+        obligation, tenant, recipient = _make_obligation(db_session)
+        record = rp_crud.mark_paid(
+            db_session, tenant, obligation, amount=850, currency="GBP", declared_date=date.today(),
+            payment_method_category="BANK_TRANSFER",
+        )
+        dispute = rp_crud.report_discrepancy(db_session, record=record, reason_code="NOT_ARRIVED", reported_by_party_id=recipient.id)
+        admin = _make_admin(db_session, email="timeline-dispute-admin@test.com")
+        rp_crud.resolve_dispute(db_session, admin, dispute, resolution_notes="Matched to a late reference")
+
+        timeline = rp_crud.build_record_timeline(db_session, record)
+        event_types = [e.event_type for e in timeline]
+        assert "rental_payment.disputed" in event_types
+        assert "rental_payment.dispute_resolved" in event_types
+        assert event_types.index("rental_payment.disputed") < event_types.index("rental_payment.dispute_resolved")
+
+    def test_correction_appears(self, db_session: Session):
+        obligation, tenant, recipient = _make_obligation(db_session)
+        record = rp_crud.mark_paid(
+            db_session, tenant, obligation, amount=850, currency="GBP", declared_date=date.today(),
+            payment_method_category="BANK_TRANSFER",
+        )
+        rp_crud.confirm_receipt(db_session, recipient, record)
+        admin = _make_admin(db_session, email="timeline-correction-admin@test.com")
+        rp_crud.append_correction(
+            db_session, admin, record, field_name="declared_amount", new_value="900.00", reason="Underreported",
+        )
+
+        timeline = rp_crud.build_record_timeline(db_session, record)
+        assert "rental_payment.corrected" in [e.event_type for e in timeline]
+
+    def test_unrelated_dispute_on_another_record_is_not_included(self, db_session: Session):
+        """Only THIS record's own disputes get pulled in -- not every
+        rental_payment_dispute row in the database."""
+        obligation, tenant, recipient = _make_obligation(db_session)
+        record = rp_crud.mark_paid(
+            db_session, tenant, obligation, amount=850, currency="GBP", declared_date=date.today(),
+            payment_method_category="BANK_TRANSFER",
+        )
+        other_obligation, other_tenant, other_recipient = _make_obligation(db_session)
+        other_record = rp_crud.mark_paid(
+            db_session, other_tenant, other_obligation, amount=500, currency="GBP", declared_date=date.today(),
+            payment_method_category="BANK_TRANSFER",
+        )
+        rp_crud.report_discrepancy(db_session, record=other_record, reason_code="NOT_ARRIVED", reported_by_party_id=other_recipient.id)
+
+        timeline = rp_crud.build_record_timeline(db_session, record)
+        assert "rental_payment.disputed" not in [e.event_type for e in timeline]
+
+    def test_evidence_upload_appears_in_the_timeline(self, client, db_session: Session):
+        tenant_user = _make_user(db_session, email="timeline-evidence-tenant@test.com")
+        party = _make_party(db_session)
+        guest = _make_guest(db_session, guest_id="G-RP-TIMELINE-EVIDENCE")
+        guest.user_account_id = tenant_user.id
+        db_session.flush()
+        obligation = rp_crud.create_obligation(
+            db_session, obligation_type="RENT", tenant_guest_id=guest.id, recipient_party_id=party.id,
+            amount=850, currency="GBP", due_date=date.today(),
+        )
+        record = rp_crud.mark_paid(
+            db_session, guest, obligation, amount=850, currency="GBP", declared_date=date.today(),
+            payment_method_category="BANK_TRANSFER",
+        )
+
+        r_upload = client.post(
+            f"/api/users/rental-payments/records/{record.id}/evidence",
+            files={"file": ("proof.pdf", _PDF_BYTES, "application/pdf")},
+            cookies=auth_user_cookie(tenant_user),
+        )
+        assert r_upload.status_code == 201, r_upload.text
+
+        r_timeline = client.get(f"/api/users/rental-payments/records/{record.id}/timeline", cookies=auth_user_cookie(tenant_user))
+        assert r_timeline.status_code == 200, r_timeline.text
+        assert "rental_payment.evidence_uploaded" in [e["eventType"] for e in r_timeline.json()]
+
+    def test_unrelated_party_cannot_view_the_timeline(self, client, db_session: Session):
+        obligation, tenant, _recipient = _make_obligation(db_session)
+        record = rp_crud.mark_paid(
+            db_session, tenant, obligation, amount=850, currency="GBP", declared_date=date.today(),
+            payment_method_category="BANK_TRANSFER",
+        )
+        outsider = _make_user(db_session, email="timeline-outsider@test.com")
+        db_session.commit()
+
+        r = client.get(f"/api/users/rental-payments/records/{record.id}/timeline", cookies=auth_user_cookie(outsider))
+        assert r.status_code == 403, r.text
 
 
 class TestWaiveAndCancel:
@@ -666,7 +793,7 @@ class TestRecipientEvidenceAndAdminOverrides:
             cookies=auth_admin_cookie(admin),
         )
         assert r.status_code == 200, r.text
-        assert r.json()["status"] == "CONFIRMED_BY_RECIPIENT"
+        assert r.json()["status"] == "CONFIRMED"
         assert r.json()["provenance"] == "ADMIN_CORRECTION"
 
     def test_admin_can_view_but_not_edit_payment_instructions(self, client, db_session: Session):

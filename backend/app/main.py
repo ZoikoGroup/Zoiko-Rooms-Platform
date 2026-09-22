@@ -31,6 +31,7 @@ from app.api.routes import (
     occupancy_classification,
     party,
     payments,
+    payment_recipient_authority,
     properties,
     public,
     public_assistant,
@@ -117,6 +118,7 @@ app.include_router(listing_fees.webhook_router)
 app.include_router(rental_payments.router)
 app.include_router(rental_payments.recipient_router)
 app.include_router(rental_payments.admin_router)
+app.include_router(rental_payments.webhook_router)
 app.include_router(knowledge.router)
 app.include_router(bookings.router)
 app.include_router(guests.router)
@@ -134,6 +136,7 @@ app.include_router(market_policy.router)
 app.include_router(properties.router)
 app.include_router(party.router)
 app.include_router(authority.router)
+app.include_router(payment_recipient_authority.router)
 app.include_router(identity_verification.router)
 app.include_router(room_passport.router)
 app.include_router(occupancy_classification.router)

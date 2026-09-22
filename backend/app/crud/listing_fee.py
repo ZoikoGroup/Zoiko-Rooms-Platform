@@ -9,6 +9,7 @@ shared tables, no shared crud calls into models/finance.py, per Section
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 
@@ -20,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.listing_fee_receipt_documents import save_listing_fee_receipt_document
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
@@ -37,6 +39,8 @@ from app.models.listing_fee import (
 )
 from app.models.party import Party
 from app.services import stripe_client
+
+logger = logging.getLogger("uvicorn.error")
 
 DEFAULT_JURISDICTION = "England"
 
@@ -199,6 +203,45 @@ def get_payment_or_404(db: Session, payment_id: int) -> ListingFeePayment:
     return payment
 
 
+def get_payment_by_checkout_session_id(db: Session, checkout_session_id: str) -> ListingFeePayment:
+    """The return leg of create_checkout's Stripe-hosted redirect: resolves
+    Stripe's own `{CHECKOUT_SESSION_ID}` (substituted into success_url/
+    cancel_url) back to the ListingFeePayment it belongs to -- a plain
+    lookup against our own provider_checkout_session_id column (set at
+    checkout creation time, before Stripe's own PaymentIntent even exists;
+    see create_checkout_session's own docstring for why that column, not
+    provider_payment_intent_id, is what's known immediately). Fails closed
+    (404) on anything that doesn't resolve to one of our own payments, same
+    posture as every other *_or_404 lookup in this module.
+
+    Self-heals a still-PENDING result by asking Stripe directly, right now,
+    whether it already knows this session succeeded (retrieve_checkout_session)
+    -- the customer's own return trip here must not be left hostage to
+    webhook delivery having already happened by the time they land on this
+    page (local dev without `stripe listen` running, or ordinary webhook
+    latency in any environment). The webhook remains the authoritative
+    completion path for every other caller (this reconciliation only ever
+    runs when a customer is actually looking at this specific payment's
+    result) -- _complete_payment_success's own already-SUCCEEDED guard
+    makes a redundant webhook delivery afterward a no-op either way."""
+    payment = db.scalar(
+        select(ListingFeePayment).where(ListingFeePayment.provider_checkout_session_id == checkout_session_id)
+    )
+    if not payment:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Checkout session not found")
+
+    if payment.status == "PENDING":
+        session_status = stripe_client.retrieve_checkout_session(checkout_session_id=checkout_session_id)
+        if session_status and session_status["payment_status"] == "paid":
+            if session_status["payment_intent_id"] and not payment.provider_payment_intent_id:
+                payment.provider_payment_intent_id = session_status["payment_intent_id"]
+                db.commit()
+            _complete_payment_success(db, payment)
+            db.refresh(payment)
+
+    return payment
+
+
 def list_listing_fee_payments_for_party(db: Session, party_id: int) -> list[ListingFeePayment]:
     """ZR-PAY-002 Section 3.2: the lister's own 'Listing fee receipts' view."""
     return list(
@@ -272,15 +315,33 @@ def is_listing_fee_payment_refund_eligible(db: Session, payment: ListingFeePayme
 
 def create_checkout(
     db: Session, quote: ListingFeeQuote, party: Party, *, idempotency_key: str, billing_country: str,
-    correlation_id: str = "",
+    frontend_origin: str = "", correlation_id: str = "",
 ) -> tuple[ListingFeePayment, str]:
     """ZR-PAY-002 Section 8.2/12.2 POST /listing-fees/checkout-sessions.
-    Returns (payment, client_secret) -- the frontend confirms the
-    PaymentIntent directly with Stripe's own hosted/tokenized component
-    using that secret (Section 8.2's PCI boundary); this application never
-    sees card PAN/CVV. Amount/currency come from the quote, never
-    re-resolved. Get-or-create by idempotency key, same retried-request
-    guard as crud/finance.py:request_refund."""
+    Returns (payment, checkout_url) -- checkout_url is Stripe's own hosted
+    payment page; the frontend does a real browser redirect there (never
+    renders its own card form -- Section 8.2's PCI boundary, met here by
+    Stripe's hosted page rather than an embedded component). Amount/currency
+    come from the quote, never re-resolved. Get-or-create by idempotency
+    key, same retried-request guard as crud/finance.py:request_refund.
+
+    frontend_origin is the caller's own resolved, CORS-allowlist-validated
+    request Origin (see api/routes/listing_fees.py:_resolve_frontend_origin)
+    -- not settings.frontend_url directly. A static config value can drift
+    out of sync with whatever port/host the browser is actually being
+    served from (a local Next.js dev server auto-increments its port when
+    the default is taken); redirecting back to wherever the browser
+    genuinely came from is self-correcting and avoids that drift. Falls
+    back to settings.frontend_url when the caller didn't resolve one (e.g.
+    a test calling this directly).
+
+    success_url/cancel_url embed the literal `{CHECKOUT_SESSION_ID}`
+    placeholder Stripe substitutes on redirect -- never this payment's own
+    id -- so the DB insert below can stay exactly where it was (after the
+    Stripe call returns, not before): the frontend resolves that session id
+    back to this payment via get_payment_by_checkout_session_id once the
+    customer returns, rather than this function needing to know its own
+    not-yet-created row's id up front."""
     existing = db.scalar(select(ListingFeePayment).where(ListingFeePayment.idempotency_key == idempotency_key))
     if existing:
         if existing.quote_id != quote.id:
@@ -294,17 +355,26 @@ def create_checkout(
     if listing_fee_is_paid(db, quote.listing_id):
         raise HTTPException(status.HTTP_409_CONFLICT, "The Listing Fee for this listing has already been paid")
 
+    origin = frontend_origin or settings.frontend_url
+    success_url = f"{origin}/account/host/listings?stripeCheckout=success&checkoutSessionId={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{origin}/account/host/listings?stripeCheckout=cancel&checkoutSessionId={{CHECKOUT_SESSION_ID}}"
+
     try:
-        provider_payment_intent_id, client_secret = stripe_client.create_payment_intent_with_client_secret(
+        checkout_session_id, checkout_url = stripe_client.create_checkout_session(
             amount=float(quote.total_amount), currency=quote.currency,
             metadata={"domain": "listing_fee", "quote_id": str(quote.id), "listing_id": quote.listing_id},
+            success_url=success_url, cancel_url=cancel_url,
             idempotency_key=f"listing_fee_checkout:{idempotency_key}",
         )
     except Exception:
         # ZR-PAY-002 Section 8.4: 'Show a neutral failure message; do not
         # expose gateway diagnostics.' A provider-side failure creating the
-        # PaymentIntent itself (rare, but possible -- network/auth errors)
-        # must never surface as a raw 500 with a leaked stack trace.
+        # Checkout Session itself (rare, but possible -- network/auth
+        # errors) must never surface as a raw 500 with a leaked stack trace
+        # to the caller -- but it must still be logged somewhere, or a real
+        # misconfiguration (bad key, wrong API version, Stripe account
+        # restriction) becomes undiagnosable in production.
+        logger.exception("listing_fee: create_checkout_session failed (quote_id=%s)", quote.id)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "The payment provider could not be reached -- please try again")
 
     try:
@@ -312,7 +382,11 @@ def create_checkout(
             payment = ListingFeePayment(
                 quote_id=quote.id, listing_id=quote.listing_id, party_id=party.id,
                 amount=quote.total_amount, currency=quote.currency, idempotency_key=idempotency_key,
-                billing_country=billing_country.upper(), provider_payment_intent_id=provider_payment_intent_id,
+                billing_country=billing_country.upper(), provider_checkout_session_id=checkout_session_id,
+                # provider_payment_intent_id intentionally left unset here --
+                # Stripe doesn't create one until the customer actually pays
+                # (see create_checkout_session's docstring); the webhook's
+                # checkout.session.completed handling backfills it.
             )
             db.add(payment)
             db.flush()
@@ -321,7 +395,7 @@ def create_checkout(
         # while this one was talking to Stripe -- same SAVEPOINT idiom as
         # ingest_stripe_webhook_event's own ListingFeeProviderEvent insert.
         # Stripe's own idempotency_key above already prevented a second
-        # real PaymentIntent from being created there; this is just the
+        # real Checkout Session from being created there; this is just the
         # DB-level backstop, so we return the winner's row rather than
         # raising a raw 500.
         winner = db.scalar(select(ListingFeePayment).where(ListingFeePayment.idempotency_key == idempotency_key))
@@ -345,7 +419,7 @@ def create_checkout(
         _complete_payment_success(db, payment, correlation_id=correlation_id)
         db.refresh(payment)
 
-    return payment, client_secret
+    return payment, checkout_url
 
 
 def _complete_payment_success(db: Session, payment: ListingFeePayment, *, correlation_id: str = "") -> None:
@@ -376,6 +450,15 @@ def _complete_payment_success(db: Session, payment: ListingFeePayment, *, correl
         notification_type="listing_fee.paid",
         related_entity_type="listing_fee_payment", related_entity_id=str(payment.id),
     )
+
+    # ZR-PAY-002 Section 2.1/8.3, Acceptance Gate A7: "Automatic publication
+    # of a listing merely because its Listing Fee has been paid" is
+    # explicitly out of scope -- paying the fee only ever satisfies the
+    # "Listing fee" line of the publish-eligibility checklist
+    # (crud/listing.py:check_publish_eligibility). An admin's own explicit
+    # publish action (or the existing publication.requires_approval=False
+    # auto-approve path, neither of which is triggered from here) remains
+    # the only way a listing actually goes live.
 
 
 def _complete_payment_failure(db: Session, payment: ListingFeePayment, message: str, *, correlation_id: str = "") -> None:
@@ -411,6 +494,17 @@ STRIPE_EVENT_TYPE_MAP = {
     "payment_intent.succeeded": "PAYMENT_SUCCEEDED",
     "payment_intent.payment_failed": "PAYMENT_FAILED",
     "charge.refunded": "REFUND_SUCCEEDED",
+    # The Checkout Session events, not the PaymentIntent ones above, are the
+    # authoritative success/failure signal for a Stripe-hosted checkout --
+    # provider_payment_intent_id is null until one of these backfills it
+    # (see create_checkout_session's docstring for why), so a
+    # payment_intent.succeeded/payment_failed for this same payment simply
+    # won't find a matching row if it happens to arrive first; it becomes a
+    # harmless, idempotent no-op once _complete_payment_success's own
+    # already-SUCCEEDED guard is reached on any later, redundant delivery.
+    "checkout.session.completed": "CHECKOUT_SESSION_COMPLETED",
+    "checkout.session.async_payment_succeeded": "CHECKOUT_SESSION_COMPLETED",
+    "checkout.session.async_payment_failed": "CHECKOUT_SESSION_ASYNC_PAYMENT_FAILED",
 }
 
 
@@ -458,6 +552,32 @@ def ingest_stripe_webhook_event(db: Session, event, *, correlation_id: str = "")
             return
         refunded_amount = stripe_client.from_minor_units(stripe_object.get("amount_refunded", 0), payment.currency)
         _apply_refund_confirmation(db, payment, refunded_amount, correlation_id=correlation_id)
+        return
+
+    if event_type in ("CHECKOUT_SESSION_COMPLETED", "CHECKOUT_SESSION_ASYNC_PAYMENT_FAILED"):
+        # stripe_object here is the Checkout Session itself, not a
+        # PaymentIntent -- looked up by the id create_checkout stored at
+        # checkout-creation time (provider_payment_intent_id is still null
+        # at this point for a brand-new session).
+        payment = db.scalar(
+            select(ListingFeePayment).where(ListingFeePayment.provider_checkout_session_id == stripe_object["id"])
+        )
+        if not payment:
+            return
+        if event_type == "CHECKOUT_SESSION_ASYNC_PAYMENT_FAILED":
+            _complete_payment_failure(db, payment, "Your payment method could not be charged.", correlation_id=correlation_id)
+            return
+        # CHECKOUT_SESSION_COMPLETED fires for both a synchronous method
+        # (card -- payment_status is already "paid") and the *start* of an
+        # async one (payment_status "unpaid", resolved later by
+        # checkout.session.async_payment_succeeded, mapped to this same
+        # internal type above) -- only the "paid" case is an actual success.
+        if stripe_object.get("payment_status") == "paid":
+            payment_intent_id = stripe_object.get("payment_intent")
+            if payment_intent_id and not payment.provider_payment_intent_id:
+                payment.provider_payment_intent_id = payment_intent_id
+                db.commit()
+            _complete_payment_success(db, payment, correlation_id=correlation_id)
 
 
 def get_or_create_listing_fee_receipt(db: Session, payment: ListingFeePayment) -> ListingFeeReceipt:

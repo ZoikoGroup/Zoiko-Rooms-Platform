@@ -26,24 +26,37 @@ from app.services.deposit_terminology import resolve_deposit_terminology
 
 RENTAL_PAYMENT_OBLIGATION_TYPES = ("RENT", "DEPOSIT", "OTHER")
 
-# ZR-PAY-002 Section 6: one combined lifecycle -- an obligation starts in one
-# of the first two states and, once a RentalPaymentRecord exists against it,
-# reflects that record's own state instead. RentalPaymentObligation.status
-# and RentalPaymentRecord.status both draw from this same tuple (the spec's
-# own table draws no distinction between which object each state "belongs"
-# to), recomputed by crud/rental_payment.py:recompute_obligation_status --
-# never assigned directly, same discipline as
-# models/finance.py:Obligation.status.
+# ZR-PAY-LINK-003 Section 16: an obligation starts in one of the first two
+# states and, once a RentalPaymentRecord exists against it, reflects that
+# record's own state instead. RentalPaymentObligation.status and
+# RentalPaymentRecord.status both draw from this same tuple (the spec's own
+# table draws no distinction between which object each state "belongs" to),
+# recomputed by crud/rental_payment.py:recompute_obligation_status -- never
+# assigned directly, same discipline as models/finance.py:Obligation.status.
+# CONFIRMED collapses the ZR-PAY-002-era CONFIRMED_BY_RECIPIENT/
+# CONFIRMED_BY_PROVIDER pair into the one status value Section 16 names --
+# "who confirmed" is still fully available, just on RentalPaymentRecord.provenance
+# below, not duplicated onto status too (frontend already renders provenance
+# as its own field, never relied on the status value alone for this).
+# PAYMENT_SESSION_STARTED is produced by
+# crud/external_payment_session.py:create_session via this same recompute
+# function. PROVIDER_PROCESSING is modeled for schema completeness but has
+# no producing code path yet -- this build's Stripe integration doesn't
+# distinguish "provider accepted, still settling" from STARTED/SUCCEEDED/
+# FAILED at the ExternalPaymentSession level (would need
+# checkout.session.async_payment_succeeded handling), same honest
+# "taxonomy modeled, not yet backed" posture as
+# models/market_policy.py:FUNDS_FLOW_PROFILES' TRUST_ESCROW_CUSTODY/
+# ZOIKO_REGULATED_CUSTODY.
 RENTAL_PAYMENT_STATUSES = (
-    "UPCOMING", "DUE", "TENANT_MARKED_PAID", "AWAITING_CONFIRMATION", "CONFIRMED_BY_RECIPIENT",
-    "CONFIRMED_BY_PROVIDER", "PARTIALLY_PAID", "OVERDUE", "DISPUTED", "REVERSED", "WAIVED", "CANCELLED",
+    "UPCOMING", "DUE", "PAYMENT_SESSION_STARTED", "PROVIDER_PROCESSING", "PAYER_RECORDED",
+    "RECIPIENT_CONFIRMATION_PENDING", "CONFIRMED", "PARTIALLY_PAID", "OVERDUE", "DISPUTED", "REVERSED",
+    "CANCELLED", "WAIVED",
 )
-# ZR-PAY-002 Section 6.1: the minimum provenance sources. CONFIRMED_BY_PROVIDER/
-# PROVIDER_CONFIRMATION are modeled (so the schema doesn't need a later
-# migration) but no code path produces them yet -- this build has no real
-# integrated external rent-payment provider, same honest "taxonomy modeled,
-# not yet backed" posture as models/market_policy.py:FUNDS_FLOW_PROFILES'
-# TRUST_ESCROW_CUSTODY/ZOIKO_REGULATED_CUSTODY.
+# ZR-PAY-002 Section 6.1: the minimum provenance sources -- kept as its own,
+# unrenamed vocabulary (RENTAL_PAYMENT_STATUSES above draws from Section
+# 16's own separate list). PROVIDER_CONFIRMATION is backed now, by
+# crud/external_payment_session.py:record_provider_payment_success.
 RENTAL_PAYMENT_PROVENANCE = (
     "TENANT_DECLARATION", "RECIPIENT_CONFIRMATION", "PROVIDER_CONFIRMATION", "ADMIN_CORRECTION", "SYSTEM_DERIVATION",
 )
@@ -110,18 +123,23 @@ class RentalPaymentObligation(Base):
     records: Mapped[list["RentalPaymentRecord"]] = relationship(back_populates="obligation", order_by="RentalPaymentRecord.created_at")
 
     @property
-    def jurisdiction_code(self) -> str | None:
-        """Same agreement-or-occupancy -> room -> property traversal
-        crud/rental_payment.py:obligation_jurisdiction_code uses -- kept
-        here too (not imported from crud, to avoid a models->crud import
-        cycle) purely so display_label below can stay a plain ORM attribute
-        pydantic's from_attributes can read directly."""
+    def room(self) -> "Room | None":
+        """Same agreement-or-occupancy -> room traversal jurisdiction_code
+        below (and crud/external_payment_session.py:create_session,
+        crud/payment_connection.py's room-scoped SUSPENDED/jurisdiction
+        checks) all go through -- never re-derived inline, kept as a plain
+        ORM property (not a crud helper) purely so it and jurisdiction_code
+        stay plain attributes pydantic's from_attributes can read directly,
+        with no models->crud import cycle."""
         if self.agreement:
-            room = self.agreement.offer.listing.room
-        elif self.occupancy:
-            room = self.occupancy.room
-        else:
-            return None
+            return self.agreement.offer.listing.room
+        if self.occupancy:
+            return self.occupancy.room
+        return None
+
+    @property
+    def jurisdiction_code(self) -> str | None:
+        room = self.room
         return room.property.jurisdiction_code if room and room.property else None
 
     @property
@@ -146,7 +164,7 @@ class RentalPaymentRecord(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     obligation_id: Mapped[int] = mapped_column(ForeignKey("rental_payment_obligations.id", ondelete="CASCADE"), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(30), default="TENANT_MARKED_PAID")
+    status: Mapped[str] = mapped_column(String(30), default="PAYER_RECORDED")
     provenance: Mapped[str] = mapped_column(String(30), default="TENANT_DECLARATION")
     declared_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     declared_currency: Mapped[str] = mapped_column(String(3), nullable=False)
@@ -164,8 +182,8 @@ class RentalPaymentRecord(Base):
     confirmed_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
     # ZR-PAY-002 Section 12.1's shared 'provider_event_reference' object,
     # applied here -- the external provider's own transaction/reconciliation
-    # reference a CONFIRMED_BY_PROVIDER status is backed by. Never set for
-    # any other provenance.
+    # reference a PROVIDER_CONFIRMATION-provenance confirmation is backed
+    # by. Never set for any other provenance.
     provider_reference: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

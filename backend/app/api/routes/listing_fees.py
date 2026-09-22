@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user, require_super_admin
+from app.core.config import settings
 from app.core.correlation import get_correlation_id
 from app.core.listing_fee_receipt_documents import resolve_listing_fee_receipt_document_path
 from app.crud import listing as listing_crud
@@ -49,6 +50,25 @@ def _get_own_party_or_400(db: Session, user: UserAccount) -> Party:
     return party
 
 
+def _resolve_frontend_origin(request: Request) -> str:
+    """settings.frontend_url is a static per-deployment config value -- easy
+    to drift out of sync with whatever port/host the browser actually made
+    this request from (a local Next.js dev server auto-increments its port
+    when the default is taken, exactly the mismatch that once sent a real
+    Stripe redirect to a dead port). The browser's own Origin header is the
+    actual, current truth for where it's serving the frontend from --
+    trusted here only because it's independently validated against the same
+    cors_origin_list already used to decide whether to answer the request
+    at all (see app/main.py's CORS middleware), so this can't be used to
+    redirect a paying customer somewhere attacker-controlled. Falls back to
+    the static setting for a request with no Origin header at all (e.g. a
+    same-origin/server-to-server call, or a test client)."""
+    origin = request.headers.get("origin")
+    if origin and origin in settings.cors_origin_list:
+        return origin
+    return settings.frontend_url
+
+
 def _get_own_listing_or_404(db: Session, listing_id: str, user: UserAccount):
     listing = listing_crud.get_listing(db, listing_id)
     if not listing:
@@ -75,23 +95,39 @@ def post_create_listing_fee_checkout_session(
     user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """ZR-PAY-002 Section 8.2 POST /listing-fees/checkout-sessions. Returns
-    the PaymentIntent's client_secret for the frontend's hosted/tokenized
-    payment component (Section 8.2's PCI boundary) -- empty when no real
-    Stripe keys are configured, since the payment already completed
-    synchronously in that case."""
+    Stripe's own hosted checkout_url -- the frontend does a real browser
+    redirect there (Section 8.2's PCI boundary, met via Stripe's hosted page
+    rather than an embedded component) -- empty when no real Stripe keys
+    are configured, since the payment already completed synchronously in
+    that case."""
     quote = listing_fee_crud.get_quote_or_404(db, payload.quote_id)
     party = _get_own_party_or_400(db, user)
     if quote.party_id != party.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This quote does not belong to you")
-    payment, client_secret = listing_fee_crud.create_checkout(
+    payment, checkout_url = listing_fee_crud.create_checkout(
         db, quote, party, idempotency_key=payload.idempotency_key, billing_country=payload.billing_country,
-        correlation_id=get_correlation_id(request),
+        frontend_origin=_resolve_frontend_origin(request), correlation_id=get_correlation_id(request),
     )
     return ListingFeeCheckoutSessionRead(
         id=payment.id, quote_id=payment.quote_id, listing_id=payment.listing_id,
-        amount=float(payment.amount), currency=payment.currency, status=payment.status, client_secret=client_secret,
+        amount=float(payment.amount), currency=payment.currency, status=payment.status, checkout_url=checkout_url,
         created_at=payment.created_at,
     )
+
+
+@router.get("/checkout-sessions/{checkout_session_id}/resolve", response_model=ListingFeePaymentRead)
+def get_resolve_checkout_session(
+    checkout_session_id: str, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The return leg once Stripe redirects the customer back from its own
+    hosted page: the frontend lands on ?checkoutSessionId={CHECKOUT_SESSION_ID}
+    (Stripe's own placeholder, substituted server-side) and calls this to
+    find out which of its own payments that was, and its current status."""
+    payment = listing_fee_crud.get_payment_by_checkout_session_id(db, checkout_session_id)
+    party = _get_own_party_or_400(db, user)
+    if payment.party_id != party.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This payment does not belong to you")
+    return _to_payment_read(db, payment)
 
 
 def _assert_own_payment(db: Session, payment_id: int, user: UserAccount):

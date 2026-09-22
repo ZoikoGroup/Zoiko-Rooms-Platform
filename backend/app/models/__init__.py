@@ -78,6 +78,7 @@ from app.models.occupancy_classification import OccupancyClassification
 from app.models.occupancy_condition_report import OccupancyConditionReportItem
 from app.models.party import Party
 from app.models.payment import Payment
+from app.models.payment_recipient_authority import PaymentRecipientAuthority
 from app.models.property import Property
 from app.models.review import Review
 from app.models.room import Room
@@ -109,6 +110,8 @@ from app.models.rental_payment import (
     RentalPaymentObligation,
     RentalPaymentRecord,
 )
+from app.models.rental_payment_provider_account import RentalPaymentProviderAccount
+from app.models.external_payment_session import ExternalPaymentSession, RentalPaymentProviderEvent
 
 __all__ = [
     "AdminUser",
@@ -128,6 +131,7 @@ __all__ = [
     "Booking",
     "BookingChangeRequest",
     "Payment",
+    "PaymentRecipientAuthority",
     "Review",
     "Party",
     "Membership",
@@ -227,4 +231,7 @@ __all__ = [
     "RentalPaymentCorrection",
     "RentalPaymentInstruction",
     "RentalPaymentEvidenceHold",
+    "RentalPaymentProviderAccount",
+    "ExternalPaymentSession",
+    "RentalPaymentProviderEvent",
 ]

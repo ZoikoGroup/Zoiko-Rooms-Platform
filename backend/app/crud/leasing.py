@@ -970,8 +970,9 @@ def create_agreement(
     # must never undo or fail an already-committed agreement.
     try:
         from app.crud.rental_payment import create_obligation as create_rental_payment_obligation
+        from app.crud.rental_payment import resolve_rent_recipient_party_id
 
-        recipient_party_id = listing.room.property.owner_party_id if listing.room and listing.room.property else None
+        recipient_party_id = resolve_rent_recipient_party_id(db, listing.room) if listing.room else None
         if recipient_party_id is not None:
             create_rental_payment_obligation(
                 db, obligation_type="RENT", tenant_guest_id=offer.guest_id, recipient_party_id=recipient_party_id,
