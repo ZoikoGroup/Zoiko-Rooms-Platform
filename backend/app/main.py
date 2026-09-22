@@ -23,6 +23,7 @@ from app.api.routes import (
     identity_verification,
     leasing,
     listings,
+    listing_fees,
     knowledge,
     market_policy,
     market_releases,
@@ -33,6 +34,7 @@ from app.api.routes import (
     properties,
     public,
     public_assistant,
+    rental_payments,
     reviews,
     room_passport,
     search,
@@ -109,6 +111,12 @@ app.include_router(user_payments.router)
 app.include_router(user_rentals.router)
 app.include_router(user_hosting.router)
 app.include_router(listings.router)
+app.include_router(listing_fees.router)
+app.include_router(listing_fees.admin_router)
+app.include_router(listing_fees.webhook_router)
+app.include_router(rental_payments.router)
+app.include_router(rental_payments.recipient_router)
+app.include_router(rental_payments.admin_router)
 app.include_router(knowledge.router)
 app.include_router(bookings.router)
 app.include_router(guests.router)

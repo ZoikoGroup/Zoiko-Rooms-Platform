@@ -19,7 +19,8 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.dispute_evidence_uploads import delete_dispute_evidence_file
+from app.core.config import settings
+from app.core.dispute_evidence_uploads import delete_dispute_evidence_file, resolve_dispute_evidence_path
 from app.core.identity_uploads import resolve_identity_document_path
 from app.crud.market_policy import jurisdiction_code_for_occupancy, resolve_market_policy
 from app.models.dispute import DisputeResolutionCase
@@ -29,15 +30,29 @@ from app.models.identity_verification import IdentityVerification
 from app.models.occupancy import Occupancy
 from app.models.party import Party
 from app.models.property import Property
+from app.models.rental_payment import RentalPaymentEvidenceHold
+
+# Which on-disk store an artifact's file actually lives in, keyed by
+# related_entity_type -- each upload pipeline in this codebase writes to its
+# own directory (core/identity_uploads.py vs core/dispute_evidence_uploads.py,
+# which crud/rental_payment.py:upload_payment_evidence also uses), so the
+# sweep must resolve the right one rather than assuming identity's.
+_PATH_RESOLVERS = {
+    "identity_verification": resolve_identity_document_path,
+    "rental_payment_record": resolve_dispute_evidence_path,
+}
 
 
 def _retention_days_for_artifact(db: Session, artifact: EvidenceArtifact) -> int | None:
-    """Only identity_verification artifacts are wired to a real retention
-    source today (MarketPolicyPack.identity_evidence_retention_days,
-    resolved by the evidence subject's own party jurisdiction) -- other
-    related_entity_types have no evidence file of their own yet (occupancy
-    eligibility/screening/property compliance don't accept a file upload
-    in this MVP), so there is nothing to resolve retention for."""
+    """identity_verification resolves MarketPolicyPack.identity_evidence_
+    retention_days by the evidence subject's own party jurisdiction.
+    rental_payment_record resolves the flat, domain-independent
+    settings.rental_payment_evidence_retention_days (ZR-PAY-002 Section
+    12.1 keeps this domain's schema separate from MarketPolicyPack -- see
+    that setting's own docstring). Every other related_entity_type has no
+    evidence file of its own yet, so there is nothing to resolve."""
+    if artifact.related_entity_type == "rental_payment_record":
+        return settings.rental_payment_evidence_retention_days
     if artifact.related_entity_type != "identity_verification":
         return None
     record = db.get(IdentityVerification, int(artifact.related_entity_id))
@@ -56,11 +71,24 @@ def _retention_days_for_artifact(db: Session, artifact: EvidenceArtifact) -> int
     return policy.identity_evidence_retention_days
 
 
+def _has_active_legal_hold(db: Session, artifact: EvidenceArtifact) -> bool:
+    """ZR-PAY-002 Section 10/13's 'legal hold ... exceptions' -- an ACTIVE
+    RentalPaymentEvidenceHold blocks deletion outright, the same real
+    enforcement models/dispute_legal_hold.py:DisputeLegalHold already gives
+    crud/dispute_evidence.py:archive_evidence."""
+    return db.scalar(
+        select(RentalPaymentEvidenceHold.id).where(
+            RentalPaymentEvidenceHold.artifact_id == artifact.id, RentalPaymentEvidenceHold.status == "ACTIVE",
+        )
+    ) is not None
+
+
 def sweep_expired_evidence(db: Session, *, now: datetime | None = None) -> list[EvidenceArtifact]:
     """Deletes the on-disk file for every not-yet-deleted artifact whose
-    jurisdiction-configured retention window has passed. Idempotent and
-    safe to run repeatedly -- an artifact with no file left on disk (e.g.
-    a previous partial run) is still marked deleted_at rather than erroring."""
+    jurisdiction-configured retention window has passed and which carries
+    no ACTIVE legal hold. Idempotent and safe to run repeatedly -- an
+    artifact with no file left on disk (e.g. a previous partial run) is
+    still marked deleted_at rather than erroring."""
     now = now or datetime.now(timezone.utc)
     candidates = list(db.scalars(select(EvidenceArtifact).where(EvidenceArtifact.deleted_at.is_(None))))
 
@@ -72,8 +100,11 @@ def sweep_expired_evidence(db: Session, *, now: datetime | None = None) -> list[
         cutoff = artifact.created_at + timedelta(days=retention_days)
         if now < cutoff:
             continue
+        if _has_active_legal_hold(db, artifact):
+            continue
 
-        path = resolve_identity_document_path(artifact.stored_filename)
+        resolve_path = _PATH_RESOLVERS.get(artifact.related_entity_type, resolve_identity_document_path)
+        path = resolve_path(artifact.stored_filename)
         if path.is_file():
             path.unlink()
         artifact.deleted_at = now

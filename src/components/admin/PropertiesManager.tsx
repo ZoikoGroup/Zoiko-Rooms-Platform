@@ -34,7 +34,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { StatCard } from "@/components/admin/StatCard";
 import { formatCurrency, resolveImageUrl } from "@/lib/utils";
-import { apiClientFetch } from "@/lib/api-client";
+import { apiClientFetch, ApiError } from "@/lib/api-client";
 import { getCurrentAdmin } from "@/lib/auth";
 import { listingStateLabel, listingStateTone } from "@/lib/status";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
@@ -235,8 +235,8 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
       setItems((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
       showToast(`"${updated.name}" approved and published`);
       closeReview();
-    } catch {
-      showToast("Failed to approve and publish this listing");
+    } catch (err) {
+      showToast(err instanceof ApiError ? err.message : "Failed to approve and publish this listing");
     } finally {
       setReviewBusy(false);
     }

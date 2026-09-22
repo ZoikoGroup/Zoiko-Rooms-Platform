@@ -65,6 +65,61 @@ def create_payment_intent(*, amount: float, currency: str, metadata: dict) -> st
     return intent.id
 
 
+def create_payment_intent_with_client_secret(
+    *, amount: float, currency: str, metadata: dict, idempotency_key: str | None = None,
+) -> tuple[str, str]:
+    """ZR-PAY-002 Section 8.2's PCI boundary: the Listing Fee checkout is a
+    hosted/tokenized provider component the frontend confirms directly with
+    Stripe.js using this client_secret -- unlike create_payment_intent above
+    (whose callers never expose the intent to a browser), this is the one
+    call site in this codebase that actually hands a PaymentIntent to a
+    client. No `on_behalf_of`/`transfer_data` -- this charges straight into
+    Zoiko's own Stripe balance, never a Connected Account, matching the
+    Listing Fee's 'direct fee collector / merchant relationship' role.
+    Returns (provider_transaction_id, client_secret); client_secret is empty
+    in the simulated (unconfigured) fallback, same disclosed-simulation
+    posture as every other stub here.
+
+    idempotency_key, when supplied, is passed straight to Stripe's own
+    idempotency mechanism (Stripe-Idempotency-Key) -- ZR-PAY-002 Section
+    13: 'Idempotency: Required for fee-payment and refund commands.' This
+    is what actually stops a network-level retry (client timeout, our own
+    502-then-retry) from creating two separate real PaymentIntents for one
+    logical checkout attempt; this app's own idempotency_key unique-DB-
+    constraint guard only ever catches a retry that reaches our database,
+    not one that never got a response the first time."""
+    if not is_configured():
+        return new_id("PAYTXN"), ""
+    stripe = _client()
+    intent = stripe.PaymentIntent.create(
+        amount=to_minor_units(amount, currency), currency=currency.lower(), metadata=metadata,
+        idempotency_key=idempotency_key,
+    )
+    return intent.id, intent.client_secret or ""
+
+
+def create_refund(
+    *, payment_intent_id: str, amount: float, currency: str, metadata: dict, idempotency_key: str | None = None,
+) -> str:
+    """Returns the provider refund id -- a real Stripe Refund id (re_...)
+    when configured, otherwise a generated placeholder. ZR-PAY-002 Section
+    8.4: refunds a Listing Fee PaymentIntent directly (Zoiko's own charge),
+    never a Transfer/TransferReversal -- that pair is the rent/payout
+    domain's own mechanism (see reverse_transfer above) and does not apply
+    here, matching the two domains' separate money flows. idempotency_key
+    -- see create_payment_intent_with_client_secret's own docstring for why
+    this is passed to Stripe's own idempotency mechanism, not just guarded
+    at the DB layer."""
+    if not is_configured():
+        return new_id("RE")
+    stripe = _client()
+    refund = stripe.Refund.create(
+        payment_intent=payment_intent_id, amount=to_minor_units(amount, currency), metadata=metadata,
+        idempotency_key=idempotency_key,
+    )
+    return refund.id
+
+
 def create_connected_account(*, country: str, email: str, metadata: dict) -> str:
     """Returns the provider account id -- a real Stripe Connect Express
     account id (acct_...) when configured, otherwise a generated
@@ -198,11 +253,14 @@ def retrieve_payment_intent(*, payment_intent_id: str) -> dict | None:
     return {"amount_received": int(intent.amount_received), "currency": intent.currency, "status": intent.status}
 
 
-def construct_webhook_event(*, payload: bytes, signature_header: str):
+def construct_webhook_event(*, payload: bytes, signature_header: str, secret: str | None = None):
     """Verifies a real Stripe webhook signature and returns the parsed
     Event. Raises stripe.error.SignatureVerificationError on a bad/forged
     signature -- the caller (the public webhook route) must let that surface
     as a 400, never as a 200 that would tell an attacker their forged
-    payload was accepted."""
+    payload was accepted. `secret` lets a caller verify against a different
+    endpoint's own signing secret (e.g. the Listing Fee webhook route) --
+    defaults to the shared settings.stripe_webhook_secret, unchanged for
+    every existing call site."""
     stripe = _client()
-    return stripe.Webhook.construct_event(payload, signature_header, settings.stripe_webhook_secret)
+    return stripe.Webhook.construct_event(payload, signature_header, secret or settings.stripe_webhook_secret)

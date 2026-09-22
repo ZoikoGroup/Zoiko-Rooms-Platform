@@ -51,3 +51,27 @@ class DisputeOperationalMetricsRead(CamelModel):
     external_referral_rate: float | None
     avg_active_financial_hold_age_days: float | None
     avg_released_financial_hold_lifetime_days: float | None
+
+
+class PaymentOperationalMetricsRead(CamelModel):
+    """ZR-WIR-TRACE-001 TR-11 operational metrics for the Payments domain
+    (ZR-PAY-002) -- see app/services/payment_operational_metrics.py for
+    what each one measures and why request tracing/alert ownership are
+    deliberately not reported here. Rate/average fields are null (not
+    zero) when there's no data to compute them from yet."""
+
+    total_listing_fee_payments: int
+    listing_fee_payments_by_status: dict[str, int]
+    listing_fee_payment_failure_rate: float | None
+    avg_listing_fee_time_to_success_seconds: float | None
+    total_listing_fee_refunds: int
+    listing_fee_refunds_by_status: dict[str, int]
+    listing_fee_refund_rate: float | None
+    total_rental_payment_obligations: int
+    obligations_by_status: dict[str, int]
+    total_rental_payment_records: int
+    records_by_status: dict[str, int]
+    avg_rental_payment_confirmation_turnaround_days: float | None
+    rental_payment_discrepancy_rate: float | None
+    payment_instructions_pending_review_count: int
+    payment_instructions_rejected_count: int

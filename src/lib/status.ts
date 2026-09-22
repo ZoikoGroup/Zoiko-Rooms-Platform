@@ -522,6 +522,65 @@ export const renterVerificationStatusTone: Record<string, "neutral" | "warning" 
   SUSPENDED: "neutral",
 };
 
+// --- ZR-PAY-002: Listing Fee (the only Zoiko-collected payment) ---
+
+export const listingFeePaymentStatusTone = {
+  PENDING: "warning",
+  SUCCEEDED: "success",
+  FAILED: "danger",
+} as const;
+
+export const listingFeeRefundStatusTone = {
+  REQUESTED: "warning",
+  PROCESSING: "warning",
+  PARTIALLY_REFUNDED: "primary",
+  REFUNDED: "success",
+  FAILED: "danger",
+} as const;
+
+// --- ZR-PAY-002: rental payment records (evidence/workflow only) ---
+// Section 6.1's display rule: never collapse TENANT_MARKED_PAID /
+// CONFIRMED_BY_RECIPIENT / CONFIRMED_BY_PROVIDER into one generic "Paid"
+// tone -- each keeps its own distinguishable tone here.
+
+export const rentalPaymentStatusTone = {
+  UPCOMING: "neutral",
+  DUE: "warning",
+  TENANT_MARKED_PAID: "primary",
+  AWAITING_CONFIRMATION: "primary",
+  CONFIRMED_BY_RECIPIENT: "success",
+  CONFIRMED_BY_PROVIDER: "success",
+  PARTIALLY_PAID: "warning",
+  OVERDUE: "danger",
+  DISPUTED: "danger",
+  REVERSED: "danger",
+  WAIVED: "neutral",
+  CANCELLED: "neutral",
+} as const;
+
+export const rentalPaymentStatusLabel = {
+  UPCOMING: "Upcoming",
+  DUE: "Payment due",
+  TENANT_MARKED_PAID: "Marked as paid",
+  AWAITING_CONFIRMATION: "Awaiting confirmation",
+  CONFIRMED_BY_RECIPIENT: "Confirmed by recipient",
+  CONFIRMED_BY_PROVIDER: "Confirmed by provider",
+  PARTIALLY_PAID: "Partially paid",
+  OVERDUE: "Overdue",
+  DISPUTED: "Disputed",
+  REVERSED: "Reversed",
+  WAIVED: "Waived",
+  CANCELLED: "Cancelled",
+} as const;
+
+export const rentalPaymentInstructionStatusTone = {
+  PENDING_VERIFICATION: "warning",
+  PENDING_REVIEW: "warning",
+  ACTIVE: "success",
+  SUPERSEDED: "neutral",
+  REJECTED: "danger",
+} as const;
+
 // -- Section 10 gap: ZR-ENG-CLR-010 general-purpose Dispute Resolution
 // engine -- distinct from the finance.DisputeCase (chargeback) tones above.
 export const disputeCaseStatusTone: Record<string, "primary" | "accent" | "success" | "warning" | "neutral" | "danger"> = {

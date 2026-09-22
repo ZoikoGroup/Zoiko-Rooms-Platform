@@ -10,6 +10,7 @@ import {
   Pencil,
   Plus,
   Send,
+  ShieldCheck,
   ThumbsDown,
   ThumbsUp,
   XCircle,
@@ -22,6 +23,7 @@ import {
   DisclosureRequirement,
   Listing,
   Occupancy,
+  OccupancyEligibilityMethod,
   OptionalClauseChoice,
   PublishEligibility,
 } from "@/lib/types";
@@ -84,6 +86,18 @@ export function LeasingManager() {
   const [occupancyByOfferId, setOccupancyByOfferId] = useState<Record<number, Occupancy>>({});
   const [gateStatusByOccupancy, setGateStatusByOccupancy] = useState<Record<number, ActivationGateStatus>>({});
   const [handoverBusy, setHandoverBusy] = useState<string | null>(null);
+
+  // Lets an admin clear the OCCUPANCY_ELIGIBILITY gate (create_agreement's own
+  // 409 reason) right where they hit it, instead of writing down the party ID
+  // and re-finding it in Trust & Safety -- same open+decide backend calls
+  // OccupancyEligibilityManager uses, just pre-filled to this one applicant.
+  const [eligibilityTarget, setEligibilityTarget] = useState<Application | null>(null);
+  const [eligibilityJurisdiction, setEligibilityJurisdiction] = useState("England");
+  const [eligibilityMethod, setEligibilityMethod] = useState<OccupancyEligibilityMethod>("MANUAL_DOCUMENT_CHECK");
+  const [eligibilityShareCode, setEligibilityShareCode] = useState("");
+  const [eligibilityResult, setEligibilityResult] = useState<"PASS" | "FAIL_INELIGIBLE">("PASS");
+  const [eligibilityNote, setEligibilityNote] = useState("");
+  const [eligibilitySubmitting, setEligibilitySubmitting] = useState(false);
 
   function showToast(message: string) {
     setToast(message);
@@ -358,6 +372,43 @@ export function LeasingManager() {
     }
   }
 
+  function openEligibilityModal(application: Application) {
+    setEligibilityTarget(application);
+    setEligibilityJurisdiction("England");
+    setEligibilityMethod("MANUAL_DOCUMENT_CHECK");
+    setEligibilityShareCode("");
+    setEligibilityResult("PASS");
+    setEligibilityNote("");
+  }
+
+  async function submitEligibilityCheck() {
+    if (!eligibilityTarget?.guestPartyId) return;
+    if (!eligibilityNote.trim()) return showToast("Enter a reason note");
+    setEligibilitySubmitting(true);
+    try {
+      const check = await apiClientFetch<{ id: number }>("/api/verification/occupancy-eligibility-checks", {
+        method: "POST",
+        body: JSON.stringify({
+          partyId: eligibilityTarget.guestPartyId,
+          jurisdictionCode: eligibilityJurisdiction.trim(),
+          method: eligibilityMethod,
+          shareCode: eligibilityShareCode.trim(),
+        }),
+      });
+      await apiClientFetch(`/api/verification/occupancy-eligibility-checks/${check.id}/decide`, {
+        method: "POST",
+        body: JSON.stringify({ resultStatus: eligibilityResult, reasonNote: eligibilityNote.trim(), followUpDays: 365 }),
+      });
+      showToast(eligibilityResult === "PASS" ? "Occupancy eligibility passed" : "Occupancy eligibility marked ineligible");
+      setEligibilityTarget(null);
+      loadApplications();
+    } catch {
+      showToast("Failed to record occupancy eligibility check");
+    } finally {
+      setEligibilitySubmitting(false);
+    }
+  }
+
   async function sendAgreement(agreementId: number) {
     try {
       await apiClientFetch(`/api/leasing/agreements/${agreementId}/send`, { method: "POST" });
@@ -559,7 +610,8 @@ export function LeasingManager() {
                   {application.listingName || application.listingId}
                 </p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Application #{application.id} · {application.listingId} · {application.guestEmail} · applied{" "}
+                  Application #{application.id} · {application.listingId} · {application.guestEmail}
+                  {application.guestPartyId != null && ` · Party #${application.guestPartyId}`} · applied{" "}
                   {formatDate(application.submittedAt)}
                 </p>
                 {listing && (
@@ -652,9 +704,16 @@ export function LeasingManager() {
                     )
                   )}
                   {offer.status === "ACCEPTED" && !agreement && (
-                    <Button size="sm" variant="accent" onClick={() => openAgreementModal(offer.id)}>
-                      <FileSignature className="h-3.5 w-3.5" /> Create Agreement
-                    </Button>
+                    <>
+                      <Button size="sm" variant="accent" onClick={() => openAgreementModal(offer.id)}>
+                        <FileSignature className="h-3.5 w-3.5" /> Create Agreement
+                      </Button>
+                      {application.guestPartyId != null && (
+                        <Button size="sm" variant="outline" onClick={() => openEligibilityModal(application)}>
+                          <ShieldCheck className="h-3.5 w-3.5" /> Open eligibility check
+                        </Button>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -928,6 +987,85 @@ export function LeasingManager() {
             Confirm Rejection
           </Button>
         </form>
+      </Modal>
+
+      <Modal
+        open={eligibilityTarget !== null}
+        onClose={() => setEligibilityTarget(null)}
+        title="Occupancy eligibility check"
+      >
+        <div className="space-y-3.5">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {eligibilityTarget?.guestName} · Party #{eligibilityTarget?.guestPartyId} — jurisdiction-specific
+            eligibility check (e.g. England&apos;s right-to-rent style check). Manual review only; the decision is
+            audited.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Jurisdiction</label>
+              <input
+                value={eligibilityJurisdiction}
+                onChange={(e) => setEligibilityJurisdiction(e.target.value)}
+                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Method</label>
+              <select
+                value={eligibilityMethod}
+                onChange={(e) => setEligibilityMethod(e.target.value as OccupancyEligibilityMethod)}
+                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              >
+                <option value="MANUAL_DOCUMENT_CHECK">Manual document check</option>
+                <option value="DIGITAL_SHARE_CODE">Digital share code</option>
+              </select>
+            </div>
+          </div>
+          {eligibilityMethod === "DIGITAL_SHARE_CODE" && (
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Share code</label>
+              <input
+                value={eligibilityShareCode}
+                onChange={(e) => setEligibilityShareCode(e.target.value)}
+                placeholder="e.g. AB1-CD2-EF3"
+                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              />
+            </div>
+          )}
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Result</label>
+            <select
+              value={eligibilityResult}
+              onChange={(e) => setEligibilityResult(e.target.value as typeof eligibilityResult)}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            >
+              <option value="PASS">Pass — eligible</option>
+              <option value="FAIL_INELIGIBLE">Fail — not eligible</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Reason note (required)</label>
+            <textarea
+              value={eligibilityNote}
+              onChange={(e) => setEligibilityNote(e.target.value)}
+              rows={3}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setEligibilityTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              loading={eligibilitySubmitting}
+              disabled={!eligibilityNote.trim()}
+              onClick={submitEligibilityCheck}
+            >
+              Record decision
+            </Button>
+          </div>
+        </div>
       </Modal>
 
       <Modal

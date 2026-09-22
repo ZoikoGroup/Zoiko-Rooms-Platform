@@ -337,6 +337,24 @@ def send_payout_beneficiary_verification_code_email(to_email: str, full_name: st
     )
 
 
+def send_rental_payment_instruction_verification_code_email(to_email: str, full_name: str, code: str, expires_minutes: int) -> None:
+    """ZR-PAY-002 Section 9.1's step-up-auth code -- same mailed one-time-
+    code mechanic as send_payout_beneficiary_verification_code_email above,
+    for the tenant-facing rent/deposit payment instructions a landlord/agent
+    manages instead of Zoiko's own outgoing payout destination."""
+    send_email(
+        to_email,
+        "Confirm your payment instructions",
+        heading="Confirm your payment instructions",
+        body_lines=[
+            f"Hi {full_name},",
+            f"Use this code to confirm the payment instructions renters will see: {code}",
+            f"This code is valid for {expires_minutes} minutes and can only be used once.",
+            "If you didn't request this change, contact support immediately -- do not share this code with anyone.",
+        ],
+    )
+
+
 def send_payout_paid_email(to_email: str, full_name: str, amount: float, currency: str, period_key: str) -> None:
     send_email(
         to_email,

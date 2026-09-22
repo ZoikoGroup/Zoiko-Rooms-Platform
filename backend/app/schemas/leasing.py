@@ -371,6 +371,12 @@ class ApplicationRead(CamelModel):
     guest_id: str
     guest_name: str
     guest_email: str
+    # The renter's Party id -- needed by admins to open an Occupancy
+    # Eligibility check (Trust & Safety) or an Identity Verification lookup
+    # for this applicant. None for a legacy walk-in Guest with no linked
+    # self-service UserAccount (see models/guest.py's own user_account_id
+    # docstring).
+    guest_party_id: int | None = None
     named_occupant_guest_id: str | None = None
     status: str
     message: str

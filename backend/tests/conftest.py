@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, event, text, Text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.config import settings
 from app.core.rate_limit import sublet_document_limiter, sublet_submit_limiter
 from app.core.security import create_access_token, hash_password
 from app.db.base import Base
@@ -24,6 +25,20 @@ from app.main import app
 from app.models.admin_user import AdminUser
 from app.models.market_policy import MarketPolicyPack
 from app.models.user_account import UserAccount
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_real_provider_credentials(monkeypatch):
+    """Tests must never depend on -- or be silently changed by -- whatever
+    real credentials happen to be in a developer's local backend/.env
+    (Settings() loads that file unconditionally). Without this, a real
+    STRIPE_SECRET_KEY flips every 'unconfigured Stripe -> simulated/
+    synchronous fallback' code path this suite relies on, and worse, makes
+    tests place real (if sandbox) API calls. Forced blank for every test
+    regardless of what .env says; monkeypatch restores it afterward."""
+    monkeypatch.setattr(settings, "stripe_secret_key", "")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", "")
+    monkeypatch.setattr(settings, "stripe_listing_fee_webhook_secret", "")
 
 
 @pytest.fixture(autouse=True)

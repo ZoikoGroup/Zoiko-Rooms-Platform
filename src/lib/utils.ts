@@ -33,11 +33,34 @@ export function formatCurrency(amount: number, currency: string = "USD") {
   }).format(amount);
 }
 
+/** ZR-PAY-002's own examples show two-decimal amounts (£850.00, £24.99) --
+ *  formatCurrency's maximumFractionDigits: 0 would round those away, so this
+ *  is a separate helper for the Listing Fee / rental payment screens rather
+ *  than changing formatCurrency's existing, widely-relied-on behavior.
+ *  Lets Intl.NumberFormat use each currency's own natural decimal places. */
+export function formatMoney(amount: number, currency: string) {
+  const locale = CURRENCY_LOCALES[currency] ?? "en-GB";
+  return new Intl.NumberFormat(locale, { style: "currency", currency }).format(amount);
+}
+
 export function formatDate(date: string) {
   return new Date(date).toLocaleDateString("en-IN", {
     day: "numeric",
     month: "short",
     year: "numeric",
+  });
+}
+
+/** ZR-PAY-002 Section 5.1's own timestamp style ("18 Sep 2026, 14:31") --
+ *  used wherever a payment declaration/confirmation timestamp, not just a
+ *  due date, needs to be shown. */
+export function formatDateTime(date: string) {
+  return new Date(date).toLocaleString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 }
 

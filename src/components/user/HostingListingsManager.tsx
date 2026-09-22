@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { AlertTriangle, BedDouble, MapPin, Pencil, Plus, Send, XCircle } from "lucide-react";
+import { AlertTriangle, BedDouble, MapPin, Pencil, Plus, Receipt, Send, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
@@ -25,6 +25,7 @@ import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
+import { ListingFeeCheckout } from "@/components/user/ListingFeeCheckout";
 
 const MAX_LISTING_IMAGES = 10;
 
@@ -93,6 +94,7 @@ export function HostingListingsManager() {
   const [error, setError] = useState("");
 
   const [busyListingId, setBusyListingId] = useState<string | null>(null);
+  const [payingFeeListingId, setPayingFeeListingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!user) return;
@@ -270,6 +272,11 @@ export function HostingListingsManager() {
                     <Button size="sm" variant="ghost" onClick={() => openEdit(listing)}>
                       <Pencil className="h-3.5 w-3.5" /> Edit
                     </Button>
+                    {listing.state !== "PUBLISHED" && (
+                      <Button size="sm" variant="outline" onClick={() => setPayingFeeListingId(listing.id)}>
+                        <Receipt className="h-3.5 w-3.5" /> Listing fee
+                      </Button>
+                    )}
                     {(listing.state === "DRAFT" || listing.state === "REJECTED") && (
                       <Button size="sm" loading={busy} onClick={() => submitForReview(listing.id)}>
                         <Send className="h-3.5 w-3.5" /> Submit for Review
@@ -501,6 +508,10 @@ export function HostingListingsManager() {
           );
         }}
       />
+
+      <Modal open={Boolean(payingFeeListingId)} onClose={() => setPayingFeeListingId(null)} title="Listing fee">
+        {payingFeeListingId && <ListingFeeCheckout listingId={payingFeeListingId} />}
+      </Modal>
 
       <Toast toast={toast} />
     </div>

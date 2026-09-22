@@ -12,6 +12,7 @@ the cross-domain drift risk Section 1 calls out."""
 
 from sqlalchemy import func, select
 from app.crud.identity_verification import get_verified_identity_for_party
+from app.crud.listing import resolve_market_release
 from app.crud.occupancy_eligibility import get_valid_occupancy_eligibility_credential
 from app.models.leasing import Agreement, Application, Offer
 from app.models.listing import Listing
@@ -76,7 +77,7 @@ def _check_occupancy_eligibility_requirements(db, listing: Listing, guest) -> li
     to nothing for jurisdictions with no verification policy configured
     (see resolve_verification_requirements), so it never blocks existing
     flows unless a jurisdiction has actually opted in."""
-    market_release = db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
+    market_release = resolve_market_release(db, listing)
     jurisdiction_code = market_release.jurisdiction if market_release else None
     party_id = guest.user_account.party_id if guest and guest.user_account else None
     if not (jurisdiction_code and party_id):
@@ -95,7 +96,7 @@ def _check_occupancy_eligibility_requirements(db, listing: Listing, guest) -> li
 
 def check_agreement_eligibility(db, offer: Offer) -> list[str]:
     listing: Listing = offer.listing
-    market_release = db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
+    market_release = resolve_market_release(db, listing)
     reasons = check_marketplace_standing(db, listing.room, market_release)
 
     if offer.status != "ACCEPTED":
@@ -131,7 +132,7 @@ def check_agreement_eligibility(db, offer: Offer) -> list[str]:
 def check_move_in_eligibility(db, agreement: Agreement) -> list[str]:
     offer: Offer = agreement.offer
     listing: Listing = offer.listing
-    market_release = db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
+    market_release = resolve_market_release(db, listing)
     reasons = check_marketplace_standing(db, listing.room, market_release)
 
     # ZR-ENG-CLR-004 AC-13/AC-14: Executed and Effective are separate states
