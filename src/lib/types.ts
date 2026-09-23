@@ -136,6 +136,57 @@ export interface AuthorityRecord {
   createdAt: string;
 }
 
+/** ZR-PAY-LINK-003 Section 1.1/2: a separate claim from AuthorityRecord --
+ *  "authority to list" and "authority to receive payments" are separate
+ *  claims. partyId here is who actually receives rent for this room, which
+ *  may be a different party than whoever holds the room's own list-authority. */
+/** "pending_step_up" (ZR-PAY-LINK-003 Section 14.1) only appears for a
+ *  CHANGE -- a room that already has a live verified recipient getting a
+ *  new one -- never for a room's first-ever declaration, which goes
+ *  straight to "pending". */
+export type PaymentRecipientAuthorityStatus = "pending_step_up" | "pending" | "verified" | "failed" | "revoked";
+export type PaymentRecipientRelationshipType = "OWNER" | "AGENT" | "MANAGER" | "OTHER";
+
+export interface PaymentRecipientAuthority {
+  id: number;
+  partyId: number;
+  roomId: number;
+  relationshipType: PaymentRecipientRelationshipType;
+  evidenceRef: string;
+  verifiedAt: string | null;
+  expiresAt: string | null;
+  status: PaymentRecipientAuthorityStatus;
+  isHighRisk: boolean;
+  highRiskReason: string;
+  createdAt: string;
+}
+
+/** ZR-PAY-LINK-003 Section 3.1: the consolidated recipient+destination
+ *  status for a room -- what backs the "is rent collection actually usable
+ *  yet, and why not if not" banner. CLOSED is not yet derived server-side
+ *  (see crud/payment_connection.py's own docstring), so it never appears
+ *  here today. */
+export type PaymentConnectionState =
+  | "DRAFT"
+  | "RECIPIENT_SETUP_REQUIRED"
+  | "PENDING_VERIFICATION"
+  | "ACTIVE"
+  | "SUSPENDED";
+
+export interface PaymentConnection {
+  roomId: number;
+  state: PaymentConnectionState;
+  recipientPartyId: number | null;
+  recipientAuthorityId: number | null;
+  recipientRelationshipType: PaymentRecipientRelationshipType | null;
+  recipientAuthorityStatus: PaymentRecipientAuthorityStatus | null;
+  recipientVerifiedAt: string | null;
+  recipientExpiresAt: string | null;
+  destinationMethod: string | null;
+  destinationStatus: string | null;
+  destinationAccountIdentifierMasked: string | null;
+}
+
 export interface RoomPassportClaim {
   id: number;
   roomId: number;
@@ -578,9 +629,11 @@ export interface ListingFeeCheckoutSession {
   amount: number;
   currency: string;
   status: ListingFeePaymentStatus;
-  /** Empty when Stripe isn't configured server-side -- the payment already
-   *  completed synchronously in that case; nothing to confirm client-side. */
-  clientSecret: string;
+  /** Stripe's own hosted payment page -- redirect the browser here directly
+   *  (window.location.href), never render a custom form for it. Empty when
+   *  Stripe isn't configured server-side -- the payment already completed
+   *  synchronously in that case; nothing to redirect to. */
+  checkoutUrl: string;
   createdAt: string;
 }
 
@@ -638,13 +691,19 @@ export interface ListingFeeRefund {
 
 export type RentalPaymentObligationType = "RENT" | "DEPOSIT" | "OTHER";
 
+/** ZR-PAY-LINK-003 Section 16. CONFIRMED collapses the ZR-PAY-002-era
+ *  CONFIRMED_BY_RECIPIENT/CONFIRMED_BY_PROVIDER pair -- "who confirmed" is
+ *  still available on RentalPaymentRecord.provenance, rendered as its own
+ *  field wherever status is shown. PROVIDER_PROCESSING has no producing
+ *  backend code path yet (see models/rental_payment.py's own docstring). */
 export type RentalPaymentStatus =
   | "UPCOMING"
   | "DUE"
-  | "TENANT_MARKED_PAID"
-  | "AWAITING_CONFIRMATION"
-  | "CONFIRMED_BY_RECIPIENT"
-  | "CONFIRMED_BY_PROVIDER"
+  | "PAYMENT_SESSION_STARTED"
+  | "PROVIDER_PROCESSING"
+  | "PAYER_RECORDED"
+  | "RECIPIENT_CONFIRMATION_PENDING"
+  | "CONFIRMED"
   | "PARTIALLY_PAID"
   | "OVERDUE"
   | "DISPUTED"
@@ -681,6 +740,10 @@ export interface RentalPaymentRecord {
   providerReference: string;
   confirmedAt: string | null;
   createdAt: string;
+  /** ZR-PAY-LINK-003 Section 19/Wireframe PAY-18 -- previously only ever
+   *  visible to admins; now nested here for the tenant/recipient views. */
+  disputes: RentalPaymentDispute[];
+  corrections: RentalPaymentCorrection[];
 }
 
 export interface RentalPaymentObligation {
@@ -755,6 +818,54 @@ export interface RentalPaymentInstruction {
   highRiskReason: string;
   reviewedAt: string | null;
   reviewReason: string;
+}
+
+/** SUPERSEDED never appears on the account a recipient's own GET/change
+ *  routes return (those always resolve the current row) -- listed here
+ *  only because it's a real value the type could carry in principle. */
+export type RentalPaymentProviderAccountStatus = "ONBOARDING" | "COMPLETE" | "SUPERSEDED";
+
+/** ZR-PAY-LINK-003 Section 6/Wireframe C: a recipient's own connected Stripe
+ *  account for receiving rent/deposit payments directly -- never the raw
+ *  account id, same masking posture as RentalPaymentInstruction. */
+export interface RentalPaymentProviderAccount {
+  id: number;
+  status: RentalPaymentProviderAccountStatus;
+  detailsSubmitted: boolean;
+  chargesEnabled: boolean;
+  payoutsEnabled: boolean;
+  /** ZR-PAY-LINK-003 Section 14.1: set only on the row created by a
+   *  confirmed account change, same as RentalPaymentInstruction's own
+   *  isHighRisk/highRiskReason. */
+  isHighRisk: boolean;
+  highRiskReason: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RentalPaymentProviderAccountConnectResult {
+  account: RentalPaymentProviderAccount;
+  onboardingUrl: string;
+}
+
+export type ExternalPaymentSessionStatus = "STARTED" | "SUCCEEDED" | "FAILED";
+
+/** ZR-PAY-LINK-003 Section 6/10.1/Wireframe F: a short-lived,
+ *  provider-hosted payment handoff for one obligation. */
+export interface ExternalPaymentSession {
+  id: number;
+  obligationId: number;
+  status: ExternalPaymentSessionStatus;
+  amount: number;
+  currency: string;
+  failureMessage: string;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface ExternalPaymentSessionCreateResult {
+  session: ExternalPaymentSession;
+  checkoutUrl: string;
 }
 
 export interface EvidenceArtifact {
@@ -1800,6 +1911,9 @@ export interface RentalTransactionRecord {
   obligations: ObligationRead[];
   payments: SimulatedPayment[];
   deposit: DepositRecord | null;
+  /** ZR-PAY-002's own record/evidence-layer obligations (never money-moving),
+   *  kept alongside `obligations` above rather than replacing it. */
+  rentalPaymentObligations: RentalPaymentObligation[];
   handoverEvents: HandoverEvent[];
   activationDecisions: ActivationDecision[];
   subletRequests: SubletRequest[];

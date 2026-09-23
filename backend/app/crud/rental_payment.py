@@ -12,7 +12,7 @@ import secrets
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.dispute_evidence_uploads import save_dispute_evidence_file
@@ -22,6 +22,7 @@ from app.crud.events import emit_event
 from app.crud import notification as notif_crud
 from app.crud.user import get_user_by_party_id
 from app.models.admin_user import AdminUser
+from app.models.domain_event import DomainEvent
 from app.models.evidence_artifact import EvidenceArtifact
 from app.models.guest import Guest
 from app.models.party import Party
@@ -35,12 +36,13 @@ from app.models.rental_payment import (
     RentalPaymentObligation,
     RentalPaymentRecord,
 )
+from app.schemas.rental_transaction_record import RentalTransactionTimelineEntryRead
 
 # ZR-PAY-002 Section 11: 'Append corrective event -- Tenant: Controlled,
 # Landlord/Agent: Controlled.' Deliberately narrower than
 # CORRECTABLE_RECORD_FIELDS below (never declared_amount/declared_date --
 # those stay admin-only, A10's heavier protection for the financially
-# significant fields) and only while the record is still TENANT_MARKED_PAID
+# significant fields) and only while the record is still PAYER_RECORDED
 # (own tenant_correct_own_record) or the dispute is still OPEN (own
 # recipient_update_own_open_dispute) -- i.e. before the other side has acted
 # on it, never after.
@@ -55,6 +57,40 @@ CORRECTABLE_RECORD_FIELDS = ("declared_amount", "declared_date", "external_refer
 
 def _round2(amount) -> float:
     return round(float(amount), 2)
+
+
+def resolve_rent_recipient_party_id(db: Session, room) -> int | None:
+    """ZR-PAY-LINK-003 Section 1.1/2: 'A provider's ability to list a
+    property does not automatically mean that provider is authorized to
+    receive money.' The one place either obligation-creation call site
+    (crud/leasing.py:create_agreement, crud/occupancy.py:
+    generate_next_rent_obligation) resolves who actually receives rent for
+    a room -- never re-derived inline at either call site.
+
+    Prefers a verified PAYMENT_RECEIPT authority claim
+    (payment_recipient_authority.get_valid_payment_recipient_authority_for_room)
+    over the property owner when one exists, so a host who has actually
+    designated (and gotten admin-verified) an authorized agent/manager as
+    recipient has that respected. Falls back to the property's own
+    owner_party_id when no verified claim exists yet -- a still-PENDING
+    claim (submitted but not yet admin-verified) does not change who's
+    resolved either; this is a deliberate, non-breaking rollout choice:
+    making a verified claim mandatory immediately would retroactively
+    block rent collection for every existing room the moment this shipped,
+    with nothing yet on file to satisfy it. recipient_party_id is only
+    ever set once, at obligation-creation time (never reassigned after --
+    ZR-PAY-LINK-003 Section 24's own 'historical obligations retain
+    original payee lineage'), so a claim that gets verified later only
+    ever governs obligations created from that point on, never
+    retroactively changes who could act on ones already created."""
+    from app.crud.payment_recipient_authority import get_valid_payment_recipient_authority_for_room
+
+    if room is None or room.property is None:
+        return None
+    authority = get_valid_payment_recipient_authority_for_room(db, room.id)
+    if authority is not None:
+        return authority.party_id
+    return room.property.owner_party_id
 
 
 def create_obligation(
@@ -94,17 +130,32 @@ def recompute_obligation_status(db: Session, obligation: RentalPaymentObligation
         .limit(1)
     )
     if latest_record is None:
+        # ZR-PAY-LINK-003 Section 16: PAYMENT_SESSION_STARTED -- an online
+        # payment session in flight takes priority over the plain due-date
+        # derivation below, both so the tenant sees it's actually in
+        # progress and so canMarkPaid-style UI checks (only ever true for
+        # UPCOMING/DUE/OVERDUE) stop offering a second, conflicting payment
+        # action while one is already underway. Deferred import, same
+        # cross-module-boundary discipline as resolve_rent_recipient_party_id
+        # below.
+        from app.crud.external_payment_session import get_latest_session_for_obligation
+
+        latest_session = get_latest_session_for_obligation(db, obligation.id)
+        if latest_session is not None and latest_session.status == "STARTED":
+            obligation.status = "PAYMENT_SESSION_STARTED"
+            return
+
         obligation.status = "UPCOMING" if obligation.due_date > date.today() else (
             "OVERDUE" if obligation.due_date < date.today() else "DUE"
         )
         return
 
-    if latest_record.status == "TENANT_MARKED_PAID":
-        obligation.status = "AWAITING_CONFIRMATION"
+    if latest_record.status == "PAYER_RECORDED":
+        obligation.status = "RECIPIENT_CONFIRMATION_PENDING"
     else:
-        # CONFIRMED_BY_RECIPIENT / CONFIRMED_BY_PROVIDER / PARTIALLY_PAID /
-        # DISPUTED / REVERSED all mirror the record's own state directly --
-        # each is already the exact display status ZR-PAY-002 Section 6 names.
+        # CONFIRMED / PARTIALLY_PAID / DISPUTED / REVERSED all mirror the
+        # record's own state directly -- each is already the exact display
+        # status ZR-PAY-LINK-003 Section 16 names.
         obligation.status = latest_record.status
 
 
@@ -136,6 +187,32 @@ def list_payment_evidence_for_record(db: Session, record_id: int) -> list[Eviden
             .order_by(EvidenceArtifact.created_at.desc())
         )
     )
+
+
+def build_record_timeline(db: Session, record: RentalPaymentRecord) -> list[RentalTransactionTimelineEntryRead]:
+    """ZR-PAY-LINK-003 Section 19 GET /rental-payment-records/{id}/timeline
+    -- same merge-existing-DomainEvent-rows-into-one-chronological-view
+    technique as crud/rental_transaction_record.py:_timeline_for, scoped to
+    one record instead of a whole occupancy. A dispute's own resolve event
+    is emitted against the dispute's resource id, not the record's (see
+    resolve_dispute below), so each of record.disputes needs its own pair
+    too -- corrections need no separate pair, theirs is already emitted
+    against the record (see append_correction/tenant_correct_own_record)."""
+    resource_pairs: list[tuple[str, str]] = [("rental_payment_record", str(record.id))]
+    for dispute in record.disputes:
+        resource_pairs.append(("rental_payment_dispute", str(dispute.id)))
+
+    conditions = [
+        (DomainEvent.resource_type == resource_type) & (DomainEvent.resource_id == resource_id)
+        for resource_type, resource_id in resource_pairs
+    ]
+    events = list(db.scalars(select(DomainEvent).where(or_(*conditions)).order_by(DomainEvent.occurred_at)))
+    return [
+        RentalTransactionTimelineEntryRead(
+            timestamp=event.occurred_at, source=event.resource_type.upper(), event_type=event.event_type, detail=event.payload,
+        )
+        for event in events
+    ]
 
 
 def list_obligations_for_tenant(db: Session, guest_id: str, *, obligation_type: str | None = None) -> list[RentalPaymentObligation]:
@@ -183,7 +260,7 @@ def mark_paid(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"paymentMethodCategory must be one of {RENTAL_PAYMENT_METHOD_CATEGORIES}")
 
     record = RentalPaymentRecord(
-        obligation_id=obligation.id, status="TENANT_MARKED_PAID", provenance="TENANT_DECLARATION",
+        obligation_id=obligation.id, status="PAYER_RECORDED", provenance="TENANT_DECLARATION",
         declared_amount=_round2(amount), declared_currency=currency, declared_date=declared_date,
         payment_method_category=payment_method_category, external_reference=external_reference,
         declared_by_guest_id=guest.id,
@@ -198,7 +275,7 @@ def mark_paid(
     emit_event(
         db, "rental_payment.marked_paid", "rental_payment_record", str(record.id),
         {"obligationId": obligation.id, "amount": float(amount), "currency": currency},
-        correlation_id=correlation_id, actor_kind="guest", actor_id=guest.id, new_state="TENANT_MARKED_PAID",
+        correlation_id=correlation_id, actor_kind="guest", actor_id=guest.id, new_state="PAYER_RECORDED",
     )
     db.commit()
 
@@ -234,6 +311,10 @@ async def _store_payment_evidence(
 
     log_audit_event(
         db, None, "rental_payment.evidence_uploaded", "rental_payment_record", str(record.id), correlation_id,
+    )
+    emit_event(
+        db, "rental_payment.evidence_uploaded", "rental_payment_record", str(record.id),
+        {"artifactId": artifact.id}, correlation_id=correlation_id,
     )
     db.commit()
     return artifact
@@ -346,7 +427,7 @@ def confirm_receipt(
     never exceed the declared amount (that would not be a confirmation of
     this declaration at all)."""
     assert_party_is_recipient(record.obligation, party.id)
-    if record.status not in ("TENANT_MARKED_PAID", "DISPUTED"):
+    if record.status not in ("PAYER_RECORDED", "DISPUTED"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"A record in status {record.status} cannot be confirmed")
 
     declared = _round2(float(record.declared_amount))
@@ -355,7 +436,7 @@ def confirm_receipt(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Confirmed amount must be greater than zero")
     if confirmed > declared:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Confirmed amount cannot exceed the declared amount")
-    new_status = "CONFIRMED_BY_RECIPIENT" if confirmed >= declared else "PARTIALLY_PAID"
+    new_status = "CONFIRMED" if confirmed >= declared else "PARTIALLY_PAID"
 
     record.status = new_status
     record.provenance = "RECIPIENT_CONFIRMATION"
@@ -378,7 +459,7 @@ def confirm_receipt(
     db.commit()
 
     message = (
-        "Payment confirmed by the recipient." if new_status == "CONFIRMED_BY_RECIPIENT"
+        "Payment confirmed by the recipient." if new_status == "CONFIRMED"
         else f"The recipient confirmed receipt of {record.declared_currency} {confirmed:.2f} -- "
              f"less than the {record.declared_currency} {declared:.2f} declared."
     )
@@ -405,15 +486,15 @@ def admin_confirm_receipt(
     append_correction."""
     if not reason.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "A reason is required")
-    if record.status not in ("TENANT_MARKED_PAID", "DISPUTED"):
+    if record.status not in ("PAYER_RECORDED", "DISPUTED"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"A record in status {record.status} cannot be confirmed")
 
     previous_status = record.status
     db.add(RentalPaymentCorrection(
-        record_id=record.id, field_name="status", previous_value=previous_status, new_value="CONFIRMED_BY_RECIPIENT",
+        record_id=record.id, field_name="status", previous_value=previous_status, new_value="CONFIRMED",
         reason=reason, actor_admin_id=admin.id,
     ))
-    record.status = "CONFIRMED_BY_RECIPIENT"
+    record.status = "CONFIRMED"
     record.provenance = "ADMIN_CORRECTION"
     record.confirmed_at = datetime.now(timezone.utc)
     db.flush()
@@ -423,12 +504,12 @@ def admin_confirm_receipt(
 
     log_audit_event(
         db, admin, "rental_payment.receipt_confirmed_by_admin", "rental_payment_record", str(record.id), correlation_id,
-        reason=reason, before_state=previous_status, after_state="CONFIRMED_BY_RECIPIENT",
+        reason=reason, before_state=previous_status, after_state="CONFIRMED",
     )
     emit_event(
         db, "rental_payment.receipt_confirmed", "rental_payment_record", str(record.id),
         {"obligationId": record.obligation_id, "overriddenByAdmin": True},
-        correlation_id=correlation_id, new_state="CONFIRMED_BY_RECIPIENT",
+        correlation_id=correlation_id, new_state="CONFIRMED",
     )
     db.commit()
 
@@ -445,28 +526,30 @@ def confirm_receipt_as_provider(
     db: Session, admin: AdminUser, record: RentalPaymentRecord, *, provider_reference: str, reason: str,
     correlation_id: str = "",
 ) -> RentalPaymentRecord:
-    """ZR-PAY-002 Section 6: CONFIRMED_BY_PROVIDER -- 'Integrated provider
-    supplies authoritative confirmation. Allowed source/transition: Verified
-    provider event.' This build has no live, real-time integration with an
-    external rent-payment provider to receive that event automatically (the
-    honest 'not yet built' limitation models/rental_payment.py's own
-    RENTAL_PAYMENT_PROVENANCE docstring already states) -- this is the real
-    path that exists today: a restricted admin recording an authoritative
-    confirmation they actually obtained from a verified external source
-    (the provider's own transaction record, a bank reconciliation), never a
-    routine substitute for the recipient's own confirmation. provenance is
-    PROVIDER_CONFIRMATION, never RECIPIENT_CONFIRMATION or ADMIN_CORRECTION
-    -- Section 6.1's display rule requires the record detail to expose
-    exactly which of the three this was."""
+    """ZR-PAY-002 Section 6: status CONFIRMED via PROVIDER_CONFIRMATION
+    provenance -- 'Integrated provider supplies authoritative confirmation.
+    Allowed source/transition: Verified provider event.'
+    crud/external_payment_session.py:record_provider_payment_success is now
+    the real, automated path for an obligation actually paid through the
+    external-provider rail (a webhook or self-heal read, not an admin
+    action). This function stays as the admin-only manual-reconciliation
+    fallback: a restricted admin recording an authoritative confirmation
+    they obtained some other way (a bank reconciliation, the provider's own
+    dashboard for a payment that fell outside the automated session flow),
+    never a routine substitute for either the recipient's own confirmation
+    or the automated one. provenance is PROVIDER_CONFIRMATION, never
+    RECIPIENT_CONFIRMATION or ADMIN_CORRECTION -- Section 6.1's display rule
+    requires the record detail to expose exactly which of the three this
+    was."""
     if not provider_reference.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "A provider reference is required")
     if not reason.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "A reason is required")
-    if record.status not in ("TENANT_MARKED_PAID", "DISPUTED"):
+    if record.status not in ("PAYER_RECORDED", "DISPUTED"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"A record in status {record.status} cannot be confirmed")
 
     previous_status = record.status
-    record.status = "CONFIRMED_BY_PROVIDER"
+    record.status = "CONFIRMED"
     record.provenance = "PROVIDER_CONFIRMATION"
     record.provider_reference = provider_reference
     record.confirmed_amount = _round2(float(record.declared_amount))
@@ -478,12 +561,12 @@ def confirm_receipt_as_provider(
 
     log_audit_event(
         db, admin, "rental_payment.receipt_confirmed_by_provider", "rental_payment_record", str(record.id), correlation_id,
-        reason=reason, before_state=previous_status, after_state="CONFIRMED_BY_PROVIDER",
+        reason=reason, before_state=previous_status, after_state="CONFIRMED",
     )
     emit_event(
         db, "rental_payment.receipt_confirmed", "rental_payment_record", str(record.id),
         {"obligationId": record.obligation_id, "providerReference": provider_reference},
-        correlation_id=correlation_id, new_state="CONFIRMED_BY_PROVIDER",
+        correlation_id=correlation_id, new_state="CONFIRMED",
     )
     db.commit()
 
@@ -528,7 +611,7 @@ def reverse_record(
     correction once evidence supports it, not an automatic transition from
     a discrepancy report -- see models/rental_payment.py's own status
     docstring."""
-    if record.status not in ("CONFIRMED_BY_RECIPIENT", "CONFIRMED_BY_PROVIDER"):
+    if record.status != "CONFIRMED":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a confirmed record can be reversed")
 
     db.add(RentalPaymentCorrection(
@@ -601,11 +684,11 @@ def tenant_correct_own_record(
     Controlled.' Narrow on every axis: only the tenant's OWN record, only a
     clerical field (never amount/date -- see TENANT_CORRECTABLE_RECORD_FIELDS'
     own docstring), and only before the recipient has acted on it
-    (TENANT_MARKED_PAID) -- once AWAITING_CONFIRMATION resolves to
+    (PAYER_RECORDED) -- once RECIPIENT_CONFIRMATION_PENDING resolves to
     CONFIRMED/DISPUTED, only an admin correction may touch it."""
     if record.declared_by_guest_id != guest.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This record does not belong to you")
-    if record.status != "TENANT_MARKED_PAID":
+    if record.status != "PAYER_RECORDED":
         raise HTTPException(status.HTTP_409_CONFLICT, "This record can no longer be self-corrected -- ask an admin to append a correction")
     if field_name not in TENANT_CORRECTABLE_RECORD_FIELDS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"fieldName must be one of {TENANT_CORRECTABLE_RECORD_FIELDS}")

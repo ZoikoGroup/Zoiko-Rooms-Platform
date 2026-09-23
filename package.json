@@ -11,8 +11,6 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@stripe/react-stripe-js": "^6.10.0",
-    "@stripe/stripe-js": "^9.16.0",
     "clsx": "^2.1.1",
     "framer-motion": "^12.43.0",
     "leaflet": "^1.9.4",

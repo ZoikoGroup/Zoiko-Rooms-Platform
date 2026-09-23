@@ -370,8 +370,9 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
     # module docstring. Same best-effort placement as the rent-invoice hook.
     try:
         from app.crud.rental_payment import create_obligation as create_rental_payment_obligation
+        from app.crud.rental_payment import resolve_rent_recipient_party_id
 
-        recipient_party_id = occupancy.room.property.owner_party_id if occupancy.room and occupancy.room.property else None
+        recipient_party_id = resolve_rent_recipient_party_id(db, occupancy.room) if occupancy.room else None
         if recipient_party_id is not None:
             create_rental_payment_obligation(
                 db, obligation_type="RENT", tenant_guest_id=occupancy.guest_id, recipient_party_id=recipient_party_id,

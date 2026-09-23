@@ -40,7 +40,7 @@ class TestCreateCheckoutConcurrentRetry:
         idempotency_key = "race-checkout-key-1"
         winner_holder: dict[str, ListingFeePayment] = {}
 
-        def _fake_create_payment_intent_with_client_secret(*, amount, currency, metadata, idempotency_key=None):
+        def _fake_create_checkout_session(*, amount, currency, metadata, success_url, cancel_url, idempotency_key=None):
             # Simulate a second request (e.g. a client-side retry after a
             # timeout) reaching the database and committing first, while
             # this call is still "talking to Stripe". `idempotency_key`
@@ -50,20 +50,20 @@ class TestCreateCheckoutConcurrentRetry:
             winner = ListingFeePayment(
                 quote_id=quote.id, listing_id=quote.listing_id, party_id=party.id,
                 amount=quote.total_amount, currency=quote.currency, idempotency_key="race-checkout-key-1",
-                billing_country="GB", provider_payment_intent_id="pi_race_winner", status="SUCCEEDED",
+                billing_country="GB", provider_checkout_session_id="cs_race_winner", status="SUCCEEDED",
             )
             other_session.add(winner)
             other_session.commit()
             winner_holder["winner_id"] = winner.id
             other_session.close()
-            return "pi_race_loser", "secret_should_never_be_used"
+            return "cs_race_loser", "https://checkout.stripe.com/should_never_be_used"
 
         monkeypatch.setattr(
-            lf_crud.stripe_client, "create_payment_intent_with_client_secret",
-            _fake_create_payment_intent_with_client_secret,
+            lf_crud.stripe_client, "create_checkout_session",
+            _fake_create_checkout_session,
         )
 
-        payment, client_secret = lf_crud.create_checkout(
+        payment, checkout_url = lf_crud.create_checkout(
             db_session, quote, party, idempotency_key=idempotency_key, billing_country="GB",
         )
 
@@ -72,8 +72,8 @@ class TestCreateCheckoutConcurrentRetry:
         # an unhandled IntegrityError, and never silently create a second
         # payment row for the same idempotency key.
         assert payment.id == winner_holder["winner_id"]
-        assert payment.provider_payment_intent_id == "pi_race_winner"
-        assert client_secret == ""
+        assert payment.provider_checkout_session_id == "cs_race_winner"
+        assert checkout_url == ""
 
         all_payments = db_session.query(ListingFeePayment).filter(
             ListingFeePayment.idempotency_key == idempotency_key
@@ -133,11 +133,11 @@ class TestStripeReceivesOwnIdempotencyKey:
 
         captured = {}
 
-        def _capture(*, amount, currency, metadata, idempotency_key=None):
+        def _capture(*, amount, currency, metadata, success_url, cancel_url, idempotency_key=None):
             captured["idempotency_key"] = idempotency_key
-            return "pi_captured", "secret"
+            return "pi_captured", "https://checkout.stripe.com/c/pay/cs_captured"
 
-        monkeypatch.setattr(lf_crud.stripe_client, "create_payment_intent_with_client_secret", _capture)
+        monkeypatch.setattr(lf_crud.stripe_client, "create_checkout_session", _capture)
 
         lf_crud.create_checkout(db_session, quote, party, idempotency_key="my-key-123", billing_country="GB")
         assert captured["idempotency_key"] == "listing_fee_checkout:my-key-123"

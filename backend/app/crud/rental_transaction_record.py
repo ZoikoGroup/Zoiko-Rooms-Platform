@@ -28,9 +28,11 @@ from app.models.finance import Obligation, PaymentAllocation, SimulatedPayment
 from app.models.identity_verification import IdentityVerification
 from app.models.occupancy import Occupancy
 from app.models.property_verification import PropertyVerification
+from app.models.rental_payment import RentalPaymentObligation
 from app.models.sublet_request import SubletRequest
 from app.models.termination_record import TerminationRecord
 from app.schemas.finance import SimulatedPaymentRead
+from app.schemas.rental_payment import RentalPaymentObligationRead
 from app.schemas.rental_transaction_record import RentalTransactionRecordRead, RentalTransactionTimelineEntryRead
 from app.schemas.verification import PROPERTY_VERIFICATION_SHARING_SCOPE, RenterVerificationStatusItem
 
@@ -51,6 +53,18 @@ def _obligations_for(db: Session, occupancy: Occupancy, agreement) -> list[Oblig
     return list(db.scalars(select(Obligation).where(or_(*filters)).order_by(Obligation.due_date)))
 
 
+def _rental_payment_obligations_for(db: Session, occupancy: Occupancy, agreement) -> list[RentalPaymentObligation]:
+    """Same occupancy-or-agreement-scoped shape as _obligations_for above,
+    for the ZR-PAY-002 record/evidence-layer domain (models/rental_payment.py)
+    that coexists alongside the custody-based Obligation -- see that
+    module's own docstring for why the two are queried separately rather
+    than one replacing the other."""
+    filters = [RentalPaymentObligation.occupancy_id == occupancy.id]
+    if agreement is not None:
+        filters.append(RentalPaymentObligation.agreement_id == agreement.id)
+    return list(db.scalars(select(RentalPaymentObligation).where(or_(*filters)).order_by(RentalPaymentObligation.due_date)))
+
+
 def _payments_for(db: Session, obligation_ids: list[int]) -> list[SimulatedPayment]:
     if not obligation_ids:
         return []
@@ -67,6 +81,7 @@ def _payments_for(db: Session, obligation_ids: list[int]) -> list[SimulatedPayme
 
 def _timeline_for(
     db: Session, *, application, agreement, occupancy: Occupancy, payments: list[SimulatedPayment], sublet_requests: list[SubletRequest],
+    rental_payment_obligations: list[RentalPaymentObligation],
 ) -> list[RentalTransactionTimelineEntryRead]:
     """Same merge-existing-DomainEvent-rows-into-one-chronological-view
     technique as crud/finance.py:get_payment_timeline -- generalized across
@@ -82,6 +97,17 @@ def _timeline_for(
         resource_pairs.append(("simulated_payment", str(payment.id)))
     for sublet_request in sublet_requests:
         resource_pairs.append(("sublet_request", str(sublet_request.id)))
+    # ZR-PAY-LINK-003 Section 19: the rental-payment domain's own material
+    # transitions -- corrections need no separate pair, their own
+    # rental_payment.corrected event is already emitted against the record's
+    # resource id, not a correction-specific one (see
+    # crud/rental_payment.py:append_correction).
+    for rp_obligation in rental_payment_obligations:
+        resource_pairs.append(("rental_payment_obligation", str(rp_obligation.id)))
+        for record in rp_obligation.records:
+            resource_pairs.append(("rental_payment_record", str(record.id)))
+            for dispute in record.disputes:
+                resource_pairs.append(("rental_payment_dispute", str(dispute.id)))
 
     conditions = [
         (DomainEvent.resource_type == resource_type) & (DomainEvent.resource_id == resource_id)
@@ -109,6 +135,7 @@ def build_rental_transaction_record(db: Session, occupancy: Occupancy, *, includ
 
     obligations = _obligations_for(db, occupancy, agreement)
     obligation_ids = [o.id for o in obligations]
+    rental_payment_obligations = _rental_payment_obligations_for(db, occupancy, agreement)
     payments = _payments_for(db, obligation_ids)
 
     deposit_obligation = next((o for o in obligations if o.obligation_type == "DEPOSIT"), None)
@@ -184,7 +211,7 @@ def build_rental_transaction_record(db: Session, occupancy: Occupancy, *, includ
             )
 
     return RentalTransactionRecordRead(
-        occupancy=to_occupancy_read(occupancy),
+        occupancy=to_occupancy_read(db, occupancy),
         application=to_application_read(application) if application else None,
         amendments=list_amendments(db, agreement) if agreement else [],
         obligations=[to_obligation_read(o) for o in obligations],
@@ -198,5 +225,9 @@ def build_rental_transaction_record(db: Session, occupancy: Occupancy, *, includ
         property_verification=property_verification,
         authority_to_list=authority_to_list,
         identity_verification=identity_verification,
-        timeline=_timeline_for(db, application=application, agreement=agreement, occupancy=occupancy, payments=payments, sublet_requests=sublet_requests),
+        rental_payment_obligations=[RentalPaymentObligationRead.model_validate(o) for o in rental_payment_obligations],
+        timeline=_timeline_for(
+            db, application=application, agreement=agreement, occupancy=occupancy, payments=payments,
+            sublet_requests=sublet_requests, rental_payment_obligations=rental_payment_obligations,
+        ),
     )

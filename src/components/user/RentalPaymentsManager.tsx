@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AlertTriangle, CalendarClock, FileWarning, Home, Upload } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -21,9 +22,12 @@ import { formatDate, formatDateTime, formatMoney } from "@/lib/utils";
 import {
   errorMessage,
   getMyRentalPaymentInstructions,
+  getRentalPaymentObligationConnection,
   listMyRentalPaymentObligations,
   markRentalPaymentPaid,
   reportRentalPaymentDiscrepancyAsTenant,
+  resolveRentalPaymentCheckoutSession,
+  startRentalPaymentSession,
   uploadRentalPaymentEvidence,
 } from "@/lib/user-api";
 
@@ -51,7 +55,11 @@ const TYPE_FILTERS: { value: RentalPaymentObligationType | "ALL"; label: string 
 
 type Tab = "overview" | "upcoming" | "records" | "instructions";
 
-const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE"]);
+// PAYMENT_SESSION_STARTED included so an obligation with an online payment
+// in flight stays visible here rather than disappearing mid-payment --
+// canMarkPaid below still only fires for UPCOMING/DUE/OVERDUE, so it won't
+// offer a second, conflicting payment action while one is already underway.
+const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "PAYMENT_SESSION_STARTED"]);
 
 export function RentalPaymentsManager() {
   const { toast, showToast } = useToast();
@@ -64,6 +72,31 @@ export function RentalPaymentsManager() {
   const [instructionsObligation, setInstructionsObligation] = useState<RentalPaymentObligation | null>(null);
   const [disputingRecord, setDisputingRecord] = useState<RentalPaymentRecord | null>(null);
   const [viewingRecord, setViewingRecord] = useState<RentalPaymentRecord | null>(null);
+  const [startingSessionForId, setStartingSessionForId] = useState<number | null>(null);
+
+  /** ZR-PAY-LINK-003 Section 19/Wireframe F: "Continue to secure payment."
+   *  The recipient may not have connected a provider account yet -- that
+   *  shows up as an ordinary error toast here, same as InstructionsModal's
+   *  own "recipient has not set up payment instructions yet" empty state
+   *  for the other rail, rather than trying to know in advance whether the
+   *  button will work. */
+  async function handlePaySecurely(obligation: RentalPaymentObligation) {
+    setStartingSessionForId(obligation.id);
+    try {
+      const result = await startRentalPaymentSession(obligation.id);
+      if (result.checkoutUrl) {
+        window.location.href = result.checkoutUrl;
+        return;
+      }
+      // Stripe not configured server-side -- completed synchronously.
+      showToast("Payment confirmed.");
+      load();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not start secure payment."), "error");
+    } finally {
+      setStartingSessionForId(null);
+    }
+  }
 
   function load() {
     listMyRentalPaymentObligations()
@@ -73,6 +106,34 @@ export function RentalPaymentsManager() {
   }
 
   useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Landed back here from Stripe's own hosted checkout page (see
+  // handlePaySecurely's real redirect, and the backend's own
+  // success_url/cancel_url) -- same pattern as
+  // HostingListingsManager.tsx's own checkoutSessionId handling for the
+  // Listing Fee return.
+  useEffect(() => {
+    const checkoutSessionId = searchParams.get("checkoutSessionId");
+    if (!checkoutSessionId) return;
+    resolveRentalPaymentCheckoutSession(checkoutSessionId)
+      .then((session) => {
+        if (session.status === "SUCCEEDED") {
+          showToast("Payment confirmed.");
+        } else if (session.status === "FAILED") {
+          showToast(session.failureMessage || "Your payment did not go through.", "error");
+        } else {
+          showToast("Your payment is still processing -- we'll update the record once it's confirmed.");
+        }
+        load();
+      })
+      .catch(() => showToast("Could not confirm your payment. Please check your payment records.", "error"))
+      .finally(() => router.replace("/account/rent-payments"));
+    // Only ever react to the query param changing, not to every toast/router update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const filteredObligations = useMemo(
     () => (typeFilter === "ALL" ? obligations : obligations.filter((o) => o.obligationType === typeFilter)),
@@ -130,6 +191,8 @@ export function RentalPaymentsManager() {
               obligation={nextObligation}
               onPay={() => setPayingObligation(nextObligation)}
               onViewInstructions={() => setInstructionsObligation(nextObligation)}
+              onPaySecurely={() => handlePaySecurely(nextObligation)}
+              payingSecurely={startingSessionForId === nextObligation.id}
             />
           ) : (
             <Card>
@@ -154,6 +217,8 @@ export function RentalPaymentsManager() {
                   obligation={o}
                   onPay={() => setPayingObligation(o)}
                   onViewInstructions={() => setInstructionsObligation(o)}
+                  onPaySecurely={() => handlePaySecurely(o)}
+                  payingSecurely={startingSessionForId === o.id}
                 />
               ))}
             </div>
@@ -303,12 +368,36 @@ function ObligationCard({
   obligation,
   onPay,
   onViewInstructions,
+  onPaySecurely,
+  payingSecurely,
 }: {
   obligation: RentalPaymentObligation;
   onPay: () => void;
   onViewInstructions: () => void;
+  onPaySecurely: () => void;
+  payingSecurely: boolean;
 }) {
   const canMarkPaid = obligation.status === "UPCOMING" || obligation.status === "DUE" || obligation.status === "OVERDUE";
+
+  // ZR-PAY-LINK-003 Section 3.1: self-contained per-card fetch, same shape
+  // as InstructionsModal's own per-obligation load below -- lets a tenant
+  // see (and never act on) a SUSPENDED connection instead of the card
+  // silently offering payment actions that would 409 anyway.
+  const [suspended, setSuspended] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    getRentalPaymentObligationConnection(obligation.id)
+      .then((connection) => {
+        if (!cancelled) setSuspended(connection.state === "SUSPENDED");
+      })
+      .catch(() => {
+        // No linked room, or nothing to check -- never block the card on this.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [obligation.id]);
+
   return (
     <Card>
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -340,12 +429,23 @@ function ObligationCard({
             View payment instructions
           </Button>
           {canMarkPaid && (
-            <Button size="sm" onClick={onPay}>
+            <Button size="sm" variant="outline" loading={payingSecurely} disabled={suspended} onClick={onPaySecurely}>
+              Continue to secure payment
+            </Button>
+          )}
+          {canMarkPaid && (
+            <Button size="sm" disabled={suspended} onClick={onPay}>
               I have made this payment
             </Button>
           )}
         </div>
       </div>
+      {suspended && (
+        <p className="mt-3 flex items-center gap-1.5 text-xs font-semibold text-rose-600 dark:text-rose-300">
+          <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> Payments for this room are currently suspended --
+          contact your landlord or agent before sending money.
+        </p>
+      )}
       <p className="mt-3 text-xs text-slate-400">Zoiko Rooms does not receive or hold this payment.</p>
     </Card>
   );

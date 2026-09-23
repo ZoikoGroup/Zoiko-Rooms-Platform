@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { AlertTriangle, BedDouble, MapPin, Pencil, Plus, Receipt, Send, XCircle } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { AlertTriangle, BedDouble, MapPin, Pencil, Plus, Receipt, Send, ShieldCheck, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
@@ -16,6 +17,7 @@ import {
   listHostedListings,
   listHostedProperties,
   listHostedRooms,
+  resolveListingFeeCheckoutSession,
   submitHostedListingForReview,
   updateHostedListing,
 } from "@/lib/user-api";
@@ -26,6 +28,7 @@ import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } 
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { ListingFeeCheckout } from "@/components/user/ListingFeeCheckout";
+import { PaymentRecipientSetup } from "@/components/user/PaymentRecipientSetup";
 
 const MAX_LISTING_IMAGES = 10;
 
@@ -82,6 +85,8 @@ function toFormState(listing: HostedListing): ListingFormState {
 export function HostingListingsManager() {
   const { user } = useUserSession();
   const { toast, showToast } = useToast();
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [listings, setListings] = useState<HostedListing[]>([]);
   const [properties, setProperties] = useState<Property[]>([]);
@@ -95,6 +100,27 @@ export function HostingListingsManager() {
 
   const [busyListingId, setBusyListingId] = useState<string | null>(null);
   const [payingFeeListingId, setPayingFeeListingId] = useState<string | null>(null);
+  const [returningCheckoutSessionId, setReturningCheckoutSessionId] = useState<string | null>(null);
+  const [paymentRecipientRoomId, setPaymentRecipientRoomId] = useState<number | null>(null);
+
+  // Landed back here from Stripe's own hosted checkout page (see
+  // ListingFeeCheckout.tsx's real redirect, and crud/listing_fee.py's
+  // success_url/cancel_url) -- resolve which listing/payment that was and
+  // reopen the fee modal in its "confirming" state, rather than making the
+  // host find the right listing and click "Listing fee" again themselves.
+  useEffect(() => {
+    const checkoutSessionId = searchParams.get("checkoutSessionId");
+    if (!checkoutSessionId) return;
+    resolveListingFeeCheckoutSession(checkoutSessionId)
+      .then((payment) => {
+        setPayingFeeListingId(payment.listingId);
+        setReturningCheckoutSessionId(checkoutSessionId);
+      })
+      .catch(() => showToast("Could not confirm your Listing Fee payment. Please try again from your listing.", "error"))
+      .finally(() => router.replace("/account/host/listings"));
+    // Only ever react to the query param changing, not to every toast/router update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const load = useCallback(async () => {
     if (!user) return;
@@ -272,7 +298,12 @@ export function HostingListingsManager() {
                     <Button size="sm" variant="ghost" onClick={() => openEdit(listing)}>
                       <Pencil className="h-3.5 w-3.5" /> Edit
                     </Button>
-                    {listing.state !== "PUBLISHED" && (
+                    {listing.roomId !== null && (
+                      <Button size="sm" variant="outline" onClick={() => setPaymentRecipientRoomId(listing.roomId)}>
+                        <ShieldCheck className="h-3.5 w-3.5" /> Payment recipient
+                      </Button>
+                    )}
+                    {listing.state === "APPROVED" && (
                       <Button size="sm" variant="outline" onClick={() => setPayingFeeListingId(listing.id)}>
                         <Receipt className="h-3.5 w-3.5" /> Listing fee
                       </Button>
@@ -290,6 +321,15 @@ export function HostingListingsManager() {
                     <p className="flex items-center gap-1.5 font-semibold">
                       <AlertTriangle className="h-3.5 w-3.5" /> Awaiting review by a Zoiko admin.
                     </p>
+                  </div>
+                )}
+
+                {listing.state === "APPROVED" && (
+                  <div className="mt-4 rounded-xl bg-emerald-50 px-4 py-3 text-xs text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20">
+                    <p className="flex items-center gap-1.5 font-semibold">
+                      <Receipt className="h-3.5 w-3.5" /> Approved -- pay the Listing Fee
+                    </p>
+                    <p className="mt-1">A Zoiko admin has approved this listing. Paying the Listing Fee clears the last publication requirement, but a Zoiko admin still needs to publish it.</p>
                   </div>
                 )}
 
@@ -509,8 +549,29 @@ export function HostingListingsManager() {
         }}
       />
 
-      <Modal open={Boolean(payingFeeListingId)} onClose={() => setPayingFeeListingId(null)} title="Listing fee">
-        {payingFeeListingId && <ListingFeeCheckout listingId={payingFeeListingId} />}
+      <Modal
+        open={Boolean(payingFeeListingId)}
+        onClose={() => {
+          setPayingFeeListingId(null);
+          setReturningCheckoutSessionId(null);
+          load();
+        }}
+        title="Listing fee"
+      >
+        {payingFeeListingId && (
+          <ListingFeeCheckout
+            listingId={payingFeeListingId}
+            returningCheckoutSessionId={returningCheckoutSessionId ?? undefined}
+          />
+        )}
+      </Modal>
+
+      <Modal
+        open={paymentRecipientRoomId !== null}
+        onClose={() => setPaymentRecipientRoomId(null)}
+        title="Payment recipient"
+      >
+        {paymentRecipientRoomId !== null && <PaymentRecipientSetup roomId={paymentRecipientRoomId} />}
       </Modal>
 
       <Toast toast={toast} />

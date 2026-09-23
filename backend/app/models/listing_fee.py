@@ -129,6 +129,17 @@ class ListingFeePayment(Base):
     status: Mapped[str] = mapped_column(String(20), default="PENDING")
     idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     billing_country: Mapped[str] = mapped_column(String(2), default="")
+    # Known immediately at checkout creation (Stripe returns the Checkout
+    # Session id synchronously) -- this is what the return-leg from Stripe's
+    # hosted page resolves against (see crud/listing_fee.py:
+    # get_payment_by_checkout_session_id), and what the webhook's
+    # checkout.session.* handling looks this row up by.
+    provider_checkout_session_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    # NOT known until the customer actually completes Stripe's hosted page --
+    # Stripe only creates the underlying PaymentIntent at that point, not at
+    # Checkout Session creation time (unlike a raw PaymentIntent, which is
+    # confirmed to exist immediately). Backfilled by the webhook's
+    # checkout.session.completed handling once it does.
     provider_payment_intent_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
     failure_message: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

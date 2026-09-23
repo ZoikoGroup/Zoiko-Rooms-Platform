@@ -428,3 +428,43 @@ class TestDataCorrectness:
         assert event_types.index("offer.created") < event_types.index("agreement.created") < event_types.index("occupancy.active")
         timestamps = [e["timestamp"] for e in timeline]
         assert timestamps == sorted(timestamps)
+
+    def test_rental_payment_obligation_and_dispute_appear_in_the_projection_and_timeline(self, client, db_session: Session):
+        """ZR-PAY-LINK-003 Section 19: the ZR-PAY-002 record/evidence-layer
+        domain (models/rental_payment.py) is a separate table from the
+        legacy Obligation this fixture already creates -- it must show up in
+        its own rental_payment_obligations field, and its own material
+        transitions (declared, disputed) must appear in the merged
+        timeline too."""
+        from app.crud import rental_payment as rp_crud
+
+        rental = _make_rental(db_session, host_email="rtr-host-22@test.com", renter_email="rtr-renter-22@test.com")
+        rp_obligation = rp_crud.create_obligation(
+            db_session, obligation_type="RENT", tenant_guest_id=rental["guest"].id,
+            recipient_party_id=rental["host_party"].id, amount=1000, currency="INR", due_date=date.today(),
+            occupancy_id=rental["occupancy"].id,
+        )
+        record = rp_crud.mark_paid(
+            db_session, rental["guest"], rp_obligation, amount=1000, currency="INR", declared_date=date.today(),
+            payment_method_category="BANK_TRANSFER",
+        )
+        rp_crud.report_discrepancy(
+            db_session, record=record, reason_code="AMOUNT_DIFFERENT", reported_by_party_id=rental["host_party"].id,
+        )
+
+        r = client.get(
+            f"/api/users/rentals/occupancies/{rental['occupancy'].id}/transaction-record",
+            cookies=auth_user_cookie(rental["renter_user"]),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+
+        obligation_ids = {o["id"] for o in body["rentalPaymentObligations"]}
+        assert rp_obligation.id in obligation_ids
+        matched = next(o for o in body["rentalPaymentObligations"] if o["id"] == rp_obligation.id)
+        assert len(matched["records"]) == 1
+        assert len(matched["records"][0]["disputes"]) == 1
+
+        event_types = [e["eventType"] for e in body["timeline"]]
+        assert "rental_payment.marked_paid" in event_types
+        assert "rental_payment.disputed" in event_types

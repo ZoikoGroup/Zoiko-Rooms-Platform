@@ -7,6 +7,39 @@ from app.schemas.common import CamelModel
 MAX_MONEY_AMOUNT = 9_999_999_999.99
 
 
+# Defined ahead of RentalPaymentRecordRead below (rather than in their usual
+# declaration order further down this file) so it can nest them directly --
+# ZR-PAY-LINK-003 Section 19/Wireframe PAY-18: a record's disputes/corrections
+# were previously only ever visible to admins; nesting them here is what
+# actually surfaces that history to the tenant/recipient views that already
+# return RentalPaymentRecordRead (RentalPaymentObligationRead.records).
+class RentalPaymentDisputeRead(CamelModel):
+    id: int
+    record_id: int
+    reason_code: str
+    details: str
+    status: str
+    reported_by_guest_id: str | None
+    reported_by_party_id: int | None
+    reported_at: datetime
+    resolved_by_admin_id: int | None
+    resolved_at: datetime | None
+    resolution_notes: str
+
+
+class RentalPaymentCorrectionRead(CamelModel):
+    id: int
+    record_id: int
+    field_name: str
+    previous_value: str
+    new_value: str
+    reason: str
+    actor_admin_id: int | None
+    actor_guest_id: str | None
+    actor_party_id: int | None
+    created_at: datetime
+
+
 class RentalPaymentRecordRead(CamelModel):
     id: int
     obligation_id: int
@@ -23,6 +56,8 @@ class RentalPaymentRecordRead(CamelModel):
     provider_reference: str
     confirmed_at: datetime | None
     created_at: datetime
+    disputes: list[RentalPaymentDisputeRead] = []
+    corrections: list[RentalPaymentCorrectionRead] = []
 
 
 class RentalPaymentObligationRead(CamelModel):
@@ -71,20 +106,6 @@ class RentalPaymentDisputeCreate(CamelModel):
     details: str = ""
 
 
-class RentalPaymentDisputeRead(CamelModel):
-    id: int
-    record_id: int
-    reason_code: str
-    details: str
-    status: str
-    reported_by_guest_id: str | None
-    reported_by_party_id: int | None
-    reported_at: datetime
-    resolved_by_admin_id: int | None
-    resolved_at: datetime | None
-    resolution_notes: str
-
-
 class RentalPaymentDisputeResolve(CamelModel):
     resolution_notes: str
 
@@ -97,19 +118,6 @@ class RentalPaymentCorrectionCreate(CamelModel):
     field_name: str
     new_value: str
     reason: str
-
-
-class RentalPaymentCorrectionRead(CamelModel):
-    id: int
-    record_id: int
-    field_name: str
-    previous_value: str
-    new_value: str
-    reason: str
-    actor_admin_id: int | None
-    actor_guest_id: str | None
-    actor_party_id: int | None
-    created_at: datetime
 
 
 class RentalPaymentTerminalActionRequest(CamelModel):

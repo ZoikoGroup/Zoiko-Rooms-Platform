@@ -9,12 +9,17 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, Upload
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user, require_super_admin
+from app.core.config import settings
 from app.core.correlation import get_correlation_id
 from app.core.dispute_evidence_uploads import resolve_dispute_evidence_path
+from app.crud import external_payment_session as eps_crud
+from app.crud import payment_connection as payment_connection_crud
 from app.crud import rental_payment as rp_crud
+from app.crud import rental_payment_provider_account as rpa_crud
 from app.crud.audit import log_audit_event
 from app.crud.guest import get_guest_for_user
 from app.db.session import get_db
+from app.services import stripe_client
 from app.services.rental_payment_due_soon import sweep_rental_payment_due_soon
 from app.models.admin_user import AdminUser
 from app.models.evidence_artifact import EvidenceArtifact
@@ -22,6 +27,8 @@ from app.models.guest import Guest
 from app.models.party import Party
 from app.models.rental_payment import RentalPaymentDispute, RentalPaymentEvidenceHold
 from app.models.user_account import UserAccount
+from app.schemas.external_payment_session import ExternalPaymentSessionCreateResult, ExternalPaymentSessionRead
+from app.schemas.payment_connection import PaymentConnectionRead
 from app.schemas.rental_payment import (
     EvidenceArtifactRead,
     RentalPaymentConfirmReceiptRequest,
@@ -45,12 +52,21 @@ from app.schemas.rental_payment import (
     RentalPaymentTenantSelfCorrectionCreate,
     RentalPaymentTerminalActionRequest,
 )
+from app.schemas.rental_payment_provider_account import (
+    RentalPaymentProviderAccountChangeRequestResult,
+    RentalPaymentProviderAccountConfirmChange,
+    RentalPaymentProviderAccountConnectResult,
+    RentalPaymentProviderAccountCreate,
+    RentalPaymentProviderAccountRead,
+)
+from app.schemas.rental_transaction_record import RentalTransactionTimelineEntryRead
 
 router = APIRouter(prefix="/api/users/rental-payments", tags=["user-rental-payments"], dependencies=[Depends(get_current_user)])
 recipient_router = APIRouter(
     prefix="/api/users/rental-payments/recipient", tags=["recipient-rental-payments"], dependencies=[Depends(get_current_user)],
 )
 admin_router = APIRouter(prefix="/api/finance/rental-payments", tags=["finance-rental-payments"], dependencies=[Depends(get_current_admin)])
+webhook_router = APIRouter(prefix="/api/finance", tags=["finance-rental-payment-webhooks"])
 
 
 def _get_own_guest_or_403(db: Session, user: UserAccount) -> Guest:
@@ -99,6 +115,25 @@ def get_my_rental_payment_obligation(obligation_id: int, user: UserAccount = Dep
     return obligation
 
 
+@router.get("/obligations/{obligation_id}/connection", response_model=PaymentConnectionRead)
+def get_my_rental_payment_obligation_connection(
+    obligation_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-PAY-LINK-003 Section 3.1 -- the tenant-facing counterpart to
+    api/routes/user_hosting.py's own host-facing payment-connection route
+    (that one is room-ownership-gated; this one is obligation-ownership-gated
+    instead, same access-control shape difference
+    api/routes/rental_payments.py's own evidence routes already have between
+    the tenant and recipient sides)."""
+    guest = _get_own_guest_or_403(db, user)
+    obligation = rp_crud.get_obligation_or_404(db, obligation_id)
+    rp_crud.assert_tenant_owns_obligation(obligation, guest.id)
+    room = obligation.room
+    if room is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This obligation has no linked room to check")
+    return payment_connection_crud.get_payment_connection_for_room(db, room)
+
+
 @router.post("/obligations/{obligation_id}/mark-paid", response_model=RentalPaymentObligationRead, status_code=status.HTTP_201_CREATED)
 def post_mark_rental_payment_paid(
     obligation_id: int, payload: RentalPaymentMarkPaidRequest, request: Request,
@@ -114,6 +149,76 @@ def post_mark_rental_payment_paid(
     )
     db.refresh(obligation)
     return obligation
+
+
+def _resolve_frontend_origin(request: Request) -> str:
+    """Same Origin-header-validated-against-CORS-allowlist resolution as
+    api/routes/listing_fees.py:_resolve_frontend_origin -- duplicated rather
+    than imported to keep this domain's own routes independent, same
+    small-duplication posture as this file's other helpers."""
+    origin = request.headers.get("origin")
+    if origin and origin in settings.cors_origin_list:
+        return origin
+    return settings.frontend_url
+
+
+@router.post(
+    "/obligations/{obligation_id}/payment-session", response_model=ExternalPaymentSessionCreateResult,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_start_rental_payment_session(
+    obligation_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-PAY-LINK-003 Section 19 POST /rental-payment-obligations/{id}/payment-session
+    -- Wireframe F: 'Continue to secure payment.' A real browser redirect to
+    Stripe's own hosted page follows, never an in-app card form (same PCI
+    boundary as the Listing Fee checkout)."""
+    guest = _get_own_guest_or_403(db, user)
+    obligation = rp_crud.get_obligation_or_404(db, obligation_id)
+    origin = _resolve_frontend_origin(request)
+    # /account/rent-payments is the tenant's own existing Payments page
+    # (src/app/account/(shell)/rent-payments/page.tsx) -- same
+    # land-back-on-the-existing-page pattern as the Listing Fee return
+    # (HostingListingsManager.tsx reading its own checkoutSessionId param),
+    # not a dedicated return route.
+    success_url = f"{origin}/account/rent-payments?checkoutSessionId={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{origin}/account/rent-payments?checkoutSessionId={{CHECKOUT_SESSION_ID}}&cancelled=1"
+    session, checkout_url = eps_crud.create_session(
+        db, guest, obligation, success_url=success_url, cancel_url=cancel_url, correlation_id=get_correlation_id(request),
+    )
+    return ExternalPaymentSessionCreateResult(session=session, checkout_url=checkout_url)
+
+
+@router.get("/payment-sessions/by-checkout-session/{checkout_session_id}", response_model=ExternalPaymentSessionRead)
+def get_rental_payment_session_by_checkout_session_id(
+    checkout_session_id: str, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The return-page resolve: the frontend lands on
+    ?checkoutSessionId={CHECKOUT_SESSION_ID} (Stripe's own placeholder,
+    substituted server-side) and calls this to find out which of its own
+    sessions that was, self-healing via resolve_session rather than only
+    waiting on the webhook (Wireframe F: 'Browser return alone is not
+    payment confirmation') -- same role as
+    api/routes/listing_fees.py:get_resolve_checkout_session plays for the
+    Listing Fee's own return leg."""
+    guest = _get_own_guest_or_403(db, user)
+    session = eps_crud.get_session_by_checkout_session_id_or_404(db, checkout_session_id)
+    if session.tenant_guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This payment session does not belong to you")
+    return eps_crud.resolve_session(db, session)
+
+
+@router.get("/payment-sessions/{session_id}", response_model=ExternalPaymentSessionRead)
+def get_rental_payment_session(session_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The return-page resolve -- self-heals via
+    crud/external_payment_session.py:resolve_session rather than only
+    waiting on the webhook (Wireframe F: 'Browser return alone is not
+    payment confirmation')."""
+    guest = _get_own_guest_or_403(db, user)
+    session = eps_crud.get_session_or_404(db, session_id)
+    if session.tenant_guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This payment session does not belong to you")
+    return eps_crud.resolve_session(db, session)
 
 
 def _get_own_record_or_404(db: Session, record_id: int, guest: Guest):
@@ -189,7 +294,7 @@ def post_confirm_receipt(
 ):
     """ZR-PAY-002 Section 5.1/6/12.2 POST /payments/records/{id}/confirm-receipt.
     payload.amount, when supplied and less than the declared amount,
-    produces PARTIALLY_PAID rather than CONFIRMED_BY_RECIPIENT."""
+    produces PARTIALLY_PAID rather than CONFIRMED."""
     party = _get_own_party_or_400(db, user)
     record = _get_recipient_record_or_403(db, record_id, party)
     updated = rp_crud.confirm_receipt(
@@ -299,6 +404,101 @@ def post_confirm_rental_payment_instruction(
     return _to_instruction_read(updated)
 
 
+@recipient_router.get("/provider-account", response_model=RentalPaymentProviderAccountRead)
+def get_recipient_rental_payment_provider_account(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    party = _get_own_party_or_400(db, user)
+    account = rpa_crud.get_for_party(db, party.id)
+    if not account:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No connected payment account yet")
+    return account
+
+
+@recipient_router.post(
+    "/provider-account", response_model=RentalPaymentProviderAccountConnectResult, status_code=status.HTTP_201_CREATED,
+)
+def post_connect_rental_payment_provider_account(
+    payload: RentalPaymentProviderAccountCreate, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-PAY-LINK-003 Wireframe C: 'Connect payment account.' Returns the
+    hosted onboarding URL the frontend does a real browser redirect to --
+    same PCI/KYC boundary as the Listing Fee checkout, this app never
+    collects the recipient's own bank/identity details itself."""
+    party = _get_own_party_or_400(db, user)
+    account = rpa_crud.create_connected_account(db, party, country=payload.country, email=payload.email)
+    onboarding_url = rpa_crud.create_onboarding_link(account)
+    return RentalPaymentProviderAccountConnectResult(account=account, onboarding_url=onboarding_url)
+
+
+@recipient_router.post("/provider-account/refresh", response_model=RentalPaymentProviderAccountRead)
+def post_refresh_rental_payment_provider_account(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    party = _get_own_party_or_400(db, user)
+    account = rpa_crud.get_for_party(db, party.id)
+    if not account:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No connected payment account yet")
+    return rpa_crud.refresh_account_status(db, account)
+
+
+@recipient_router.post("/provider-account/simulate-onboarding-complete", response_model=RentalPaymentProviderAccountRead)
+def post_simulate_rental_payment_provider_account_onboarding_complete(
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Dev/test-only -- refuses once real Stripe credentials are configured,
+    see crud/rental_payment_provider_account.py:simulate_onboarding_complete's
+    own guard."""
+    party = _get_own_party_or_400(db, user)
+    account = rpa_crud.get_for_party(db, party.id)
+    if not account:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No connected payment account yet")
+    return rpa_crud.simulate_onboarding_complete(db, account)
+
+
+@recipient_router.post("/provider-account/request-change", response_model=RentalPaymentProviderAccountChangeRequestResult)
+def post_request_rental_payment_provider_account_change(
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-PAY-LINK-003 Section 14.1's step-up code for changing which
+    account receives online rent payments -- the current account stays
+    fully usable (see crud/rental_payment_provider_account.py:
+    request_account_change's own docstring) until confirm-change succeeds."""
+    party = _get_own_party_or_400(db, user)
+    account = rpa_crud.get_for_party(db, party.id)
+    if not account:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No connected payment account yet")
+    rpa_crud.request_account_change(db, account, user)
+    return RentalPaymentProviderAccountChangeRequestResult()
+
+
+@recipient_router.post("/provider-account/resend-change-code", response_model=RentalPaymentProviderAccountChangeRequestResult)
+def post_resend_rental_payment_provider_account_change_code(
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    party = _get_own_party_or_400(db, user)
+    account = rpa_crud.get_for_party(db, party.id)
+    if not account:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No connected payment account yet")
+    rpa_crud.resend_account_change_code(db, account, user)
+    return RentalPaymentProviderAccountChangeRequestResult()
+
+
+@recipient_router.post("/provider-account/confirm-change", response_model=RentalPaymentProviderAccountConnectResult)
+def post_confirm_rental_payment_provider_account_change(
+    payload: RentalPaymentProviderAccountConfirmChange, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Section 14.1's strong-auth confirmation -- supersedes the current
+    account and creates a brand-new one via a real Stripe onboarding flow,
+    same 'never reuse a possibly-compromised destination' posture as the
+    rest of this change flow."""
+    party = _get_own_party_or_400(db, user)
+    account = rpa_crud.get_for_party(db, party.id)
+    if not account:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No connected payment account yet")
+    new_account = rpa_crud.confirm_account_change(
+        db, account, user, payload.code, country=payload.country, email=payload.email,
+    )
+    onboarding_url = rpa_crud.create_onboarding_link(new_account)
+    return RentalPaymentProviderAccountConnectResult(account=new_account, onboarding_url=onboarding_url)
+
+
 def _record_access_or_403(db: Session, record, user: UserAccount) -> tuple[bool, bool]:
     """Returns (is_tenant, is_recipient) -- either side of the record, never
     an unrelated party (A8)."""
@@ -308,6 +508,16 @@ def _record_access_or_403(db: Session, record, user: UserAccount) -> tuple[bool,
     if not (is_tenant or is_recipient):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You are not authorized to view this record's evidence")
     return is_tenant, is_recipient
+
+
+@router.get("/records/{record_id}/timeline", response_model=list[RentalTransactionTimelineEntryRead])
+def get_rental_payment_record_timeline(record_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """ZR-PAY-LINK-003 Section 19 GET /rental-payment-records/{id}/timeline
+    -- available to either side of the record, same access rule as the
+    evidence routes below."""
+    record = rp_crud.get_record_or_404(db, record_id)
+    _record_access_or_403(db, record, user)
+    return rp_crud.build_record_timeline(db, record)
 
 
 @router.get("/records/{record_id}/evidence", response_model=list[EvidenceArtifactRead])
@@ -442,11 +652,11 @@ def post_confirm_rental_payment_record_as_provider(
     record_id: int, payload: RentalPaymentProviderConfirmRequest, request: Request,
     admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
 ):
-    """ZR-PAY-002 Section 6: CONFIRMED_BY_PROVIDER -- 'Verified provider
-    event.' Restricted to super_admin, recording an authoritative
-    confirmation actually obtained from a verified external source (see
-    crud/rental_payment.py:confirm_receipt_as_provider's own docstring for
-    why this is admin-triggered rather than webhook-triggered)."""
+    """ZR-PAY-002 Section 6: status CONFIRMED via PROVIDER_CONFIRMATION
+    provenance -- 'Verified provider event.' Restricted to super_admin, the
+    manual-reconciliation fallback for a confirmation obtained some other
+    way than the automated external-payment-session webhook (see
+    crud/rental_payment.py:confirm_receipt_as_provider's own docstring)."""
     record = rp_crud.get_record_or_404(db, record_id)
     return rp_crud.confirm_receipt_as_provider(
         db, admin, record, provider_reference=payload.provider_reference, reason=payload.reason,
@@ -548,3 +758,24 @@ def post_release_rental_payment_evidence_hold(
 )
 def get_rental_payment_evidence_holds(artifact_id: int, db: Session = Depends(get_db)):
     return rp_crud.list_evidence_holds_for_artifact(db, artifact_id)
+
+
+@webhook_router.post("/rental-payments/stripe/webhook")
+async def post_rental_payment_stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    """The real endpoint Stripe calls for this domain's own Connect events.
+    Verifies the Stripe-Signature header against
+    settings.stripe_rental_payment_webhook_secret (falling back to the
+    shared stripe_webhook_secret) before touching anything -- same
+    fail-closed posture as api/routes/listing_fees.py:post_listing_fee_stripe_webhook."""
+    payload = await request.body()
+    signature_header = request.headers.get("stripe-signature", "")
+    try:
+        event = stripe_client.construct_webhook_event(
+            payload=payload, signature_header=signature_header,
+            secret=settings.stripe_rental_payment_webhook_secret or settings.stripe_webhook_secret,
+        )
+    except Exception:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid webhook signature")
+
+    eps_crud.ingest_stripe_webhook_event(db, event, correlation_id=get_correlation_id(request))
+    return {"received": True}

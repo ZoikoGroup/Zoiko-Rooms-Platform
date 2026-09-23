@@ -14,6 +14,8 @@ from app.crud import authority as authority_crud
 from app.crud import leasing as leasing_crud
 from app.crud import listing as listing_crud
 from app.crud import occupancy as occupancy_crud
+from app.crud import payment_connection as payment_connection_crud
+from app.crud import payment_recipient_authority as payment_recipient_authority_crud
 from app.crud import property_verification as property_verification_crud
 from app.crud import sublet as sublet_crud
 from app.crud import sublet_documents as sublet_documents_crud
@@ -44,6 +46,13 @@ from app.schemas.listing import ListingCreate, ListingRead, ListingUpdate
 from app.schemas.occupancy import OccupancyRead
 from app.schemas.rental_transaction_record import RentalTransactionRecordRead
 from app.schemas.verification import PropertyVerificationDeclare, PropertyVerificationRead
+from app.schemas.payment_connection import PaymentConnectionRead
+from app.models.payment_recipient_authority import PaymentRecipientAuthority
+from app.schemas.payment_recipient_authority import (
+    PaymentRecipientAuthorityConfirmChange,
+    PaymentRecipientAuthorityDeclare,
+    PaymentRecipientAuthorityRead,
+)
 
 router = APIRouter(prefix="/api/users/hosting", tags=["user-hosting"], dependencies=[Depends(get_current_user)])
 
@@ -746,6 +755,113 @@ def declare_hosted_authority_record(
     )
     db.commit()
     return record
+
+
+# --- ZR-PAY-LINK-003 Section 1.1/2: payment-receipt authority, deliberately
+# separate from the list-authority routes above -- "authority to list" and
+# "authority to receive payments" are separate claims. Unlike the routes
+# above, recipient_party_id may name a party other than the caller.
+
+
+@router.get("/rooms/{room_id}/payment-connection", response_model=PaymentConnectionRead)
+def get_hosted_room_payment_connection(room_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """ZR-PAY-LINK-003 Section 3.1 -- the consolidated recipient+destination
+    status view, ahead of the raw authority-list route below so a host can
+    see *why* payments aren't ACTIVE yet without cross-referencing two
+    endpoints."""
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    return payment_connection_crud.get_payment_connection_for_room_owned_by(db, user, room)
+
+
+@router.get("/rooms/{room_id}/payment-recipient-authorities", response_model=list[PaymentRecipientAuthorityRead])
+def list_hosted_room_payment_recipient_authorities(
+    room_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    return payment_recipient_authority_crud.list_payment_recipient_authorities_for_room_owned_by(db, user, room)
+
+
+@router.post(
+    "/rooms/{room_id}/payment-recipient-authorities", response_model=PaymentRecipientAuthorityRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def declare_hosted_payment_recipient_authority(
+    room_id: int,
+    payload: PaymentRecipientAuthorityDeclare,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if payload.room_id != room_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "roomId in the body must match the room in the URL")
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    # Wireframe A's default choice, "Me / the property owner" -- the
+    # frontend has no reason to otherwise know its own party id.
+    recipient_party_id = payload.recipient_party_id if payload.recipient_party_id is not None else user.party_id
+    record, _raw_code = payment_recipient_authority_crud.declare_payment_recipient_authority(
+        db, user, room, recipient_party_id=recipient_party_id,
+        relationship_type=payload.relationship_type, evidence_ref=payload.evidence_ref,
+    )
+    emit_event(
+        db, "payment_recipient_authority.declared", "payment_recipient_authority", str(record.id),
+        {"roomId": room_id}, correlation_id=get_correlation_id(request),
+    )
+    db.commit()
+    return record
+
+
+def _get_room_scoped_payment_recipient_authority(db: Session, room_id: int, authority_id: int) -> PaymentRecipientAuthority:
+    record = payment_recipient_authority_crud.get_payment_recipient_authority_or_404(db, authority_id)
+    if record.room_id != room_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment recipient authority not found for this room")
+    return record
+
+
+@router.post("/rooms/{room_id}/payment-recipient-authorities/{authority_id}/resend-change-code")
+def resend_hosted_payment_recipient_authority_change_code(
+    room_id: int, authority_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-PAY-LINK-003 Section 14.1's step-up code, resent -- only the
+    submitting room's own owner, same ownership check
+    declare_payment_recipient_authority/confirm_payment_recipient_authority_change
+    already enforce."""
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    if not user.party_id or room.property.owner_party_id != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only manage payments for your own room")
+    record = _get_room_scoped_payment_recipient_authority(db, room_id, authority_id)
+    payment_recipient_authority_crud.resend_payment_recipient_authority_change_code(db, record, user)
+    return {"sent": True}
+
+
+@router.post(
+    "/rooms/{room_id}/payment-recipient-authorities/{authority_id}/confirm-change",
+    response_model=PaymentRecipientAuthorityRead,
+)
+def confirm_hosted_payment_recipient_authority_change(
+    room_id: int, authority_id: int, payload: PaymentRecipientAuthorityConfirmChange, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    if not user.party_id or room.property.owner_party_id != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only manage payments for your own room")
+    record = _get_room_scoped_payment_recipient_authority(db, room_id, authority_id)
+    updated = payment_recipient_authority_crud.confirm_payment_recipient_authority_change(db, record, user, payload.code)
+    emit_event(
+        db, "payment_recipient_authority.change_confirmed", "payment_recipient_authority", str(updated.id),
+        {"roomId": room_id}, correlation_id=get_correlation_id(request),
+    )
+    db.commit()
+    return updated
 
 
 @router.get("/rooms/{room_id}/property-verifications", response_model=list[PropertyVerificationRead])

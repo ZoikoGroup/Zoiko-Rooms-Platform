@@ -36,3 +36,6 @@ class Room(Base):
         back_populates="room", uselist=False, cascade="all, delete-orphan"
     )
     listings: Mapped[list["Listing"]] = relationship(back_populates="room")
+    payment_recipient_authorities: Mapped[list["PaymentRecipientAuthority"]] = relationship(
+        back_populates="room", cascade="all, delete-orphan"
+    )

@@ -65,37 +65,135 @@ def create_payment_intent(*, amount: float, currency: str, metadata: dict) -> st
     return intent.id
 
 
-def create_payment_intent_with_client_secret(
-    *, amount: float, currency: str, metadata: dict, idempotency_key: str | None = None,
+def create_checkout_session(
+    *, amount: float, currency: str, metadata: dict, success_url: str, cancel_url: str,
+    product_name: str = "Zoiko Rooms Listing Fee", idempotency_key: str | None = None,
 ) -> tuple[str, str]:
     """ZR-PAY-002 Section 8.2's PCI boundary: the Listing Fee checkout is a
-    hosted/tokenized provider component the frontend confirms directly with
-    Stripe.js using this client_secret -- unlike create_payment_intent above
-    (whose callers never expose the intent to a browser), this is the one
-    call site in this codebase that actually hands a PaymentIntent to a
-    client. No `on_behalf_of`/`transfer_data` -- this charges straight into
+    real, separate Stripe-hosted payment page -- the customer is redirected
+    there directly by the browser (window.location, a real navigation, not
+    an in-page component this app renders) and Stripe redirects back to
+    success_url/cancel_url once done. This is the one call site in this
+    codebase that hands a real payment page to a client -- unlike
+    create_payment_intent above, whose callers never expose anything to a
+    browser. No `on_behalf_of`/`transfer_data` -- this charges straight into
     Zoiko's own Stripe balance, never a Connected Account, matching the
     Listing Fee's 'direct fee collector / merchant relationship' role.
-    Returns (provider_transaction_id, client_secret); client_secret is empty
-    in the simulated (unconfigured) fallback, same disclosed-simulation
-    posture as every other stub here.
+    Returns (checkout_session_id, checkout_url); checkout_url is empty in
+    the simulated (unconfigured) fallback -- the payment already completed
+    synchronously in that case, same disclosed-simulation posture as every
+    other stub here.
+
+    checkout_session_id, not a PaymentIntent id, is what's returned and
+    stored (ListingFeePayment.provider_checkout_session_id) -- Stripe does
+    NOT create the underlying PaymentIntent until the customer actually
+    completes the hosted page (session.payment_intent is None right after
+    this call returns, confirmed against the real API), unlike a raw
+    PaymentIntent, which exists the instant it's created. The webhook's
+    checkout.session.completed handling backfills
+    ListingFeePayment.provider_payment_intent_id once Stripe actually
+    creates one.
 
     idempotency_key, when supplied, is passed straight to Stripe's own
     idempotency mechanism (Stripe-Idempotency-Key) -- ZR-PAY-002 Section
     13: 'Idempotency: Required for fee-payment and refund commands.' This
     is what actually stops a network-level retry (client timeout, our own
-    502-then-retry) from creating two separate real PaymentIntents for one
-    logical checkout attempt; this app's own idempotency_key unique-DB-
+    502-then-retry) from creating two separate real Checkout Sessions for
+    one logical checkout attempt; this app's own idempotency_key unique-DB-
     constraint guard only ever catches a retry that reaches our database,
     not one that never got a response the first time."""
     if not is_configured():
         return new_id("PAYTXN"), ""
     stripe = _client()
-    intent = stripe.PaymentIntent.create(
-        amount=to_minor_units(amount, currency), currency=currency.lower(), metadata=metadata,
+    session = stripe.checkout.Session.create(
+        mode="payment",
+        line_items=[{
+            "price_data": {
+                "currency": currency.lower(),
+                "product_data": {"name": product_name},
+                "unit_amount": to_minor_units(amount, currency),
+            },
+            "quantity": 1,
+        }],
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata=metadata,
         idempotency_key=idempotency_key,
     )
-    return intent.id, intent.client_secret or ""
+    return session.id, session.url or ""
+
+
+def create_rent_payment_checkout_session(
+    *, amount: float, currency: str, connected_account_id: str, metadata: dict, success_url: str, cancel_url: str,
+    product_name: str = "Rent payment", idempotency_key: str | None = None,
+) -> tuple[str, str]:
+    """ZR-PAY-LINK-003 Section 1/G3: 'No rental fund settles to Zoiko Rooms.'
+    Deliberately NOT create_checkout_session above -- that one charges
+    straight into Zoiko's own Stripe balance by design (correct for the
+    Listing Fee, Zoiko's own merchant charge; wrong here). This issues the
+    Checkout Session as a Stripe Connect **direct charge**: the `stripe_account`
+    request option makes the connected account itself the merchant of
+    record, so the customer's payment settles directly there -- Zoiko's own
+    balance is never touched, not even transiently, unlike a destination
+    charge (`transfer_data`) or `on_behalf_of`, either of which would still
+    route funds through the platform account first. Must never be used for
+    the Listing Fee, and create_checkout_session must never be used for
+    rent -- the two are not interchangeable despite the near-identical
+    shape. Same simulated fallback posture as every other function here:
+    without real credentials, returns a placeholder id and no URL."""
+    if not is_configured():
+        return new_id("PAYTXN"), ""
+    stripe = _client()
+    session = stripe.checkout.Session.create(
+        mode="payment",
+        line_items=[{
+            "price_data": {
+                "currency": currency.lower(),
+                "product_data": {"name": product_name},
+                "unit_amount": to_minor_units(amount, currency),
+            },
+            "quantity": 1,
+        }],
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata=metadata,
+        idempotency_key=idempotency_key,
+        stripe_account=connected_account_id,
+    )
+    return session.id, session.url or ""
+
+
+def retrieve_checkout_session(*, checkout_session_id: str) -> dict | None:
+    """Reconciliation read, not the primary success signal -- the webhook
+    (checkout.session.completed/async_payment_succeeded, see
+    crud/listing_fee.py:ingest_stripe_webhook_event) is still what actually
+    completes a payment. This exists so the customer's own return trip to
+    success_url isn't left hostage to webhook delivery having happened by
+    the time they land there (local dev without `stripe listen` running,
+    or ordinary webhook latency in any environment) -- the return page can
+    ask Stripe directly, right now, whether it already knows this session
+    succeeded, and self-heal immediately instead of only polling and
+    waiting. Returns {payment_status, payment_intent_id} when configured,
+    None otherwise -- nothing real to check without credentials, same
+    disclosed-simulation posture as every other function in this module."""
+    if not is_configured():
+        return None
+    stripe = _client()
+    session = stripe.checkout.Session.retrieve(checkout_session_id)
+    return {"payment_status": session.payment_status, "payment_intent_id": session.payment_intent}
+
+
+def retrieve_rent_payment_checkout_session(*, checkout_session_id: str, connected_account_id: str) -> dict | None:
+    """Same reconciliation-read role as retrieve_checkout_session above, but
+    for a create_rent_payment_checkout_session direct charge -- that session
+    lives on the CONNECTED account, not the platform account, so it must be
+    retrieved with the same `stripe_account` request option it was created
+    with, or Stripe will simply not find it."""
+    if not is_configured():
+        return None
+    stripe = _client()
+    session = stripe.checkout.Session.retrieve(checkout_session_id, stripe_account=connected_account_id)
+    return {"payment_status": session.payment_status, "payment_intent_id": session.payment_intent}
 
 
 def create_refund(

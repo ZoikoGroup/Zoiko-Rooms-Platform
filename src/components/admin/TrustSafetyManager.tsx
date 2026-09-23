@@ -8,6 +8,7 @@ import {
   MarketRelease,
   OccupancyClassification,
   OccupancyReviewState,
+  PaymentRecipientAuthority,
   Property,
   PropertyVerification,
   Room,
@@ -25,6 +26,8 @@ import {
   marketReleaseStatusTone,
   occupancyReviewStateLabel,
   occupancyReviewStateTone,
+  paymentRecipientAuthorityStatusLabel,
+  paymentRecipientAuthorityStatusTone,
   propertyVerificationStatusLabel,
   propertyVerificationStatusTone,
 } from "@/lib/status";
@@ -52,6 +55,9 @@ export function TrustSafetyManager() {
   const [revokeReason, setRevokeReason] = useState("");
   const [revokePropertyVerificationId, setRevokePropertyVerificationId] = useState<number | null>(null);
   const [revokePropertyVerificationReason, setRevokePropertyVerificationReason] = useState("");
+  const [paymentRecipientAuthorities, setPaymentRecipientAuthorities] = useState<PaymentRecipientAuthority[]>([]);
+  const [revokePaymentRecipientAuthorityId, setRevokePaymentRecipientAuthorityId] = useState<number | null>(null);
+  const [revokePaymentRecipientAuthorityReason, setRevokePaymentRecipientAuthorityReason] = useState("");
 
   function showToast(message: string) {
     setToast(message);
@@ -61,13 +67,15 @@ export function TrustSafetyManager() {
   useEffect(() => {
     async function loadAll() {
       try {
-        const [releasesData, authorityData, properties] = await Promise.all([
+        const [releasesData, authorityData, paymentRecipientData, properties] = await Promise.all([
           apiClientFetch<MarketRelease[]>("/api/market-releases"),
           apiClientFetch<AuthorityRecord[]>("/api/authority-records"),
+          apiClientFetch<PaymentRecipientAuthority[]>("/api/payment-recipient-authorities"),
           apiClientFetch<Property[]>("/api/properties"),
         ]);
         setReleases(releasesData);
         setAuthorityRecords(authorityData);
+        setPaymentRecipientAuthorities(paymentRecipientData);
 
         const roomLists = await Promise.all(
           properties.map((property) =>
@@ -185,6 +193,47 @@ export function TrustSafetyManager() {
       showToast("Authority record revoked");
     } catch {
       showToast("Failed to revoke authority record");
+    }
+  }
+
+  async function verifyPaymentRecipientAuthority(id: number) {
+    try {
+      const updated = await apiClientFetch<PaymentRecipientAuthority>(`/api/payment-recipient-authorities/${id}/verify`, {
+        method: "POST",
+      });
+      setPaymentRecipientAuthorities((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      showToast("Payment recipient authority verified");
+    } catch {
+      showToast("Failed to verify payment recipient authority");
+    }
+  }
+
+  async function rejectPaymentRecipientAuthority(id: number) {
+    try {
+      const updated = await apiClientFetch<PaymentRecipientAuthority>(`/api/payment-recipient-authorities/${id}/reject`, {
+        method: "POST",
+      });
+      setPaymentRecipientAuthorities((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      showToast("Payment recipient authority rejected");
+    } catch {
+      showToast("Failed to reject payment recipient authority");
+    }
+  }
+
+  async function submitRevokePaymentRecipientAuthority(e: React.FormEvent) {
+    e.preventDefault();
+    if (revokePaymentRecipientAuthorityId === null || !revokePaymentRecipientAuthorityReason.trim()) return;
+    try {
+      const updated = await apiClientFetch<PaymentRecipientAuthority>(
+        `/api/payment-recipient-authorities/${revokePaymentRecipientAuthorityId}/revoke`,
+        { method: "POST", body: JSON.stringify({ reason: revokePaymentRecipientAuthorityReason.trim() }) }
+      );
+      setPaymentRecipientAuthorities((prev) => prev.map((r) => (r.id === revokePaymentRecipientAuthorityId ? updated : r)));
+      setRevokePaymentRecipientAuthorityId(null);
+      setRevokePaymentRecipientAuthorityReason("");
+      showToast("Payment recipient authority revoked");
+    } catch {
+      showToast("Failed to revoke payment recipient authority");
     }
   }
 
@@ -387,6 +436,71 @@ export function TrustSafetyManager() {
           })}
           {authorityRecords.length === 0 && (
             <p className="text-sm text-slate-400 dark:text-slate-400">No authority records submitted yet.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
+          <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Payment Recipient Authority</h2>
+        </div>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          A separate claim from Authority Records above -- being allowed to list a property does not automatically
+          mean that party is authorized to receive rent/deposit payments for it. Verifying this here is what
+          determines who rent payment obligations actually route to for a room going forward (see
+          resolve_rent_recipient_party_id) -- submitted by the host from their own listing flow.
+        </p>
+        <div className="mt-4 space-y-2">
+          {paymentRecipientAuthorities.map((record) => {
+            const room = rooms.find((r) => r.id === record.roomId);
+            return (
+              <div
+                key={record.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-white/10"
+              >
+                <div>
+                  <p className="text-sm font-semibold text-primary-900 dark:text-white">
+                    {room ? room.property.address : `Room #${record.roomId}`} — party #{record.partyId} (
+                    {record.relationshipType.toLowerCase()})
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Evidence: {record.evidenceRef || "—"}
+                    {record.expiresAt && ` · expires ${formatDate(record.expiresAt)}`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge tone={paymentRecipientAuthorityStatusTone[record.status]}>
+                    {paymentRecipientAuthorityStatusLabel[record.status]}
+                  </Badge>
+                  {record.status === "pending" && (
+                    <>
+                      <Button size="sm" variant="primary" onClick={() => verifyPaymentRecipientAuthority(record.id)}>
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Verify
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => rejectPaymentRecipientAuthority(record.id)}>
+                        <XCircle className="h-3.5 w-3.5" /> Reject
+                      </Button>
+                    </>
+                  )}
+                  {record.status === "verified" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setRevokePaymentRecipientAuthorityId(record.id);
+                        setRevokePaymentRecipientAuthorityReason("");
+                      }}
+                    >
+                      <XCircle className="h-3.5 w-3.5" /> Revoke
+                    </Button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {paymentRecipientAuthorities.length === 0 && (
+            <p className="text-sm text-slate-400 dark:text-slate-400">No payment recipient authority claims submitted yet.</p>
           )}
         </div>
       </section>
@@ -647,6 +761,35 @@ export function TrustSafetyManager() {
             />
           </div>
           <Button type="submit" variant="primary" fullWidth disabled={!revokePropertyVerificationReason.trim()}>
+            Revoke
+          </Button>
+        </form>
+      </Modal>
+
+      <Modal
+        open={revokePaymentRecipientAuthorityId !== null}
+        onClose={() => { setRevokePaymentRecipientAuthorityId(null); setRevokePaymentRecipientAuthorityReason(""); }}
+        title="Revoke Payment Recipient Authority"
+      >
+        <form onSubmit={submitRevokePaymentRecipientAuthority} className="space-y-3.5">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            This immediately stops rent obligations from routing to this party going forward -- e.g. the agent
+            relationship ended, or the evidence turned out to be fraudulent. Obligations already created keep their
+            original recipient.
+          </p>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Reason (required)
+            </label>
+            <textarea
+              value={revokePaymentRecipientAuthorityReason}
+              onChange={(e) => setRevokePaymentRecipientAuthorityReason(e.target.value)}
+              rows={3}
+              required
+              className="w-full resize-none rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <Button type="submit" variant="primary" fullWidth disabled={!revokePaymentRecipientAuthorityReason.trim()}>
             Revoke
           </Button>
         </form>
