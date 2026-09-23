@@ -1418,8 +1418,22 @@ def confirm_agreement_payment(db: Session, agreement: Agreement, correlation_id:
     clears -- the only path (besides _apply_signature's already-paid shortcut
     above) that can move a PAYMENT_IN_PROGRESS/PAYMENT_PENDING agreement to
     the terminal SIGNED state. A no-op otherwise -- not waiting on payment, or
-    not every obligation clear yet."""
-    if agreement.status not in ("PAYMENT_IN_PROGRESS", "PAYMENT_PENDING"):
+    not every obligation clear yet.
+
+    Also reachable from SENT when both signatures are already in: the
+    checkout-expiry sweep (services/booking_expiry.py) resets an unpaid
+    PAYMENT_IN_PROGRESS agreement back to SENT after its 30-minute deadline
+    -- a timeout sized for the old custodial checkout-session flow, not the
+    non-custodial rail's own bridge (crud/rental_payment.py's
+    _sync_legacy_obligation_from_confirmation), where payment can
+    legitimately clear long after 30 minutes (a manual bank-transfer
+    instruction, or just a slower Stripe checkout). Without this, a fully-
+    signed, fully-paid agreement that happened to cross the 30-minute mark
+    stayed stuck at SENT forever even though the money had cleared --
+    requiring both signatures already present (not just any SENT
+    agreement) is what makes accepting SENT here safe."""
+    already_signed_both = bool(agreement.signed_by_provider_at and agreement.signed_by_renter_at)
+    if agreement.status not in ("PAYMENT_IN_PROGRESS", "PAYMENT_PENDING") and not (agreement.status == "SENT" and already_signed_both):
         return agreement
     if not _all_initial_obligations_paid(agreement):
         return agreement

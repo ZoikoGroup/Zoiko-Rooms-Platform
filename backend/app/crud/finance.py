@@ -123,6 +123,42 @@ def recompute_obligation_status(db: Session, obligation: Obligation) -> None:
         obligation.status = "PARTIALLY_PAID"
 
 
+def ensure_deposit_record_for_paid_obligation(db: Session, obligation: Obligation) -> None:
+    """ZR-ENG-CLR-002 Section 2.3/5.2: create the DepositRecord + its
+    DepositInstrument the moment a DEPOSIT obligation reaches PAID -- exactly
+    the side effect confirm_payment below already had inline, extracted so
+    crud/rental_payment.py's cross-domain status-sync bridge (ZR-PAY-LINK-003
+    <-> this legacy domain) can trigger the identical, already-correct
+    jurisdiction-policy-resolved record/instrument pair without duplicating
+    this logic. No-ops if not a PAID DEPOSIT, or one already exists."""
+    if obligation.obligation_type != "DEPOSIT" or obligation.status != "PAID" or obligation.deposit_record:
+        return
+
+    record = DepositRecord(obligation_id=obligation.id, held_amount=obligation.amount)
+    db.add(record)
+    db.flush()
+    # instrument type is SECURITY_DEPOSIT (the only one this platform issues
+    # today); custody_model and the policy snapshot are resolved from the
+    # market policy pack, not hard-coded, so a new jurisdiction is a data
+    # row, not a code change.
+    deposit_room = obligation.agreement.offer.listing.room if obligation.agreement else obligation.occupancy.room
+    policy = resolve_market_policy(db, deposit_room.property.jurisdiction_code)
+    calculation_snapshot = to_policy_snapshot(policy)
+    calculation_snapshot.update({
+        "amount": float(obligation.amount),
+        "currency": obligation.currency,
+        "formula": "FIXED",
+    })
+    db.add(
+        DepositInstrument(
+            deposit_record_id=record.id,
+            instrument_type="SECURITY_DEPOSIT",
+            custody_model=policy.deposit_custody_model,
+            calculation_snapshot=calculation_snapshot,
+        )
+    )
+
+
 def get_amount_outstanding(obligation: Obligation) -> float:
     allocated = sum(_round2(a.amount_allocated) for a in obligation.allocations)
     return _round2(obligation.amount) - allocated
@@ -424,31 +460,7 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
     for obligation in obligations:
         db.refresh(obligation)
         recompute_obligation_status(db, obligation)
-
-        if obligation.obligation_type == "DEPOSIT" and obligation.status == "PAID" and not obligation.deposit_record:
-            record = DepositRecord(obligation_id=obligation.id, held_amount=obligation.amount)
-            db.add(record)
-            db.flush()
-            # ZR-ENG-CLR-002 Section 2.3/5.2: instrument type is SECURITY_DEPOSIT
-            # (the only one this platform issues today); custody_model and the
-            # policy snapshot are resolved from the market policy pack, not
-            # hard-coded, so a new jurisdiction is a data row, not a code change.
-            deposit_room = obligation.agreement.offer.listing.room if obligation.agreement else obligation.occupancy.room
-            policy = resolve_market_policy(db, deposit_room.property.jurisdiction_code)
-            calculation_snapshot = to_policy_snapshot(policy)
-            calculation_snapshot.update({
-                "amount": float(obligation.amount),
-                "currency": obligation.currency,
-                "formula": "FIXED",
-            })
-            db.add(
-                DepositInstrument(
-                    deposit_record_id=record.id,
-                    instrument_type="SECURITY_DEPOSIT",
-                    custody_model=policy.deposit_custody_model,
-                    calculation_snapshot=calculation_snapshot,
-                )
-            )
+        ensure_deposit_record_for_paid_obligation(db, obligation)
 
     # ZR-ENG-CLR-005 AC-16: Payment Service reacts to a cleared payment only
     # through the Booking Orchestrator boundary -- it never imports

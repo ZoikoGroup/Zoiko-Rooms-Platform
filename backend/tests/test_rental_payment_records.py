@@ -15,8 +15,10 @@ from app.crud import rental_payment as rp_crud
 from app.models.evidence_artifact import EvidenceArtifact
 from app.models.guest import Guest
 from app.models.party import Party
+from app.models.payment_recipient_authority import PaymentRecipientAuthority
 from app.services.rental_payment_due_soon import sweep_rental_payment_due_soon
 from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
+from tests.test_payment_recipient_authority import _make_room_owned_by
 
 
 def _make_party(db: Session, *, party_type: str = "provider") -> Party:
@@ -327,7 +329,8 @@ class TestRecordTimeline:
         )
         rp_crud.confirm_receipt(db_session, recipient, record)
 
-        timeline = rp_crud.build_record_timeline(db_session, record)
+        timeline, total = rp_crud.build_record_timeline(db_session, record)
+        assert total == len(timeline)
         event_types = [e.event_type for e in timeline]
         assert "rental_payment.marked_paid" in event_types
         assert "rental_payment.receipt_confirmed" in event_types
@@ -345,7 +348,7 @@ class TestRecordTimeline:
         admin = _make_admin(db_session, email="timeline-dispute-admin@test.com")
         rp_crud.resolve_dispute(db_session, admin, dispute, resolution_notes="Matched to a late reference")
 
-        timeline = rp_crud.build_record_timeline(db_session, record)
+        timeline, _total = rp_crud.build_record_timeline(db_session, record)
         event_types = [e.event_type for e in timeline]
         assert "rental_payment.disputed" in event_types
         assert "rental_payment.dispute_resolved" in event_types
@@ -363,7 +366,7 @@ class TestRecordTimeline:
             db_session, admin, record, field_name="declared_amount", new_value="900.00", reason="Underreported",
         )
 
-        timeline = rp_crud.build_record_timeline(db_session, record)
+        timeline, _total = rp_crud.build_record_timeline(db_session, record)
         assert "rental_payment.corrected" in [e.event_type for e in timeline]
 
     def test_unrelated_dispute_on_another_record_is_not_included(self, db_session: Session):
@@ -381,7 +384,7 @@ class TestRecordTimeline:
         )
         rp_crud.report_discrepancy(db_session, record=other_record, reason_code="NOT_ARRIVED", reported_by_party_id=other_recipient.id)
 
-        timeline = rp_crud.build_record_timeline(db_session, record)
+        timeline, _total = rp_crud.build_record_timeline(db_session, record)
         assert "rental_payment.disputed" not in [e.event_type for e in timeline]
 
     def test_evidence_upload_appears_in_the_timeline(self, client, db_session: Session):
@@ -408,7 +411,7 @@ class TestRecordTimeline:
 
         r_timeline = client.get(f"/api/users/rental-payments/records/{record.id}/timeline", cookies=auth_user_cookie(tenant_user))
         assert r_timeline.status_code == 200, r_timeline.text
-        assert "rental_payment.evidence_uploaded" in [e["eventType"] for e in r_timeline.json()]
+        assert "rental_payment.evidence_uploaded" in [e["eventType"] for e in r_timeline.json()["items"]]
 
     def test_unrelated_party_cannot_view_the_timeline(self, client, db_session: Session):
         obligation, tenant, _recipient = _make_obligation(db_session)
@@ -479,7 +482,7 @@ class TestPaymentInstructions:
         obligation, tenant, recipient = _make_obligation(db_session)
         instruction, raw_code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233445566", reference_format="ZR-{propertyCode}",
+            country_code="ZZ", bank_details={"account_identifier": "00112233445566"}, authorized_recipient_confirmed=True, reference_format="ZR-{propertyCode}",
         )
         assert instruction.status == "PENDING_VERIFICATION"
         assert instruction.account_identifier_last4 == "5566"
@@ -492,7 +495,7 @@ class TestPaymentInstructions:
         _obligation, _tenant, recipient = _make_obligation(db_session)
         instruction, _raw_code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233445566",
+            country_code="ZZ", bank_details={"account_identifier": "00112233445566"}, authorized_recipient_confirmed=True,
         )
         with pytest.raises(HTTPException) as exc:
             rp_crud.confirm_rental_payment_instruction(db_session, instruction, "000000")
@@ -501,31 +504,82 @@ class TestPaymentInstructions:
         assert instruction.verification_attempts == 1
 
     def test_correct_code_activates_and_supersedes_previous(self, db_session: Session):
+        """Same destination both times (isolating the supersede mechanic
+        from the destination-novelty risk signal, covered separately in
+        TestInstructionRiskControlsAndManualReview) -- only the recipient
+        name changes."""
         _obligation, _tenant, recipient = _make_obligation(db_session)
         first, first_code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233441111",
+            country_code="ZZ", bank_details={"account_identifier": "00112233441111"}, authorized_recipient_confirmed=True,
         )
         activated_first = rp_crud.confirm_rental_payment_instruction(db_session, first, first_code)
         assert activated_first.status == "ACTIVE"
 
         second, second_code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd (new)",
-            account_identifier="00112233442222",
+            country_code="ZZ", bank_details={"account_identifier": "00112233441111"}, authorized_recipient_confirmed=True,
         )
-        rp_crud.confirm_rental_payment_instruction(db_session, second, second_code)
+        activated_second = rp_crud.confirm_rental_payment_instruction(db_session, second, second_code)
+        assert activated_second.status == "ACTIVE"
         db_session.refresh(first)
         assert first.status == "SUPERSEDED"
 
         active = rp_crud.get_active_rental_payment_instruction(db_session, recipient.id)
         assert active.id == second.id
-        assert active.account_identifier_last4 == "2222"
+        assert active.account_identifier_last4 == "1111"
+
+    def test_a_novel_destination_after_an_established_one_is_flagged_for_review(self, db_session: Session):
+        """ZR-PAY-LINK-003 Section 14.1: destination novelty is a real risk
+        signal once a party already has an established instruction --
+        unlike test_correct_code_activates_and_supersedes_previous above,
+        this uses a genuinely different account identifier."""
+        _obligation, _tenant, recipient = _make_obligation(db_session)
+        first, first_code = rp_crud.submit_rental_payment_instruction(
+            db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
+            country_code="ZZ", bank_details={"account_identifier": "00112233441111"}, authorized_recipient_confirmed=True,
+        )
+        rp_crud.confirm_rental_payment_instruction(db_session, first, first_code)
+
+        second, second_code = rp_crud.submit_rental_payment_instruction(
+            db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
+            country_code="ZZ", bank_details={"account_identifier": "00112233449999"}, authorized_recipient_confirmed=True,
+        )
+        assert second.is_high_risk
+        assert "has not been used by this account before" in second.high_risk_reason
+        activated_second = rp_crud.confirm_rental_payment_instruction(db_session, second, second_code)
+        assert activated_second.status == "PENDING_REVIEW"
+
+    def test_a_change_soon_after_an_authority_change_is_flagged_for_review(self, db_session: Session):
+        """ZR-PAY-LINK-003 Section 14.1's 'timing' signal: an instruction
+        change following another account-affecting change (here, the
+        recipient authority itself) within the rapid-succession window --
+        the classic account-takeover pattern of several changes in a row."""
+        _obligation, _tenant, recipient = _make_obligation(db_session)
+        first, first_code = rp_crud.submit_rental_payment_instruction(
+            db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440011"}, authorized_recipient_confirmed=True,
+        )
+        rp_crud.confirm_rental_payment_instruction(db_session, first, first_code)
+
+        room = _make_room_owned_by(db_session, recipient)
+        db_session.add(PaymentRecipientAuthority(
+            party_id=recipient.id, room_id=room.id, relationship_type="OWNER", status="verified",
+        ))
+        db_session.flush()
+
+        second, _second_code = rp_crud.submit_rental_payment_instruction(
+            db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440011"}, authorized_recipient_confirmed=True,
+        )
+        assert second.is_high_risk
+        assert "authority for this account changed within the last hour" in second.high_risk_reason
 
     def test_tenant_sees_only_the_active_instruction_for_their_obligation(self, db_session: Session):
         obligation, tenant, recipient = _make_obligation(db_session)
         instruction, code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233449999",
+            country_code="ZZ", bank_details={"account_identifier": "00112233449999"}, authorized_recipient_confirmed=True,
         )
         rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
 
@@ -552,7 +606,7 @@ class TestInstructionRiskControlsAndManualReview:
         recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=None)
         instruction, code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233440001",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440001"}, authorized_recipient_confirmed=True,
         )
         assert instruction.is_high_risk is False
         activated = rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
@@ -563,7 +617,7 @@ class TestInstructionRiskControlsAndManualReview:
         recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=recent)
         instruction, code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233440002",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440002"}, authorized_recipient_confirmed=True,
         )
         assert instruction.is_high_risk is True
         assert instruction.high_risk_reason
@@ -582,7 +636,7 @@ class TestInstructionRiskControlsAndManualReview:
         recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=old)
         instruction, code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233440003",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440003"}, authorized_recipient_confirmed=True,
         )
         assert instruction.is_high_risk is False
         activated = rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
@@ -592,7 +646,7 @@ class TestInstructionRiskControlsAndManualReview:
         recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=None)
         first, first_code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233440004",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440004"}, authorized_recipient_confirmed=True,
         )
         rp_crud.confirm_rental_payment_instruction(db_session, first, first_code)
 
@@ -604,7 +658,7 @@ class TestInstructionRiskControlsAndManualReview:
 
         second, second_code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd (new)",
-            account_identifier="00112233440005",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440005"}, authorized_recipient_confirmed=True,
         )
         pending = rp_crud.confirm_rental_payment_instruction(db_session, second, second_code)
         assert pending.status == "PENDING_REVIEW"
@@ -626,7 +680,7 @@ class TestInstructionRiskControlsAndManualReview:
         recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=None)
         first, first_code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233440006",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440006"}, authorized_recipient_confirmed=True,
         )
         rp_crud.confirm_rental_payment_instruction(db_session, first, first_code)
 
@@ -637,7 +691,7 @@ class TestInstructionRiskControlsAndManualReview:
 
         second, second_code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Suspicious New Recipient",
-            account_identifier="00112233440007",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440007"}, authorized_recipient_confirmed=True,
         )
         pending = rp_crud.confirm_rental_payment_instruction(db_session, second, second_code)
 
@@ -652,7 +706,7 @@ class TestInstructionRiskControlsAndManualReview:
         recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=None)
         instruction, code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233440008",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440008"}, authorized_recipient_confirmed=True,
         )
         activated = rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
         assert activated.status == "ACTIVE"
@@ -667,7 +721,7 @@ class TestInstructionRiskControlsAndManualReview:
         recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=recent)
         instruction, code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233440009",
+            country_code="ZZ", bank_details={"account_identifier": "00112233440009"}, authorized_recipient_confirmed=True,
         )
         rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
         db_session.commit()
@@ -802,7 +856,7 @@ class TestRecipientEvidenceAndAdminOverrides:
 
         instruction, code = rp_crud.submit_rental_payment_instruction(
             db_session, party, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233445566",
+            country_code="ZZ", bank_details={"account_identifier": "00112233445566"}, authorized_recipient_confirmed=True,
         )
         rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
 

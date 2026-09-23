@@ -145,10 +145,33 @@ export function PaymentRecipientSetup({ roomId }: { roomId: number }) {
   );
 }
 
-/** ZR-PAY-LINK-003 Section 3.1/23: the consolidated recipient+destination
- *  status -- what the authority-status card above can't show on its own,
- *  since a room can have a verified recipient and still have nowhere for
- *  rent to actually go (RECIPIENT_SETUP_REQUIRED). */
+/** Wireframe C's "Recipient verified ✓ / Payment receipt authority ✓"
+ *  checklist -- a small ✓/pending/✕ row for one destination-verification
+ *  check, shared by the two rows PaymentConnectionBanner renders below. */
+function VerificationCheckRow({ label, state }: { label: string; state: "done" | "pending" | "none" }) {
+  const Icon = state === "done" ? CheckCircle2 : state === "pending" ? ShieldCheck : XCircle;
+  const toneClass =
+    state === "done"
+      ? "text-emerald-700 dark:text-emerald-300"
+      : state === "pending"
+        ? "text-amber-700 dark:text-amber-300"
+        : "text-slate-400 dark:text-slate-500";
+  return (
+    <div className="flex items-center gap-1.5 text-xs font-semibold">
+      <Icon className={`h-3.5 w-3.5 shrink-0 ${toneClass}`} aria-hidden="true" />
+      <span className={toneClass}>{label}</span>
+    </div>
+  );
+}
+
+/** ZR-PAY-LINK-003 Section 3.1/23/Wireframe C: the consolidated
+ *  recipient+destination status -- what the authority-status card above
+ *  can't show on its own, since a room can have a verified recipient and
+ *  still have nowhere for rent to actually go (RECIPIENT_SETUP_REQUIRED).
+ *  Also the "Recipient verified ✓" / "Payment receipt authority ✓"
+ *  destination-verification-result checklist Wireframe C calls for --
+ *  both checks are already on this same connection object, so no separate
+ *  fetch is needed. */
 function PaymentConnectionBanner({ connection }: { connection: PaymentConnection }) {
   const description =
     connection.state === "ACTIVE"
@@ -161,6 +184,15 @@ function PaymentConnectionBanner({ connection }: { connection: PaymentConnection
             ? "The recipient is verified, but no payment destination has been set up yet -- add one below."
             : "Payments are suspended for this room. Review the recipient authority and payment destination.";
 
+  const authorityState: "done" | "pending" | "none" =
+    connection.recipientAuthorityStatus === "verified" ? "done" : connection.recipientAuthorityStatus ? "pending" : "none";
+  const destinationState: "done" | "pending" | "none" =
+    connection.destinationStatus === "COMPLETE" || connection.destinationStatus === "ACTIVE"
+      ? "done"
+      : connection.destinationStatus
+        ? "pending"
+        : "none";
+
   return (
     <Card>
       <div className="flex items-center justify-between gap-2">
@@ -168,12 +200,18 @@ function PaymentConnectionBanner({ connection }: { connection: PaymentConnection
         <Badge tone={paymentConnectionStatusTone[connection.state]}>{paymentConnectionStatusLabel[connection.state]}</Badge>
       </div>
       <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">{description}</p>
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5">
+        <VerificationCheckRow label="Payment receipt authority" state={authorityState} />
+        <VerificationCheckRow label="Payment destination" state={destinationState} />
+      </div>
       <dl className="mt-3 space-y-1.5 text-sm">
         <div className="flex justify-between">
           <dt className="text-slate-500 dark:text-slate-400">Payment destination</dt>
           <dd className="font-semibold text-slate-700 dark:text-slate-200">
             {connection.destinationMethod
-              ? `${connection.destinationMethod.replace("_", " ")} (${connection.destinationAccountIdentifierMasked})`
+              ? connection.destinationAccountIdentifierMasked
+                ? `${connection.destinationMethod.replace("_", " ")} (${connection.destinationAccountIdentifierMasked})`
+                : connection.destinationMethod.replace("_", " ")
               : "Not configured yet"}
           </dd>
         </div>

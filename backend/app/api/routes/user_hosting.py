@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -9,7 +10,9 @@ from app.core.image_uploads import save_listing_images
 from app.core.rate_limit import sublet_document_limiter
 from app.core.signed_urls import verify_signed_download_token
 from app.crud.audit import log_audit_event
+from app.crud.eligibility import check_move_in_eligibility
 from app.crud.events import emit_event
+from app.crud import activation_gate as gate_crud
 from app.crud import authority as authority_crud
 from app.crud import leasing as leasing_crud
 from app.crud import listing as listing_crud
@@ -24,6 +27,7 @@ from app.crud.rental_transaction_record import build_rental_transaction_record
 from app.db.session import get_db
 from app.models.occupancy import Occupancy
 from app.models.user_account import UserAccount
+from app.schemas.activation_gate import HandoverEventCreate, HandoverEventRead
 from app.schemas.occupancy import PreMoveInCancellationRead, PreMoveInCancellationRequest
 from app.schemas.sublet_document import SubletDocumentRead
 from app.schemas.leasing import (
@@ -106,6 +110,139 @@ def cancel_hosted_booking_before_move_in(
     emit_event(db, "occupancy.cancelled_before_move_in", "occupancy", str(occupancy_id), result)
     db.commit()
     return PreMoveInCancellationRead(occupancy=occupancy_crud.to_occupancy_read(db, updated), **result)
+
+
+def _get_own_occupancy_or_403(db: Session, occupancy_id: int, user: UserAccount) -> Occupancy:
+    from app.crud.party import party_id_for_listing
+
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    if not user.party_id or party_id_for_listing(occupancy.listing) != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to your property")
+    return occupancy
+
+
+@router.post("/occupancies/{occupancy_id}/handover/prepare", response_model=HandoverEventRead)
+def post_prepare_handover_as_host(
+    occupancy_id: int, payload: HandoverEventCreate, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The self-service Host counterpart to
+    api/routes/occupancy.py:post_prepare_handover -- one of the two
+    handover-evidence steps (alongside possession-delivered below) that,
+    same as confirm-move-in itself, were previously admin-portal-only
+    despite being the Host's own action. Without this, adding a
+    self-service confirm-move-in alone wouldn't be enough -- the
+    activation gate it evaluates still blocks on HANDOVER_READY_REQUIRED,
+    which nothing but a Zoiko admin could previously clear."""
+    occupancy = _get_own_occupancy_or_403(db, occupancy_id, user)
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="HANDOVER_READY", actor_kind="provider_user", actor_user_id=user.id,
+        evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),
+    )
+    log_audit_event(
+        db, None, "occupancy.handover_ready", "occupancy", str(occupancy_id), get_correlation_id(request),
+        reason=f"host_user:{user.id}",
+    )
+    emit_event(db, "occupancy.handover_ready", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
+    db.commit()
+    return event
+
+
+@router.post("/occupancies/{occupancy_id}/handover/possession-delivered", response_model=HandoverEventRead)
+def post_possession_delivered_as_host(
+    occupancy_id: int, payload: HandoverEventCreate, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The self-service Host counterpart to
+    api/routes/occupancy.py:post_possession_delivered -- see
+    post_prepare_handover_as_host's own docstring for why this exists
+    alongside it."""
+    occupancy = _get_own_occupancy_or_403(db, occupancy_id, user)
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="POSSESSION_DELIVERED", actor_kind="provider_user", actor_user_id=user.id,
+        evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),
+    )
+    log_audit_event(
+        db, None, "occupancy.possession_delivered", "occupancy", str(occupancy_id), get_correlation_id(request),
+        reason=f"host_user:{user.id}",
+    )
+    emit_event(db, "occupancy.possession_delivered", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
+    db.commit()
+    return event
+
+
+def _agreement_for_occupancy_or_404(db: Session, occupancy: Occupancy):
+    from app.models.leasing import Agreement
+
+    agreement = db.scalar(select(Agreement).where(Agreement.offer_id == occupancy.offer_id))
+    if not agreement:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No agreement found for this occupancy")
+    return agreement
+
+
+@router.get("/occupancies/{occupancy_id}/move-in-eligibility")
+def get_move_in_eligibility_as_host(
+    occupancy_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The host-facing, ownership-checked counterpart to
+    api/routes/occupancy.py's own get_move_in_eligibility (that one is
+    admin-portal-only and doesn't check listing ownership at all -- fine
+    for an internal Zoiko admin, wrong for a self-service Host). Keyed by
+    occupancy_id, not agreement_id, to match what the Host's own
+    HostingPropertiesManager.tsx already has on hand (schemas/occupancy.py:
+    OccupancyRead has no agreement_id field at all)."""
+    occupancy = _get_own_occupancy_or_403(db, occupancy_id, user)
+    agreement = _agreement_for_occupancy_or_404(db, occupancy)
+    reasons = check_move_in_eligibility(db, agreement)
+    return {"eligible": not reasons, "reasons": reasons}
+
+
+@router.post("/occupancies/{occupancy_id}/confirm-move-in", response_model=OccupancyRead)
+def post_confirm_move_in_as_host(
+    occupancy_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The self-service Host counterpart to
+    api/routes/occupancy.py:post_confirm_move_in -- same activation-gate
+    evaluation, same crud.confirm_move_in, so a real Host doesn't need a
+    Zoiko platform admin to click this for them (that was previously the
+    ONLY way this action was reachable, despite this being a Host
+    commercial decision, not an admin one -- see
+    occupancy_crud.confirm_move_in's own docstring). Keyed by occupancy_id
+    -- see get_move_in_eligibility_as_host's own docstring for why."""
+    occupancy = _get_own_occupancy_or_403(db, occupancy_id, user)
+    agreement = _agreement_for_occupancy_or_404(db, occupancy)
+    if occupancy.status == "ACTIVE":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Occupancy is already active")
+    if occupancy.status == "ENDED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Occupancy has already ended and cannot be reactivated")
+    if occupancy.status != "PENDING_MOVE_IN":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Occupancy is not awaiting move-in")
+
+    correlation_id = get_correlation_id(request)
+    evaluation = gate_crud.evaluate_activation_gate(db, occupancy)
+    decision = gate_crud.persist_activation_decision(
+        db, occupancy, evaluation, trigger="confirm_move_in", correlation_id=correlation_id,
+    )
+    log_audit_event(
+        db, None, "occupancy.activation_evaluated", "occupancy", str(occupancy.id), correlation_id,
+        reason=f"host_user:{user.id}; {evaluation.outcome}",
+    )
+    emit_event(db, "occupancy.activation_evaluated", "occupancy", str(occupancy.id), {"decisionId": decision.id, "outcome": evaluation.outcome})
+    if evaluation.outcome == "BLOCKED":
+        emit_event(db, "occupancy.activation_blocked", "occupancy", str(occupancy.id), {"decisionId": decision.id, "reasonCodes": evaluation.reason_codes})
+    if evaluation.outcome != "ACTIVATE":
+        db.commit()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"message": "Activation gate did not permit move-in", "outcome": evaluation.outcome,
+             "reasonCodes": evaluation.reason_codes, "decisionId": decision.id},
+        )
+
+    occupancy = occupancy_crud.confirm_move_in(db, agreement, user)
+    log_audit_event(db, None, "occupancy.move_in", "occupancy", str(occupancy.id), correlation_id, reason=f"host_user:{user.id}")
+    emit_event(db, "occupancy.active", "occupancy", str(occupancy.id), {"roomId": occupancy.room_id})
+    db.commit()
+    return occupancy_crud.to_occupancy_read(db, occupancy)
 
 
 @router.get("/properties", response_model=list[PropertyRead])

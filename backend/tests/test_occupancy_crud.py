@@ -24,7 +24,7 @@ from app.models.occupancy_classification import OccupancyClassification
 from app.models.party import Party
 from app.models.property import Property
 from app.models.room import Room
-from tests.conftest import _make_admin
+from tests.conftest import _make_admin, _make_user
 
 
 def _make_signed_agreement(db: Session, *, admin, monthly_rent: float = 1000.0, term_months: int = 12):
@@ -123,6 +123,48 @@ class TestConfirmMoveIn:
 
         with pytest.raises(HTTPException) as exc:
             crud.confirm_move_in(db_session, agreement, outsider_admin)
+        assert exc.value.status_code == 403
+
+    def test_a_hosts_own_user_account_can_confirm_move_in(self, db_session: Session):
+        """ZR-ENG-CLR-011 Section 10/ZR-ENG-CLR-004 Section 4.3: confirming
+        move-in is a Host commercial action -- confirm_move_in accepts a
+        self-service Host's own UserAccount, not just an AdminUser, via
+        assert_provider_access_any. Previously this was reachable ONLY
+        through the internal Zoiko admin console, with no way for a real
+        Host to activate their own tenancy without Zoiko staff doing it for
+        them."""
+        admin = _make_admin(db_session, email="occ-movein-host1@test.com", role="admin")
+        agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin)
+        owner_party = get_or_create_default_party(db_session, admin)
+
+        host_user = _make_user(db_session, email="occ-movein-host1-user@test.com")
+        host_user.party_id = owner_party.id
+        db_session.commit()
+
+        occupancy = crud.confirm_move_in(db_session, agreement, host_user)
+        assert occupancy.status == "ACTIVE"
+
+    def test_a_different_hosts_user_account_is_rejected(self, db_session: Session):
+        admin = _make_admin(db_session, email="occ-movein-host2@test.com", role="admin")
+        agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin)
+
+        other_admin = _make_admin(db_session, email="occ-movein-host2-other@test.com", role="admin")
+        other_party = get_or_create_default_party(db_session, other_admin)
+        outsider_user = _make_user(db_session, email="occ-movein-host2-user@test.com")
+        outsider_user.party_id = other_party.id
+        db_session.commit()
+
+        with pytest.raises(HTTPException) as exc:
+            crud.confirm_move_in(db_session, agreement, outsider_user)
+        assert exc.value.status_code == 403
+
+    def test_a_user_account_with_no_party_is_rejected(self, db_session: Session):
+        admin = _make_admin(db_session, email="occ-movein-host3@test.com", role="admin")
+        agreement, offer, listing, room, guest = _make_signed_agreement(db_session, admin=admin)
+        no_party_user = _make_user(db_session, email="occ-movein-host3-user@test.com")
+
+        with pytest.raises(HTTPException) as exc:
+            crud.confirm_move_in(db_session, agreement, no_party_user)
         assert exc.value.status_code == 403
 
     def test_rejects_move_in_when_not_eligible(self, db_session: Session):

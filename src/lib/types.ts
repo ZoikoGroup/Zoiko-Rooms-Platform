@@ -746,6 +746,20 @@ export interface RentalPaymentRecord {
   corrections: RentalPaymentCorrection[];
 }
 
+/** ZR-PAY-LINK-003 Section 15/Wireframe PAY-17: one co-tenant's share of a
+ *  joint-tenancy obligation. Deliberately has no "contributed so far"
+ *  amount/status of its own -- match payerGuestId against
+ *  RentalPaymentObligation.records[].declaredByGuestId to find that payer's
+ *  own latest record and its status, same nest-don't-duplicate shape the
+ *  disputes/corrections nesting already uses. */
+export interface RentalPaymentAllocation {
+  id: number;
+  obligationId: number;
+  payerGuestId: string;
+  allocatedAmount: number;
+  createdAt: string;
+}
+
 export interface RentalPaymentObligation {
   id: number;
   obligationType: RentalPaymentObligationType;
@@ -765,6 +779,16 @@ export interface RentalPaymentObligation {
   waivedAt: string | null;
   createdAt: string;
   records: RentalPaymentRecord[];
+  /** Empty for the ordinary single-payer obligation (the default). */
+  payerAllocations: RentalPaymentAllocation[];
+}
+
+export interface RentalPaymentObligationsPage {
+  items: RentalPaymentObligation[];
+  limit: number;
+  offset: number;
+  total: number;
+  hasMore: boolean;
 }
 
 export type RentalPaymentDiscrepancyReason =
@@ -809,7 +833,14 @@ export interface RentalPaymentInstruction {
   status: RentalPaymentInstructionStatus;
   method: RentalPaymentMethodCategory;
   recipientName: string;
+  countryCode: string;
   accountIdentifierMasked: string;
+  /** ZR-PAY-LINK-003 Wireframe D's structured "Account details" -- decrypted
+   *  server-side (app/core/field_encryption.py), only ever populated when
+   *  the caller is actually authorized to see this party's instructions in
+   *  full (the tenant with a due obligation, the recipient themselves, or
+   *  restricted admin review). null everywhere else. */
+  bankDetails: Record<string, string> | null;
   referenceFormat: string;
   additionalInstructions: string;
   verifiedAt: string | null;
@@ -1902,6 +1933,14 @@ export interface RentalTransactionTimelineEntry {
   source: string;
   eventType: string;
   detail: Record<string, unknown>;
+}
+
+export interface RentalPaymentTimelinePage {
+  items: RentalTransactionTimelineEntry[];
+  limit: number;
+  offset: number;
+  total: number;
+  hasMore: boolean;
 }
 
 export interface RentalTransactionRecord {

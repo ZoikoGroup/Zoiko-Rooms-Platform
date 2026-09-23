@@ -123,6 +123,147 @@ class TestProviderAccountRoutes:
         assert r2.status_code == 409, r2.text
 
 
+class TestResumeOnboardingRoute:
+    """A fresh onboarding link for the account already on file -- for a host
+    who closed the Stripe tab before finishing. Never creates a second
+    account, unlike POST /provider-account."""
+
+    def test_resume_returns_a_fresh_link_for_the_same_account(self, client, db_session: Session):
+        user, _party = _make_recipient(db_session, email="resume@test.com")
+        r_connect = client.post(
+            "/api/users/rental-payments/recipient/provider-account",
+            json={"country": "GB", "email": "recipient@test.com"},
+            cookies=auth_user_cookie(user),
+        )
+        assert r_connect.status_code == 201, r_connect.text
+        original_account_id = r_connect.json()["account"]["id"]
+
+        r_resume = client.post(
+            "/api/users/rental-payments/recipient/provider-account/resume-onboarding",
+            cookies=auth_user_cookie(user),
+        )
+        assert r_resume.status_code == 200, r_resume.text
+        body = r_resume.json()
+        assert body["onboardingUrl"]
+        assert body["account"]["id"] == original_account_id
+        assert body["account"]["status"] == "ONBOARDING"
+
+    def test_resume_with_no_account_is_404(self, client, db_session: Session):
+        user, _party = _make_recipient(db_session, email="resume-none@test.com")
+        r = client.post(
+            "/api/users/rental-payments/recipient/provider-account/resume-onboarding",
+            cookies=auth_user_cookie(user),
+        )
+        assert r.status_code == 404, r.text
+
+    def test_resume_once_complete_is_409(self, client, db_session: Session):
+        user, _party = _make_recipient(db_session, email="resume-complete@test.com")
+        client.post(
+            "/api/users/rental-payments/recipient/provider-account",
+            json={"country": "GB", "email": "recipient@test.com"},
+            cookies=auth_user_cookie(user),
+        )
+        client.post(
+            "/api/users/rental-payments/recipient/provider-account/simulate-onboarding-complete",
+            cookies=auth_user_cookie(user),
+        )
+        r = client.post(
+            "/api/users/rental-payments/recipient/provider-account/resume-onboarding",
+            cookies=auth_user_cookie(user),
+        )
+        assert r.status_code == 409, r.text
+
+
+class TestAccountUpdatedWebhookRoute:
+    """The real HTTP entrypoint Stripe calls -- signature verification is
+    bypassed via a monkeypatched construct_webhook_event (same shape as
+    every other webhook-route test in this codebase that doesn't want to
+    hand-craft a real Stripe-Signature HMAC), so this exercises the route's
+    own account.updated branch end-to-end, not just the crud function."""
+
+    def test_account_updated_event_updates_the_matching_provider_account(self, client, db_session: Session, monkeypatch):
+        _user, party = _make_recipient(db_session, email="webhook-route@test.com")
+        account = crud.create_connected_account(db_session, party, country="GB", email="recipient@test.com")
+        assert account.status == "ONBOARDING"
+
+        fake_event = {
+            "type": "account.updated",
+            "data": {"object": {
+                "id": account.stripe_account_id,
+                "details_submitted": True, "charges_enabled": True, "payouts_enabled": True,
+            }},
+        }
+        monkeypatch.setattr(
+            "app.api.routes.rental_payments.stripe_client.construct_webhook_event", lambda **kwargs: fake_event,
+        )
+        r = client.post(
+            "/api/finance/rental-payments/stripe/webhook",
+            headers={"stripe-signature": "fake-for-test"}, json={},
+        )
+        assert r.status_code == 200, r.text
+
+        db_session.refresh(account)
+        assert account.status == "COMPLETE"
+        assert account.charges_enabled is True
+
+    def test_an_invalid_signature_is_rejected(self, client, monkeypatch):
+        def _raise(**kwargs):
+            raise ValueError("bad signature")
+
+        monkeypatch.setattr("app.api.routes.rental_payments.stripe_client.construct_webhook_event", _raise)
+        r = client.post(
+            "/api/finance/rental-payments/stripe/webhook",
+            headers={"stripe-signature": "not-real"}, json={},
+        )
+        assert r.status_code == 400, r.text
+
+
+class TestApplyAccountUpdatedEvent:
+    """Section 6's real production path for status to reach us -- Stripe's
+    account.updated webhook, not a manual 'Refresh status' click."""
+
+    def test_a_matching_account_is_updated_and_synced_to_complete(self, db_session: Session):
+        _user, party = _make_recipient(db_session, email="webhook-match@test.com")
+        account = crud.create_connected_account(db_session, party, country="GB", email="recipient@test.com")
+        assert account.status == "ONBOARDING"
+
+        updated = crud.apply_account_updated_event(
+            db_session, stripe_account_id=account.stripe_account_id,
+            details_submitted=True, charges_enabled=True, payouts_enabled=True,
+        )
+        assert updated is not None
+        assert updated.id == account.id
+        assert updated.status == "COMPLETE"
+        assert updated.charges_enabled is True
+
+    def test_an_unmatched_stripe_account_id_is_a_harmless_no_op(self, db_session: Session):
+        result = crud.apply_account_updated_event(
+            db_session, stripe_account_id="acct_does_not_exist",
+            details_submitted=True, charges_enabled=True, payouts_enabled=True,
+        )
+        assert result is None
+
+    def test_a_superseded_account_is_not_matched(self, db_session: Session):
+        """Section 14.1's own supersede shape -- once superseded by a
+        governed account CHANGE, that old stripe_account_id must never be
+        resurrected by a stale/late-arriving webhook event."""
+        user, party = _make_recipient(db_session, email="webhook-superseded@test.com")
+        account = crud.create_connected_account(db_session, party, country="GB", email="recipient@test.com")
+        crud.simulate_onboarding_complete(db_session, account)
+        raw_code = crud.request_account_change(db_session, account, user)
+        crud.confirm_account_change(
+            db_session, account, user, raw_code, country="GB", email="new-recipient@test.com",
+        )
+        db_session.refresh(account)
+        assert account.status == "SUPERSEDED"
+
+        result = crud.apply_account_updated_event(
+            db_session, stripe_account_id=account.stripe_account_id,
+            details_submitted=True, charges_enabled=True, payouts_enabled=True,
+        )
+        assert result is None
+
+
 class TestAccountChangeGovernance:
     """ZR-PAY-LINK-003 Section 14.1: request_account_change/confirm_account_change
     -- the governed flow that lets a recipient replace their connected
@@ -214,6 +355,27 @@ class TestAccountChangeGovernance:
         )
         assert new_account.is_high_risk is True
         assert new_account.high_risk_reason
+
+    def test_a_change_soon_after_an_authority_change_is_flagged_for_review(self, db_session: Session):
+        """ZR-PAY-LINK-003 Section 14.1's 'timing' signal on this rail too --
+        see the identical rental_payment.py test for the direct-instructions
+        rail."""
+        from app.models.payment_recipient_authority import PaymentRecipientAuthority
+        from tests.test_payment_recipient_authority import _make_room_owned_by
+
+        user, party, account = self._make_complete_account(db_session, email="change-authority-timing@test.com")
+        room = _make_room_owned_by(db_session, party)
+        db_session.add(PaymentRecipientAuthority(
+            party_id=party.id, room_id=room.id, relationship_type="OWNER", status="verified",
+        ))
+        db_session.flush()
+
+        raw_code = crud.request_account_change(db_session, account, user)
+        new_account = crud.confirm_account_change(
+            db_session, account, user, raw_code, country="GB", email="new-recipient@test.com",
+        )
+        assert new_account.is_high_risk is True
+        assert "authority for this account changed within the last hour" in new_account.high_risk_reason
 
     def test_confirm_without_a_pending_request_is_rejected(self, db_session: Session):
         user, _party, account = self._make_complete_account(db_session, email="change-no-request@test.com")

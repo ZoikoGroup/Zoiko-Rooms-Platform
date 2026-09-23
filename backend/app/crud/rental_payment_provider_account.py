@@ -76,8 +76,12 @@ def create_connected_account(db: Session, party: Party, *, country: str, email: 
     if get_for_party(db, party.id) is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "You already have a connected payment account")
 
+    # 'merchant' configuration: this account is the merchant of record for
+    # a Stripe Connect direct charge (ZR-PAY-LINK-003's non-custodial rent
+    # rail) -- see stripe_client.create_connected_account's own docstring.
     stripe_account_id = stripe_client.create_connected_account(
         country=country, email=email, metadata={"domain": "rental_payment", "party_id": str(party.id)},
+        configuration="merchant",
     )
     account = RentalPaymentProviderAccount(party_id=party.id, stripe_account_id=stripe_account_id, status="ONBOARDING")
     db.add(account)
@@ -98,6 +102,37 @@ def refresh_account_status(db: Session, account: RentalPaymentProviderAccount) -
     status_fields = stripe_client.retrieve_account_status(stripe_account_id=account.stripe_account_id)
     for field, value in status_fields.items():
         setattr(account, field, value)
+    _sync_status(account)
+    account.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+def apply_account_updated_event(db: Session, *, stripe_account_id: str, details_submitted: bool, charges_enabled: bool, payouts_enabled: bool) -> RentalPaymentProviderAccount | None:
+    """The real production path for status to reach us -- Stripe's own
+    account.updated webhook event, delivered the moment a host finishes (or
+    changes) their onboarding, no page needing to be open and no manual
+    'Refresh status' click required. Uses the fields already on the event's
+    own Account payload directly rather than making a second API call back
+    to Stripe (retrieve_account_status), same reconciliation-read-is-not-
+    the-only-path posture as external_payment_session.py's own webhook.
+    Returns None (a harmless no-op) when this stripe_account_id belongs to
+    no party here at all -- the account may belong to a different
+    Zoiko domain (see host_stripe_account.py's own sibling of this
+    function) or to nothing at all if Stripe still has a stale test event
+    queued for an account since closed."""
+    account = db.scalar(
+        select(RentalPaymentProviderAccount).where(
+            RentalPaymentProviderAccount.stripe_account_id == stripe_account_id,
+            RentalPaymentProviderAccount.status != "SUPERSEDED",
+        )
+    )
+    if account is None:
+        return None
+    account.details_submitted = details_submitted
+    account.charges_enabled = charges_enabled
+    account.payouts_enabled = payouts_enabled
     _sync_status(account)
     account.updated_at = datetime.now(timezone.utc)
     db.commit()
@@ -144,16 +179,50 @@ def _generate_and_send_account_change_code(account: RentalPaymentProviderAccount
     return raw_code
 
 
-def _assess_account_change_risk(user: UserAccount) -> tuple[bool, str]:
-    """Same recent-password-change signal as
-    rental_payment.py:_assess_instruction_change_risk -- see that
-    function's own docstring for why this is the one real signal this
-    build has."""
+# ZR-PAY-LINK-003 Section 14.1: same 'multiple account-affecting changes in
+# rapid succession' window as rental_payment.py:
+# INSTRUCTION_RAPID_SUCCESSION_WINDOW_MINUTES -- duplicated, not imported,
+# same independence discipline this module's own docstring states.
+ACCOUNT_CHANGE_RAPID_SUCCESSION_WINDOW_MINUTES = 60
+
+
+def _assess_account_change_risk(db: Session, user: UserAccount, party_id: int) -> tuple[bool, str]:
+    """ZR-PAY-LINK-003 Section 14.1: 'destination novelty, jurisdiction,
+    amount profile and timing.' Same recent-password-change signal as
+    rental_payment.py:_assess_instruction_change_risk, plus timing (this
+    rail's own data actually supports it). Three signals deliberately NOT
+    attempted here, rather than shipped inaccurately:
+    - destination novelty: Stripe always mints a brand-new stripe_account_id
+      on every change (see confirm_account_change's own docstring) -- there
+      is no 'same destination as before' to compare.
+    - jurisdiction: models/property.py:jurisdiction_code is a market-pack
+      name/code ('England', 'IN', 'US', 'AU', ...), not a normalized ISO
+      country code -- comparing it against the Stripe country param (e.g.
+      'GB') would false-positive on every submission for this build's only
+      currently-supported jurisdiction ('England' != 'GB'). No reliable
+      mapping between the two exists yet.
+    - amount profile: no such infrastructure exists (same disclosed-gap
+      posture as the rental_payment.py sibling)."""
+    reasons: list[str] = []
+    now = datetime.now(timezone.utc)
+
     if user.password_changed_at:
-        age = datetime.now(timezone.utc) - user.password_changed_at
+        age = now - user.password_changed_at
         if age <= timedelta(hours=ACCOUNT_CHANGE_RECENT_CREDENTIAL_CHANGE_RISK_WINDOW_HOURS):
-            return True, "Account password was changed within the last 24 hours"
-    return False, ""
+            reasons.append("Account password was changed within the last 24 hours")
+
+    rapid_window_start = now - timedelta(minutes=ACCOUNT_CHANGE_RAPID_SUCCESSION_WINDOW_MINUTES)
+    from app.models.payment_recipient_authority import PaymentRecipientAuthority
+
+    recent_authority_change = db.scalar(
+        select(PaymentRecipientAuthority.id).where(
+            PaymentRecipientAuthority.party_id == party_id, PaymentRecipientAuthority.created_at >= rapid_window_start,
+        )
+    )
+    if recent_authority_change is not None:
+        reasons.append("Payment recipient authority for this account changed within the last hour")
+
+    return bool(reasons), "; ".join(reasons)
 
 
 def request_account_change(db: Session, account: RentalPaymentProviderAccount, user: UserAccount) -> str:
@@ -224,7 +293,7 @@ def confirm_account_change(
         db.commit()
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Incorrect verification code")
 
-    is_high_risk, high_risk_reason = _assess_account_change_risk(user)
+    is_high_risk, high_risk_reason = _assess_account_change_risk(db, user, account.party_id)
 
     # Supersede (and flush) the old row BEFORE inserting the new one -- the
     # partial unique index only allows one non-SUPERSEDED row per party at
@@ -237,6 +306,7 @@ def confirm_account_change(
 
     new_stripe_account_id = stripe_client.create_connected_account(
         country=country, email=email, metadata={"domain": "rental_payment", "party_id": str(account.party_id)},
+        configuration="merchant",
     )
     new_account = RentalPaymentProviderAccount(
         party_id=account.party_id, stripe_account_id=new_stripe_account_id, status="ONBOARDING",

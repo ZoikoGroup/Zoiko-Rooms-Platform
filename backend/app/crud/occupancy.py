@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.crud.eligibility import check_move_in_eligibility
 from app.crud import notification as notif_crud
-from app.crud.party import assert_provider_access, party_id_for_listing
+from app.crud.party import assert_provider_access, assert_provider_access_any, party_id_for_listing
 from app.models.admin_user import AdminUser
 from app.models.user_account import UserAccount
 from app.models.finance import CADENCE_INTERVAL_DAYS, OBLIGATION_TYPE_TO_PLANE, Obligation, PaymentSchedule
@@ -137,9 +137,15 @@ def has_co_tenants(db: Session, occupancy_id: int) -> bool:
     ) is not None
 
 
-def confirm_move_in(db: Session, agreement: Agreement, admin: AdminUser) -> Occupancy:
+def confirm_move_in(db: Session, agreement: Agreement, actor: AdminUser | UserAccount) -> Occupancy:
+    """actor is AdminUser | UserAccount, not AdminUser-only -- ZR-ENG-CLR-011
+    Section 10/ZR-ENG-CLR-004 Section 4.3 posture (see
+    assert_provider_access_any's own docstring): confirming move-in is a
+    Host commercial action, not exclusively an admin-portal one. A Zoiko
+    platform admin (via api/routes/occupancy.py) and a self-service Host's
+    own UserAccount (via api/routes/user_hosting.py) both reach here."""
     offer = agreement.offer
-    assert_provider_access(db, admin, party_id_for_listing(offer.listing))
+    assert_provider_access_any(db, actor, party_id_for_listing(offer.listing))
 
     occupancy = db.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
     if not occupancy:
@@ -272,13 +278,23 @@ def list_occupancies_for_room_owned_by(db: Session, user: UserAccount, room: Roo
     )
 
 
-def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: AdminUser) -> Obligation | None:
+def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: AdminUser | None) -> Obligation | None:
     """Idempotent: no scheduler exists in this stack, so recurring rent is generated
     on demand -- automatically right after the current period's rent obligation is
     marked paid, or manually via an admin action. Calling this twice for the same
     period never creates a duplicate obligation, and it refuses to run past the
-    lease's expected end date without a renewal step."""
-    assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
+    lease's expected end date without a renewal step.
+
+    admin=None is the cross-domain-bridge caller (crud/rental_payment.py:
+    _sync_legacy_obligation_from_confirmation, triggered by the NEW
+    ZR-PAY-LINK-003 domain's own record confirming, not by an admin acting)
+    -- skips the ownership check below the same way
+    services/booking_orchestrator.py:generate_downstream_rent already
+    swallows a real admin's own ownership mismatch here (line ~55-57)
+    rather than letting it block an already-confirmed payment; every other
+    caller keeps passing a real admin and is unaffected."""
+    if admin is not None:
+        assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
     if occupancy.status != "ACTIVE":
         raise HTTPException(status.HTTP_409_CONFLICT, "Occupancy is not active")
 

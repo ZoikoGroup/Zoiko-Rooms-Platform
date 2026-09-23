@@ -14,6 +14,8 @@ currencies Stripe defines, where the integer *is* the major unit."""
 
 from __future__ import annotations
 
+from typing import Literal
+
 from app.core.config import settings
 from app.crud.ids import new_id
 
@@ -46,6 +48,18 @@ def _client():
 
     stripe.api_key = settings.stripe_secret_key
     return stripe
+
+
+def stripe_client_v2():
+    """The Accounts v2 API (client.v2.core.accounts...) is only reachable
+    through the newer stripe.StripeClient instance -- the legacy module-
+    level stripe.api_key + stripe.Account.create pattern _client() returns
+    is v1-only. A fresh client per call, same as _client() re-setting
+    stripe.api_key every time -- this module never caches either across
+    calls."""
+    import stripe
+
+    return stripe.StripeClient(settings.stripe_secret_key)
 
 
 def create_payment_intent(*, amount: float, currency: str, metadata: dict) -> str:
@@ -200,14 +214,18 @@ def create_refund(
     *, payment_intent_id: str, amount: float, currency: str, metadata: dict, idempotency_key: str | None = None,
 ) -> str:
     """Returns the provider refund id -- a real Stripe Refund id (re_...)
-    when configured, otherwise a generated placeholder. ZR-PAY-002 Section
-    8.4: refunds a Listing Fee PaymentIntent directly (Zoiko's own charge),
-    never a Transfer/TransferReversal -- that pair is the rent/payout
-    domain's own mechanism (see reverse_transfer above) and does not apply
-    here, matching the two domains' separate money flows. idempotency_key
-    -- see create_payment_intent_with_client_secret's own docstring for why
-    this is passed to Stripe's own idempotency mechanism, not just guarded
-    at the DB layer."""
+    when configured, otherwise a generated placeholder. Shared by both
+    crud/listing_fee.py:request_refund (ZR-PAY-002 Section 8.4: refunds a
+    Listing Fee PaymentIntent directly, Zoiko's own charge) and
+    crud/finance.py's own decide_refund (Section 5 gap: pulling money back
+    out of Stripe for the rent/payout domain's PSP_DIRECT-collected
+    payments) -- both refund a PaymentIntent directly, never a
+    Transfer/TransferReversal (see reverse_transfer above for that separate
+    mechanism). idempotency_key is optional since only the Listing Fee
+    caller currently supplies one -- see
+    create_payment_intent_with_client_secret's own docstring for why it's
+    passed to Stripe's own idempotency mechanism, not just guarded at the
+    DB layer."""
     if not is_configured():
         return new_id("RE")
     stripe = _client()
@@ -218,17 +236,63 @@ def create_refund(
     return refund.id
 
 
-def create_connected_account(*, country: str, email: str, metadata: dict) -> str:
+def create_connected_account(
+    *, country: str, email: str, metadata: dict, configuration: Literal["merchant", "recipient"],
+) -> str:
     """Returns the provider account id -- a real Stripe Connect Express
     account id (acct_...) when configured, otherwise a generated
-    placeholder with the same shape."""
+    placeholder with the same shape.
+
+    Stripe Accounts v2 (POST /v2/core/accounts), not v1 -- Stripe now
+    rejects v1 Account creation by default for new Connect integrations
+    (InvalidRequestError account_controller_express_dash_without_
+    application_losses_or_fees is what surfaces if this ever regresses to
+    v1). This module has TWO callers with genuinely different money-flow
+    shapes that the old v1 call conflated under one hardcoded
+    capabilities={'transfers': ...} body:
+    - crud/rental_payment_provider_account.py (ZR-PAY-LINK-003's
+      non-custodial rent rail): the connected account IS the merchant of
+      record for a Stripe Connect direct charge -- needs the 'merchant'
+      configuration's card_payments capability.
+    - crud/host_stripe_account.py (the legacy ZR-ENG-CLR-005 payout rail,
+      separate-charges-and-transfers): the connected account only ever
+      RECEIVES a Transfer from Zoiko's own balance -- needs the
+      'recipient' configuration's stripe_balance.stripe_transfers
+      capability instead.
+    dashboard='express' preserves today's Express-dashboard host
+    experience; per Stripe's own validation
+    (account_controller_express_dash_without_application_losses_or_fees),
+    that requires fees_collector/losses_collector both be 'application' --
+    not a free choice, the only combination Express dashboards accept.
+    stripe_version is left to the installed SDK's own default
+    (stripe._api_version._ApiVersion.CURRENT) rather than hardcoded here,
+    so a future stripe-python upgrade tracks Stripe's own version
+    promotion automatically."""
     if not is_configured():
         return new_id("ACCT")
-    stripe = _client()
-    account = stripe.Account.create(
-        type="express", country=country, email=email, metadata=metadata,
-        capabilities={"transfers": {"requested": True}},
+    client = stripe_client_v2()
+    # Confirmed against a real Stripe test account: v2 rejects
+    # recipient.capabilities.stripe_balance.stripe_transfers on its own --
+    # "cannot be requested without the configuration.merchant.capabilities.
+    # card_payments capability" -- so the 'recipient' case still has to
+    # request merchant.card_payments alongside it, even though this
+    # account never directly collects a card payment itself.
+    configuration_params = (
+        {"merchant": {"capabilities": {"card_payments": {"requested": True}}}}
+        if configuration == "merchant"
+        else {
+            "merchant": {"capabilities": {"card_payments": {"requested": True}}},
+            "recipient": {"capabilities": {"stripe_balance": {"stripe_transfers": {"requested": True}}}},
+        }
     )
+    account = client.v2.core.accounts.create(params={
+        "contact_email": email,
+        "dashboard": "express",
+        "identity": {"country": country},
+        "configuration": configuration_params,
+        "defaults": {"responsibilities": {"fees_collector": "application", "losses_collector": "application"}},
+        "metadata": metadata,
+    })
     return account.id
 
 
@@ -281,25 +345,6 @@ def create_transfer(*, amount: float, currency: str, destination_account_id: str
         destination=destination_account_id, metadata=metadata,
     )
     return transfer.id
-
-
-def create_refund(*, payment_intent_id: str, amount: float, currency: str, metadata: dict) -> str:
-    """Returns the provider refund id -- a real Stripe Refund id (re_...)
-    when configured, otherwise a generated placeholder. Section 5 gap: this
-    was the missing counterpart to create_payment_intent above --
-    decide_refund (crud/finance.py) previously only ever reversed Zoiko's
-    own ledger, never actually moved money back out of Stripe to the
-    renter's card/bank. Stripe itself enforces the refund ceiling (cannot
-    exceed the PaymentIntent's own captured amount) when real credentials
-    are configured; the simulated fallback trusts the caller's own amount
-    the same way every other simulated path in this module does."""
-    if not is_configured():
-        return new_id("RE")
-    stripe = _client()
-    refund = stripe.Refund.create(
-        payment_intent=payment_intent_id, amount=to_minor_units(amount, currency), metadata=metadata,
-    )
-    return refund.id
 
 
 def create_setup_intent(*, customer_email: str, metadata: dict) -> str:

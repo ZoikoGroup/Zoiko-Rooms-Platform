@@ -573,6 +573,31 @@ def _create_co_tenancy_agreement(
         amount=latest_terms.deposit_amount, currency=listing.currency, due_date=latest_terms.start_date, agreement_id=agreement.id,
     ))
     db.flush()
+
+    # ZR-PAY-002 Section 4/6: the record/evidence-layer counterpart to the two
+    # custody-based Obligation rows above -- same best-effort placement as
+    # crud/leasing.py:create_agreement's own equivalent block (this co-tenancy
+    # agreement is otherwise identical in shape to an ordinary one, just
+    # created programmatically instead of through the applications flow).
+    try:
+        from app.crud.rental_payment import create_obligation as create_rental_payment_obligation
+        from app.crud.rental_payment import resolve_rent_recipient_party_id
+
+        recipient_party_id = resolve_rent_recipient_party_id(db, listing.room) if listing.room else None
+        if recipient_party_id is not None:
+            create_rental_payment_obligation(
+                db, obligation_type="RENT", tenant_guest_id=proposed_guest.id, recipient_party_id=recipient_party_id,
+                amount=latest_terms.monthly_rent, currency=listing.currency, due_date=latest_terms.start_date,
+                agreement_id=agreement.id,
+            )
+            create_rental_payment_obligation(
+                db, obligation_type="DEPOSIT", tenant_guest_id=proposed_guest.id, recipient_party_id=recipient_party_id,
+                amount=latest_terms.deposit_amount, currency=listing.currency, due_date=latest_terms.start_date,
+                agreement_id=agreement.id,
+            )
+    except Exception:
+        pass
+
     return agreement
 
 

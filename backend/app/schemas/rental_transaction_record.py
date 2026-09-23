@@ -36,6 +36,17 @@ class RentalTransactionTimelineEntryRead(CamelModel):
     detail: dict
 
 
+class RentalPaymentTimelinePage(CamelModel):
+    """Paginated envelope for GET /records/{id}/timeline -- same shape as
+    schemas/listing.py:PublicListingsPage."""
+
+    items: list[RentalTransactionTimelineEntryRead]
+    limit: int
+    offset: int
+    total: int
+    has_more: bool
+
+
 class RentalTransactionRecordRead(CamelModel):
     """See build_rental_transaction_record for exactly which verification
     fields are populated for a renter vs. a host viewer -- identity is never

@@ -7,7 +7,7 @@ from app.core.security import decode_access_token_claims
 from app.crud.admin import get_admin_by_email
 from app.crud.user import get_user_by_email
 from app.db.session import get_db
-from app.models.admin_user import AdminUser
+from app.models.admin_user import PAYMENT_STAFF_ROLES, AdminUser
 from app.models.user_account import UserAccount
 
 COOKIE_NAME = "zoiko_admin_token"
@@ -39,6 +39,16 @@ def get_current_admin(
 def require_super_admin(admin: AdminUser = Depends(get_current_admin)) -> AdminUser:
     if admin.role != "super_admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    return admin
+
+
+def require_super_admin_or_payment_staff(admin: AdminUser = Depends(get_current_admin)) -> AdminUser:
+    """ZR-PAY-LINK-003 Section 17: the narrow Staff tier for rental-payment
+    confirm/correction actions -- see app/models/admin_user.py:PAYMENT_STAFF_ROLES
+    for why this checks a second, independent field rather than `role`
+    itself."""
+    if admin.role != "super_admin" and admin.payment_staff_role not in PAYMENT_STAFF_ROLES:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Payment staff or super admin access required")
     return admin
 
 

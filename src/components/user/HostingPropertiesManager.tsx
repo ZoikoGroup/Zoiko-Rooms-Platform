@@ -10,12 +10,16 @@ import { Modal } from "@/components/ui/Modal";
 import { Occupancy, Property, Room } from "@/lib/types";
 import { Switch } from "@/components/ui/Switch";
 import {
+  confirmHostedMoveIn,
+  confirmHostedPossessionDelivered,
   createHostedProperty,
   createHostedRoom,
   errorMessage,
+  getHostedMoveInEligibility,
   listHostedProperties,
   listHostedRoomOccupancies,
   listHostedRooms,
+  prepareHostedHandover,
   updateHostedProperty,
   updateHostedRoom,
 } from "@/lib/user-api";
@@ -43,6 +47,7 @@ export function HostingPropertiesManager() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [recordOccupancyId, setRecordOccupancyId] = useState<number | null>(null);
+  const [handoverBusyId, setHandoverBusyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -121,6 +126,48 @@ export function HostingPropertiesManager() {
       setError(errorMessage(err, "Could not save the room."));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handlePrepareHandover(occupancyId: number) {
+    setHandoverBusyId(`${occupancyId}:prepare`);
+    try {
+      await prepareHostedHandover(occupancyId);
+      showToast("Marked handover ready.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not mark handover ready."), "error");
+    } finally {
+      setHandoverBusyId(null);
+    }
+  }
+
+  async function handlePossessionDelivered(occupancyId: number) {
+    setHandoverBusyId(`${occupancyId}:possession`);
+    try {
+      await confirmHostedPossessionDelivered(occupancyId);
+      showToast("Possession delivery recorded.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not record possession delivery."), "error");
+    } finally {
+      setHandoverBusyId(null);
+    }
+  }
+
+  async function handleConfirmMoveIn(occupancyId: number) {
+    setHandoverBusyId(`${occupancyId}:confirm`);
+    try {
+      const eligibility = await getHostedMoveInEligibility(occupancyId);
+      if (!eligibility.eligible) {
+        showToast(`Not ready for move-in yet: ${eligibility.reasons.join("; ")}`, "error");
+        return;
+      }
+      await confirmHostedMoveIn(occupancyId);
+      showToast("Move-in confirmed -- the tenancy is now active.");
+      await load();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not confirm move-in."), "error");
+    } finally {
+      setHandoverBusyId(null);
     }
   }
 
@@ -240,21 +287,50 @@ export function HostingPropertiesManager() {
                           </div>
 
                           {occupancies.length > 0 && (
-                            <div className="space-y-1.5 border-t border-slate-200 pt-2 dark:border-white/10">
+                            <div className="space-y-2 border-t border-slate-200 pt-2 dark:border-white/10">
                               {occupancies.map((occupancy) => (
-                                <div key={occupancy.id} className="flex items-center justify-between gap-2">
-                                  <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-                                    <Badge tone={occupancyStatusTone[occupancy.status] ?? "neutral"}>
-                                      {occupancy.status.replace(/_/g, " ")}
-                                    </Badge>
-                                    <span>
-                                      {occupancy.guestName || "Renter"}
-                                      {occupancy.moveInDate ? ` · since ${formatDate(occupancy.moveInDate)}` : ""}
-                                    </span>
+                                <div key={occupancy.id} className="space-y-1.5">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                                      <Badge tone={occupancyStatusTone[occupancy.status] ?? "neutral"}>
+                                        {occupancy.status.replace(/_/g, " ")}
+                                      </Badge>
+                                      <span>
+                                        {occupancy.guestName || "Renter"}
+                                        {occupancy.moveInDate ? ` · since ${formatDate(occupancy.moveInDate)}` : ""}
+                                      </span>
+                                    </div>
+                                    <Button size="sm" variant="ghost" onClick={() => setRecordOccupancyId(occupancy.id)}>
+                                      <ClipboardList className="h-3.5 w-3.5" /> Transaction record
+                                    </Button>
                                   </div>
-                                  <Button size="sm" variant="ghost" onClick={() => setRecordOccupancyId(occupancy.id)}>
-                                    <ClipboardList className="h-3.5 w-3.5" /> Transaction record
-                                  </Button>
+                                  {occupancy.status === "PENDING_MOVE_IN" && (
+                                    <div className="flex flex-wrap items-center gap-1.5 rounded-lg bg-slate-50 p-2 dark:bg-slate-800/60">
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        loading={handoverBusyId === `${occupancy.id}:prepare`}
+                                        onClick={() => handlePrepareHandover(occupancy.id)}
+                                      >
+                                        Mark handover ready
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        loading={handoverBusyId === `${occupancy.id}:possession`}
+                                        onClick={() => handlePossessionDelivered(occupancy.id)}
+                                      >
+                                        Confirm possession delivered
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        loading={handoverBusyId === `${occupancy.id}:confirm`}
+                                        onClick={() => handleConfirmMoveIn(occupancy.id)}
+                                      >
+                                        Confirm move-in
+                                      </Button>
+                                    </div>
+                                  )}
                                 </div>
                               ))}
                             </div>
