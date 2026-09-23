@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -88,7 +88,14 @@ class IdentityVerification(Base):
     expiry_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     verifier_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     verifier_notes: Mapped[str] = mapped_column(String(2000), default="")
-    status: Mapped[str] = mapped_column(String(20), default="pending")
+    status: Mapped[str] = mapped_column(String(40), default="pending")
+    # services/document_ocr.py: the document number Tesseract actually read off
+    # the uploaded image, and its average OCR confidence (0-100) -- distinct
+    # from encrypted_reference above, which is whatever the user typed into the
+    # form and was never cross-checked against the image. Null whenever OCR
+    # didn't run (Tesseract not installed) or found no confident match.
+    ocr_extracted_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

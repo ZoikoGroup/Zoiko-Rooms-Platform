@@ -216,13 +216,10 @@ def submit_rental_application(
                 notification_type="application.received",
                 related_entity_type="application", related_entity_id=str(application.id),
             )
-        notif_crud.notify_all_super_admins(
-            db,
-            title="New rental application submitted",
-            message=f"{user.full_name} applied for listing {application.listing_id}.",
-            notification_type="application.submitted",
-            related_entity_type="application", related_entity_id=str(application.id),
-        )
+        # Deliberately renter <-> host only, no admin copy -- applying and
+        # deciding an application is a self-service host action (see
+        # decide_application_as_host in crud/leasing.py), not something
+        # Zoiko admin needs visibility into for every submission.
 
         db.commit()
 

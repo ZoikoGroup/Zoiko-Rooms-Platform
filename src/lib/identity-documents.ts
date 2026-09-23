@@ -26,10 +26,10 @@ interface DocumentTypeOption {
 
 export const documentTypesByCategory: Record<DocumentCategory, DocumentTypeOption[]> = {
   identity: [
-    { value: "aadhaar", label: "Aadhaar" },
-    { value: "pan_card", label: "PAN Card" },
     { value: "passport", label: "Passport" },
     { value: "driving_license", label: "Driving License" },
+    { value: "aadhaar", label: "Aadhaar" },
+    { value: "pan_card", label: "PAN Card" },
     { value: "voter_id", label: "Voter ID" },
     { value: "national_id", label: "National ID" },
     { value: "residence_permit", label: "Residence Permit" },

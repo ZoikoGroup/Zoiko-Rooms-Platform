@@ -120,6 +120,17 @@ class Listing(Base):
         nullable=True,
     )
 
+    # Section 14 offer.requires_manual_creation (services/policy.py): a host's
+    # own reusable offer terms for this listing, used only when a market
+    # release has opted into automatic offer creation -- see
+    # crud/leasing.py:_auto_create_offer_if_enabled. All nullable and
+    # optional; a listing with none of these set simply stays on the
+    # existing fully-manual offer flow regardless of the policy setting.
+    default_monthly_rent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    default_deposit_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    default_term_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    default_cadence: Mapped[str] = mapped_column(String(20), default="MONTHLY")
+
     owner: Mapped["AdminUser"] = relationship(back_populates="listings")
     party: Mapped["Party"] = relationship(back_populates="listings")
     room: Mapped["Room"] = relationship(back_populates="listings")

@@ -68,18 +68,27 @@ def list_property_verifications_for_room(db: Session, room_id: int) -> list[Prop
     )
 
 
-def declare_property_verification(db: Session, user: UserAccount, room: Room, *, evidence_ref: str) -> PropertyVerification:
+def declare_property_verification(
+    db: Session, user: UserAccount, room: Room, *,
+    evidence_ref: str, stored_filename: str, original_filename: str, content_type: str, file_size: int,
+) -> PropertyVerification:
     """Host self-service submission, scoped to a room the calling host's own
     party actually owns -- same ownership-check shape as
     crud/authority.py:declare_authority_record and
-    api/routes/user_hosting.py's own pattern."""
+    api/routes/user_hosting.py's own pattern. A real uploaded document is
+    now required alongside evidence_ref -- previously evidence_ref (a free
+    -text description) was the only thing ever recorded, with nothing
+    actually evidencing the claim."""
     if not user.party_id or room.property.owner_party_id != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only submit property evidence for your own room")
     if not evidence_ref.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Evidence reference is required")
 
     record = PropertyVerification(
-        party_id=user.party_id, room_id=room.id, evidence_ref=evidence_ref.strip(), status="pending",
+        party_id=user.party_id, room_id=room.id, evidence_ref=evidence_ref.strip(),
+        document_file_path=stored_filename, document_file_original_name=original_filename,
+        document_file_content_type=content_type, document_file_size=file_size,
+        status="pending",
     )
     db.add(record)
     db.commit()
@@ -99,7 +108,9 @@ def list_property_verifications_for_room_owned_by(db: Session, user: UserAccount
     return list_property_verifications_for_room(db, room.id)
 
 
-def verify_property_verification(db: Session, record: PropertyVerification, admin: AdminUser) -> PropertyVerification:
+def verify_property_verification(
+    db: Session, record: PropertyVerification, admin: AdminUser, *, notes: str = ""
+) -> PropertyVerification:
     if record.status not in ("pending", "additional_evidence_required"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"Only a pending property verification can be verified (current status: {record.status})")
     now = datetime.now(timezone.utc)
@@ -107,6 +118,7 @@ def verify_property_verification(db: Session, record: PropertyVerification, admi
     record.verified_at = now
     record.expires_at = now + timedelta(days=PROPERTY_VERIFICATION_VALIDITY_DAYS)
     record.verifier_admin_id = admin.id
+    record.verifier_notes = notes
     db.commit()
     db.refresh(record)
     return record
