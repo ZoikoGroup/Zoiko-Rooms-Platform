@@ -21,6 +21,17 @@ ADMIN_APPROVAL_STATUSES = ("pending", "approved", "rejected")
 # retroactively locked out.
 DISPUTE_ADMIN_ROLES = ("SUPPORT", "DISPUTE_OFFICER", "FINANCE", "TRUST_AND_SAFETY", "LEGAL_COMPLIANCE")
 
+# ZR-PAY-LINK-003 Section 17 Permissions Matrix: the narrow "Staff" tier
+# ("Controlled support only" / "Case-bound" / "Controlled + audited") for
+# rental-payment confirm/correction actions -- deliberately a THIRD,
+# payments-only field for the exact same reason dispute_role above is kept
+# separate from `role`: folding this into ADMIN_ROLES would silently change
+# every "role != super_admin" check across the whole admin surface, not just
+# the rental-payment routes this is meant to loosen. None (the default)
+# means "not payment support staff", not "no access" -- an admin without
+# this flag still has whatever `role` alone already grants them.
+PAYMENT_STAFF_ROLES = ("PAYMENT_SUPPORT",)
+
 
 class AdminUser(Base):
     __tablename__ = "admin_users"
@@ -42,6 +53,8 @@ class AdminUser(Base):
     # See DISPUTE_ADMIN_ROLES above -- null means "not yet specialized",
     # not "no dispute access".
     dispute_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # See PAYMENT_STAFF_ROLES above -- null means "not payment support staff".
+    payment_staff_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     approval_status: Mapped[str] = mapped_column(String(20), default="approved")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

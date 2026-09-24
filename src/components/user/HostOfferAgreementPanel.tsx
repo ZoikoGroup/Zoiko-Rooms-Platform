@@ -6,8 +6,15 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
-import { Agreement, DisclosureRequirement, Offer } from "@/lib/types";
-import { agreementStatusLabel, agreementStatusTone, offerStatusLabel, offerStatusTone } from "@/lib/status";
+import { Agreement, DisclosureRequirement, Offer, RentalPaymentObligation } from "@/lib/types";
+import {
+  agreementStatusLabel,
+  agreementStatusTone,
+  offerStatusLabel,
+  offerStatusTone,
+  rentalPaymentStatusLabel,
+  rentalPaymentStatusTone,
+} from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   addHostedOfferTerms,
@@ -17,6 +24,7 @@ import {
   errorMessage,
   getHostedOffer,
   listHostedAgreementDisclosures,
+  listRecipientRentalPaymentObligations,
   sendHostedAgreement,
   sendHostedOffer,
   signHostedAgreement,
@@ -56,6 +64,7 @@ export function HostOfferAgreementPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [termsForm, setTermsForm] = useState<TermsForm>(emptyTermsForm);
+  const [rentalPaymentObligations, setRentalPaymentObligations] = useState<RentalPaymentObligation[]>([]);
   const { toast, showToast } = useToast();
 
   const reload = useCallback(async (currentOfferId: number) => {
@@ -64,8 +73,19 @@ export function HostOfferAgreementPanel({
     if (fresh.agreement) {
       const items = await listHostedAgreementDisclosures(fresh.agreement.id);
       setDisclosures(items);
+      // ZR-PAY-LINK-003: this agreement's own RENT/DEPOSIT
+      // RentalPaymentObligations (crud/leasing.py:create_agreement already
+      // creates these alongside the legacy pair) -- so the host sees real
+      // payment progress here instead of a static "waiting" banner. The
+      // host is the recipient, not the payer -- no payment actions here,
+      // their own confirm-receipt UI already exists in
+      // RecipientRentalPaymentsManager.tsx.
+      listRecipientRentalPaymentObligations(undefined, { agreementId: fresh.agreement.id })
+        .then((page) => setRentalPaymentObligations(page.items))
+        .catch(() => setRentalPaymentObligations([]));
     } else {
       setDisclosures([]);
+      setRentalPaymentObligations([]);
     }
     return fresh;
   }, []);
@@ -369,11 +389,27 @@ export function HostOfferAgreementPanel({
               )}
 
               {(agreement.status === "PAYMENT_IN_PROGRESS" || agreement.status === "SIGNED") && (
-                <div className="rounded-xl bg-emerald-50 px-4 py-3 text-xs text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
-                  Both parties have signed.{" "}
-                  {agreement.status === "PAYMENT_IN_PROGRESS"
-                    ? "Waiting for the renter's initial payment to confirm the booking."
-                    : "The agreement is fully executed."}
+                <div className="space-y-2 rounded-xl bg-emerald-50 px-4 py-3 dark:bg-emerald-500/10">
+                  <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                    Both parties have signed.{" "}
+                    {agreement.status === "PAYMENT_IN_PROGRESS"
+                      ? "Waiting for the renter's initial payment to confirm the booking."
+                      : "The agreement is fully executed."}
+                  </p>
+                  {rentalPaymentObligations.length > 0 && (
+                    <div className="space-y-1 border-t border-emerald-200/60 pt-2 dark:border-emerald-500/20">
+                      {rentalPaymentObligations.map((o) => (
+                        <div key={o.id} className="flex items-center justify-between gap-2 text-xs">
+                          <span className="capitalize text-emerald-800 dark:text-emerald-200">
+                            {o.displayLabel} — {formatCurrency(o.amount, o.currency)}
+                          </span>
+                          <Badge tone={rentalPaymentStatusTone[o.status] ?? "neutral"}>
+                            {rentalPaymentStatusLabel[o.status] ?? o.status}
+                          </Badge>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

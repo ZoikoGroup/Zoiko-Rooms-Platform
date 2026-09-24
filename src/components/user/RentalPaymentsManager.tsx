@@ -9,6 +9,7 @@ import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { RentalPaymentEvidenceList } from "@/components/user/RentalPaymentEvidenceList";
+import { resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
 import {
   RentalPaymentDiscrepancyReason,
   RentalPaymentInstruction,
@@ -61,9 +62,22 @@ type Tab = "overview" | "upcoming" | "records" | "instructions";
 // offer a second, conflicting payment action while one is already underway.
 const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "PAYMENT_SESSION_STARTED"]);
 
+// GET /obligations is now paginated (ZR-PAY-LINK-003 Section 19/G11 -- an
+// unbounded list doesn't scale to a years-long tenancy). This view's
+// overview/upcoming tabs need every open obligation to compute "next
+// obligation due" correctly, so a full page at the pagination ceiling is
+// fetched up front rather than the ordinary page size; loadMoreObligations
+// below only ever appends further (older) history for the Records tab, on
+// top of that same shared list -- it never replaces it, since other tabs
+// depend on everything already loaded staying present.
+const OBLIGATIONS_PAGE_LIMIT = 100;
+
 export function RentalPaymentsManager() {
   const { toast, showToast } = useToast();
   const [obligations, setObligations] = useState<RentalPaymentObligation[]>([]);
+  const [obligationsTotal, setObligationsTotal] = useState(0);
+  const [hasMoreObligations, setHasMoreObligations] = useState(false);
+  const [loadingMoreObligations, setLoadingMoreObligations] = useState(false);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>("overview");
   const [typeFilter, setTypeFilter] = useState<RentalPaymentObligationType | "ALL">("ALL");
@@ -99,10 +113,25 @@ export function RentalPaymentsManager() {
   }
 
   function load() {
-    listMyRentalPaymentObligations()
-      .then(setObligations)
+    listMyRentalPaymentObligations(undefined, { limit: OBLIGATIONS_PAGE_LIMIT, offset: 0 })
+      .then((page) => {
+        setObligations(page.items);
+        setObligationsTotal(page.total);
+        setHasMoreObligations(page.hasMore);
+      })
       .catch((err) => showToast(errorMessage(err, "Could not load your rental payments."), "error"))
       .finally(() => setLoading(false));
+  }
+
+  function loadMoreObligations() {
+    setLoadingMoreObligations(true);
+    listMyRentalPaymentObligations(undefined, { limit: OBLIGATIONS_PAGE_LIMIT, offset: obligations.length })
+      .then((page) => {
+        setObligations((prev) => [...prev, ...page.items]);
+        setHasMoreObligations(page.hasMore);
+      })
+      .catch((err) => showToast(errorMessage(err, "Could not load more payment records."), "error"))
+      .finally(() => setLoadingMoreObligations(false));
   }
 
   useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -305,6 +334,13 @@ export function RentalPaymentsManager() {
               </div>
             </Card>
           )}
+          {hasMoreObligations && (
+            <div className="flex justify-center">
+              <Button size="sm" variant="outline" loading={loadingMoreObligations} onClick={loadMoreObligations}>
+                Load older records ({obligations.length} of {obligationsTotal})
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
@@ -440,6 +476,7 @@ function ObligationCard({
           )}
         </div>
       </div>
+      {obligation.payerAllocations.length > 0 && <PayerAllocationsView obligation={obligation} />}
       {suspended && (
         <p className="mt-3 flex items-center gap-1.5 text-xs font-semibold text-rose-600 dark:text-rose-300">
           <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> Payments for this room are currently suspended --
@@ -448,6 +485,93 @@ function ObligationCard({
       )}
       <p className="mt-3 text-xs text-slate-400">Zoiko Rooms does not receive or hold this payment.</p>
     </Card>
+  );
+}
+
+/** ZR-PAY-LINK-003 Section 15/Wireframe PAY-17: joint-tenancy payer
+ *  allocation view -- read-only. Per Section 15, a co-tenant sees every
+ *  payer's reconciled contribution status but can never alter another
+ *  payer's own record, so this view has no actions at all. Each payer's
+ *  contribution status is the latest of their own records (matched by
+ *  declaredByGuestId), never a separate value stored on the allocation
+ *  itself -- see RentalPaymentAllocation's own type docstring. */
+function PayerAllocationsView({ obligation }: { obligation: RentalPaymentObligation }) {
+  return (
+    <div className="mt-3 space-y-1.5 border-t border-slate-100 pt-3 dark:border-white/10">
+      <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">Split between {obligation.payerAllocations.length} payers</p>
+      {obligation.payerAllocations.map((allocation) => {
+        const ownRecords = obligation.records
+          .filter((r) => r.declaredByGuestId === allocation.payerGuestId)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        const latest = ownRecords[0] ?? null;
+        return (
+          <div key={allocation.id} className="flex items-center justify-between gap-2 text-xs">
+            <span className="text-slate-500 dark:text-slate-400">
+              {allocation.payerGuestId} — {formatMoney(allocation.allocatedAmount, obligation.currency)}
+            </span>
+            <Badge tone={latest ? rentalPaymentStatusTone[latest.status] ?? "neutral" : "neutral"}>
+              {latest ? rentalPaymentStatusLabel[latest.status] ?? latest.status : "Not yet paid"}
+            </Badge>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Self-contained, drop-in reuse of ObligationCard for any screen that has
+ *  already found the single ZR-PAY-LINK-003 RentalPaymentObligation it
+ *  wants to render payment actions for (the agreement-signing "Your offer"
+ *  modal and the "My Rentals" dashboard both matched via
+ *  src/lib/rentalPaymentMatch.ts, rather than duplicating
+ *  ObligationCard/PayObligationModal/InstructionsModal/the Stripe-session-
+ *  start handler a third and fourth time). onChanged is called after any
+ *  action that could have changed the obligation's own status, so the
+ *  caller can refetch. */
+export function SingleObligationPaymentCard({ obligation, onChanged }: { obligation: RentalPaymentObligation; onChanged: () => void }) {
+  const { toast, showToast } = useToast();
+  const [paying, setPaying] = useState(false);
+  const [showInstructions, setShowInstructions] = useState(false);
+  const [startingSession, setStartingSession] = useState(false);
+
+  async function handlePaySecurely() {
+    setStartingSession(true);
+    try {
+      const result = await startRentalPaymentSession(obligation.id);
+      if (result.checkoutUrl) {
+        window.location.href = result.checkoutUrl;
+        return;
+      }
+      showToast("Payment confirmed.");
+      onChanged();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not start secure payment."), "error");
+    } finally {
+      setStartingSession(false);
+    }
+  }
+
+  return (
+    <>
+      <ObligationCard
+        obligation={obligation}
+        onPay={() => setPaying(true)}
+        onViewInstructions={() => setShowInstructions(true)}
+        onPaySecurely={handlePaySecurely}
+        payingSecurely={startingSession}
+      />
+      <PayObligationModal
+        obligation={paying ? obligation : null}
+        onClose={() => setPaying(false)}
+        onRecorded={() => {
+          setPaying(false);
+          showToast("Payment recorded. We recorded that you marked this payment as made. The recipient may still need to confirm receipt.");
+          onChanged();
+        }}
+      />
+      <InstructionsModal obligation={showInstructions ? obligation : null} onClose={() => setShowInstructions(false)} />
+      <Toast toast={toast} />
+    </>
   );
 }
 
@@ -477,6 +601,28 @@ function InstructionsModal({ obligation, onClose }: { obligation: RentalPaymentO
     }
   }
 
+  function formattedBankDetails(): string {
+    if (!instruction?.bankDetails) return "";
+    const schema = resolveBankFieldSchema(instruction.countryCode, instruction.method);
+    return Object.entries(instruction.bankDetails)
+      .map(([key, value]) => {
+        const label = schema.fields.find((f) => f.key === key)?.label ?? key;
+        return `${label}: ${value}`;
+      })
+      .join("\n");
+  }
+
+  async function copyPaymentDetails() {
+    const text = formattedBankDetails();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("Payment details copied.");
+    } catch {
+      showToast("Could not copy to clipboard.", "error");
+    }
+  }
+
   return (
     <Modal open={Boolean(obligation)} onClose={onClose} title="Payment instructions">
       {loading ? (
@@ -499,10 +645,40 @@ function InstructionsModal({ obligation, onClose }: { obligation: RentalPaymentO
               </button>
             </div>
           )}
+          {instruction.bankDetails && Object.keys(instruction.bankDetails).length > 0 && (
+            <div className="rounded-xl bg-primary-50 px-4 py-3 dark:bg-primary-500/10">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-xs font-bold uppercase tracking-wide text-primary-700 dark:text-primary-300">
+                  Payment details
+                </span>
+                <button
+                  onClick={copyPaymentDetails}
+                  aria-label="Copy payment details"
+                  className="text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300"
+                >
+                  Copy
+                </button>
+              </div>
+              <div className="mt-1.5 space-y-1 text-sm font-medium text-slate-800 dark:text-slate-100">
+                {Object.entries(instruction.bankDetails).map(([key, value]) => {
+                  const schema = resolveBankFieldSchema(instruction.countryCode, instruction.method);
+                  const label = schema.fields.find((f) => f.key === key)?.label ?? key;
+                  return (
+                    <p key={key}>
+                      <span className="text-slate-500 dark:text-slate-400">{label}:</span> {value}
+                    </p>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {instruction.additionalInstructions && (
-            <p className="rounded-xl bg-slate-50 px-4 py-2.5 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-              {instruction.additionalInstructions}
-            </p>
+            <div className="rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800">
+              <span className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Notes</span>
+              <p className="mt-1.5 whitespace-pre-wrap text-sm text-slate-700 dark:text-slate-200">
+                {instruction.additionalInstructions}
+              </p>
+            </div>
           )}
           <p className="flex items-center gap-1.5 pt-2 text-xs font-semibold text-primary-700 dark:text-primary-300">
             <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> Confirm the recipient and details before sending funds.

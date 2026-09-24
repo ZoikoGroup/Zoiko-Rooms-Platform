@@ -5,14 +5,16 @@ is the tenant's own view (mark-paid, evidence, disputes), `recipient_router`
 is the landlord/agent's own view (confirm-receipt, disputes), `admin_router`
 is the restricted correction/resolution surface."""
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_admin, get_current_user, require_super_admin
+from app.api.deps import get_current_admin, get_current_user, require_super_admin, require_super_admin_or_payment_staff
 from app.core.config import settings
 from app.core.correlation import get_correlation_id
 from app.core.dispute_evidence_uploads import resolve_dispute_evidence_path
+from app.core.field_encryption import decrypt_json
 from app.crud import external_payment_session as eps_crud
+from app.crud import host_stripe_account as hsa_crud
 from app.crud import payment_connection as payment_connection_crud
 from app.crud import rental_payment as rp_crud
 from app.crud import rental_payment_provider_account as rpa_crud
@@ -31,6 +33,7 @@ from app.schemas.external_payment_session import ExternalPaymentSessionCreateRes
 from app.schemas.payment_connection import PaymentConnectionRead
 from app.schemas.rental_payment import (
     EvidenceArtifactRead,
+    RentalPaymentAllocationsCreate,
     RentalPaymentConfirmReceiptRequest,
     RentalPaymentCorrectionCreate,
     RentalPaymentCorrectionRead,
@@ -46,6 +49,7 @@ from app.schemas.rental_payment import (
     RentalPaymentInstructionSubmit,
     RentalPaymentMarkPaidRequest,
     RentalPaymentObligationRead,
+    RentalPaymentObligationsPage,
     RentalPaymentProviderConfirmRequest,
     RentalPaymentRecordRead,
     RentalPaymentReverseRequest,
@@ -59,7 +63,7 @@ from app.schemas.rental_payment_provider_account import (
     RentalPaymentProviderAccountCreate,
     RentalPaymentProviderAccountRead,
 )
-from app.schemas.rental_transaction_record import RentalTransactionTimelineEntryRead
+from app.schemas.rental_transaction_record import RentalPaymentTimelinePage
 
 router = APIRouter(prefix="/api/users/rental-payments", tags=["user-rental-payments"], dependencies=[Depends(get_current_user)])
 recipient_router = APIRouter(
@@ -67,6 +71,9 @@ recipient_router = APIRouter(
 )
 admin_router = APIRouter(prefix="/api/finance/rental-payments", tags=["finance-rental-payments"], dependencies=[Depends(get_current_admin)])
 webhook_router = APIRouter(prefix="/api/finance", tags=["finance-rental-payment-webhooks"])
+
+# Same pagination ceiling convention as api/routes/public.py:MAX_PUBLIC_LISTINGS_LIMIT.
+MAX_RENTAL_PAYMENT_LIST_LIMIT = 100
 
 
 def _get_own_guest_or_403(db: Session, user: UserAccount) -> Guest:
@@ -85,10 +92,18 @@ def _get_own_party_or_400(db: Session, user: UserAccount) -> Party:
     return party
 
 
-def _to_instruction_read(instruction) -> RentalPaymentInstructionRead:
+def _to_instruction_read(instruction, *, include_bank_details: bool = False) -> RentalPaymentInstructionRead:
+    """include_bank_details=True decrypts encrypted_bank_details into the
+    real field values -- only ever set at a call site that has already
+    verified the caller is authorized to see THIS party's instructions in
+    full (the tenant with a due obligation to this recipient, the
+    recipient's own view, or restricted super-admin review). False
+    (default) matches every other caller's existing masked-only behavior."""
+    bank_details = decrypt_json(instruction.encrypted_bank_details) if include_bank_details else None
     return RentalPaymentInstructionRead(
         id=instruction.id, party_id=instruction.party_id, status=instruction.status, method=instruction.method,
-        recipient_name=instruction.recipient_name, account_identifier_masked=f"******{instruction.account_identifier_last4}",
+        recipient_name=instruction.recipient_name, country_code=instruction.country_code,
+        account_identifier_masked=f"******{instruction.account_identifier_last4}", bank_details=bank_details,
         reference_format=instruction.reference_format, additional_instructions=instruction.additional_instructions,
         verified_at=instruction.verified_at, created_at=instruction.created_at,
         is_high_risk=instruction.is_high_risk, high_risk_reason=instruction.high_risk_reason,
@@ -96,15 +111,27 @@ def _to_instruction_read(instruction) -> RentalPaymentInstructionRead:
     )
 
 
-@router.get("/obligations", response_model=list[RentalPaymentObligationRead])
+@router.get("/obligations", response_model=RentalPaymentObligationsPage)
 def list_my_rental_payment_obligations(
-    obligation_type: str | None = None, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+    obligation_type: str | None = None,
+    agreement_id: int | None = None,
+    occupancy_id: int | None = None,
+    limit: int = Query(default=20, ge=1, le=MAX_RENTAL_PAYMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """ZR-PAY-002 Section 3.1/7/12.2 GET /payments/obligations (tenant view).
     obligation_type is the '[Rent] [Deposit] [Other]' filter (Section 7);
-    omitted means 'All'."""
+    omitted means 'All'. agreement_id scopes to one agreement's own RENT/
+    DEPOSIT pair -- used by the agreement-signing payment screen;
+    occupancy_id is the same for the recurring-rent case -- used by the
+    ongoing 'My Rentals' dashboard."""
     guest = _get_own_guest_or_403(db, user)
-    return rp_crud.list_obligations_for_tenant(db, guest.id, obligation_type=obligation_type)
+    items, total = rp_crud.list_obligations_for_tenant_page(
+        db, guest.id, obligation_type=obligation_type, agreement_id=agreement_id, occupancy_id=occupancy_id,
+        limit=limit, offset=offset,
+    )
+    return RentalPaymentObligationsPage(items=items, limit=limit, offset=offset, total=total, has_more=offset + len(items) < total)
 
 
 @router.get("/obligations/{obligation_id}", response_model=RentalPaymentObligationRead)
@@ -270,15 +297,41 @@ def post_tenant_report_discrepancy(
     )
 
 
-@recipient_router.get("/obligations", response_model=list[RentalPaymentObligationRead])
+@recipient_router.get("/obligations", response_model=RentalPaymentObligationsPage)
 def list_recipient_rental_payment_obligations(
-    obligation_type: str | None = None, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+    obligation_type: str | None = None,
+    agreement_id: int | None = None,
+    limit: int = Query(default=20, ge=1, le=MAX_RENTAL_PAYMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     """ZR-PAY-002 Section 3.2 (landlord/agent view) -- 'Amounts due' /
     'Awaiting confirmation'. Same '[Rent] [Deposit] [Other]' filter as the
-    tenant view (Section 7)."""
+    tenant view (Section 7). agreement_id scopes to one agreement's own
+    RENT/DEPOSIT pair -- used by the host's offer/agreement payment-progress
+    view."""
     party = _get_own_party_or_400(db, user)
-    return rp_crud.list_obligations_for_recipient(db, party.id, obligation_type=obligation_type)
+    items, total = rp_crud.list_obligations_for_recipient_page(
+        db, party.id, obligation_type=obligation_type, agreement_id=agreement_id, limit=limit, offset=offset,
+    )
+    return RentalPaymentObligationsPage(items=items, limit=limit, offset=offset, total=total, has_more=offset + len(items) < total)
+
+
+@recipient_router.post("/obligations/{obligation_id}/payer-allocations", response_model=RentalPaymentObligationRead)
+def post_rental_payment_obligation_payer_allocations(
+    obligation_id: int, payload: RentalPaymentAllocationsCreate,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-PAY-LINK-003 Section 15/Wireframe PAY-17: joint-tenancy payer
+    allocation -- recipient-set only (never the tenant/payer side), and only
+    once, before any payment activity exists against the obligation. See
+    crud/rental_payment.py:create_payer_allocations for the full rule set."""
+    party = _get_own_party_or_400(db, user)
+    obligation = rp_crud.get_obligation_or_404(db, obligation_id)
+    rp_crud.assert_party_is_recipient(obligation, party.id)
+    return rp_crud.create_payer_allocations(
+        db, obligation, [(entry.payer_guest_id, entry.allocated_amount) for entry in payload.allocations],
+    )
 
 
 def _get_recipient_record_or_403(db: Session, record_id: int, party: Party):
@@ -345,13 +398,18 @@ def get_my_rental_payment_instructions(obligation_id: int, user: UserAccount = D
     instruction = rp_crud.get_active_rental_payment_instruction(db, obligation.recipient_party_id)
     if not instruction:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "The recipient has not set up payment instructions yet")
-    return _to_instruction_read(instruction)
+    # This tenant has a real due obligation to this recipient -- the whole
+    # point of this route is letting them see the real details to pay.
+    return _to_instruction_read(instruction, include_bank_details=True)
 
 
 @recipient_router.get("/instructions", response_model=list[RentalPaymentInstructionRead])
 def list_recipient_rental_payment_instructions(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     party = _get_own_party_or_400(db, user)
-    return [_to_instruction_read(i) for i in rp_crud.list_rental_payment_instructions_for_party(db, party.id)]
+    return [
+        _to_instruction_read(i, include_bank_details=True)
+        for i in rp_crud.list_rental_payment_instructions_for_party(db, party.id)
+    ]
 
 
 @recipient_router.put("/instructions", response_model=RentalPaymentInstructionRead, status_code=status.HTTP_201_CREATED)
@@ -366,10 +424,12 @@ def put_submit_rental_payment_instruction(
     party = _get_own_party_or_400(db, user)
     instruction, _raw_code = rp_crud.submit_rental_payment_instruction(
         db, party, method=payload.method, recipient_name=payload.recipient_name,
-        account_identifier=payload.account_identifier, reference_format=payload.reference_format,
+        country_code=payload.country_code, bank_details=payload.bank_details,
+        authorized_recipient_confirmed=payload.authorized_recipient_confirmed,
+        reference_format=payload.reference_format,
         additional_instructions=payload.additional_instructions, correlation_id=get_correlation_id(request),
     )
-    return _to_instruction_read(instruction)
+    return _to_instruction_read(instruction, include_bank_details=True)
 
 
 def _get_own_instruction_or_403(db: Session, instruction_id: int, party: Party):
@@ -401,7 +461,7 @@ def post_confirm_rental_payment_instruction(
     updated = rp_crud.confirm_rental_payment_instruction(
         db, instruction, payload.code, correlation_id=get_correlation_id(request),
     )
-    return _to_instruction_read(updated)
+    return _to_instruction_read(updated, include_bank_details=True)
 
 
 @recipient_router.get("/provider-account", response_model=RentalPaymentProviderAccountRead)
@@ -436,6 +496,25 @@ def post_refresh_rental_payment_provider_account(user: UserAccount = Depends(get
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No connected payment account yet")
     return rpa_crud.refresh_account_status(db, account)
+
+
+@recipient_router.post("/provider-account/resume-onboarding", response_model=RentalPaymentProviderAccountConnectResult)
+def post_resume_rental_payment_provider_account_onboarding(
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """A fresh hosted onboarding link for the CURRENT (already-created)
+    account -- for a host who closed the Stripe tab before finishing.
+    Never creates a new account (unlike POST /provider-account itself) --
+    the account this returns a link for is exactly the one already on
+    file, same stripe_account_id, same status."""
+    party = _get_own_party_or_400(db, user)
+    account = rpa_crud.get_for_party(db, party.id)
+    if not account:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No connected payment account yet")
+    if account.status == "COMPLETE":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This account has already completed onboarding")
+    onboarding_url = rpa_crud.create_onboarding_link(account)
+    return RentalPaymentProviderAccountConnectResult(account=account, onboarding_url=onboarding_url)
 
 
 @recipient_router.post("/provider-account/simulate-onboarding-complete", response_model=RentalPaymentProviderAccountRead)
@@ -510,14 +589,20 @@ def _record_access_or_403(db: Session, record, user: UserAccount) -> tuple[bool,
     return is_tenant, is_recipient
 
 
-@router.get("/records/{record_id}/timeline", response_model=list[RentalTransactionTimelineEntryRead])
-def get_rental_payment_record_timeline(record_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+@router.get("/records/{record_id}/timeline", response_model=RentalPaymentTimelinePage)
+def get_rental_payment_record_timeline(
+    record_id: int,
+    limit: int = Query(default=20, ge=1, le=MAX_RENTAL_PAYMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
     """ZR-PAY-LINK-003 Section 19 GET /rental-payment-records/{id}/timeline
     -- available to either side of the record, same access rule as the
     evidence routes below."""
     record = rp_crud.get_record_or_404(db, record_id)
     _record_access_or_403(db, record, user)
-    return rp_crud.build_record_timeline(db, record)
+    items, total = rp_crud.build_record_timeline(db, record, limit=limit, offset=offset)
+    return RentalPaymentTimelinePage(items=items, limit=limit, offset=offset, total=total, has_more=offset + len(items) < total)
 
 
 @router.get("/records/{record_id}/evidence", response_model=list[EvidenceArtifactRead])
@@ -631,14 +716,16 @@ def post_reverse_rental_payment_record(
 
 
 @admin_router.post(
-    "/records/{record_id}/confirm", response_model=RentalPaymentRecordRead, dependencies=[Depends(require_super_admin)],
+    "/records/{record_id}/confirm", response_model=RentalPaymentRecordRead,
+    dependencies=[Depends(require_super_admin_or_payment_staff)],
 )
 def post_admin_confirm_rental_payment_record(
     record_id: int, payload: RentalPaymentTerminalActionRequest, request: Request,
-    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_super_admin_or_payment_staff), db: Session = Depends(get_db),
 ):
     """ZR-PAY-002 Section 11: 'Confirm receipt -- Admin/Support: No, except
-    explicit correction workflow.' Restricted to super_admin, reason
+    explicit correction workflow.' ZR-PAY-LINK-003 Section 17: 'Controlled
+    support only' -- super_admin or a payment_staff_role admin, reason
     required -- never a routine substitute for the recipient's own
     confirm-receipt action."""
     record = rp_crud.get_record_or_404(db, record_id)
@@ -646,16 +733,18 @@ def post_admin_confirm_rental_payment_record(
 
 
 @admin_router.post(
-    "/records/{record_id}/provider-confirm", response_model=RentalPaymentRecordRead, dependencies=[Depends(require_super_admin)],
+    "/records/{record_id}/provider-confirm", response_model=RentalPaymentRecordRead,
+    dependencies=[Depends(require_super_admin_or_payment_staff)],
 )
 def post_confirm_rental_payment_record_as_provider(
     record_id: int, payload: RentalPaymentProviderConfirmRequest, request: Request,
-    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_super_admin_or_payment_staff), db: Session = Depends(get_db),
 ):
     """ZR-PAY-002 Section 6: status CONFIRMED via PROVIDER_CONFIRMATION
-    provenance -- 'Verified provider event.' Restricted to super_admin, the
-    manual-reconciliation fallback for a confirmation obtained some other
-    way than the automated external-payment-session webhook (see
+    provenance -- 'Verified provider event.' ZR-PAY-LINK-003 Section 17:
+    'Controlled support only' -- super_admin or a payment_staff_role admin,
+    the manual-reconciliation fallback for a confirmation obtained some
+    other way than the automated external-payment-session webhook (see
     crud/rental_payment.py:confirm_receipt_as_provider's own docstring)."""
     record = rp_crud.get_record_or_404(db, record_id)
     return rp_crud.confirm_receipt_as_provider(
@@ -670,8 +759,15 @@ def post_confirm_rental_payment_record_as_provider(
 def get_rental_payment_instructions_pending_review(db: Session = Depends(get_db)):
     """ZR-PAY-002 Section 9.1 step 7: the manual-review queue for
     high-risk payment-instruction changes. Registered ahead of
-    /instructions/{party_id} so this literal path is matched first."""
-    return [_to_instruction_read(i) for i in rp_crud.list_rental_payment_instructions_pending_review(db)]
+    /instructions/{party_id} so this literal path is matched first.
+    include_bank_details=True -- reviewing a destination change without
+    seeing the actual destination would make the review meaningless;
+    super_admin-only, same restricted-not-never posture as Section 17's
+    Permissions Matrix ('View payment destination... Staff: Restricted')."""
+    return [
+        _to_instruction_read(i, include_bank_details=True)
+        for i in rp_crud.list_rental_payment_instructions_pending_review(db)
+    ]
 
 
 @admin_router.post(
@@ -685,7 +781,7 @@ def post_approve_rental_payment_instruction(
     instruction = rp_crud.get_rental_payment_instruction_or_404(db, instruction_id)
     return _to_instruction_read(rp_crud.approve_pending_review_instruction(
         db, admin, instruction, reason=payload.reason, correlation_id=get_correlation_id(request),
-    ))
+    ), include_bank_details=True)
 
 
 @admin_router.post(
@@ -699,26 +795,30 @@ def post_reject_rental_payment_instruction(
     instruction = rp_crud.get_rental_payment_instruction_or_404(db, instruction_id)
     return _to_instruction_read(rp_crud.reject_pending_review_instruction(
         db, admin, instruction, reason=payload.reason, correlation_id=get_correlation_id(request),
-    ))
+    ), include_bank_details=True)
 
 
 @admin_router.get("/instructions/{party_id}", response_model=list[RentalPaymentInstructionRead], dependencies=[Depends(require_super_admin)])
 def get_rental_payment_instructions_for_party(party_id: int, db: Session = Depends(get_db)):
     """ZR-PAY-002 Section 11: 'View payment instructions -- Admin/Support:
     Restricted.'"""
-    return [_to_instruction_read(i) for i in rp_crud.list_rental_payment_instructions_for_party(db, party_id)]
+    return [
+        _to_instruction_read(i, include_bank_details=True)
+        for i in rp_crud.list_rental_payment_instructions_for_party(db, party_id)
+    ]
 
 
 @admin_router.post(
     "/records/{record_id}/corrections", response_model=RentalPaymentCorrectionRead, status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_super_admin)],
+    dependencies=[Depends(require_super_admin_or_payment_staff)],
 )
 def post_append_rental_payment_correction(
     record_id: int, payload: RentalPaymentCorrectionCreate, request: Request,
-    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_super_admin_or_payment_staff), db: Session = Depends(get_db),
 ):
     """ZR-PAY-002 Section 7.2/A10/11: 'Append corrective event: Restricted +
-    reason.'"""
+    reason.' ZR-PAY-LINK-003 Section 17: 'Controlled + audited' for Staff --
+    super_admin or a payment_staff_role admin."""
     record = rp_crud.get_record_or_404(db, record_id)
     return rp_crud.append_correction(
         db, admin, record, field_name=payload.field_name, new_value=payload.new_value, reason=payload.reason,
@@ -766,7 +866,16 @@ async def post_rental_payment_stripe_webhook(request: Request, db: Session = Dep
     Verifies the Stripe-Signature header against
     settings.stripe_rental_payment_webhook_secret (falling back to the
     shared stripe_webhook_secret) before touching anything -- same
-    fail-closed posture as api/routes/listing_fees.py:post_listing_fee_stripe_webhook."""
+    fail-closed posture as api/routes/listing_fees.py:post_listing_fee_stripe_webhook.
+
+    Also the one place account.updated is handled: Stripe's Connect
+    webhooks aren't domain-scoped (an Express account is an Express
+    account), so a single account.updated event here is tried against both
+    rpa_crud's own table (the current rail) and hsa_crud's (the legacy
+    rail) by stripe_account_id -- whichever one owns it applies, the other
+    is a no-op. Without this, onboarding status only ever updates from a
+    host manually clicking 'Refresh status' on a page they'd have to think
+    to reopen -- see rpa_crud.apply_account_updated_event's own docstring."""
     payload = await request.body()
     signature_header = request.headers.get("stripe-signature", "")
     try:
@@ -776,6 +885,22 @@ async def post_rental_payment_stripe_webhook(request: Request, db: Session = Dep
         )
     except Exception:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid webhook signature")
+
+    if event["type"] == "account.updated":
+        account_obj = event["data"]["object"]
+        rpa_crud.apply_account_updated_event(
+            db, stripe_account_id=account_obj["id"],
+            details_submitted=bool(account_obj.get("details_submitted")),
+            charges_enabled=bool(account_obj.get("charges_enabled")),
+            payouts_enabled=bool(account_obj.get("payouts_enabled")),
+        )
+        hsa_crud.apply_account_updated_event(
+            db, stripe_account_id=account_obj["id"],
+            details_submitted=bool(account_obj.get("details_submitted")),
+            charges_enabled=bool(account_obj.get("charges_enabled")),
+            payouts_enabled=bool(account_obj.get("payouts_enabled")),
+        )
+        return {"received": True}
 
     eps_crud.ingest_stripe_webhook_event(db, event, correlation_id=get_correlation_id(request))
     return {"received": True}

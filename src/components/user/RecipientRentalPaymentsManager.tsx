@@ -8,6 +8,7 @@ import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { RentalPaymentEvidenceList } from "@/components/user/RentalPaymentEvidenceList";
+import { COUNTRY_OPTIONS, resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
 import {
   ListingFeePayment,
   ListingFeeRefund,
@@ -40,6 +41,7 @@ import {
   listMyRentalPaymentInstructions,
   listRecipientRentalPaymentObligations,
   refreshRentalPaymentProviderAccount,
+  resumeRentalPaymentProviderAccountOnboarding,
   reportRentalPaymentDiscrepancyAsRecipient,
   requestRentalPaymentProviderAccountChange,
   resendRentalPaymentInstructionCode,
@@ -74,9 +76,18 @@ const TYPE_FILTERS: { value: RentalPaymentObligationType | "ALL"; label: string 
 type Tab = "overview" | "amounts-due" | "records" | "instructions" | "listing-fees";
 const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "RECIPIENT_CONFIRMATION_PENDING", "PAYER_RECORDED", "DISPUTED"]);
 
+// See RentalPaymentsManager.tsx's own OBLIGATIONS_PAGE_LIMIT docstring --
+// same reasoning: the Amounts due/Overview tabs need every open obligation
+// up front, so a full page at the ceiling is fetched first; loadMoreObligations
+// only ever appends further (older) history for the Records tab on top of it.
+const OBLIGATIONS_PAGE_LIMIT = 100;
+
 export function RecipientRentalPaymentsManager() {
   const { toast, showToast } = useToast();
   const [obligations, setObligations] = useState<RentalPaymentObligation[]>([]);
+  const [obligationsTotal, setObligationsTotal] = useState(0);
+  const [hasMoreObligations, setHasMoreObligations] = useState(false);
+  const [loadingMoreObligations, setLoadingMoreObligations] = useState(false);
   const [instructions, setInstructions] = useState<RentalPaymentInstruction[]>([]);
   const [listingFeePayments, setListingFeePayments] = useState<ListingFeePayment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -85,14 +96,31 @@ export function RecipientRentalPaymentsManager() {
   const [reviewing, setReviewing] = useState<{ record: RentalPaymentRecord; obligation: RentalPaymentObligation } | null>(null);
 
   function load() {
-    Promise.all([listRecipientRentalPaymentObligations(), listMyRentalPaymentInstructions(), listMyListingFeePayments()])
-      .then(([o, i, lf]) => {
-        setObligations(o);
+    Promise.all([
+      listRecipientRentalPaymentObligations(undefined, { limit: OBLIGATIONS_PAGE_LIMIT, offset: 0 }),
+      listMyRentalPaymentInstructions(),
+      listMyListingFeePayments(),
+    ])
+      .then(([obligationsPage, i, lf]) => {
+        setObligations(obligationsPage.items);
+        setObligationsTotal(obligationsPage.total);
+        setHasMoreObligations(obligationsPage.hasMore);
         setInstructions(i);
         setListingFeePayments(lf);
       })
       .catch((err) => showToast(errorMessage(err, "Could not load your payments."), "error"))
       .finally(() => setLoading(false));
+  }
+
+  function loadMoreObligations() {
+    setLoadingMoreObligations(true);
+    listRecipientRentalPaymentObligations(undefined, { limit: OBLIGATIONS_PAGE_LIMIT, offset: obligations.length })
+      .then((page) => {
+        setObligations((prev) => [...prev, ...page.items]);
+        setHasMoreObligations(page.hasMore);
+      })
+      .catch((err) => showToast(errorMessage(err, "Could not load more payment records."), "error"))
+      .finally(() => setLoadingMoreObligations(false));
   }
 
   useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -270,6 +298,13 @@ export function RecipientRentalPaymentsManager() {
                 </table>
               </div>
             </Card>
+          )}
+          {hasMoreObligations && (
+            <div className="flex justify-center">
+              <Button size="sm" variant="outline" loading={loadingMoreObligations} onClick={loadMoreObligations}>
+                Load older records ({obligations.length} of {obligationsTotal})
+              </Button>
+            </div>
           )}
         </div>
       )}
@@ -532,6 +567,7 @@ function ProviderAccountManager() {
   const [account, setAccount] = useState<RentalPaymentProviderAccount | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [simulating, setSimulating] = useState(false);
   const [email, setEmail] = useState("");
   const [country, setCountry] = useState("GB");
@@ -540,7 +576,21 @@ function ProviderAccountManager() {
   function load() {
     setLoading(true);
     getRentalPaymentProviderAccount()
-      .then(setAccount)
+      .then((loaded) => {
+        setAccount(loaded);
+        // Stripe's account.updated webhook is the real production path for
+        // status to reach us (see api/routes/rental_payments.py's own
+        // webhook handler) -- but there's no local listener for it in most
+        // dev setups, and even in production the webhook can lag behind
+        // this page load by a few seconds. A silent one-shot refresh here
+        // means a host landing back from onboarding doesn't have to know
+        // to click "Refresh status" themselves. Errors are swallowed --
+        // this is a background nicety, not a user-initiated action, and
+        // the visible "Refresh status" button remains for a manual retry.
+        if (loaded.status !== "COMPLETE") {
+          refreshRentalPaymentProviderAccount().then(setAccount).catch(() => {});
+        }
+      })
       .catch((err) => {
         if (err instanceof ApiError && err.status === 404) {
           setAccount(null);
@@ -580,6 +630,20 @@ function ProviderAccountManager() {
       showToast(errorMessage(err, "Could not refresh your account status."), "error");
     } finally {
       setRefreshing(false);
+    }
+  }
+
+  async function handleResumeOnboarding() {
+    setResuming(true);
+    try {
+      const result = await resumeRentalPaymentProviderAccountOnboarding();
+      if (result.onboardingUrl) {
+        window.location.href = result.onboardingUrl;
+      }
+    } catch (err) {
+      showToast(errorMessage(err, "Could not resume onboarding."), "error");
+    } finally {
+      setResuming(false);
     }
   }
 
@@ -624,6 +688,11 @@ function ProviderAccountManager() {
             <Button size="sm" variant="outline" loading={refreshing} onClick={handleRefresh}>
               Refresh status
             </Button>
+            {account.status !== "COMPLETE" && (
+              <Button size="sm" loading={resuming} onClick={handleResumeOnboarding}>
+                Resume onboarding
+              </Button>
+            )}
             {account.status !== "COMPLETE" && (
               <Button size="sm" variant="ghost" loading={simulating} onClick={handleSimulate}>
                 Simulate onboarding complete (dev)
@@ -784,11 +853,16 @@ function InstructionsManager({ instructions, onChanged }: { instructions: Rental
   const [formOpen, setFormOpen] = useState(false);
   const [method, setMethod] = useState<RentalPaymentMethodCategory>("BANK_TRANSFER");
   const [recipientName, setRecipientName] = useState("");
-  const [accountIdentifier, setAccountIdentifier] = useState("");
+  const [countryCode, setCountryCode] = useState("GB");
+  const [bankDetails, setBankDetails] = useState<Record<string, string>>({});
   const [referenceFormat, setReferenceFormat] = useState("");
   const [additionalInstructions, setAdditionalInstructions] = useState("");
+  const [authorizedRecipientConfirmed, setAuthorizedRecipientConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+
+  const bankFieldSchema = resolveBankFieldSchema(countryCode, method);
+  const isBankTransfer = method === "BANK_TRANSFER";
 
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const [code, setCode] = useState("");
@@ -797,17 +871,22 @@ function InstructionsManager({ instructions, onChanged }: { instructions: Rental
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (!authorizedRecipientConfirmed) {
+      setError("Confirm that these instructions belong to the authorized recipient before saving.");
+      return;
+    }
     setSubmitting(true);
     setError("");
     try {
       const created = await submitRentalPaymentInstruction({
-        method, recipientName, accountIdentifier, referenceFormat, additionalInstructions,
+        method, recipientName, countryCode, bankDetails, authorizedRecipientConfirmed, referenceFormat, additionalInstructions,
       });
       setFormOpen(false);
       setRecipientName("");
-      setAccountIdentifier("");
+      setBankDetails({});
       setReferenceFormat("");
       setAdditionalInstructions("");
+      setAuthorizedRecipientConfirmed(false);
       showToast("We emailed you a verification code. Confirm it below to activate these details.");
       onChanged();
       setConfirmingId(created.id);
@@ -873,7 +952,7 @@ function InstructionsManager({ instructions, onChanged }: { instructions: Rental
                   <Badge tone={rentalPaymentInstructionStatusTone[i.status] ?? "neutral"}>{i.status.replace(/_/g, " ")}</Badge>
                 </div>
                 <p className="mt-0.5 text-xs text-slate-400">
-                  {i.method.replace(/_/g, " ").toLowerCase()} &middot; {i.accountIdentifierMasked}
+                  {i.method.replace(/_/g, " ").toLowerCase()} &middot; {i.countryCode || "—"} &middot; {i.accountIdentifierMasked}
                 </p>
                 {i.status === "PENDING_REVIEW" && (
                   <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
@@ -901,7 +980,14 @@ function InstructionsManager({ instructions, onChanged }: { instructions: Rental
         <form onSubmit={handleSubmit} className="space-y-4">
           {error && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">{error}</p>}
           <Field label="Method *">
-            <select value={method} onChange={(e) => setMethod(e.target.value as RentalPaymentMethodCategory)} className={inputClass}>
+            <select
+              value={method}
+              onChange={(e) => {
+                setMethod(e.target.value as RentalPaymentMethodCategory);
+                setBankDetails({});
+              }}
+              className={inputClass}
+            >
               {METHOD_OPTIONS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
@@ -910,15 +996,57 @@ function InstructionsManager({ instructions, onChanged }: { instructions: Rental
           <Field label="Recipient name *">
             <input required value={recipientName} onChange={(e) => setRecipientName(e.target.value)} className={inputClass} />
           </Field>
-          <Field label="Account / payment ID *" hint="Only the last 4 characters are ever stored or shown to tenants.">
-            <input required minLength={4} value={accountIdentifier} onChange={(e) => setAccountIdentifier(e.target.value)} className={inputClass} />
-          </Field>
+          {isBankTransfer && (
+            <Field label="Country / region *">
+              <select
+                value={countryCode}
+                onChange={(e) => {
+                  setCountryCode(e.target.value);
+                  setBankDetails({});
+                }}
+                className={inputClass}
+              >
+                {COUNTRY_OPTIONS.map((c) => (
+                  <option key={c.code} value={c.code}>{c.label}</option>
+                ))}
+              </select>
+            </Field>
+          )}
+          {bankFieldSchema.fields.map((field) => (
+            <Field key={field.key} label={`${field.label} *`} hint={field.hint}>
+              <input
+                required
+                value={bankDetails[field.key] ?? ""}
+                onChange={(e) => setBankDetails((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                className={inputClass}
+              />
+            </Field>
+          ))}
+          <p className="text-xs text-slate-400">
+            The tenant sees these details in full to pay you -- only the last 4 characters of the primary account
+            field ever appear anywhere else (your own list above, admin review).
+          </p>
           <Field label="Reference format" hint="Optional -- what reference tenants should use.">
             <input value={referenceFormat} onChange={(e) => setReferenceFormat(e.target.value)} className={inputClass} />
           </Field>
-          <Field label="Additional instructions" hint="Optional">
-            <textarea value={additionalInstructions} onChange={(e) => setAdditionalInstructions(e.target.value)} rows={2} className={inputClass} />
+          <Field label="Additional instructions" hint="Optional -- anything else the tenant should know (e.g. payment timing, account name notes).">
+            <textarea
+              value={additionalInstructions}
+              onChange={(e) => setAdditionalInstructions(e.target.value)}
+              rows={3}
+              className={inputClass}
+            />
           </Field>
+          <label className="flex items-start gap-2 text-sm text-slate-700 dark:text-slate-200">
+            <input
+              type="checkbox"
+              required
+              checked={authorizedRecipientConfirmed}
+              onChange={(e) => setAuthorizedRecipientConfirmed(e.target.checked)}
+              className="mt-0.5"
+            />
+            I confirm these instructions belong to the authorized recipient.
+          </label>
           <p className="flex items-start gap-1.5 text-xs text-slate-400">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> Affected tenants will be notified that payment
             instructions changed and asked to review the new details before their next payment.

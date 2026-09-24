@@ -60,6 +60,22 @@ class RentalPaymentRecordRead(CamelModel):
     corrections: list[RentalPaymentCorrectionRead] = []
 
 
+class RentalPaymentAllocationRead(CamelModel):
+    """ZR-PAY-LINK-003 Section 15/Wireframe PAY-17: one co-tenant's share of
+    a joint-tenancy obligation. Deliberately doesn't duplicate a computed
+    'contributed so far' amount/status here -- that's already fully
+    derivable by matching this payer_guest_id against
+    RentalPaymentObligationRead.records[].declared_by_guest_id, the same
+    'nest, don't duplicate' discipline the disputes/corrections nesting
+    above already follows."""
+
+    id: int
+    obligation_id: int
+    payer_guest_id: str
+    allocated_amount: float
+    created_at: datetime
+
+
 class RentalPaymentObligationRead(CamelModel):
     id: int
     obligation_type: str
@@ -76,6 +92,34 @@ class RentalPaymentObligationRead(CamelModel):
     waived_at: datetime | None
     created_at: datetime
     records: list[RentalPaymentRecordRead] = []
+    # ZR-PAY-LINK-003 Section 15/Wireframe PAY-17 -- empty for the ordinary
+    # single-payer obligation (the default).
+    payer_allocations: list[RentalPaymentAllocationRead] = []
+
+
+class RentalPaymentAllocationEntry(CamelModel):
+    payer_guest_id: str
+    allocated_amount: float = Field(gt=0, le=MAX_MONEY_AMOUNT)
+
+
+class RentalPaymentAllocationsCreate(CamelModel):
+    """ZR-PAY-LINK-003 Section 15 POST .../payer-allocations -- the
+    recipient's one-time joint-tenancy split, never tenant-editable. See
+    crud/rental_payment.py:create_payer_allocations for the sum-must-equal-
+    the-obligation's-own-amount and settable-only-once rules."""
+
+    allocations: list[RentalPaymentAllocationEntry]
+
+
+class RentalPaymentObligationsPage(CamelModel):
+    """Paginated envelope for GET /obligations (tenant + recipient views) --
+    same shape as schemas/listing.py:PublicListingsPage."""
+
+    items: list[RentalPaymentObligationRead]
+    limit: int
+    offset: int
+    total: int
+    has_more: bool
 
 
 class RentalPaymentMarkPaidRequest(CamelModel):
@@ -153,7 +197,17 @@ class RentalPaymentEvidenceHoldRead(CamelModel):
 class RentalPaymentInstructionSubmit(CamelModel):
     method: str
     recipient_name: str
-    account_identifier: str = Field(min_length=4, max_length=64)
+    # ZR-PAY-LINK-003 Wireframe D: country_code resolves which structured
+    # field set (services/bank_field_schemas.py) bank_details is validated
+    # against -- e.g. {"sort_code": "12-34-56", "account_number": "12345678"}
+    # for GB, {"iban": "..."} for an IBAN country, {"account_identifier":
+    # "..."} for the generic fallback. Never a single free-text string
+    # anymore -- see crud/rental_payment.py:submit_rental_payment_instruction.
+    country_code: str = Field(min_length=2, max_length=2)
+    bank_details: dict[str, str]
+    # Wireframe D's mandatory checkbox -- must be true or submission is
+    # rejected (400), not merely recorded as false.
+    authorized_recipient_confirmed: bool
     reference_format: str = ""
     additional_instructions: str = ""
 
@@ -168,7 +222,15 @@ class RentalPaymentInstructionRead(CamelModel):
     status: str
     method: str
     recipient_name: str
+    country_code: str = ""
     account_identifier_masked: str
+    # The real structured values, decrypted -- only ever populated for the
+    # three call sites in api/routes/rental_payments.py that are actually
+    # authorized to see this specific party's instructions in full (the
+    # tenant with a due obligation to this recipient, the recipient
+    # themselves, and payment-staff admin review). None everywhere else,
+    # including any list-shaped response.
+    bank_details: dict[str, str] | None = None
     reference_format: str
     additional_instructions: str
     verified_at: datetime | None

@@ -47,8 +47,12 @@ def create_connected_account(db: Session, party: Party, admin: AdminUser, countr
     if get_for_party(db, party.id) is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "This provider already has a Stripe Connect account")
 
+    # 'recipient' configuration: this account only ever RECEIVES a
+    # Transfer from Zoiko's own balance (the separate-charges-and-transfers
+    # payout model this domain uses) -- see
+    # stripe_client.create_connected_account's own docstring.
     stripe_account_id = stripe_client.create_connected_account(
-        country=country, email=email, metadata={"party_id": str(party.id)},
+        country=country, email=email, metadata={"party_id": str(party.id)}, configuration="recipient",
     )
     account = HostStripeAccount(party_id=party.id, stripe_account_id=stripe_account_id, status="ONBOARDING")
     db.add(account)
@@ -71,6 +75,29 @@ def refresh_account_status(db: Session, account: HostStripeAccount, admin: Admin
     status_fields = stripe_client.retrieve_account_status(stripe_account_id=account.stripe_account_id)
     for field, value in status_fields.items():
         setattr(account, field, value)
+    _sync_status(account)
+    account.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+def apply_account_updated_event(db: Session, *, stripe_account_id: str, details_submitted: bool, charges_enabled: bool, payouts_enabled: bool) -> HostStripeAccount | None:
+    """The webhook-driven counterpart to refresh_account_status -- see
+    crud/rental_payment_provider_account.py's own sibling of this function
+    for why this exists (Stripe's account.updated event, not a page needing
+    to be open). No admin/assert_provider_access here: an incoming webhook
+    has no human session behind it, same posture as
+    crud/payment_provider.py:get_system_admin exists to work around for
+    ITS webhook, except this table's own status fields need no admin gate
+    to update from Stripe's own event payload. Returns None when this
+    stripe_account_id matches no HostStripeAccount here at all."""
+    account = db.query(HostStripeAccount).filter(HostStripeAccount.stripe_account_id == stripe_account_id).first()
+    if account is None:
+        return None
+    account.details_submitted = details_submitted
+    account.charges_enabled = charges_enabled
+    account.payouts_enabled = payouts_enabled
     _sync_status(account)
     account.updated_at = datetime.now(timezone.utc)
     db.commit()

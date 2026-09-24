@@ -20,6 +20,7 @@ import {
   PaymentPreview,
   PublicListing,
   RefundEntitlement,
+  RentalPaymentObligation,
   SubletArrangementType,
   SubletRequest,
   SubletRenterLookup,
@@ -39,6 +40,8 @@ import {
   terminationCaseStatusTone,
 } from "@/lib/status";
 import { addMonths, formatCurrency, formatDate } from "@/lib/utils";
+import { matchRentalPaymentObligation } from "@/lib/rentalPaymentMatch";
+import { SingleObligationPaymentCard } from "@/components/user/RentalPaymentsManager";
 import {
   acceptAlternativeChangeTerms,
   acceptOwnMutualSurrender,
@@ -56,6 +59,7 @@ import {
   getOwnRefundEntitlement,
   listMyAutopayMandates,
   listMyChangeRequests,
+  listMyRentalPaymentObligations,
   listOccupancies,
   listOwnConditionReport,
   listOwnTerminationCases,
@@ -190,12 +194,34 @@ export function RentalsManager() {
   // after move-in, or to opt into autopay -- both keyed by agreementId/
   // occupancyId since a renter can have more than one active occupancy.
   const [paymentPreviews, setPaymentPreviews] = useState<Record<number, PaymentPreview>>({});
+  // ZR-PAY-LINK-003: this agreement's own initial-signing RentalPaymentObligations
+  // plus this occupancy's own recurring ones, merged -- keyed by agreementId,
+  // same as paymentPreviews above. Lets each amountDueNow item be matched
+  // (src/lib/rentalPaymentMatch.ts) to the recipient-verified, non-custodial
+  // rail instead of the legacy Card/Pay-now one wherever a confident match
+  // exists.
+  const [rentalPaymentObligations, setRentalPaymentObligations] = useState<Record<number, RentalPaymentObligation[]>>({});
   const [obligationMethods, setObligationMethods] = useState<Record<number, string[]>>({});
   const [selectedMethod, setSelectedMethod] = useState<Record<number, string>>({});
   const [payingObligationId, setPayingObligationId] = useState<number | null>(null);
   const [autopayMandates, setAutopayMandates] = useState<AutopayMandate[]>([]);
   const [autopayBusyOccupancyId, setAutopayBusyOccupancyId] = useState<number | null>(null);
   const [recordFor, setRecordFor] = useState<UserOccupancy | null>(null);
+
+  // ZR-PAY-LINK-003: fetches and merges both scopes' RentalPaymentObligations
+  // for one occupancy's agreement -- separate from `load` so
+  // SingleObligationPaymentCard's onChanged can refresh just this piece
+  // after a payment action, without re-running the whole dashboard load.
+  const loadRentalPaymentObligationsFor = useCallback((agreementId: number, occupancyId: number) => {
+    Promise.all([
+      listMyRentalPaymentObligations(undefined, { agreementId }),
+      listMyRentalPaymentObligations(undefined, { occupancyId }),
+    ])
+      .then(([agreementPage, occupancyPage]) => {
+        setRentalPaymentObligations((prev) => ({ ...prev, [agreementId]: [...agreementPage.items, ...occupancyPage.items] }));
+      })
+      .catch(() => {});
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -212,6 +238,7 @@ export function RentalsManager() {
       await Promise.all(
         active.map(async (occupancy) => {
           const agreementId = occupancy.agreementId!;
+          loadRentalPaymentObligationsFor(agreementId, occupancy.id);
           try {
             const preview = await getOwnAgreementPaymentPreview(agreementId);
             setPaymentPreviews((prev) => ({ ...prev, [agreementId]: preview }));
@@ -866,38 +893,51 @@ export function RentalsManager() {
                   {due.length === 0 ? (
                     <p className="text-xs text-slate-400">Nothing due right now.</p>
                   ) : (
-                    due.map((o) => (
-                      <div key={o.id} className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-sm text-slate-700 dark:text-slate-200">
-                          {o.obligationType === "RENT" ? "Rent" : o.obligationType === "DEPOSIT" ? "Deposit" : o.obligationType}
-                          {" — "}
-                          {formatCurrency(o.amount, o.currency)}
-                          <span className="text-slate-400"> (due {formatDate(o.dueDate)})</span>
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <select
-                            className={`${inputClass} !w-auto py-1.5 text-xs`}
-                            value={selectedMethod[o.id] ?? ""}
-                            onChange={(e) => setSelectedMethod((prev) => ({ ...prev, [o.id]: e.target.value }))}
-                            disabled={!obligationMethods[o.id]?.length}
-                          >
-                            {(obligationMethods[o.id] ?? []).map((m) => (
-                              <option key={m} value={m}>
-                                {PAYMENT_METHOD_LABELS[m] ?? m}
-                              </option>
-                            ))}
-                          </select>
-                          <Button
-                            size="sm"
-                            loading={payingObligationId === o.id}
-                            disabled={!selectedMethod[o.id]}
-                            onClick={() => handlePayObligation(o.id, agreementId)}
-                          >
-                            Pay now
-                          </Button>
+                    due.map((o) => {
+                      const rpObligations = rentalPaymentObligations[agreementId] ?? [];
+                      const match = matchRentalPaymentObligation(o, preview?.amountDueNow ?? [], rpObligations);
+                      if (match) {
+                        return (
+                          <SingleObligationPaymentCard
+                            key={o.id}
+                            obligation={match}
+                            onChanged={() => loadRentalPaymentObligationsFor(agreementId, occupancy.id)}
+                          />
+                        );
+                      }
+                      return (
+                        <div key={o.id} className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-sm text-slate-700 dark:text-slate-200">
+                            {o.obligationType === "RENT" ? "Rent" : o.obligationType === "DEPOSIT" ? "Deposit" : o.obligationType}
+                            {" — "}
+                            {formatCurrency(o.amount, o.currency)}
+                            <span className="text-slate-400"> (due {formatDate(o.dueDate)})</span>
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <select
+                              className={`${inputClass} !w-auto py-1.5 text-xs`}
+                              value={selectedMethod[o.id] ?? ""}
+                              onChange={(e) => setSelectedMethod((prev) => ({ ...prev, [o.id]: e.target.value }))}
+                              disabled={!obligationMethods[o.id]?.length}
+                            >
+                              {(obligationMethods[o.id] ?? []).map((m) => (
+                                <option key={m} value={m}>
+                                  {PAYMENT_METHOD_LABELS[m] ?? m}
+                                </option>
+                              ))}
+                            </select>
+                            <Button
+                              size="sm"
+                              loading={payingObligationId === o.id}
+                              disabled={!selectedMethod[o.id]}
+                              onClick={() => handlePayObligation(o.id, agreementId)}
+                            >
+                              Pay now
+                            </Button>
+                          </div>
                         </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                   <div className="flex items-center justify-between gap-2 border-t border-slate-200 pt-2 dark:border-slate-700">
                     <span className="text-xs text-slate-500 dark:text-slate-400">

@@ -18,7 +18,7 @@ module does on its own."""
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, text
+from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -121,6 +121,18 @@ class RentalPaymentObligation(Base):
     agreement: Mapped["Agreement | None"] = relationship(viewonly=True)
     occupancy: Mapped["Occupancy | None"] = relationship(viewonly=True)
     records: Mapped[list["RentalPaymentRecord"]] = relationship(back_populates="obligation", order_by="RentalPaymentRecord.created_at")
+    # ZR-PAY-LINK-003 Section 15: 'Two tenants, one rent obligation --
+    # Agreement can create payer allocations ... Each payment contribution
+    # records its payer; aggregate obligation status is computed.' Empty for
+    # the ordinary single-payer case (the default, and every obligation that
+    # existed before this table did) -- tenant_guest_id above stays the one
+    # payer of record then, unchanged. When allocations exist, they define
+    # the full set of payers instead; see crud/rental_payment.py:
+    # assert_tenant_owns_obligation and recompute_obligation_status for how
+    # each branch differs.
+    payer_allocations: Mapped[list["RentalPaymentAllocation"]] = relationship(
+        back_populates="obligation", order_by="RentalPaymentAllocation.id",
+    )
 
     @property
     def room(self) -> "Room | None":
@@ -151,6 +163,31 @@ class RentalPaymentObligation(Base):
         if self.obligation_type == "DEPOSIT":
             return resolve_deposit_terminology(self.jurisdiction_code)
         return self.obligation_type.lower()
+
+
+class RentalPaymentAllocation(Base):
+    """ZR-PAY-LINK-003 Section 15: one co-tenant's share of a joint-tenancy
+    obligation. Never tenant-editable -- only set once, at the same
+    agreement/obligation-creation point crud/rental_payment.py:create_obligation
+    itself is called from (never edited afterward: a mid-tenancy reallocation
+    is a new/amended obligation, same 'never in-place' discipline Section 24
+    gives recipient/destination changes). Each payer's actual declarations/
+    confirmations still live as ordinary RentalPaymentRecord rows scoped by
+    their own declared_by_guest_id -- this table only records who owes what
+    share, not the payment history itself."""
+
+    __tablename__ = "rental_payment_allocations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    obligation_id: Mapped[int] = mapped_column(
+        ForeignKey("rental_payment_obligations.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    payer_guest_id: Mapped[str] = mapped_column(ForeignKey("guests.id", ondelete="CASCADE"), nullable=False, index=True)
+    allocated_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    obligation: Mapped["RentalPaymentObligation"] = relationship(back_populates="payer_allocations")
+    payer: Mapped["Guest"] = relationship()
 
 
 class RentalPaymentRecord(Base):
@@ -274,16 +311,22 @@ class RentalPaymentEvidenceHold(Base):
 class RentalPaymentInstruction(Base):
     """ZR-PAY-002 Section 9: the landlord/agent's own payment details for
     receiving rent/deposit directly -- Zoiko never receives, holds or
-    forwards this money, and never stores enough of the account identifier
-    to move any either (only `account_identifier_last4` is ever persisted,
+    forwards this money. `account_identifier_last4` (masked display) and
+    `destination_fingerprint` (one-way hash, novelty detection) follow the
     same AC-33-style masking discipline as
-    models/finance.py:PayoutBeneficiary.account_number_last4). Step-up-authed
-    via a mailed one-time code, same mechanic as PayoutBeneficiary's own
-    confirm step -- kept as its own table rather than a reuse of it because
-    this is a tenant-facing rent/deposit instruction a Party manages for
-    itself, not Zoiko's own outgoing host-payout destination; conflating the
-    two would blur exactly the domain boundary ZR-PAY-002 Section 12.1 draws.
-    At most one ACTIVE row per party (partial unique index below)."""
+    models/finance.py:PayoutBeneficiary.account_number_last4 -- but unlike
+    that table, a tenant actually has to be able to pay these details in
+    full, so `encrypted_bank_details` DOES persist the real structured
+    values (ZR-PAY-LINK-003 Wireframe D's per-country fields), Fernet-
+    encrypted via app/core/field_encryption.py -- this codebase's first
+    at-rest-encrypted field, not the "never store it" discipline everywhere
+    else. Step-up-authed via a mailed one-time code, same mechanic as
+    PayoutBeneficiary's own confirm step -- kept as its own table rather
+    than a reuse of it because this is a tenant-facing rent/deposit
+    instruction a Party manages for itself, not Zoiko's own outgoing
+    host-payout destination; conflating the two would blur exactly the
+    domain boundary ZR-PAY-002 Section 12.1 draws. At most one ACTIVE row
+    per party (partial unique index below)."""
 
     __tablename__ = "rental_payment_instructions"
     __table_args__ = (
@@ -298,8 +341,33 @@ class RentalPaymentInstruction(Base):
     status: Mapped[str] = mapped_column(String(20), default="PENDING_VERIFICATION")
     method: Mapped[str] = mapped_column(String(20), default="BANK_TRANSFER")
     recipient_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # ZR-PAY-LINK-003 Wireframe D "Country / region" -- resolves which
+    # structured field set (services/bank_field_schemas.py) governed
+    # bank_details when this instruction was submitted. Blank for rows
+    # created before this column existed (falls back to the generic schema).
+    country_code: Mapped[str] = mapped_column(String(2), default="")
     account_identifier_last4: Mapped[str] = mapped_column(String(4), nullable=False)
+    # ZR-PAY-LINK-003 Section 14.1/21 'destination novelty' risk signal --
+    # a SHA-256 hex digest of the full account identifier, never the value
+    # itself (same never-store-the-full-value discipline as
+    # account_identifier_last4 above). Lets crud/rental_payment.py:
+    # _assess_instruction_change_risk detect "this exact destination has
+    # never been used by this party before" by hash-equality, without
+    # ever persisting or exposing anything reversible.
+    destination_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     reference_format: Mapped[str] = mapped_column(String(255), default="")
+    # The real structured field values (Wireframe D's "Account details") --
+    # Fernet-encrypted JSON, decrypted only for the tenant/recipient/admin
+    # views that are actually authorized to see this specific party's
+    # instructions in full (see api/routes/rental_payments.py's
+    # _to_instruction_read). Never logged, never included in any list-shaped
+    # response.
+    encrypted_bank_details: Mapped[str] = mapped_column(Text, default="")
+    # Wireframe D's mandatory checkbox -- "I confirm these instructions
+    # belong to the authorized recipient." Required at submission
+    # (crud/rental_payment.py:submit_rental_payment_instruction rejects a
+    # False/missing value), not merely a UI nicety.
+    authorized_recipient_confirmed: Mapped[bool] = mapped_column(default=False)
     additional_instructions: Mapped[str] = mapped_column(String(2000), default="")
     verification_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     verification_code_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

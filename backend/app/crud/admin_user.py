@@ -33,6 +33,7 @@ def create_admin_user(db: Session, data: AdminUserCreate) -> AdminUser:
         phone=data.phone,
         role=data.role,
         dispute_role=data.dispute_role,
+        payment_staff_role=data.payment_staff_role,
     )
     admin.settings = AdminSettings()
     db.add(admin)

@@ -52,8 +52,10 @@ import {
   RentalPaymentInstruction,
   RentalPaymentMethodCategory,
   RentalPaymentObligation,
+  RentalPaymentObligationsPage,
   RentalPaymentProviderAccount,
   RentalPaymentProviderAccountConnectResult,
+  RentalPaymentTimelinePage,
   RentalTransactionRecord,
   RentalTransactionTimelineEntry,
   RenterVerificationStatus,
@@ -633,6 +635,32 @@ export function getHostedRentalTransactionRecord(occupancyId: number): Promise<R
   return apiClientFetch<RentalTransactionRecord>(`/api/users/hosting/occupancies/${occupancyId}/transaction-record`);
 }
 
+/** ZR-ENG-CLR-011 Section 10/ZR-ENG-CLR-004 Section 4.3: confirming move-in
+ *  is a Host commercial action -- previously reachable only from Zoiko's
+ *  internal admin console. Mirrors the gate this action itself evaluates:
+ *  the host must record HANDOVER_READY and POSSESSION_DELIVERED first (the
+ *  renter's own RENTER_RECEIPT confirmation already lives on their Rentals
+ *  page), then move-in-eligibility/confirm-move-in become available. */
+export function getHostedMoveInEligibility(occupancyId: number): Promise<{ eligible: boolean; reasons: string[] }> {
+  return apiClientFetch(`/api/users/hosting/occupancies/${occupancyId}/move-in-eligibility`);
+}
+
+export function confirmHostedMoveIn(occupancyId: number): Promise<Occupancy> {
+  return apiClientFetch<Occupancy>(`/api/users/hosting/occupancies/${occupancyId}/confirm-move-in`, { method: "POST" });
+}
+
+export function prepareHostedHandover(occupancyId: number): Promise<void> {
+  return apiClientFetch(`/api/users/hosting/occupancies/${occupancyId}/handover/prepare`, {
+    method: "POST", body: JSON.stringify({}),
+  });
+}
+
+export function confirmHostedPossessionDelivered(occupancyId: number): Promise<void> {
+  return apiClientFetch(`/api/users/hosting/occupancies/${occupancyId}/handover/possession-delivered`, {
+    method: "POST", body: JSON.stringify({}),
+  });
+}
+
 export interface HostedListingInput {
   name: string;
   roomType: string;
@@ -883,9 +911,18 @@ export async function downloadListingFeeReceipt(paymentId: number): Promise<Blob
 // --- Rental payments: tenant view (ZR-PAY-002 Section 4) ---------------------
 // Evidence/workflow only -- Zoiko Rooms never receives or holds this money.
 
-export function listMyRentalPaymentObligations(obligationType?: RentalPaymentObligation["obligationType"]): Promise<RentalPaymentObligation[]> {
-  const query = obligationType ? `?obligationType=${obligationType}` : "";
-  return apiClientFetch<RentalPaymentObligation[]>(`/api/users/rental-payments/obligations${query}`);
+export function listMyRentalPaymentObligations(
+  obligationType?: RentalPaymentObligation["obligationType"],
+  page?: { limit?: number; offset?: number; agreementId?: number; occupancyId?: number }
+): Promise<RentalPaymentObligationsPage> {
+  const params = new URLSearchParams();
+  if (obligationType) params.set("obligationType", obligationType);
+  if (page?.limit != null) params.set("limit", String(page.limit));
+  if (page?.offset != null) params.set("offset", String(page.offset));
+  if (page?.agreementId != null) params.set("agreementId", String(page.agreementId));
+  if (page?.occupancyId != null) params.set("occupancyId", String(page.occupancyId));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return apiClientFetch<RentalPaymentObligationsPage>(`/api/users/rental-payments/obligations${query}`);
 }
 
 export function getMyRentalPaymentObligation(obligationId: number): Promise<RentalPaymentObligation> {
@@ -951,8 +988,15 @@ export function listRentalPaymentEvidence(recordId: number): Promise<EvidenceArt
 /** ZR-PAY-LINK-003 Section 19: immutable declare/confirm/dispute/correction
  *  timeline for one record -- available to either side of it (tenant or
  *  the authorized recipient), same access rule as the evidence routes. */
-export function getRentalPaymentRecordTimeline(recordId: number): Promise<RentalTransactionTimelineEntry[]> {
-  return apiClientFetch<RentalTransactionTimelineEntry[]>(`/api/users/rental-payments/records/${recordId}/timeline`);
+export function getRentalPaymentRecordTimeline(
+  recordId: number,
+  page?: { limit?: number; offset?: number }
+): Promise<RentalPaymentTimelinePage> {
+  const params = new URLSearchParams();
+  if (page?.limit != null) params.set("limit", String(page.limit));
+  if (page?.offset != null) params.set("offset", String(page.offset));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return apiClientFetch<RentalPaymentTimelinePage>(`/api/users/rental-payments/records/${recordId}/timeline${query}`);
 }
 
 export function downloadRentalPaymentEvidence(recordId: number, artifactId: number): Promise<Blob> {
@@ -969,10 +1013,16 @@ export function downloadRentalPaymentEvidence(recordId: number, artifactId: numb
 // managing payment instructions. Same evidence/workflow-only boundary.
 
 export function listRecipientRentalPaymentObligations(
-  obligationType?: RentalPaymentObligation["obligationType"]
-): Promise<RentalPaymentObligation[]> {
-  const query = obligationType ? `?obligationType=${obligationType}` : "";
-  return apiClientFetch<RentalPaymentObligation[]>(`/api/users/rental-payments/recipient/obligations${query}`);
+  obligationType?: RentalPaymentObligation["obligationType"],
+  page?: { limit?: number; offset?: number; agreementId?: number }
+): Promise<RentalPaymentObligationsPage> {
+  const params = new URLSearchParams();
+  if (obligationType) params.set("obligationType", obligationType);
+  if (page?.limit != null) params.set("limit", String(page.limit));
+  if (page?.offset != null) params.set("offset", String(page.offset));
+  if (page?.agreementId != null) params.set("agreementId", String(page.agreementId));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return apiClientFetch<RentalPaymentObligationsPage>(`/api/users/rental-payments/recipient/obligations${query}`);
 }
 
 /** amount omitted means 'confirm the full declared amount'. A lesser
@@ -1021,7 +1071,9 @@ export function listMyRentalPaymentInstructions(): Promise<RentalPaymentInstruct
 export function submitRentalPaymentInstruction(payload: {
   method: RentalPaymentMethodCategory;
   recipientName: string;
-  accountIdentifier: string;
+  countryCode: string;
+  bankDetails: Record<string, string>;
+  authorizedRecipientConfirmed: boolean;
   referenceFormat?: string;
   additionalInstructions?: string;
 }): Promise<RentalPaymentInstruction> {
@@ -1065,6 +1117,16 @@ export function refreshRentalPaymentProviderAccount(): Promise<RentalPaymentProv
   return apiClientFetch<RentalPaymentProviderAccount>("/api/users/rental-payments/recipient/provider-account/refresh", {
     method: "POST",
   });
+}
+
+/** A fresh hosted onboarding link for the account already on file -- for a
+ *  host who closed the Stripe tab before finishing. Never creates a new
+ *  account (unlike connectRentalPaymentProviderAccount). */
+export function resumeRentalPaymentProviderAccountOnboarding(): Promise<RentalPaymentProviderAccountConnectResult> {
+  return apiClientFetch<RentalPaymentProviderAccountConnectResult>(
+    "/api/users/rental-payments/recipient/provider-account/resume-onboarding",
+    { method: "POST" }
+  );
 }
 
 /** Dev/test-only -- refuses once real Stripe credentials are configured

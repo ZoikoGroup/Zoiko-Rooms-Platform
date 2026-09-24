@@ -470,7 +470,7 @@ class TestA5InstructionChangeStepUpAndRiskControls:
 
         instruction, code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            account_identifier="00112233449999",
+            country_code="ZZ", bank_details={"account_identifier": "00112233449999"}, authorized_recipient_confirmed=True,
         )
         # Step-up auth (the mailed code) is still required and still checked.
         confirmed = rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)

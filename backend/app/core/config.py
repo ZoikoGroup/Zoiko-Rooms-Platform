@@ -11,6 +11,14 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 # ENVIRONMENT=production is set alongside any of these, the app refuses to boot.
 PLACEHOLDER_JWT_SECRETS = ("dev-secret-change-me", "change-me", "changeme", "secret")
 PLACEHOLDER_PASSWORDS = ("change-this-password", "change-me", "changeme", "password", "password123")
+# A real, valid Fernet key (unlike JWT_SECRET/SEED_ADMIN_PASSWORD's plain
+# placeholder strings, Fernet requires exactly 32 url-safe base64 bytes --
+# an arbitrary human-readable placeholder string would just crash
+# encrypt_json/decrypt_json in every dev/test run). Publicly known and
+# committed to source control by design -- it must never be the key any
+# real deployment actually uses, same as every other "change-this" default.
+DEV_FIELD_ENCRYPTION_KEY = "r9v5IfBTi6JMliPvOaRnR34vW4O8OP5Gq6X9NDpMAgQ="
+PLACEHOLDER_FIELD_ENCRYPTION_KEYS = (DEV_FIELD_ENCRYPTION_KEY,)
 
 
 class Settings(BaseSettings):
@@ -23,6 +31,14 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440
+    # ZR-PAY-LINK-003 Section 8.1: "Sensitive financial fields are encrypted
+    # and masked" -- the key for app/core/field_encryption.py's Fernet
+    # helper (RentalPaymentInstruction.encrypted_bank_details, the first
+    # at-rest-encrypted field in this codebase). A dev-only placeholder here
+    # is fine (see _validate_production below); generate a real one with
+    # `python -c "from cryptography.fernet import Fernet;
+    # print(Fernet.generate_key().decode())"` for any real deployment.
+    field_encryption_key: str = DEV_FIELD_ENCRYPTION_KEY
     # Comma-separated allow-list. Includes the authenticated platform frontend
     # and the public marketing site (local dev + deployed) so the anonymous
     # assistant widget can call /api/public/assistant cross-origin.
@@ -94,8 +110,11 @@ class Settings(BaseSettings):
     # without any other code change.
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
-    stripe_connect_refresh_url: str = "http://localhost:3001/host/payouts/refresh"
-    stripe_connect_return_url: str = "http://localhost:3001/host/payouts/return"
+    # Both point at RecipientRentalPaymentsManager (the only page that
+    # renders ProviderAccountManager / "Connect payment account" /
+    # "Resume onboarding") -- there is no dedicated /host/payouts page.
+    stripe_connect_refresh_url: str = "http://localhost:3001/account/host/payments"
+    stripe_connect_return_url: str = "http://localhost:3001/account/host/payments"
     # ZR-PAY-002 Section 6/13: the Listing Fee is a separate Zoiko-own-account
     # checkout from the rent/payout domain above (see models/listing_fee.py's
     # own module docstring for why). Ops may register it as its own Stripe
@@ -215,6 +234,15 @@ class Settings(BaseSettings):
             problems.append("SEED_ADMIN_PASSWORD is unset or is a known placeholder")
         if len(self.seed_admin_password) < 12:
             problems.append("SEED_ADMIN_PASSWORD is shorter than 12 characters")
+        if not self.field_encryption_key or self.field_encryption_key.strip() in PLACEHOLDER_FIELD_ENCRYPTION_KEYS:
+            problems.append("FIELD_ENCRYPTION_KEY is unset or is the known placeholder")
+        else:
+            from cryptography.fernet import Fernet
+
+            try:
+                Fernet(self.field_encryption_key.encode("utf-8"))
+            except Exception:
+                problems.append("FIELD_ENCRYPTION_KEY is not a valid Fernet key")
         if problems:
             raise ValueError(
                 "Refusing to boot in production due to insecure configuration:\n- " + "\n- ".join(problems)

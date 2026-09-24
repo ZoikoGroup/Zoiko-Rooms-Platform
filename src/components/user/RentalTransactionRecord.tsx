@@ -19,6 +19,8 @@ import {
   occupancyStatusTone,
   offerStatusLabel,
   offerStatusTone,
+  rentalPaymentStatusLabel,
+  rentalPaymentStatusTone,
   renterVerificationStatusTone,
   simulatedPaymentStatusTone,
   subletRequestStatusLabel,
@@ -181,6 +183,58 @@ export function RentalTransactionRecord({ occupancyId, role }: { occupancyId: nu
           </div>
         )}
       </Card>
+
+      {record.rentalPaymentObligations.length > 0 && (
+        <Card>
+          <h3 className="font-heading text-sm font-bold text-primary-900 dark:text-white">Rent &amp; deposit payments</h3>
+          <div className="mt-2 space-y-3">
+            {record.rentalPaymentObligations.map((obligation) => (
+              <div key={obligation.id} className="rounded-xl border border-slate-100 p-3 dark:border-white/10">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    {obligation.displayLabel} — {formatCurrency(obligation.amount, obligation.currency)} due{" "}
+                    {formatDate(obligation.dueDate)}
+                  </span>
+                  <Badge tone={rentalPaymentStatusTone[obligation.status] ?? "neutral"}>
+                    {rentalPaymentStatusLabel[obligation.status] ?? obligation.status}
+                  </Badge>
+                </div>
+                {obligation.records.length > 0 && (
+                  <div className="mt-2 space-y-2 border-t border-slate-100 pt-2 dark:border-white/10">
+                    {obligation.records.map((paymentRecord) => (
+                      <div key={paymentRecord.id} className="space-y-1 text-xs text-slate-500 dark:text-slate-400">
+                        <div className="flex items-center justify-between gap-2">
+                          <span>
+                            Declared {formatCurrency(paymentRecord.declaredAmount, paymentRecord.declaredCurrency)} on{" "}
+                            {formatDate(paymentRecord.declaredDate)}
+                            {paymentRecord.confirmedAmount != null &&
+                              ` — confirmed ${formatCurrency(paymentRecord.confirmedAmount, paymentRecord.declaredCurrency)}`}
+                          </span>
+                          <Badge tone={rentalPaymentStatusTone[paymentRecord.status] ?? "neutral"}>
+                            {rentalPaymentStatusLabel[paymentRecord.status] ?? paymentRecord.status}
+                          </Badge>
+                        </div>
+                        {paymentRecord.disputes.map((dispute) => (
+                          <p key={dispute.id} className="pl-3 text-rose-600 dark:text-rose-300">
+                            Dispute: {dispute.reasonCode.replace(/_/g, " ").toLowerCase()} —{" "}
+                            {dispute.status === "RESOLVED" ? `Resolved: ${dispute.resolutionNotes || "no notes given"}` : "Open"}
+                          </p>
+                        ))}
+                        {paymentRecord.corrections.map((correction) => (
+                          <p key={correction.id} className="pl-3 text-slate-400">
+                            Correction: {correction.fieldName} {correction.previousValue} → {correction.newValue}
+                            {correction.reason && ` (${correction.reason})`}
+                          </p>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {(record.handoverEvents.length > 0 || record.activationDecisions.length > 0) && (
         <Card>
