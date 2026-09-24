@@ -16,6 +16,7 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { Switch } from "@/components/ui/Switch";
 import { apiClientFetch } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import {
@@ -134,6 +135,24 @@ export function TrustSafetyManager() {
       showToast(action === "approve" ? "Market release activated" : "Market release disabled");
     } catch {
       showToast(`Failed to ${action} market release`);
+    }
+  }
+
+  // Section 14 automation toggles (backend/app/services/policy.py) -- default
+  // True/manual when the key is absent from policyOverrides, same as the
+  // backend's own get_policy() fallback. Always sends the FULL override set
+  // (set_market_release_policy_overrides replaces, never patches).
+  async function setAutomationPolicy(release: MarketRelease, key: string, requiresManual: boolean) {
+    try {
+      const overrides = { ...release.policyOverrides, [key]: requiresManual };
+      const updated = await apiClientFetch<MarketRelease>(`/api/market-releases/${release.id}/policy`, {
+        method: "PUT",
+        body: JSON.stringify({ overrides }),
+      });
+      setReleases((prev) => prev.map((r) => (r.id === release.id ? updated : r)));
+      showToast("Automation setting updated");
+    } catch {
+      showToast("Failed to update automation setting");
     }
   }
 
@@ -348,24 +367,51 @@ export function TrustSafetyManager() {
           {releases.map((release) => (
             <div
               key={release.id}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-white/10"
+              className="space-y-3 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-white/10"
             >
-              <div>
-                <p className="text-sm font-semibold text-primary-900 dark:text-white">{release.jurisdiction}</p>
-                <p className="text-xs text-slate-500 dark:text-slate-400">Min stay: {release.minStayNights} nights</p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-semibold text-primary-900 dark:text-white">{release.jurisdiction}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Min stay: {release.minStayNights} nights</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge tone={marketReleaseStatusTone[release.status]}>{marketReleaseStatusLabel[release.status]}</Badge>
+                  {release.status !== "active" && (
+                    <Button size="sm" variant="primary" onClick={() => setReleaseStatus(release.id, "approve")}>
+                      Activate
+                    </Button>
+                  )}
+                  {release.status === "active" && (
+                    <Button size="sm" variant="outline" onClick={() => setReleaseStatus(release.id, "disable")}>
+                      Disable
+                    </Button>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Badge tone={marketReleaseStatusTone[release.status]}>{marketReleaseStatusLabel[release.status]}</Badge>
-                {release.status !== "active" && (
-                  <Button size="sm" variant="primary" onClick={() => setReleaseStatus(release.id, "approve")}>
-                    Activate
-                  </Button>
-                )}
-                {release.status === "active" && (
-                  <Button size="sm" variant="outline" onClick={() => setReleaseStatus(release.id, "disable")}>
-                    Disable
-                  </Button>
-                )}
+              <div className="space-y-2 border-t border-slate-200 pt-3 dark:border-white/10">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                  Automation — skips the manual click once every compliance gate already passes
+                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    Auto-create &amp; send offers once a host approves an application
+                  </span>
+                  <Switch
+                    checked={release.policyOverrides["offer.requires_manual_creation"] === false}
+                    onChange={(auto) => setAutomationPolicy(release, "offer.requires_manual_creation", !auto)}
+                    label="Auto-create offers"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    Auto-create the agreement once a renter accepts an offer
+                  </span>
+                  <Switch
+                    checked={release.policyOverrides["agreement.requires_manual_creation"] === false}
+                    onChange={(auto) => setAutomationPolicy(release, "agreement.requires_manual_creation", !auto)}
+                    label="Auto-create agreements"
+                  />
+                </div>
               </div>
             </div>
           ))}

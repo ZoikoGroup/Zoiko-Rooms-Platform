@@ -22,6 +22,19 @@ from app.models.room import Room
 from app.models.user_account import UserAccount
 from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
 
+_PDF_BYTES = b"%PDF-1.4 fake property evidence content"
+
+
+def _declare(db: Session, user: UserAccount, room: Room, *, evidence_ref: str = "deed.pdf") -> PropertyVerification:
+    """declare_property_verification now requires a real uploaded document
+    alongside evidence_ref -- same file-metadata shape
+    save_property_verification_document returns."""
+    return crud.declare_property_verification(
+        db, user, room, evidence_ref=evidence_ref,
+        stored_filename="test-stored.pdf", original_filename="deed.pdf",
+        content_type="application/pdf", file_size=len(_PDF_BYTES),
+    )
+
 
 def _make_host_with_room(db: Session, *, email: str = "pvhost@test.com") -> tuple[UserAccount, Room]:
     party = Party(party_type="provider", status="active", jurisdiction="IN")
@@ -42,7 +55,7 @@ def _make_host_with_room(db: Session, *, email: str = "pvhost@test.com") -> tupl
 class TestDeclarePropertyVerificationCrud:
     def test_declare_creates_a_pending_record(self, db_session: Session):
         user, room = _make_host_with_room(db_session)
-        record = crud.declare_property_verification(db_session, user, room, evidence_ref="title-deed.pdf")
+        record = _declare(db_session, user, room, evidence_ref="title-deed.pdf")
         assert record.status == "pending"
         assert record.party_id == user.party_id
         assert record.room_id == room.id
@@ -61,20 +74,20 @@ class TestDeclarePropertyVerificationCrud:
         db_session.commit()
 
         with pytest.raises(HTTPException) as exc_info:
-            crud.declare_property_verification(db_session, user, other_room, evidence_ref="x.pdf")
+            _declare(db_session, user, other_room, evidence_ref="x.pdf")
         assert exc_info.value.status_code == 403
 
     def test_declare_rejects_blank_evidence_ref(self, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-blank@test.com")
         with pytest.raises(HTTPException) as exc_info:
-            crud.declare_property_verification(db_session, user, room, evidence_ref="   ")
+            _declare(db_session, user, room, evidence_ref="   ")
         assert exc_info.value.status_code == 400
 
 
 class TestVerifyRejectRequestEvidenceRevoke:
     def _make_pending(self, db: Session) -> PropertyVerification:
         user, room = _make_host_with_room(db, email=f"pv-lifecycle-{id(db)}@test.com")
-        return crud.declare_property_verification(db, user, room, evidence_ref="deed.pdf")
+        return _declare(db, user, room)
 
     def test_verify_sets_status_verified_at_and_a_365_day_expiry(self, db_session: Session):
         record = self._make_pending(db_session)
@@ -132,7 +145,7 @@ class TestGetValidPropertyVerificationForRoom:
 
     def test_none_for_a_pending_record(self, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-valid-pending@test.com")
-        crud.declare_property_verification(db_session, user, room, evidence_ref="deed.pdf")
+        _declare(db_session, user, room)
         assert crud.get_valid_property_verification_for_room(db_session, room.id) is None
 
     def test_none_for_an_expired_record(self, db_session: Session):
@@ -164,11 +177,13 @@ class TestPropertyVerificationRoutes:
         user, room = _make_host_with_room(db_session, email="pv-route-owner@test.com")
         r = client.post(
             f"/api/users/hosting/rooms/{room.id}/property-verifications",
-            json={"roomId": room.id, "evidenceRef": "deed.pdf"},
+            data={"evidence_ref": "deed.pdf"},
+            files={"file": ("deed.pdf", _PDF_BYTES, "application/pdf")},
             cookies=auth_user_cookie(user),
         )
         assert r.status_code == 201, r.text
         assert r.json()["status"] == "pending"
+        assert r.json()["hasDocument"] is True
 
     def test_host_cannot_submit_for_a_room_they_dont_own(self, client, db_session: Session):
         user, _room = _make_host_with_room(db_session, email="pv-route-outsider@test.com")
@@ -184,14 +199,15 @@ class TestPropertyVerificationRoutes:
 
         r = client.post(
             f"/api/users/hosting/rooms/{other_room.id}/property-verifications",
-            json={"roomId": other_room.id, "evidenceRef": "deed.pdf"},
+            data={"evidence_ref": "deed.pdf"},
+            files={"file": ("deed.pdf", _PDF_BYTES, "application/pdf")},
             cookies=auth_user_cookie(user),
         )
         assert r.status_code == 403, r.text
 
     def test_host_cannot_view_another_hosts_property_verifications(self, client, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-route-viewer-owner@test.com")
-        crud.declare_property_verification(db_session, user, room, evidence_ref="deed.pdf")
+        _declare(db_session, user, room)
         outsider, _ = _make_host_with_room(db_session, email="pv-route-viewer-outsider@test.com")
 
         r = client.get(f"/api/users/hosting/rooms/{room.id}/property-verifications", cookies=auth_user_cookie(outsider))
@@ -199,7 +215,7 @@ class TestPropertyVerificationRoutes:
 
     def test_admin_can_verify_a_host_declared_record(self, client, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-route-admin-verify@test.com")
-        declared = crud.declare_property_verification(db_session, user, room, evidence_ref="deed.pdf")
+        declared = _declare(db_session, user, room)
         super_admin = _make_admin(db_session, email="pv-route-super@test.com", role="super_admin")
 
         r = client.post(
@@ -210,7 +226,7 @@ class TestPropertyVerificationRoutes:
 
     def test_plain_admin_cannot_verify(self, client, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-route-plain@test.com")
-        declared = crud.declare_property_verification(db_session, user, room, evidence_ref="deed.pdf")
+        declared = _declare(db_session, user, room)
         admin = _make_admin(db_session, email="pv-route-plain-admin@test.com", role="admin")
 
         r = client.post(
@@ -220,7 +236,7 @@ class TestPropertyVerificationRoutes:
 
     def test_admin_can_reject_with_notes(self, client, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-route-reject@test.com")
-        declared = crud.declare_property_verification(db_session, user, room, evidence_ref="deed.pdf")
+        declared = _declare(db_session, user, room)
         super_admin = _make_admin(db_session, email="pv-route-reject-super@test.com", role="super_admin")
 
         r = client.post(
@@ -233,7 +249,7 @@ class TestPropertyVerificationRoutes:
 
     def test_admin_can_request_additional_evidence(self, client, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-route-more-evidence@test.com")
-        declared = crud.declare_property_verification(db_session, user, room, evidence_ref="deed.pdf")
+        declared = _declare(db_session, user, room)
         super_admin = _make_admin(db_session, email="pv-route-more-evidence-super@test.com", role="super_admin")
 
         r = client.post(
@@ -246,7 +262,7 @@ class TestPropertyVerificationRoutes:
 
     def test_admin_can_revoke_a_verified_record(self, client, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-route-revoke@test.com")
-        declared = crud.declare_property_verification(db_session, user, room, evidence_ref="deed.pdf")
+        declared = _declare(db_session, user, room)
         super_admin = _make_admin(db_session, email="pv-route-revoke-super@test.com", role="super_admin")
         client.post(f"/api/verification/property-verifications/{declared.id}/verify", cookies=auth_admin_cookie(super_admin))
 
@@ -260,7 +276,7 @@ class TestPropertyVerificationRoutes:
 
     def test_admin_can_list_verifications_for_a_room(self, client, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-route-list@test.com")
-        crud.declare_property_verification(db_session, user, room, evidence_ref="deed.pdf")
+        _declare(db_session, user, room)
         admin = _make_admin(db_session, email="pv-route-list-admin@test.com", role="admin")
 
         r = client.get(f"/api/verification/property-verifications/room/{room.id}", cookies=auth_admin_cookie(admin))
@@ -279,7 +295,7 @@ class TestAuditEventsAreLoggedOnce:
         from app.models.audit import AuditEvent
 
         user, room = _make_host_with_room(db_session, email="pv-audit-verify@test.com")
-        declared = crud.declare_property_verification(db_session, user, room, evidence_ref="deed.pdf")
+        declared = _declare(db_session, user, room)
         super_admin = _make_admin(db_session, email="pv-audit-verify-super@test.com", role="super_admin")
 
         client.post(f"/api/verification/property-verifications/{declared.id}/verify", cookies=auth_admin_cookie(super_admin))

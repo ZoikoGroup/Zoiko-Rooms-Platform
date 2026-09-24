@@ -1,11 +1,13 @@
 """ZR-ENG-CLR-012: admin-facing Verification Operations routes. Manual-review
 only in this MVP -- see crud/occupancy_eligibility.py."""
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, require_super_admin
 from app.core.correlation import get_correlation_id
+from app.crud import identity_verification as identity_verification_crud
 from app.crud import occupancy_eligibility as crud
 from app.crud import property_compliance as compliance_crud
 from app.crud import property_verification as property_verification_crud
@@ -13,6 +15,7 @@ from app.crud import screening as screening_crud
 from app.crud.audit import log_audit_event
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
+from app.models.identity_verification import IdentityVerification
 from app.schemas.verification import (
     OccupancyEligibilityCheckCreate,
     OccupancyEligibilityCheckRead,
@@ -170,6 +173,31 @@ def post_resume_property_compliance_credential(
 @router.get("/property-verifications/room/{room_id}", response_model=list[PropertyVerificationRead])
 def get_property_verifications_for_room(room_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     return property_verification_crud.list_property_verifications_for_room(db, room_id)
+
+
+@router.get("/property-verifications/{verification_id}/document")
+def download_property_verification_document(
+    verification_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """Admin-side counterpart to user_hosting.py's own download route --
+    same streaming shape, no ownership check since any admin may review."""
+    from fastapi.responses import FileResponse
+
+    from app.core.property_verification_uploads import resolve_property_verification_document_path
+
+    record = property_verification_crud.get_property_verification_or_404(db, verification_id)
+    if not record.document_file_path:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No document was uploaded for this verification")
+
+    path = resolve_property_verification_document_path(record.document_file_path)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored document could not be found")
+
+    return FileResponse(
+        path,
+        media_type=record.document_file_content_type or "application/octet-stream",
+        filename=record.document_file_original_name or "document",
+    )
 
 
 @router.post(

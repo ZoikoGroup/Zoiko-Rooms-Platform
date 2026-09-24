@@ -75,7 +75,9 @@ def _user_for_party(db: Session, party_id: int) -> UserAccount | None:
     return db.scalar(select(UserAccount).where(UserAccount.party_id == party_id, UserAccount.is_active.is_(True)))
 
 
-def verify_identity_verification(db: Session, record: IdentityVerification, verifier: AdminUser) -> IdentityVerification:
+def verify_identity_verification(
+    db: Session, record: IdentityVerification, verifier: AdminUser, notes: str = ""
+) -> IdentityVerification:
     if verifier.role != "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
     now = datetime.now(timezone.utc)
@@ -83,6 +85,7 @@ def verify_identity_verification(db: Session, record: IdentityVerification, veri
     record.verified_at = now
     record.expires_at = now + timedelta(days=IDENTITY_VERIFICATION_VALIDITY_DAYS)
     record.verifier_admin_id = verifier.id
+    record.verifier_notes = notes
     record.updated_at = now
 
     user = _user_for_party(db, record.party_id)
@@ -223,6 +226,12 @@ def submit_identity_verification_for_user(
     db.add(record)
     db.flush()
 
+    ocr_outcome = _run_ocr_check(db, record)
+    if ocr_outcome is not None:
+        db.commit()
+        db.refresh(record)
+        return record
+
     message = f"{user_account.full_name} submitted a {document_type.replace('_', ' ')} for review."
     if duplicate_of_verification_id is not None:
         message += (
@@ -240,7 +249,146 @@ def submit_identity_verification_for_user(
 
     db.commit()
     db.refresh(record)
+
     return record
+
+
+def _run_ocr_check(db: Session, record: IdentityVerification) -> str | None:
+    """Dispatches to the real, local OCR check (services/document_ocr.py)
+    appropriate for this record's category. Returns the outcome ("verified"
+    or "additional_evidence_required") if OCR actually ran and decided
+    something, so the caller can skip the normal "pending review"
+    notification -- or None if the record should stay "pending" as normal
+    (OCR unavailable/errored, or category == "other", which has no
+    checkable content at all). Fails OPEN (returns None) only for infra
+    problems -- never for a real bad result."""
+    from app.services import document_ocr
+
+    if record.document_category not in ("identity", "address"):
+        return None
+    if not document_ocr.is_available():
+        return None
+
+    if record.document_category == "identity":
+        return _run_identity_ocr_check(db, record, document_ocr)
+    return _run_address_ocr_check(db, record, document_ocr)
+
+
+def _reroute_to_additional_evidence(db: Session, record: IdentityVerification, note: str) -> str:
+    """Shared by both OCR checks below -- same real notification+email path
+    a human admin's request_additional_evidence produces."""
+    record.status = "additional_evidence_required"
+    record.verifier_notes = note
+
+    user = _user_for_party(db, record.party_id)
+    if user:
+        notif_crud.notify_user(
+            db, user.id,
+            title="Please re-upload your document",
+            message=note,
+            notification_type="identity_verification.additional_evidence_required",
+            related_entity_type="identity_verification", related_entity_id=str(record.id),
+        )
+        send_identity_verification_additional_evidence_email(user.email, user.full_name, note)
+    return "additional_evidence_required"
+
+
+def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_ocr) -> str | None:
+    """A genuine match at or above that document type's own confidence
+    threshold (document_ocr.confidence_threshold_for) -- plus, for Aadhaar,
+    a genuinely valid Verhoeff checksum, and no conflict with whatever
+    number the user typed themselves -- auto-verifies for real, using the
+    same real crud path (and same real IDENTITY VerificationCredential) a
+    human admin's approval click produces: this is a real check actually
+    succeeding, not a blind accept, so completing it automatically is
+    honest. Any of those failing reroutes to re-upload."""
+    from app.core.identity_uploads import resolve_identity_document_path
+    from app.crud.payment_provider import get_system_admin
+
+    try:
+        file_path = resolve_identity_document_path(record.document_file_path)
+        matched_number, confidence = document_ocr.extract_and_score(file_path.read_bytes(), record.document_type)
+    except Exception:
+        return None
+
+    record.ocr_extracted_number = matched_number
+    record.ocr_confidence = confidence
+    db.flush()
+
+    doc_label = record.document_type.replace('_', ' ')
+    threshold = document_ocr.confidence_threshold_for(record.document_type)
+    typed_number = (record.encrypted_reference or "").replace(" ", "").upper()
+
+    reject_reason: str | None = None
+    if not matched_number or confidence < threshold:
+        reject_reason = (
+            f"Automated scan couldn't clearly read a valid {doc_label} number from this photo "
+            f"(confidence {confidence:.0f}%, below the {threshold:.0f}% minimum)."
+        )
+    elif record.document_type == "aadhaar" and not document_ocr.is_valid_aadhaar_checksum(matched_number):
+        # Format-matched (12 digits) but fails the real UIDAI checksum --
+        # not a genuine Aadhaar number, regardless of how confident the OCR
+        # read itself was.
+        reject_reason = f"The number read from this photo ({matched_number}) is not a valid Aadhaar number."
+    elif typed_number and typed_number != matched_number:
+        reject_reason = (
+            f"The number you entered ({record.encrypted_reference}) doesn't match the number read from the "
+            f"photo ({matched_number})."
+        )
+
+    if reject_reason is None:
+        note = (
+            f"Auto-verified: automated scan read a {doc_label} number ({matched_number}) matching the "
+            f"required format, at {confidence:.0f}% OCR confidence (minimum {threshold:.0f}%)."
+        )
+        verify_identity_verification(db, record, get_system_admin(db), notes=note)
+        return "verified"
+
+    note = f"{reject_reason} Please re-upload a clearer, well-lit photo of the full document."
+    return _reroute_to_additional_evidence(db, record, note)
+
+
+def _run_address_ocr_check(db: Session, record: IdentityVerification, document_ocr) -> str | None:
+    """No document NUMBER and nothing stored anywhere in this platform to
+    check a claimed address against (see document_ocr.py's own docstring),
+    so the only genuine signal is "does the content plausibly match the
+    claimed document type." A plausible match auto-verifies for real, using
+    the same real crud path a human admin's approval click produces --
+    otherwise reroutes to re-upload with the actual reason."""
+    from app.core.identity_uploads import resolve_identity_document_path
+    from app.crud.payment_provider import get_system_admin
+
+    try:
+        file_path = resolve_identity_document_path(record.document_file_path)
+        plausible, confidence = document_ocr.check_address_document_plausibility(
+            file_path.read_bytes(), record.document_type,
+        )
+    except Exception:
+        return None
+
+    record.ocr_confidence = confidence
+    db.flush()
+
+    doc_label = record.document_type.replace('_', ' ')
+    threshold = document_ocr.ADDRESS_OCR_CONFIDENCE_THRESHOLD
+
+    if plausible and confidence >= threshold:
+        note = (
+            f"Auto-verified: automated scan found content consistent with document type '{doc_label}', "
+            f"at {confidence:.0f}% OCR confidence (minimum {threshold:.0f}%)."
+        )
+        verify_identity_verification(db, record, get_system_admin(db), notes=note)
+        return "verified"
+
+    if not plausible:
+        reason = f"Automated scan couldn't find content matching document type '{doc_label}' in this document."
+    else:
+        reason = (
+            f"Automated scan couldn't clearly read this {doc_label} "
+            f"(confidence {confidence:.0f}%, below the {threshold:.0f}% minimum)."
+        )
+    note = f"{reason} Please re-upload a clearer photo or scan of the correct document."
+    return _reroute_to_additional_evidence(db, record, note)
 
 
 def list_user_identity_verifications(db: Session, user_account: "UserAccount") -> list[IdentityVerification]:

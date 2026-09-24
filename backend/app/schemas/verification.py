@@ -91,15 +91,6 @@ class PropertyComplianceCredentialRead(CamelModel):
 PROPERTY_VERIFICATION_SHARING_SCOPE = "Visible to admins and the property's own Host. Never exposed to renters as raw evidence."
 
 
-class PropertyVerificationDeclare(CamelModel):
-    """Host self-service submission -- scoped server-side to a room the
-    calling host's own party actually owns (see
-    api/routes/user_hosting.py:declare_hosted_property_verification)."""
-
-    room_id: int
-    evidence_ref: str
-
-
 class PropertyVerificationReject(CamelModel):
     notes: str = ""
 
@@ -117,6 +108,9 @@ class PropertyVerificationRead(CamelModel):
     party_id: int
     room_id: int
     evidence_ref: str
+    has_document: bool = False
+    document_file_original_name: str = ""
+    document_file_content_type: str = ""
     status: str
     verifier_admin_id: int | None = None
     verifier_notes: str = ""

@@ -59,6 +59,13 @@ export interface Listing {
   // moved in. Computed server-side (crud.listing.annotate_availability) --
   // never infer "is this actually live" from state alone.
   available: boolean;
+  // Reusable offer terms, consulted only when a market release has opted
+  // into automatic offer creation. Leaving these unset keeps this listing
+  // on the manual offer flow regardless of that setting.
+  defaultMonthlyRent: number | null;
+  defaultDepositAmount: number | null;
+  defaultTermMonths: number | null;
+  defaultCadence: string;
 }
 
 export interface PublishEligibility {
@@ -89,6 +96,9 @@ export interface MarketRelease {
   effectiveFrom: string | null;
   approvedAt: string | null;
   createdAt: string;
+  // See backend/app/services/policy.py for the known keys/defaults. Empty
+  // means every policy uses the platform-wide default (manual/on).
+  policyOverrides: Record<string, unknown>;
 }
 
 export interface Property {

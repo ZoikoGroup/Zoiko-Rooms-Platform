@@ -652,6 +652,10 @@ export interface HostedListingInput {
   contactName: string;
   contactPhone: string;
   contactEmail: string;
+  defaultMonthlyRent?: number | null;
+  defaultDepositAmount?: number | null;
+  defaultTermMonths?: number | null;
+  defaultCadence?: string;
 }
 
 export function listHostedListings(): Promise<HostedListing[]> {
