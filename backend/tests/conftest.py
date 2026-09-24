@@ -8,7 +8,12 @@ to yield a session bound to the SQLite engine.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import typing
+
+# Force the file mailer before app settings load, so a developer's .env with
+# EMAIL_PROVIDER=smtp never makes the suite send real email.
+os.environ["EMAIL_PROVIDER"] = "file"
 
 import pytest
 from fastapi.testclient import TestClient
