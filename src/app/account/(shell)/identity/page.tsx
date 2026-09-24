@@ -9,7 +9,8 @@ export default function IdentityPage() {
           Identity verification
         </h1>
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          Verify who you are with an Aadhaar, Passport or Driving License. Renting and hosting both depend on it.
+          Verify your identity using an accepted government-issued identity document. Available document types
+          depend on your country or region.
         </p>
       </div>
       <VerificationStatusSummary />

@@ -25,7 +25,7 @@ export function IdentityVerificationManager() {
   const { toast, showToast } = useToast();
 
   const [category, setCategory] = useState<DocumentCategory>("identity");
-  const [documentType, setDocumentType] = useState<IdentityDocumentType>("aadhaar");
+  const [documentType, setDocumentType] = useState<IdentityDocumentType>(documentTypesByCategory.identity[0].value);
   const [customDocumentName, setCustomDocumentName] = useState("");
   const [documentNumber, setDocumentNumber] = useState("");
   const [file, setFile] = useState<File | null>(null);
