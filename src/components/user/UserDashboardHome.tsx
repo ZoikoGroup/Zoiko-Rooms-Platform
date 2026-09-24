@@ -75,10 +75,11 @@ export function UserDashboardHome() {
               <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
               <div>
                 <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
-                  {identityStatusLabel[identityStatus]}
+                  Identity verification required
                 </p>
                 <p className="mt-0.5 text-xs text-amber-700 dark:text-amber-400">
-                  Applying to rent a room and publishing a listing both need a verified identity.
+                  To apply for a room, verify your identity using an accepted government-issued identity document.
+                  Available document types depend on your country or region.
                 </p>
               </div>
             </div>

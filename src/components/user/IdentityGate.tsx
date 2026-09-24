@@ -8,8 +8,8 @@ import { useUserSession } from "@/components/user/UserSessionContext";
 const copy: Record<string, { title: string; body: string; cta: string }> = {
   not_submitted: {
     title: "Identity verification required",
-    body: "Submit an Aadhaar, Passport or Driving License document before you can continue.",
-    cta: "Verify my identity",
+    body: "Verify your identity using an accepted government-issued identity document. Available document types depend on your country or region.",
+    cta: "Verify identity",
   },
   pending: {
     title: "Your identity verification is still pending",
