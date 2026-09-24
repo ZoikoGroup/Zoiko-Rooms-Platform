@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.config import settings
 from app.core.mailer import send_listing_published_email, send_listing_rejected_email
 from app.crud import notification as notification_crud
 from app.crud.audit import log_audit_event
@@ -126,16 +127,27 @@ def _validate_image_count(images: list[str]) -> None:
 
 
 def _resolve_market_release_id_for_room(db: Session, room_id: int | None) -> int | None:
-    """A listing's market is derived from its room's owning party's jurisdiction --
-    never hand-picked by the provider, so a listing can't be steered toward a more
-    permissive market than the one it actually operates in."""
+    """A listing's market is derived from where its room actually is -- the
+    property's own jurisdiction_code, the same field every market policy
+    lookup uses -- never hand-picked by the provider, so a listing can't be
+    steered toward a more permissive market than the one it operates in.
+
+    Falls back to the owning party's jurisdiction only when the property's
+    region has no market release at all: properties created before the
+    region was captured per property all carry the column default, while
+    their market was keyed off the party. New properties always name an
+    open region (services/jurisdictions.py:require_open_jurisdiction), so
+    they never reach the fallback."""
     if room_id is None:
         return None
     room = db.get(Room, room_id)
     if room is None:
         return None
-    jurisdiction = room.property.owner_party.jurisdiction
-    release = db.scalar(select(MarketRelease).where(MarketRelease.jurisdiction == jurisdiction))
+    release = db.scalar(select(MarketRelease).where(MarketRelease.jurisdiction == room.property.jurisdiction_code))
+    if release is None:
+        release = db.scalar(
+            select(MarketRelease).where(MarketRelease.jurisdiction == room.property.owner_party.jurisdiction)
+        )
     return release.id if release else None
 
 
@@ -628,10 +640,20 @@ def check_publish_eligibility(db: Session, listing: Listing) -> list[str]:
     # (see _require_listing_fee_paid_if_applicable). Surfaced here too so the
     # admin review screen shows it before the admin ever clicks publish.
     # Paying it must never be treated as satisfying the other gates above.
-    from app.crud.listing_fee import listing_fee_is_paid
+    from app.crud.listing_fee import (
+        DEFAULT_JURISDICTION,
+        LISTING_FEE_UNAVAILABLE_MESSAGE,
+        listing_fee_available,
+        listing_fee_is_paid,
+        listing_jurisdiction_code,
+    )
 
     if not listing_fee_is_paid(db, listing.id):
-        reasons.append("Listing Fee has not been paid")
+        fee_jurisdiction = listing_jurisdiction_code(listing) or DEFAULT_JURISDICTION
+        if settings.listing_fee_fail_closed and not listing_fee_available(db, fee_jurisdiction):
+            reasons.append(LISTING_FEE_UNAVAILABLE_MESSAGE)
+        else:
+            reasons.append("Listing Fee has not been paid")
 
     return reasons
 
@@ -651,10 +673,19 @@ def _require_listing_fee_paid_if_applicable(db: Session, listing: Listing) -> No
         resolve_listing_fee_policy,
     )
 
+    if listing_fee_is_paid(db, listing.id):
+        return
+
     jurisdiction_code = listing_jurisdiction_code(listing) or DEFAULT_JURISDICTION
     try:
         resolve_listing_fee_policy(db, jurisdiction_code)
-    except HTTPException:
+    except HTTPException as exc:
+        # ZR-PAY-CFG-001 Section 2.2: no approved ACTIVE price = publication
+        # stays blocked ("Listing fee currently unavailable in this market"),
+        # never waved through for free. Only the legacy test suite turns
+        # listing_fee_fail_closed off.
+        if settings.listing_fee_fail_closed:
+            raise HTTPException(status.HTTP_409_CONFLICT, exc.detail)
         return
 
     if not listing_fee_is_paid(db, listing.id):

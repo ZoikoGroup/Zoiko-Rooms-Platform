@@ -412,6 +412,17 @@ export function TrustSafetyManager() {
                     label="Auto-create agreements"
                   />
                 </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    Let renters pay the recipient online through the recipient&apos;s own payment provider (Zoiko never
+                    holds the money) — market approval required
+                  </span>
+                  <Switch
+                    checked={release.policyOverrides["payment.external_handoff_approved"] === true}
+                    onChange={(approved) => setAutomationPolicy(release, "payment.external_handoff_approved", approved)}
+                    label="Approve online payment handoff"
+                  />
+                </div>
               </div>
             </div>
           ))}

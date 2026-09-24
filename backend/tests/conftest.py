@@ -47,6 +47,25 @@ def _isolate_from_real_provider_credentials(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _legacy_payment_capabilities(request, monkeypatch):
+    """ZR-PAY-CFG-001 turned off every rental money-movement path and made
+    the Listing Fee and PAYMENT_RECEIPT authority fail closed. Most of this
+    suite predates that and exercises those paths directly, so it opts back
+    in here. Tests marked @pytest.mark.payment_boundary run with the real
+    (production) defaults instead -- that's where the boundary itself is
+    tested."""
+    if request.node.get_closest_marker("payment_boundary"):
+        return
+    from app.services import policy
+
+    for flag in ("rent_collection_enabled", "deposit_collection_enabled", "host_payouts_enabled"):
+        monkeypatch.setattr(settings, flag, True)
+    monkeypatch.setattr(settings, "listing_fee_fail_closed", False)
+    monkeypatch.setattr(settings, "payment_receipt_authority_required", False)
+    monkeypatch.setitem(policy._DEFAULTS, "payment.external_handoff_approved", lambda: True)
+
+
+@pytest.fixture(autouse=True)
 def _reset_sublet_rate_limiters():
     """The sublet submit/document-upload limiters (app/core/rate_limit.py)
     are true module-level singletons, keyed on user.id -- but each test gets

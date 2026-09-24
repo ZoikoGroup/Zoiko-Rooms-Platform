@@ -97,8 +97,8 @@ class TestExistingNegativeBalancePartiallyOffsetsPayout:
         assert r.status_code == 200, r.text
 
         # Now a second, otherwise-perfectly-normal obligation/payment for the
-        # SAME party -- gross 500 @ 10% fee -> net 450, far less than the
-        # 1000 still outstanding on the recovery from above. The payout still
+        # SAME party -- gross 500, no commission (ZR-PAY-CFG-001) -> net 500,
+        # far less than the 1000 still outstanding on the recovery from above. The payout still
         # goes out (PAID), but its entire net is retained as a partial offset.
         obligation2, _admin2, guest2, _party_id2 = _make_provider_rent_obligation(
             db_session, suffix="gateneg2", amount=500.0, owner_party_id=party_id,
@@ -122,18 +122,18 @@ class TestExistingNegativeBalancePartiallyOffsetsPayout:
         assert r.status_code == 200, r.text
         payout = r.json()
         assert payout["status"] == "PAID"
-        assert float(payout["amount"]) == 450.0
-        assert float(payout["recoveryOffsetAmount"]) == 450.0
+        assert float(payout["amount"]) == 500.0
+        assert float(payout["recoveryOffsetAmount"]) == 500.0
 
         from app.models.finance import FinancialHold, HostRecovery
 
         recovery = db_session.scalar(select(HostRecovery).where(HostRecovery.party_id == party_id))
         assert recovery.status == "OPEN"
-        assert float(recovery.recovered_amount) == 450.0
+        assert float(recovery.recovered_amount) == 500.0
         hold = db_session.get(FinancialHold, recovery.financial_hold_id)
         assert hold.status == "OPEN"
 
-        # A third period, generous enough to cover the remaining 550, fully
+        # A third period, generous enough to cover the remaining 500, fully
         # settles the recovery and resolves the hold.
         obligation3, _admin3, guest3, _party_id3 = _make_provider_rent_obligation(
             db_session, suffix="gateneg3", amount=1000.0, owner_party_id=party_id,
@@ -155,7 +155,7 @@ class TestExistingNegativeBalancePartiallyOffsetsPayout:
         assert r.status_code == 200, r.text
         payout3 = r.json()
         assert payout3["status"] == "PAID"
-        assert float(payout3["recoveryOffsetAmount"]) == 550.0
+        assert float(payout3["recoveryOffsetAmount"]) == 500.0
 
         db_session.refresh(recovery)
         db_session.refresh(hold)

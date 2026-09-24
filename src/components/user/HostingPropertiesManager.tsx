@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
-import { Occupancy, Property, Room } from "@/lib/types";
+import { Occupancy, OpenJurisdiction, Property, Room } from "@/lib/types";
 import { Switch } from "@/components/ui/Switch";
 import {
   confirmHostedMoveIn,
@@ -19,24 +19,35 @@ import {
   listHostedProperties,
   listHostedRoomOccupancies,
   listHostedRooms,
+  listOpenJurisdictions,
   prepareHostedHandover,
   updateHostedProperty,
   updateHostedRoom,
 } from "@/lib/user-api";
 import { ListARoomWizard } from "@/components/user/ListARoomWizard";
+import { RegionSelect } from "@/components/user/RegionSelect";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
 import { occupancyStatusTone } from "@/lib/status";
 import { formatDate } from "@/lib/utils";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 
-type PropertyForm = { id: number | null; address: string; city: string };
+type PropertyForm = {
+  id: number | null;
+  address: string;
+  city: string;
+  jurisdictionCode: string;
+  /** The saved region when editing -- stays selectable even if that market has since closed. */
+  savedJurisdictionCode?: string;
+  regionLocked: boolean;
+};
 type RoomForm = { propertyId: number; id: number | null; size: string; hasEnsuite: boolean };
 
 export function HostingPropertiesManager() {
   const { user } = useUserSession();
   const { toast, showToast } = useToast();
   const [properties, setProperties] = useState<Property[]>([]);
+  const [regions, setRegions] = useState<OpenJurisdiction[]>([]);
   const [roomsByProperty, setRoomsByProperty] = useState<Record<number, Room[]>>({});
   const [occupanciesByRoom, setOccupanciesByRoom] = useState<Record<number, Occupancy[]>>({});
   const [loading, setLoading] = useState(true);
@@ -51,8 +62,12 @@ export function HostingPropertiesManager() {
 
   const load = useCallback(async () => {
     try {
-      const owned = await listHostedProperties();
+      const [owned, openRegions] = await Promise.all([
+        listHostedProperties(),
+        listOpenJurisdictions().catch(() => [] as OpenJurisdiction[]),
+      ]);
       setProperties(owned);
+      setRegions(openRegions);
       const roomLists = await Promise.all(
         owned.map((property) => listHostedRooms(property.id).catch(() => [] as Room[]))
       );
@@ -81,10 +96,18 @@ export function HostingPropertiesManager() {
       setError("Both an address and a city are required.");
       return;
     }
+    if (!propertyForm.jurisdictionCode) {
+      setError("Select the region this property is located in.");
+      return;
+    }
     setError("");
     setSubmitting(true);
     try {
-      const payload = { address: propertyForm.address.trim(), city: propertyForm.city.trim() };
+      const payload = {
+        address: propertyForm.address.trim(),
+        city: propertyForm.city.trim(),
+        jurisdictionCode: propertyForm.jurisdictionCode,
+      };
       if (propertyForm.id === null) {
         await createHostedProperty(payload);
         showToast("Property added.");
@@ -181,7 +204,19 @@ export function HostingPropertiesManager() {
           subtitle="Use “List a Room” to add a room in one flow. The properties and rooms below are for editing what you already have."
         />
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="outline" onClick={() => setPropertyForm({ id: null, address: "", city: "" })}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              setPropertyForm({
+                id: null,
+                address: "",
+                city: "",
+                jurisdictionCode: regions.length === 1 ? regions[0].code : "",
+                regionLocked: false,
+              })
+            }
+          >
             <Plus className="h-4 w-4" /> Add Property
           </Button>
           <Button size="sm" onClick={() => setWizardOpen(true)}>
@@ -214,7 +249,8 @@ export function HostingPropertiesManager() {
                       {property.address}
                     </p>
                     <p className="mt-0.5 flex items-center gap-1.5 text-xs text-slate-400">
-                      <MapPin className="h-3.5 w-3.5" /> {property.city} · Property #{property.id}
+                      <MapPin className="h-3.5 w-3.5" /> {property.city} · {property.jurisdictionCode} · Property #
+                      {property.id}
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -223,7 +259,14 @@ export function HostingPropertiesManager() {
                       size="sm"
                       variant="ghost"
                       onClick={() =>
-                        setPropertyForm({ id: property.id, address: property.address, city: property.city })
+                        setPropertyForm({
+                          id: property.id,
+                          address: property.address,
+                          city: property.city,
+                          jurisdictionCode: property.jurisdictionCode,
+                          savedJurisdictionCode: property.jurisdictionCode,
+                          regionLocked: property.regionLocked,
+                        })
                       }
                     >
                       <Pencil className="h-3.5 w-3.5" /> Edit
@@ -376,6 +419,13 @@ export function HostingPropertiesManager() {
               className={inputClass}
             />
           </Field>
+          <RegionSelect
+            regions={regions}
+            value={propertyForm?.jurisdictionCode ?? ""}
+            onChange={(code) => setPropertyForm((f) => (f ? { ...f, jurisdictionCode: code } : f))}
+            currentCode={propertyForm?.savedJurisdictionCode}
+            locked={propertyForm?.regionLocked}
+          />
 
           {error && (
             <p className="rounded-lg bg-accent-50 px-3 py-2 text-xs font-medium text-accent-700 ring-1 ring-accent-200">

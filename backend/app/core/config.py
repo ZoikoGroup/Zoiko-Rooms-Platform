@@ -21,6 +21,17 @@ DEV_FIELD_ENCRYPTION_KEY = "r9v5IfBTi6JMliPvOaRnR34vW4O8OP5Gq6X9NDpMAgQ="
 PLACEHOLDER_FIELD_ENCRYPTION_KEYS = (DEV_FIELD_ENCRYPTION_KEY,)
 
 
+# ZR-PAY-CFG-001 Section 9 capabilities Zoiko Rooms must never have on.
+RENTAL_MONEY_MOVEMENT_FLAGS = (
+    "rent_collection_enabled",
+    "deposit_collection_enabled",
+    "host_payouts_enabled",
+    "escrow_enabled",
+    "wallet_enabled",
+    "split_settlement_enabled",
+)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(BACKEND_DIR / ".env"), env_file_encoding="utf-8", extra="ignore"
@@ -215,6 +226,27 @@ class Settings(BaseSettings):
     public_assistant_rate_limit_max: int = 10
     public_assistant_rate_limit_window_seconds: int = 60
 
+    # ZR-PAY-CFG-001 Section 9: Zoiko Rooms collects its own Listing Fee only.
+    # Rent and deposits go directly from renter to the verified recipient;
+    # Zoiko never collects, holds, escrows, settles or pays out rental money,
+    # and never takes a commission on rent. Every capability below is OFF and
+    # a production deployment refuses to boot if any is switched on (see
+    # _validate_production). Code paths behind them stay in the codebase but
+    # are blocked by services/payment_boundary.py. There is deliberately no
+    # setting for a rental commission at all -- it cannot be enabled.
+    rent_collection_enabled: bool = False
+    deposit_collection_enabled: bool = False
+    host_payouts_enabled: bool = False
+    escrow_enabled: bool = False
+    wallet_enabled: bool = False
+    split_settlement_enabled: bool = False
+    # Fail-closed rules for the Listing Fee (no approved ACTIVE price = no
+    # publication) and for payment instructions (no verified PAYMENT_RECEIPT
+    # authority = no instructions). On everywhere by default; only the legacy
+    # test suite turns them off for tests that predate these rules.
+    listing_fee_fail_closed: bool = True
+    payment_receipt_authority_required: bool = True
+
     @property
     def is_production(self) -> bool:
         return self.environment.strip().lower() == "production"
@@ -243,6 +275,13 @@ class Settings(BaseSettings):
                 Fernet(self.field_encryption_key.encode("utf-8"))
             except Exception:
                 problems.append("FIELD_ENCRYPTION_KEY is not a valid Fernet key")
+        for flag in RENTAL_MONEY_MOVEMENT_FLAGS:
+            if getattr(self, flag):
+                problems.append(f"{flag.upper()} must be false -- Zoiko Rooms never moves rental money (ZR-PAY-CFG-001)")
+        if not self.listing_fee_fail_closed:
+            problems.append("LISTING_FEE_FAIL_CLOSED must be true in production")
+        if not self.payment_receipt_authority_required:
+            problems.append("PAYMENT_RECEIPT_AUTHORITY_REQUIRED must be true in production")
         if problems:
             raise ValueError(
                 "Refusing to boot in production due to insecure configuration:\n- " + "\n- ".join(problems)

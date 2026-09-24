@@ -50,7 +50,7 @@ from app.models.signature_provider import SignatureRequest
 from app.models.user_account import UserAccount
 from app.schemas.leasing import ApplicationCreate, ApplicationDecide, ApplicationRead, ApplicationUpdate, OfferTermsCreate
 from app.services import inventory as inventory_service
-from app.services.agreement_profile import DEFAULT_DISCLOSURES, resolve_agreement_profile
+from app.services.agreement_profile import DEFAULT_DISCLOSURES, no_agreement_profile_message, resolve_agreement_profile
 from app.services.overlap import evaluate_occupant_overlap
 from app.services.booking_expiry import (
     compute_checkout_deadline,
@@ -561,7 +561,7 @@ def _invalidate_pending_agreement_version(
     if profile is None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "No approved agreement profile for this listing's jurisdiction -- routed to manual review",
+            no_agreement_profile_message(db, listing, listing.room),
         )
 
     before_state = f"v{current_version.version_no}:{agreement.status}"
@@ -921,7 +921,11 @@ def list_optional_clause_choices(db: Session, listing: Listing) -> list[dict]:
     if profile is None or not profile.optional_clause_ids:
         return []
     rows = db.scalars(
-        select(ClauseDefinition).where(ClauseDefinition.clause_id.in_(profile.optional_clause_ids))
+        select(ClauseDefinition).where(
+            ClauseDefinition.clause_id.in_(profile.optional_clause_ids),
+            ClauseDefinition.jurisdiction_scope == profile.jurisdiction,
+            ClauseDefinition.agreement_class == profile.agreement_class,
+        )
     ).all()
     by_id_version = {(r.clause_id, r.version): r for r in rows}
     choices = []
@@ -949,7 +953,7 @@ def create_agreement(
     if profile is None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "No approved agreement profile for this listing's jurisdiction -- routed to manual review",
+            no_agreement_profile_message(db, listing, listing.room),
         )
 
     # AC-17 'Host special terms use approved options; uncontrolled legal free

@@ -87,11 +87,21 @@ export function resolveNotificationHref(
     notificationType === "occupancy.ended_for_host" ||
     notificationType === "payout.paid" ||
     notificationType === "payout.held" ||
-    notificationType === "sublet_request.tenant_changed" ||
     notificationType === "dispute.opened_for_host" ||
     notificationType === "dispute.resolved_for_host"
   ) {
     return "/account/host/listings";
+  }
+  // Sublet notifications that only ever go to the host (backend/app/crud/sublet.py
+  // sends them to the listing's party) -- the host decides sublet requests, so
+  // they open the host review page, never the renter's own /account/sublets.
+  if (
+    notificationType === "sublet_request.submitted" ||
+    notificationType === "sublet_request.tenant_response_submitted" ||
+    notificationType === "sublet_request.withdrawn" ||
+    notificationType === "sublet_request.tenant_changed"
+  ) {
+    return "/account/host/sublet-requests";
   }
   if (notificationType.startsWith("application.")) return "/account/applications";
   if (notificationType.startsWith("offer.")) return "/account/applications";

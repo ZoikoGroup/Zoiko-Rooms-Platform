@@ -58,6 +58,7 @@ from app.models.leasing import (
     OfferTerms,
     SignatureEvent,
 )
+from app.models.billing_entity import BillingEntity
 from app.models.listing import Listing
 from app.models.listing_fee import (
     ListingFeePayment,
@@ -114,6 +115,7 @@ from app.models.rental_payment_provider_account import RentalPaymentProviderAcco
 from app.models.external_payment_session import ExternalPaymentSession, RentalPaymentProviderEvent
 
 __all__ = [
+    "BillingEntity",
     "AdminUser",
     "AdminSettings",
     "UserAccount",

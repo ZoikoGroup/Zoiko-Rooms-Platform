@@ -1499,7 +1499,10 @@ def _resolve_payout(db: Session, party: Party, admin: AdminUser, period_key: str
         deferred_pending_move_in = before - len(matched)
 
     gross = _round2(sum(o.amount for o in matched))
-    fee = _round2(gross * float(policy.platform_fee_rate))
+    # ZR-PAY-CFG-001 Decision 3: Zoiko Rooms takes no commission on rent --
+    # no fee is calculated, accrued, invoiced or reported. Kept as an explicit
+    # zero (not a policy lookup) so no configuration can reintroduce one.
+    fee = 0.0
     net = _round2(gross - fee)
 
     # ZR-ENG-CLR-005 AC-19/AC-30/Section 9.2 + ZR-ENG-CLR-012 Section 7's
@@ -1780,10 +1783,6 @@ def _resolve_payout(db: Session, party: Party, admin: AdminUser, period_key: str
             get_or_create_payout_statement(db, payout)
         except Exception:
             pass
-        try:
-            get_or_create_service_fee_invoice(db, payout)
-        except Exception:
-            pass
 
     return payout
 
@@ -1949,6 +1948,12 @@ def get_or_create_service_fee_invoice(db: Session, payout: PayoutRecord) -> Serv
     regenerated later (AC-34)."""
     if payout.service_fee_invoice is not None:
         return payout.service_fee_invoice
+    # ZR-PAY-CFG-001 Decision 3: no rental commission exists, so there is
+    # nothing to invoice. Historical invoices (issued before the commission
+    # was removed) are still returned above.
+    raise HTTPException(
+        status.HTTP_404_NOT_FOUND, "Zoiko Rooms takes no commission on rent, so there is no service-fee invoice",
+    )
 
     jurisdiction = _jurisdiction_for_obligation(payout.obligations[0]) if payout.obligations else DEFAULT_JURISDICTION
     policy = resolve_market_policy(db, jurisdiction, as_of=_period_as_of(payout.period_key))
@@ -2232,39 +2237,11 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
 
 
 def reverse_platform_fee_for_refund(db: Session, obligation: Obligation, refund: RefundRequest) -> None:
-    """ZR-ENG-CLR-006 Section 13: 'Host fee recalculated on rent ultimately
-    earned' -- every cause row in Section 13's own table agrees on this one
-    mechanical consequence regardless of cause: when rent that already went
-    through a COMPLETED Host payout is later refunded, the platform fee
-    run_payout already took on that same rent (gross * platform_fee_rate) is
-    credited back to the Host, mirroring run_payout's own HOST_PAYABLE/
-    PLATFORM_FEE_REVENUE entry in reverse. Re-resolves the rate via the same
-    _period_as_of(payout.period_key) lookup run_payout itself used (AC-34:
-    the rate actually in effect for that period, never today's). No-ops for
-    an obligation never part of a completed payout -- once refunded it will
-    simply never enter a *future* payout's gross (Obligation.status == 'PAID'
-    already excludes it), so there's nothing to reverse."""
-    if obligation.payout_id is None:
-        return
-    payout = db.get(PayoutRecord, obligation.payout_id)
-    if payout is None or payout.status != "PAID":
-        return
-    policy = resolve_market_policy(db, _jurisdiction_for_obligation(obligation), as_of=_period_as_of(payout.period_key))
-    fee_reversal = _round2(float(refund.amount) * float(policy.platform_fee_rate))
-    if fee_reversal <= 0:
-        return
-    host_payable = ledger_service.get_party_account(db, "HOST_PAYABLE", payout.party_id, refund.payment.currency)
-    platform_fee_revenue = ledger_service.get_platform_account(db, "PLATFORM_FEE_REVENUE", refund.payment.currency)
-    ledger_service.post_entry(
-        db,
-        debit_account=platform_fee_revenue,
-        credit_account=host_payable,
-        amount=fee_reversal,
-        currency=refund.payment.currency,
-        description=f"Platform fee reversed on refund #{refund.id} (ZR-ENG-CLR-006 Section 13)",
-        source_type="refund_request",
-        source_id=str(refund.id),
-    )
+    """Formerly credited back the platform fee run_payout took on refunded
+    rent (ZR-ENG-CLR-006 Section 13). ZR-PAY-CFG-001 Decision 3 removed the
+    rental commission entirely, so no fee is ever taken and there is never
+    anything to reverse. Kept as a no-op so existing callers stay valid."""
+    return
 
 
 def _dispute_participants(dispute: DisputeCase) -> tuple[Guest | None, int | None]:

@@ -20,8 +20,10 @@ import {
   terminationCaseStatusTone,
 } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { useAdminPaymentCapabilities } from "@/components/admin/useAdminPaymentCapabilities";
 
 export function OccupancyManager() {
+  const capabilities = useAdminPaymentCapabilities();
   const [occupancies, setOccupancies] = useState<Occupancy[]>([]);
   const [rentDue, setRentDue] = useState<Occupancy[]>([]);
   const [holdover, setHoldover] = useState<Occupancy[]>([]);
@@ -404,15 +406,21 @@ export function OccupancyManager() {
                           Approve Refund
                         </Button>
                       )}
-                      {entitlement.status === "APPROVED" && (
-                        <Button
-                          size="sm" variant="primary" className="w-full"
-                          loading={terminationBusy === termCase.id}
-                          onClick={() => executeRefund(entitlement.id, termCase.id)}
-                        >
-                          Execute Refund
-                        </Button>
-                      )}
+                      {entitlement.status === "APPROVED" &&
+                        (capabilities?.rent_collection_enabled ? (
+                          <Button
+                            size="sm" variant="primary" className="w-full"
+                            loading={terminationBusy === termCase.id}
+                            onClick={() => executeRefund(entitlement.id, termCase.id)}
+                          >
+                            Execute Refund
+                          </Button>
+                        ) : (
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            Approved. The recipient refunds the renter directly — Zoiko Rooms doesn&apos;t hold or return
+                            rental money.
+                          </p>
+                        ))}
                     </div>
                   )}
                 </div>

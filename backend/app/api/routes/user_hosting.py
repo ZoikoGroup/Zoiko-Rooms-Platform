@@ -30,6 +30,7 @@ from app.crud import sublet_documents as sublet_documents_crud
 from app.crud.property import get_property, get_room, list_rooms_for_property
 from app.crud.rental_transaction_record import build_rental_transaction_record
 from app.db.session import get_db
+from app.services import jurisdictions as jurisdiction_service
 from app.models.occupancy import Occupancy
 from app.models.user_account import UserAccount
 from app.schemas.activation_gate import HandoverEventCreate, HandoverEventRead
@@ -50,7 +51,9 @@ from app.schemas.leasing import (
     SubletRequestRead,
     UserAgreementSignRequest,
 )
-from app.schemas.marketplace import AuthorityRecordDeclare, AuthorityRecordRead, PropertyCreate, PropertyRead, RoomCreate, RoomRead
+from app.schemas.marketplace import (
+    AuthorityRecordDeclare, AuthorityRecordRead, OpenJurisdictionRead, PropertyCreate, PropertyRead, RoomCreate, RoomRead,
+)
 from app.schemas.listing import ListingCreate, ListingRead, ListingUpdate
 from app.schemas.occupancy import OccupancyRead
 from app.schemas.rental_transaction_record import RentalTransactionRecordRead
@@ -250,6 +253,17 @@ def post_confirm_move_in_as_host(
     return occupancy_crud.to_occupancy_read(db, occupancy)
 
 
+@router.get("/jurisdictions", response_model=list[OpenJurisdictionRead])
+def list_open_jurisdictions(
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Regions a property can be created in: an active market release plus
+    a current market policy pack. Drives the region picker on the property
+    forms."""
+    return jurisdiction_service.list_open_jurisdictions(db)
+
+
 @router.get("/properties", response_model=list[PropertyRead])
 def list_properties(
     user: UserAccount = Depends(get_current_user),
@@ -258,14 +272,11 @@ def list_properties(
     """List all properties owned by current user."""
     if not user.party_id:
         return []
-    
-    from sqlalchemy import select
+
     from app.models.property import Property
 
-    properties = list(
-        db.scalars(select(Property).where(Property.owner_party_id == user.party_id))
-    )
-    return properties
+    properties = db.scalars(select(Property).where(Property.owner_party_id == user.party_id).order_by(Property.id))
+    return [jurisdiction_service.to_property_read(db, prop) for prop in properties]
 
 
 @router.post("/properties", response_model=PropertyRead, status_code=status.HTTP_201_CREATED)
@@ -275,10 +286,10 @@ def create_user_property(
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create a new property as a host."""
+    """Create a new property as a host, in one of the open regions."""
     if not user.party_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "User has no associated party")
-    
+
     from app.models.property import Property
 
     prop = Property(
@@ -286,15 +297,18 @@ def create_user_property(
         address=payload.address,
         city=payload.city,
         status="active",
-        jurisdiction_code=payload.jurisdiction_code,
+        jurisdiction_code=jurisdiction_service.require_open_jurisdiction(db, payload.jurisdiction_code),
     )
     db.add(prop)
     db.commit()
     db.refresh(prop)
 
-    log_audit_event(db, None, "user_property.create", "property", str(prop.id), get_correlation_id(request), reason=f"user:{user.id}")
+    log_audit_event(
+        db, None, "user_property.create", "property", str(prop.id), get_correlation_id(request),
+        reason=f"user:{user.id} region:{prop.jurisdiction_code}",
+    )
     db.commit()
-    return prop
+    return jurisdiction_service.to_property_read(db, prop)
 
 
 @router.put("/properties/{property_id}", response_model=PropertyRead)
@@ -305,18 +319,23 @@ def update_user_property(
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update a property."""
+    """Update a property. Its region can only change while nothing is bound
+    to the current region's rules yet (services/jurisdictions.py)."""
     prop = _get_property_or_404(db, property_id, user)
-    
+
+    previous_region = prop.jurisdiction_code
+    jurisdiction_service.apply_property_jurisdiction_change(db, prop, payload.jurisdiction_code)
     prop.address = payload.address
     prop.city = payload.city
-    prop.jurisdiction_code = payload.jurisdiction_code
     db.commit()
     db.refresh(prop)
 
-    log_audit_event(db, None, "user_property.update", "property", str(property_id), get_correlation_id(request), reason=f"user:{user.id}")
+    reason = f"user:{user.id}"
+    if prop.jurisdiction_code != previous_region:
+        reason += f" region:{previous_region}->{prop.jurisdiction_code}"
+    log_audit_event(db, None, "user_property.update", "property", str(property_id), get_correlation_id(request), reason=reason)
     db.commit()
-    return prop
+    return jurisdiction_service.to_property_read(db, prop)
 
 
 @router.get("/properties/{property_id}/rooms", response_model=list[RoomRead])

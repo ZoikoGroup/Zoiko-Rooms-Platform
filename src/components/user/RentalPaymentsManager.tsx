@@ -579,15 +579,19 @@ function InstructionsModal({ obligation, onClose }: { obligation: RentalPaymentO
   const { toast, showToast } = useToast();
   const [instruction, setInstruction] = useState<RentalPaymentInstruction | null>(null);
   const [loading, setLoading] = useState(false);
-  const [notFound, setNotFound] = useState(false);
+  // The server's own reason -- e.g. no instructions set up yet, or the
+  // recipient's PAYMENT_RECEIPT authority isn't verified (ZR-PAY-CFG-001 PAY-CFG-06).
+  const [unavailableReason, setUnavailableReason] = useState("");
 
   useEffect(() => {
     if (!obligation) return;
     setLoading(true);
-    setNotFound(false);
+    setUnavailableReason("");
     getMyRentalPaymentInstructions(obligation.id)
       .then(setInstruction)
-      .catch(() => setNotFound(true))
+      .catch((err) =>
+        setUnavailableReason(errorMessage(err, "The recipient has not set up payment instructions yet.")),
+      )
       .finally(() => setLoading(false));
   }, [obligation]);
 
@@ -627,8 +631,10 @@ function InstructionsModal({ obligation, onClose }: { obligation: RentalPaymentO
     <Modal open={Boolean(obligation)} onClose={onClose} title="Payment instructions">
       {loading ? (
         <Loader label="Loading" />
-      ) : notFound ? (
-        <EmptyState message="The recipient has not set up payment instructions yet." />
+      ) : unavailableReason ? (
+        <EmptyState
+          message={`${unavailableReason.replace(/\.$/, "")}. Please don't send any payment until instructions are available here.`}
+        />
       ) : instruction ? (
         <div className="space-y-3 text-sm">
           <Row label="Recipient" value={instruction.recipientName} />

@@ -273,8 +273,9 @@ class TestAutomaticFuturePayoutOffset:
         assert recovery.status == "OPEN"
         assert hold.status == "OPEN"
 
-        # A second period's rent, generous enough (gross 2000 @ 10% fee ->
-        # net 1800) to fully cover the 1000 outstanding recovery in one shot.
+        # A second period's rent, generous enough (gross 2000, no commission
+        # per ZR-PAY-CFG-001 -> net 2000) to fully cover the 1000 outstanding
+        # recovery in one shot.
         obligation2, _admin2, guest2, _party_id2 = _make_provider_rent_obligation(
             db_session, suffix="autooffset1b", amount=2000.0, owner_party_id=party_id,
         )
@@ -297,7 +298,7 @@ class TestAutomaticFuturePayoutOffset:
         assert r.status_code == 200, r.text
         payout = r.json()
         assert payout["status"] == "PAID"
-        assert float(payout["amount"]) == 1800.0
+        assert float(payout["amount"]) == 2000.0
         assert float(payout["recoveryOffsetAmount"]) == 1000.0
 
         db_session.refresh(recovery)
@@ -340,7 +341,7 @@ class TestAutomaticFuturePayoutOffset:
         payout3 = r.json()
         assert payout3["status"] == "PAID"
         assert float(payout3["recoveryOffsetAmount"]) == 0.0
-        assert float(payout3["amount"]) == 270.0
+        assert float(payout3["amount"]) == 300.0
 
     def test_payout_statement_shows_the_offset_line_when_applied(self, client, db_session: Session):
         _admin, admin_cookies, party_id = _create_negative_balance_recovery(client, db_session, suffix="autooffset2", amount=1000.0)

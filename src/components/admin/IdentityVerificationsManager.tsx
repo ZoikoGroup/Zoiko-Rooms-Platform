@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CheckCircle2, FileText, HelpCircle, Lock, ShieldCheck, XCircle } from "lucide-react";
+import { CheckCircle2, FileText, HelpCircle, Lock, ScanLine, ShieldCheck, XCircle } from "lucide-react";
 import { AdminIdentityVerification, IdentityVerificationStatus } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -14,7 +14,12 @@ import { formatDate } from "@/lib/utils";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-const STATUS_FILTERS: { value: IdentityVerificationStatus | "all"; label: string }[] = [
+// "needs_review" is a backend pseudo-status: pending submissions plus each
+// person's latest upload the automated scan sent back (it can be wrong).
+type StatusFilter = IdentityVerificationStatus | "needs_review" | "all";
+
+const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
+  { value: "needs_review", label: "Needs review" },
   { value: "pending", label: "Pending" },
   { value: "additional_evidence_required", label: "Needs more evidence" },
   { value: "verified", label: "Verified" },
@@ -27,7 +32,7 @@ function documentUrl(id: number): string {
 }
 
 export function IdentityVerificationsManager() {
-  const [filter, setFilter] = useState<IdentityVerificationStatus | "all">("pending");
+  const [filter, setFilter] = useState<StatusFilter>("needs_review");
   const [records, setRecords] = useState<AdminIdentityVerification[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -180,7 +185,8 @@ export function IdentityVerificationsManager() {
         </div>
       </div>
       <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-        Review a USER&apos;s uploaded document, then approve or reject their identity verification.
+        Review a USER&apos;s uploaded document, then approve or reject their identity verification. Documents the
+        automated scan sent back also appear under Needs review — the scan can be wrong, so you can overrule it.
       </p>
 
       <div className="mt-4 space-y-2">
@@ -232,12 +238,25 @@ export function IdentityVerificationsManager() {
                   <p className="mt-1 text-xs text-accent-600">Rejection notes: {record.verifierNotes}</p>
                 )}
                 {record.status === "additional_evidence_required" && record.verifierNotes && (
-                  <p className="mt-1 text-xs text-amber-600">Requested from user: {record.verifierNotes}</p>
+                  <p className="mt-1 text-xs text-amber-600">
+                    {record.autoFlagged ? "Automated scan asked the user to re-upload: " : "Requested from user: "}
+                    {record.verifierNotes}
+                  </p>
+                )}
+                {record.status === "pending" && record.verifierNotes && (
+                  <p className="mt-1 text-xs text-amber-600">{record.verifierNotes}</p>
+                )}
+                {record.ocrConfidence !== null && (
+                  <p className="mt-1 flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
+                    <ScanLine className="h-3 w-3" />
+                    Scan read {record.ocrExtractedNumber ? `“${record.ocrExtractedNumber}”` : "no document number"} at{" "}
+                    {Math.round(record.ocrConfidence)}% confidence
+                  </p>
                 )}
               </div>
               <div className="flex items-center gap-2">
                 <Badge tone={identityStatusTone[record.status]}>{identityStatusLabel[record.status]}</Badge>
-                {record.status === "pending" && (
+                {(record.status === "pending" || record.status === "additional_evidence_required") && (
                   isSuperAdmin ? (
                     <>
                       <Button
@@ -248,9 +267,11 @@ export function IdentityVerificationsManager() {
                       >
                         <CheckCircle2 className="h-3.5 w-3.5" /> Approve
                       </Button>
-                      <Button size="sm" variant="outline" onClick={() => openRequestEvidence(record)}>
-                        <HelpCircle className="h-3.5 w-3.5" /> Request evidence
-                      </Button>
+                      {record.status === "pending" && (
+                        <Button size="sm" variant="outline" onClick={() => openRequestEvidence(record)}>
+                          <HelpCircle className="h-3.5 w-3.5" /> Request evidence
+                        </Button>
+                      )}
                       <Button size="sm" variant="outline" onClick={() => openReject(record)}>
                         <XCircle className="h-3.5 w-3.5" /> Reject
                       </Button>

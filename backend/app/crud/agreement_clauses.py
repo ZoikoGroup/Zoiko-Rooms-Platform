@@ -24,10 +24,27 @@ from app.models.admin_user import AdminUser
 from app.models.agreement_clause import CLAUSE_MANDATORY_LEVELS, ClauseDefinition
 
 
-def list_clause_versions(db: Session, clause_id: str | None = None) -> list[ClauseDefinition]:
-    query = select(ClauseDefinition).order_by(ClauseDefinition.clause_id, ClauseDefinition.version)
+def _same_clause(row: ClauseDefinition):
+    """Versions are counted per (clause_id, jurisdiction, class): England's
+    rent_and_charges and another region's rent_and_charges are separate
+    clauses with independent version histories."""
+    return (
+        (ClauseDefinition.clause_id == row.clause_id)
+        & (ClauseDefinition.jurisdiction_scope == row.jurisdiction_scope)
+        & (ClauseDefinition.agreement_class == row.agreement_class)
+    )
+
+
+def list_clause_versions(
+    db: Session, clause_id: str | None = None, jurisdiction_scope: str | None = None,
+) -> list[ClauseDefinition]:
+    query = select(ClauseDefinition).order_by(
+        ClauseDefinition.jurisdiction_scope, ClauseDefinition.clause_id, ClauseDefinition.version,
+    )
     if clause_id:
         query = query.where(ClauseDefinition.clause_id == clause_id)
+    if jurisdiction_scope:
+        query = query.where(ClauseDefinition.jurisdiction_scope == jurisdiction_scope)
     return list(db.scalars(query))
 
 
@@ -45,9 +62,30 @@ def create_clause_draft(
     if mandatory_level not in CLAUSE_MANDATORY_LEVELS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"mandatoryLevel must be one of {list(CLAUSE_MANDATORY_LEVELS)}")
 
+    jurisdiction_scope = jurisdiction_scope.strip()
+    if not jurisdiction_scope:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "jurisdictionScope is required")
+
+    row = _add_clause_draft(
+        db, clause_id=clause_id, jurisdiction_scope=jurisdiction_scope, agreement_class=agreement_class,
+        mandatory_level=mandatory_level, title=title, approval_note=approval_note,
+    )
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _add_clause_draft(
+    db: Session, *, clause_id: str, jurisdiction_scope: str, agreement_class: str,
+    mandatory_level: str, title: str, approval_note: str,
+) -> ClauseDefinition:
     latest = db.scalar(
         select(ClauseDefinition)
-        .where(ClauseDefinition.clause_id == clause_id)
+        .where(
+            ClauseDefinition.clause_id == clause_id,
+            ClauseDefinition.jurisdiction_scope == jurisdiction_scope,
+            ClauseDefinition.agreement_class == agreement_class,
+        )
         .order_by(ClauseDefinition.version.desc())
         .limit(1)
     )
@@ -64,9 +102,46 @@ def create_clause_draft(
         approval_note=approval_note,
     )
     db.add(row)
-    db.commit()
-    db.refresh(row)
+    db.flush()
     return row
+
+
+def copy_default_clauses_to_jurisdiction(db: Session, admin: AdminUser, jurisdiction_scope: str) -> list[ClauseDefinition]:
+    """Gives a newly opened region a starting clause registry: one DRAFT row
+    per default clause (England's placeholder catalog) that this region
+    doesn't already have. Nothing becomes effective until an admin reviews
+    and approves each draft -- code never makes another region's legal
+    content live on its own. Returns the drafts created (empty if the
+    region already has every default clause)."""
+    from app.services.agreement_profile import AGREEMENT_CLASS, DEFAULT_CLAUSES, SUPPORTED_JURISDICTION
+
+    jurisdiction_scope = jurisdiction_scope.strip()
+    if not jurisdiction_scope:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "jurisdictionScope is required")
+    if jurisdiction_scope == SUPPORTED_JURISDICTION:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"{SUPPORTED_JURISDICTION} already has the default clauses",
+        )
+
+    existing = set(db.scalars(
+        select(ClauseDefinition.clause_id).where(
+            ClauseDefinition.jurisdiction_scope == jurisdiction_scope,
+            ClauseDefinition.agreement_class == AGREEMENT_CLASS,
+        )
+    ))
+    created = [
+        _add_clause_draft(
+            db, clause_id=clause_id, jurisdiction_scope=jurisdiction_scope, agreement_class=AGREEMENT_CLASS,
+            mandatory_level=mandatory_level, title=title,
+            approval_note=f"Copied from {SUPPORTED_JURISDICTION} defaults -- review for {jurisdiction_scope} before approving.",
+        )
+        for clause_id, mandatory_level, title in DEFAULT_CLAUSES
+        if clause_id not in existing
+    ]
+    db.commit()
+    for row in created:
+        db.refresh(row)
+    return created
 
 
 def _retire(row: ClauseDefinition, *, today: date) -> None:
@@ -86,7 +161,7 @@ def approve_clause_version(db: Session, admin: AdminUser, row: ClauseDefinition)
     today = date.today()
     previously_active = db.scalar(
         select(ClauseDefinition).where(
-            ClauseDefinition.clause_id == row.clause_id,
+            _same_clause(row),
             ClauseDefinition.status == "APPROVED",
             (ClauseDefinition.effective_to.is_(None)) | (ClauseDefinition.effective_to > today),
         )
@@ -115,7 +190,7 @@ def rollback_clause(db: Session, admin: AdminUser, row: ClauseDefinition) -> Cla
     today = date.today()
     currently_active = db.scalar(
         select(ClauseDefinition).where(
-            ClauseDefinition.clause_id == row.clause_id,
+            _same_clause(row),
             ClauseDefinition.status == "APPROVED",
             (ClauseDefinition.effective_to.is_(None)) | (ClauseDefinition.effective_to > today),
         )

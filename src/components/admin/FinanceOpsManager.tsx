@@ -1,12 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertOctagon, BadgeCheck, CheckCircle2, Landmark, ReceiptText, RotateCcw, ShieldAlert, Tag } from "lucide-react";
+import { AlertOctagon, BadgeCheck, CheckCircle2, Landmark, ReceiptText, RotateCcw, ShieldAlert } from "lucide-react";
 import {
   AdminRole,
   DisputeCase,
-  ListingFeePolicy,
   Obligation,
+  PaymentCapabilities,
   PayoutRecord,
   ReconciliationRun,
   RefundRequest,
@@ -16,7 +16,8 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
-import { apiClientFetch, ApiError } from "@/lib/api-client";
+import { ListingFeePriceBookManager } from "@/components/admin/ListingFeePriceBookManager";
+import { apiClientFetch } from "@/lib/api-client";
 import { getCurrentAdmin } from "@/lib/auth";
 import {
   disputeStatusLabel,
@@ -33,20 +34,6 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 const emptyPayoutForm = { partyId: "", periodKey: "" };
 const emptyRefundForm = { paymentId: "", obligationId: "", amount: "", reason: "" };
 const emptyDisputeForm = { paymentId: "", category: "OTHER", description: "" };
-const emptyPolicyForm = {
-  jurisdictionCode: "",
-  effectiveFrom: new Date().toISOString().slice(0, 10),
-  amount: "",
-  currency: "GBP",
-  taxRate: "0",
-  quoteValidityMinutes: "30",
-  legalEntityName: "",
-  taxRegistrationNumber: "",
-  disclosureText: "",
-  refundEligible: false,
-  refundWindowDays: "",
-};
-
 export function FinanceOpsManager() {
   const [payments, setPayments] = useState<SimulatedPayment[]>([]);
   const [obligations, setObligations] = useState<Obligation[]>([]);
@@ -55,7 +42,7 @@ export function FinanceOpsManager() {
   const [disputes, setDisputes] = useState<DisputeCase[]>([]);
   const [runs, setRuns] = useState<ReconciliationRun[]>([]);
   const [pendingInstructions, setPendingInstructions] = useState<RentalPaymentInstruction[]>([]);
-  const [policies, setPolicies] = useState<ListingFeePolicy[]>([]);
+  const [capabilities, setCapabilities] = useState<PaymentCapabilities | null>(null);
   const [toast, setToast] = useState("");
   const [role, setRole] = useState<AdminRole | null>(null);
 
@@ -65,19 +52,18 @@ export function FinanceOpsManager() {
   const [refundForm, setRefundForm] = useState(emptyRefundForm);
   const [disputeModalOpen, setDisputeModalOpen] = useState(false);
   const [disputeForm, setDisputeForm] = useState(emptyDisputeForm);
-  const [policyModalOpen, setPolicyModalOpen] = useState(false);
-  const [policyForm, setPolicyForm] = useState(emptyPolicyForm);
-  const [editingPolicyId, setEditingPolicyId] = useState<number | null>(null);
 
-  function showToast(message: string) {
+  // Stable identity -- ListingFeePriceBookManager reloads when it changes.
+  const showToast = useCallback((message: string) => {
     setToast(message);
     setTimeout(() => setToast(""), 3600);
-  }
+  }, []);
 
   const loadAll = useCallback(async () => {
     try {
       const admin = await getCurrentAdmin();
       setRole(admin?.role ?? null);
+      setCapabilities(await apiClientFetch<PaymentCapabilities>("/api/finance/capabilities"));
 
       const [paymentsData, obligationsData, payoutsData, refundsData, disputesData] = await Promise.all([
         apiClientFetch<SimulatedPayment[]>("/api/finance/payments"),
@@ -99,12 +85,11 @@ export function FinanceOpsManager() {
         setPendingInstructions(
           await apiClientFetch<RentalPaymentInstruction[]>("/api/finance/rental-payments/instructions/pending-review"),
         );
-        setPolicies(await apiClientFetch<ListingFeePolicy[]>("/api/finance/listing-fees/policies"));
       }
     } catch {
       showToast("Failed to load finance operations data");
     }
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     loadAll();
@@ -203,64 +188,6 @@ export function FinanceOpsManager() {
     }
   }
 
-  function openCreatePolicy() {
-    setEditingPolicyId(null);
-    setPolicyForm(emptyPolicyForm);
-    setPolicyModalOpen(true);
-  }
-
-  function openEditPolicy(policy: ListingFeePolicy) {
-    setEditingPolicyId(policy.id);
-    setPolicyForm({
-      jurisdictionCode: policy.jurisdictionCode,
-      effectiveFrom: policy.effectiveFrom.slice(0, 10),
-      amount: String(policy.amount),
-      currency: policy.currency,
-      taxRate: String(policy.taxRate),
-      quoteValidityMinutes: String(policy.quoteValidityMinutes),
-      legalEntityName: policy.legalEntityName,
-      taxRegistrationNumber: policy.taxRegistrationNumber,
-      disclosureText: policy.disclosureText,
-      refundEligible: policy.refundEligible,
-      refundWindowDays: policy.refundWindowDays == null ? "" : String(policy.refundWindowDays),
-    });
-    setPolicyModalOpen(true);
-  }
-
-  async function submitPolicy(e: React.FormEvent) {
-    e.preventDefault();
-    const shared = {
-      amount: Number(policyForm.amount),
-      currency: policyForm.currency.toUpperCase(),
-      taxRate: Number(policyForm.taxRate),
-      quoteValidityMinutes: Number(policyForm.quoteValidityMinutes),
-      legalEntityName: policyForm.legalEntityName,
-      taxRegistrationNumber: policyForm.taxRegistrationNumber,
-      disclosureText: policyForm.disclosureText,
-      refundEligible: policyForm.refundEligible,
-      refundWindowDays: policyForm.refundWindowDays ? Number(policyForm.refundWindowDays) : null,
-    };
-    try {
-      if (editingPolicyId) {
-        await apiClientFetch(`/api/finance/listing-fees/policies/${editingPolicyId}`, {
-          method: "PUT",
-          body: JSON.stringify(shared),
-        });
-        showToast("Listing Fee policy updated");
-      } else {
-        await apiClientFetch("/api/finance/listing-fees/policies", {
-          method: "POST",
-          body: JSON.stringify({ ...shared, jurisdictionCode: policyForm.jurisdictionCode, effectiveFrom: policyForm.effectiveFrom }),
-        });
-        showToast("Listing Fee policy created");
-      }
-      setPolicyModalOpen(false);
-      loadAll();
-    } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "Failed to save Listing Fee policy");
-    }
-  }
-
   async function runReconciliation() {
     try {
       const run = await apiClientFetch<ReconciliationRun>("/api/finance/reconciliation/run", { method: "POST" });
@@ -279,10 +206,18 @@ export function FinanceOpsManager() {
             <Landmark className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
             <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Provider Payouts</h2>
           </div>
-          <Button size="sm" variant="accent" onClick={() => setPayoutModalOpen(true)}>
-            Run Payout
-          </Button>
+          {capabilities?.host_payouts_enabled && (
+            <Button size="sm" variant="accent" onClick={() => setPayoutModalOpen(true)}>
+              Run Payout
+            </Button>
+          )}
         </div>
+        {capabilities && !capabilities.host_payouts_enabled && (
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Zoiko Rooms doesn&apos;t collect or pay out rental money — renters pay hosts directly using their verified
+            payment instructions. Past payouts are shown for the record only.
+          </p>
+        )}
         <div className="mt-4 space-y-2">
           {payouts.map((payout) => (
             <div key={payout.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
@@ -305,10 +240,18 @@ export function FinanceOpsManager() {
             <RotateCcw className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
             <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Refunds</h2>
           </div>
-          <Button size="sm" variant="accent" onClick={() => setRefundModalOpen(true)}>
-            Request Refund
-          </Button>
+          {capabilities?.rent_collection_enabled && (
+            <Button size="sm" variant="accent" onClick={() => setRefundModalOpen(true)}>
+              Request Refund
+            </Button>
+          )}
         </div>
+        {capabilities && !capabilities.rent_collection_enabled && (
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Rental refunds happen directly between renter and recipient. Listing Fee refunds are handled from the Listing
+            Fee payment itself.
+          </p>
+        )}
         <div className="mt-4 space-y-2">
           {refunds.map((refund) => (
             <div key={refund.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
@@ -320,7 +263,7 @@ export function FinanceOpsManager() {
               </div>
               <div className="flex items-center gap-2">
                 <Badge tone={refundStatusTone[refund.status]}>{refundStatusLabel[refund.status] ?? refund.status}</Badge>
-                {refund.status === "REQUESTED" && (
+                {refund.status === "REQUESTED" && capabilities?.rent_collection_enabled && (
                   <>
                     <Button size="sm" variant="primary" onClick={() => decideRefund(refund.id, true)}>
                       Approve
@@ -407,49 +350,7 @@ export function FinanceOpsManager() {
         </section>
       )}
 
-      {role === "super_admin" && (
-        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Tag className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" aria-hidden="true" />
-              <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Listing Fee policies</h2>
-            </div>
-            <Button size="sm" variant="accent" onClick={openCreatePolicy}>
-              New Policy
-            </Button>
-          </div>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            ZR-PAY-002 Section 8.1: a jurisdiction needs an active Listing Fee policy before a lister in that jurisdiction can be
-            quoted a fee or publish a listing. &quot;New Policy&quot; always creates the next version for a jurisdiction; edit an
-            existing row only to correct a mistake in terms already in effect.
-          </p>
-          <div className="mt-4 space-y-2">
-            {policies.map((policy) => (
-              <div key={policy.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
-                <div>
-                  <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                    {policy.jurisdictionCode} · v{policy.version} · {formatCurrency(policy.amount, policy.currency)} +{" "}
-                    {(policy.taxRate * 100).toFixed(0)}% tax
-                  </p>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    {policy.legalEntityName} · effective {formatDate(policy.effectiveFrom)}
-                    {policy.effectiveTo ? ` – ${formatDate(policy.effectiveTo)}` : " onward"} · quote valid{" "}
-                    {policy.quoteValidityMinutes} min · {policy.refundEligible ? `refundable within ${policy.refundWindowDays ?? "∞"} days` : "no refunds"}
-                  </p>
-                </div>
-                <Button size="sm" variant="outline" onClick={() => openEditPolicy(policy)}>
-                  Edit
-                </Button>
-              </div>
-            ))}
-            {policies.length === 0 && (
-              <p className="text-sm text-slate-400">
-                No Listing Fee policy configured yet — listers cannot be quoted a fee or publish a listing until one exists.
-              </p>
-            )}
-          </div>
-        </section>
-      )}
+      {role === "super_admin" && <ListingFeePriceBookManager showToast={showToast} />}
 
       {role === "super_admin" && (
         <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
@@ -627,160 +528,6 @@ export function FinanceOpsManager() {
           </div>
           <Button type="submit" variant="primary" fullWidth>
             Open Dispute
-          </Button>
-        </form>
-      </Modal>
-
-      <Modal
-        open={policyModalOpen}
-        onClose={() => setPolicyModalOpen(false)}
-        title={editingPolicyId ? "Edit Listing Fee Policy" : "New Listing Fee Policy"}
-      >
-        <form onSubmit={submitPolicy} className="space-y-3.5">
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Jurisdiction code
-            </label>
-            <input
-              value={policyForm.jurisdictionCode}
-              onChange={(e) => setPolicyForm((f) => ({ ...f, jurisdictionCode: e.target.value }))}
-              placeholder="England"
-              disabled={Boolean(editingPolicyId)}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 disabled:opacity-60 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-              required
-            />
-            {editingPolicyId && (
-              <p className="mt-1 text-xs text-slate-400">Jurisdiction can&apos;t change on an edit — create a new policy instead.</p>
-            )}
-          </div>
-          {!editingPolicyId && (
-            <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                Effective from
-              </label>
-              <input
-                type="date"
-                value={policyForm.effectiveFrom}
-                onChange={(e) => setPolicyForm((f) => ({ ...f, effectiveFrom: e.target.value }))}
-                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-                required
-              />
-            </div>
-          )}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Amount</label>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                value={policyForm.amount}
-                onChange={(e) => setPolicyForm((f) => ({ ...f, amount: e.target.value }))}
-                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-                required
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Currency</label>
-              <input
-                value={policyForm.currency}
-                onChange={(e) => setPolicyForm((f) => ({ ...f, currency: e.target.value }))}
-                maxLength={3}
-                placeholder="GBP"
-                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm uppercase outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-                required
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                Tax rate <span className="font-normal normal-case text-slate-400">(0.2 = 20%)</span>
-              </label>
-              <input
-                type="number"
-                min={0}
-                max={1}
-                step="0.01"
-                value={policyForm.taxRate}
-                onChange={(e) => setPolicyForm((f) => ({ ...f, taxRate: e.target.value }))}
-                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                Quote validity (min)
-              </label>
-              <input
-                type="number"
-                min={1}
-                value={policyForm.quoteValidityMinutes}
-                onChange={(e) => setPolicyForm((f) => ({ ...f, quoteValidityMinutes: e.target.value }))}
-                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-              />
-            </div>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Legal billing entity
-            </label>
-            <input
-              value={policyForm.legalEntityName}
-              onChange={(e) => setPolicyForm((f) => ({ ...f, legalEntityName: e.target.value }))}
-              placeholder="Zoiko Realty Group Inc."
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-              required
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Tax registration number <span className="font-normal normal-case text-slate-400">(optional)</span>
-            </label>
-            <input
-              value={policyForm.taxRegistrationNumber}
-              onChange={(e) => setPolicyForm((f) => ({ ...f, taxRegistrationNumber: e.target.value }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Disclosure text <span className="font-normal normal-case text-slate-400">(shown before checkout)</span>
-            </label>
-            <textarea
-              value={policyForm.disclosureText}
-              onChange={(e) => setPolicyForm((f) => ({ ...f, disclosureText: e.target.value }))}
-              rows={2}
-              className="w-full resize-none rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <input
-              id="policy-refund-eligible"
-              type="checkbox"
-              checked={policyForm.refundEligible}
-              onChange={(e) => setPolicyForm((f) => ({ ...f, refundEligible: e.target.checked }))}
-              className="h-4 w-4 rounded border-slate-300 text-primary-600 focus:ring-primary-400"
-            />
-            <label htmlFor="policy-refund-eligible" className="text-sm text-slate-700 dark:text-slate-200">
-              Refund eligible
-            </label>
-          </div>
-          {policyForm.refundEligible && (
-            <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                Refund window (days) <span className="font-normal normal-case text-slate-400">(blank = no time limit)</span>
-              </label>
-              <input
-                type="number"
-                min={0}
-                value={policyForm.refundWindowDays}
-                onChange={(e) => setPolicyForm((f) => ({ ...f, refundWindowDays: e.target.value }))}
-                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-              />
-            </div>
-          )}
-          <Button type="submit" variant="primary" fullWidth>
-            {editingPolicyId ? "Save changes" : "Create policy"}
           </Button>
         </form>
       </Modal>

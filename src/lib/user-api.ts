@@ -40,6 +40,8 @@ import {
   PaymentRecipientAuthority,
   PaymentRecipientRelationshipType,
   PreMoveInCancellationResult,
+  OpenJurisdiction,
+  PaymentCapabilities,
   Property,
   PropertyVerification,
   PublicListing,
@@ -501,17 +503,20 @@ export function listHostedProperties(): Promise<Property[]> {
   return apiClientFetch<Property[]>("/api/users/hosting/properties");
 }
 
-export function createHostedProperty(payload: { address: string; city: string }): Promise<Property> {
+export type HostedPropertyInput = { address: string; city: string; jurisdictionCode: string };
+
+export function listOpenJurisdictions(): Promise<OpenJurisdiction[]> {
+  return apiClientFetch<OpenJurisdiction[]>("/api/users/hosting/jurisdictions");
+}
+
+export function createHostedProperty(payload: HostedPropertyInput): Promise<Property> {
   return apiClientFetch<Property>("/api/users/hosting/properties", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
-export function updateHostedProperty(
-  propertyId: number,
-  payload: { address: string; city: string }
-): Promise<Property> {
+export function updateHostedProperty(propertyId: number, payload: HostedPropertyInput): Promise<Property> {
   return apiClientFetch<Property>(`/api/users/hosting/properties/${propertyId}`, {
     method: "PUT",
     body: JSON.stringify(payload),
@@ -840,6 +845,11 @@ export function listUserPayments(): Promise<SimulatedPayment[]> {
 
 /** Renter self-service payment for their own rent/deposit obligation --
  *  real PSP dispatch, not an admin manually recording it. */
+/** ZR-PAY-CFG-001 9.1: which payment actions exist (rental money never moves through Zoiko Rooms). */
+export function getPaymentCapabilities(): Promise<PaymentCapabilities> {
+  return apiClientFetch<PaymentCapabilities>("/api/users/payments/capabilities");
+}
+
 export function payOwnObligation(obligationId: number, methodClass: string): Promise<SimulatedPayment> {
   return apiClientFetch<SimulatedPayment>(`/api/users/payments/obligations/${obligationId}/pay`, {
     method: "POST",

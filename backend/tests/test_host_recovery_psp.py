@@ -72,20 +72,17 @@ class TestAutomaticPspRecoveryCascade:
         recovery = db_session.scalar(select(HostRecovery).where(HostRecovery.party_id == party_id))
         assert recovery is not None
         # Tier 3 must have already fired inside decide_refund itself, with no
-        # separate admin action -- but only the 900.0 that actually reached
-        # the host's Stripe balance (net of the 10% platform fee run_payout
-        # already took and kept as Zoiko's own revenue, never transferred to
-        # the host at all) is reversible; the recovery's own amount (1000.0,
-        # this raw decide_refund path -- unlike execute_refund_entitlement --
-        # never reverses the platform fee) stays partially outstanding.
-        assert recovery.status == "OPEN"
+        # separate admin action. With no commission (ZR-PAY-CFG-001) the host's
+        # Stripe balance received the full 1000.0, so the whole recovery is
+        # reversible at once.
+        assert recovery.status == "RECOVERED"
         assert recovery.recovery_method == "PSP_BALANCE_RECOVERY"
-        assert float(recovery.recovered_amount) == 900.0
+        assert float(recovery.recovered_amount) == 1000.0
         assert recovery.psp_reversal_id
         assert recovery.psp_reversal_id.startswith("TRR-")
 
         hold = db_session.get(FinancialHold, recovery.financial_hold_id)
-        assert hold.status == "OPEN"
+        assert hold.status == "RESOLVED"
 
     def test_a_host_with_no_stripe_account_still_falls_through_to_open(self, client, db_session: Session):
         """No Stripe Connect account at all -- tier 3 must no-op, not error,
@@ -146,13 +143,12 @@ class TestManualPspRecoveryRetry:
         r = client.post(f"/api/finance/host-recoveries/{recovery.id}/attempt-psp-recovery", cookies=admin_cookies)
         assert r.status_code == 409, r.text
 
-    def test_manual_retry_recovers_whatever_the_automatic_cascade_left_outstanding(self, client, db_session: Session):
+    def test_automatic_cascade_leaves_nothing_for_a_manual_retry(self, client, db_session: Session):
         """Same setup as TestAutomaticPspRecoveryCascade's Stripe-connected
-        case: decide_refund's own cascade already reverses the 900.0 the
-        host's Stripe balance actually received, leaving 100.0 outstanding
-        (the platform fee this raw refund path never reverses -- see that
-        test's own comment). A manual retry immediately after has the same
-        transfer still available to reverse against for the remainder."""
+        case. Before ZR-PAY-CFG-001 removed the commission, the cascade could
+        only reverse the net-of-fee 900.0 and a manual retry recovered the
+        remaining 100.0; now the cascade recovers everything, so a manual
+        retry has nothing left to do."""
         obligation, admin, guest, party_id = _make_provider_rent_obligation(db_session, suffix="psprec4", amount=1000.0)
         admin_cookies = auth_admin_cookie(admin)
         _connect_stripe(client, admin_cookies, party_id)
@@ -172,16 +168,11 @@ class TestManualPspRecoveryRetry:
         refund_id = r.json()["id"]
         client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
         recovery = db_session.scalar(select(HostRecovery).where(HostRecovery.party_id == party_id))
-        assert recovery.status == "OPEN"
-        assert float(recovery.recovered_amount) == 900.0
+        assert recovery.status == "RECOVERED"
+        assert float(recovery.recovered_amount) == 1000.0
 
         r = client.post(f"/api/finance/host-recoveries/{recovery.id}/attempt-psp-recovery", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["status"] == "RECOVERED"
-        assert float(body["recoveredAmount"]) == 1000.0
-        assert body["recoveryMethod"] == "PSP_BALANCE_RECOVERY"
-        assert body["pspReversalId"]
+        assert r.status_code == 409, r.text
 
         hold = db_session.get(FinancialHold, recovery.financial_hold_id)
         assert hold.status == "RESOLVED"
@@ -207,10 +198,8 @@ class TestManualPspRecoveryRetry:
         client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
         recovery = db_session.scalar(select(HostRecovery).where(HostRecovery.party_id == party_id))
 
-        # Fully recover it first (the automatic cascade only got to 900.0).
-        r = client.post(f"/api/finance/host-recoveries/{recovery.id}/attempt-psp-recovery", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        assert r.json()["status"] == "RECOVERED"
+        # The automatic cascade already recovered it in full.
+        assert recovery.status == "RECOVERED"
 
         r = client.post(f"/api/finance/host-recoveries/{recovery.id}/attempt-psp-recovery", cookies=admin_cookies)
         assert r.status_code == 409, r.text

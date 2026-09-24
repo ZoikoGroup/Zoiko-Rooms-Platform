@@ -82,6 +82,7 @@ import {
   withdrawOwnTerminationCase,
 } from "@/lib/user-api";
 import { Card, EmptyState, Field, Toast, inputClass, useToast } from "@/components/user/ui";
+import { DirectPaymentNotice, usePaymentCapabilities } from "@/components/user/DirectPaymentNotice";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
 
 const PAYMENT_METHOD_LABELS: Record<string, string> = {
@@ -97,6 +98,7 @@ const PAYMENT_METHOD_LABELS: Record<string, string> = {
 export function RentalsManager() {
   const router = useRouter();
   const { toast, showToast } = useToast();
+  const capabilities = usePaymentCapabilities();
   const [occupancies, setOccupancies] = useState<UserOccupancy[]>([]);
   const [changeRequests, setChangeRequests] = useState<BookingChangeRequest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -913,6 +915,7 @@ export function RentalsManager() {
                             {formatCurrency(o.amount, o.currency)}
                             <span className="text-slate-400"> (due {formatDate(o.dueDate)})</span>
                           </span>
+                          {capabilities?.rent_collection_enabled ? (
                           <div className="flex items-center gap-2">
                             <select
                               className={`${inputClass} !w-auto py-1.5 text-xs`}
@@ -935,10 +938,15 @@ export function RentalsManager() {
                               Pay now
                             </Button>
                           </div>
+                          ) : (
+                            <DirectPaymentNotice compact />
+                          )}
                         </div>
                       );
                     })
                   )}
+                  {/* Autopay charged rent through Zoiko -- only offered if rent collection exists (never, per ZR-PAY-CFG-001). */}
+                  {capabilities?.rent_collection_enabled && (
                   <div className="flex items-center justify-between gap-2 border-t border-slate-200 pt-2 dark:border-slate-700">
                     <span className="text-xs text-slate-500 dark:text-slate-400">
                       Autopay {mandate ? "is on — rent is charged automatically." : "is off."}
@@ -963,6 +971,7 @@ export function RentalsManager() {
                       </Button>
                     )}
                   </div>
+                  )}
                 </div>
               );
             })()}

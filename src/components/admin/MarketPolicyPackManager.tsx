@@ -43,7 +43,6 @@ const emptyForm = {
 
   rentChangeMinIntervalDays: "365",
 
-  platformFeeRate: "0.10",
   fundsFlowProfile: "DIRECT_SETTLEMENT",
   permittedPaymentMethodClasses: "",
   zoikoLegalEntityName: "Zoiko Realty Group",
@@ -151,7 +150,6 @@ export function MarketPolicyPackManager() {
 
           rentChangeMinIntervalDays: Number(form.rentChangeMinIntervalDays) || 0,
 
-          platformFeeRate: Number(form.platformFeeRate) || 0,
           fundsFlowProfile: form.fundsFlowProfile,
           permittedPaymentMethodClasses: form.permittedPaymentMethodClasses
             .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
@@ -442,48 +440,19 @@ export function MarketPolicyPackManager() {
 
           <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Payment &amp; fee policy (Section 5/8)
+              Rental payment policy
             </p>
             <div className="grid grid-cols-2 gap-2">
-              <input
-                type="number" step="0.0001"
-                value={form.platformFeeRate}
-                onChange={(e) => setForm({ ...form, platformFeeRate: e.target.value })}
-                placeholder="Platform fee rate (0.10 = 10%)"
-                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
-              />
-              <select
-                value={form.fundsFlowProfile}
-                onChange={(e) => setForm({ ...form, fundsFlowProfile: e.target.value })}
-                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
-              >
-                <option value="DIRECT_SETTLEMENT">Direct settlement</option>
-                <option value="PSP_DEFERRED_PAYOUT">PSP deferred payout</option>
-              </select>
+              <p className="col-span-2 text-xs text-slate-500 dark:text-slate-400">
+                Renters pay the verified recipient directly — Zoiko Rooms takes no commission and never collects, holds
+                or pays out rent or deposits (ZR-PAY-CFG-001). The Listing Fee, its tax and billing entity are set in
+                Finance → Listing Fee Price Book.
+              </p>
               <input
                 value={form.permittedPaymentMethodClasses}
                 onChange={(e) => setForm({ ...form, permittedPaymentMethodClasses: e.target.value })}
-                placeholder="Permitted method classes (comma-separated, e.g. CARD,BANK_TRANSFER)"
+                placeholder="Methods renters may use to pay the recipient (comma-separated, e.g. CARD,BANK_TRANSFER)"
                 className="col-span-2 rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
-              />
-              <input
-                value={form.zoikoLegalEntityName}
-                onChange={(e) => setForm({ ...form, zoikoLegalEntityName: e.target.value })}
-                placeholder="Zoiko legal entity name"
-                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
-              />
-              <input
-                value={form.zoikoTaxRegistrationNumber}
-                onChange={(e) => setForm({ ...form, zoikoTaxRegistrationNumber: e.target.value })}
-                placeholder="Tax registration number"
-                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
-              />
-              <input
-                type="number" step="0.0001"
-                value={form.serviceFeeTaxRate}
-                onChange={(e) => setForm({ ...form, serviceFeeTaxRate: e.target.value })}
-                placeholder="Service-fee tax rate (0.20 = 20%)"
-                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
               />
             </div>
           </div>

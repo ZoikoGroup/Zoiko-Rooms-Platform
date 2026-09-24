@@ -42,7 +42,6 @@ class MarketPolicyPackCreate(CamelModel):
     identity_required_at_application: bool = False
     screening_prohibited_check_types: list[str] = []
 
-    platform_fee_rate: float = 0.10
     funds_flow_profile: str = "DIRECT_SETTLEMENT"
     permitted_payment_method_classes: list[str] = []
     zoiko_legal_entity_name: str = "Zoiko Realty Group"
@@ -102,7 +101,6 @@ class MarketPolicyPackUpdate(CamelModel):
     identity_required_at_application: bool | None = None
     screening_prohibited_check_types: list[str] | None = None
 
-    platform_fee_rate: float | None = None
     funds_flow_profile: str | None = None
     permitted_payment_method_classes: list[str] | None = None
     zoiko_legal_entity_name: str | None = None
@@ -160,7 +158,8 @@ class MarketPolicyPackRead(CamelModel):
     identity_required_at_application: bool
     screening_prohibited_check_types: list[str]
 
-    platform_fee_rate: float
+    # Always null -- Zoiko Rooms takes no commission (ZR-PAY-CFG-001).
+    platform_fee_rate: float | None = None
     funds_flow_profile: str
     permitted_payment_method_classes: list[str]
     zoiko_legal_entity_name: str
