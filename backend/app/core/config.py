@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     identity_upload_dir: str = "secure_uploads/identity"
     identity_document_max_size_mb: int = 10
 
+    # Host-submitted property/lister evidence (models/property_verification.py)
+    # -- same never-publicly-mounted convention as identity_upload_dir.
+    property_verification_upload_dir: str = "secure_uploads/property_verification"
+    property_verification_document_max_size_mb: int = 10
+
     # ZR-ENG-CLR-004 Section 13.1/AC-08: executed agreement PDFs, stored once
     # per AgreementVersion and never regenerated/overwritten -- same
     # never-publicly-mounted directory convention as identity_upload_dir.

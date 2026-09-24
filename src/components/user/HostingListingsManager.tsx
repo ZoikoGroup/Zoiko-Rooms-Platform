@@ -56,6 +56,10 @@ interface ListingFormState {
   contactName: string;
   contactPhone: string;
   contactEmail: string;
+  defaultMonthlyRent: string;
+  defaultDepositAmount: string;
+  defaultTermMonths: string;
+  defaultCadence: string;
 }
 
 function toFormState(listing: HostedListing): ListingFormState {
@@ -79,6 +83,10 @@ function toFormState(listing: HostedListing): ListingFormState {
     contactName: listing.contactName,
     contactPhone: listing.contactPhone,
     contactEmail: listing.contactEmail,
+    defaultMonthlyRent: listing.defaultMonthlyRent === null ? "" : String(listing.defaultMonthlyRent),
+    defaultDepositAmount: listing.defaultDepositAmount === null ? "" : String(listing.defaultDepositAmount),
+    defaultTermMonths: listing.defaultTermMonths === null ? "" : String(listing.defaultTermMonths),
+    defaultCadence: listing.defaultCadence || "MONTHLY",
   };
 }
 
@@ -202,6 +210,10 @@ export function HostingListingsManager() {
       contactName: form.contactName.trim(),
       contactPhone: form.contactPhone.trim(),
       contactEmail: form.contactEmail.trim(),
+      defaultMonthlyRent: form.defaultMonthlyRent.trim() ? Number(form.defaultMonthlyRent) : null,
+      defaultDepositAmount: form.defaultDepositAmount.trim() ? Number(form.defaultDepositAmount) : null,
+      defaultTermMonths: form.defaultTermMonths.trim() ? Math.round(Number(form.defaultTermMonths)) : null,
+      defaultCadence: form.defaultCadence,
     };
 
     setError("");
@@ -492,6 +504,57 @@ export function HostingListingsManager() {
               maxImages={MAX_LISTING_IMAGES}
             />
           </Field>
+
+          <div className="space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-100 dark:bg-slate-800/60 dark:ring-white/10">
+            <p className="text-xs font-semibold text-primary-900 dark:text-white">
+              Default offer terms <span className="font-normal text-slate-400">(optional, can be added later)</span>
+            </p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Only used if a Zoiko admin turns on automatic offer creation for your jurisdiction — leave blank to
+              keep sending offers yourself for this listing.
+            </p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+              <Field label="Monthly rent">
+                <input
+                  type="number"
+                  min="0"
+                  value={form?.defaultMonthlyRent ?? ""}
+                  onChange={(e) => setForm((f) => (f ? { ...f, defaultMonthlyRent: e.target.value } : f))}
+                  className={inputClass}
+                />
+              </Field>
+              <Field label="Deposit">
+                <input
+                  type="number"
+                  min="0"
+                  value={form?.defaultDepositAmount ?? ""}
+                  onChange={(e) => setForm((f) => (f ? { ...f, defaultDepositAmount: e.target.value } : f))}
+                  className={inputClass}
+                />
+              </Field>
+              <Field label="Term (months)">
+                <input
+                  type="number"
+                  min="1"
+                  value={form?.defaultTermMonths ?? ""}
+                  onChange={(e) => setForm((f) => (f ? { ...f, defaultTermMonths: e.target.value } : f))}
+                  className={inputClass}
+                />
+              </Field>
+              <Field label="Cadence">
+                <select
+                  value={form?.defaultCadence ?? "MONTHLY"}
+                  onChange={(e) => setForm((f) => (f ? { ...f, defaultCadence: e.target.value } : f))}
+                  className={inputClass}
+                >
+                  <option value="MONTHLY">Monthly</option>
+                  <option value="FORTNIGHTLY">Fortnightly</option>
+                  <option value="WEEKLY">Weekly</option>
+                  <option value="UPFRONT">Upfront</option>
+                </select>
+              </Field>
+            </div>
+          </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <Field label="Contact name">

@@ -105,6 +105,10 @@ app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads"
 # /api/identity-verifications/{id}/document routes.
 Path(settings.identity_upload_dir).mkdir(parents=True, exist_ok=True)
 
+# Property/lister evidence -- same never-mounted convention, reachable only
+# through the authenticated property-verification document routes.
+Path(settings.property_verification_upload_dir).mkdir(parents=True, exist_ok=True)
+
 app.include_router(auth.router)
 app.include_router(user_auth.router)
 app.include_router(user_identity.router)

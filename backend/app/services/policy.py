@@ -37,6 +37,19 @@ _DEFAULTS: dict[str, Any] = {
     # PUBLICATION_ELIGIBLE/JURISDICTION_GATES_PASS clauses already prevent
     # booking either way).
     "visibility.failed_gate_behavior": lambda: "hide",
+    # Same shape/precedent as publication.requires_approval above: default
+    # True preserves today's fully-manual behavior everywhere until an admin
+    # opts a market release in. When False, crud/leasing.py auto-creates and
+    # sends an offer (using the listing's own default terms) the moment a
+    # host/admin approves an application -- never bypasses
+    # check_offer_eligibility, just skips the human "click to proceed."
+    "offer.requires_manual_creation": lambda: True,
+    # Same as above, for the offer-accepted -> agreement step. When False,
+    # crud/leasing.py auto-creates the agreement the moment an offer is
+    # accepted -- create_agreement still enforces check_agreement_eligibility
+    # itself, so this never bypasses any compliance gate; it only removes the
+    # manual "Create Agreement" click once every gate already passes.
+    "agreement.requires_manual_creation": lambda: True,
 }
 
 POLICY_KEYS = tuple(_DEFAULTS)

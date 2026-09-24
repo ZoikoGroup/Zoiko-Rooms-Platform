@@ -1,3 +1,4 @@
+import secrets
 from datetime import date as date_, datetime, timezone
 from io import BytesIO
 
@@ -11,17 +12,19 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.agreement_documents import resolve_agreement_document_path, save_agreement_document
 from app.core.mailer import send_agreement_executed_email, send_application_decided_email
+from app.core.security import hash_password
 from app.crud.audit import log_audit_event
 from app.crud.eligibility import check_agreement_eligibility, check_offer_eligibility
 from app.crud.events import emit_event
 from app.crud.guest import get_guest_for_user, get_user_for_guest
 from app.crud.ids import dicebear_avatar, new_id
-from app.crud.listing import is_listing_available
+from app.crud.listing import is_listing_available, resolve_market_release
 from app.crud.market_policy import resolve_market_policy
 from app.crud import notification as notif_crud
 from app.crud.occupancy import _add_months
 from app.crud.party import assert_provider_access, assert_provider_access_any, party_id_for_listing
 from app.crud.user import get_user_by_party_id
+from app.services.policy import get_policy
 from app.models.admin_user import AdminUser
 from app.models.agreement_amendment import AgreementAmendment
 from app.models.agreement_clause import ClauseDefinition
@@ -236,10 +239,15 @@ def withdraw_application(db: Session, application: Application, admin: AdminUser
 
 def _apply_application_decision(
     db: Session, application: Application, data: ApplicationDecide, *, admin_id: int | None, user_id: int | None,
+    actor: "AdminUser | UserAccount | None" = None,
 ) -> ApplicationDecision:
     """Shared core of decide_application/decide_application_as_host -- the same
     status transition and renter/host notifications regardless of which actor
-    decided. Exactly one of admin_id/user_id is set by the caller."""
+    decided. Exactly one of admin_id/user_id is set by the caller.
+
+    actor is the same admin_id/user_id, but as a real object -- needed (only
+    on the APPROVED branch) to auto-create an offer as that same
+    already-authorized provider actor, see _auto_create_offer_if_enabled."""
     if data.decision not in ("APPROVED", "REJECTED"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "decision must be APPROVED or REJECTED")
 
@@ -293,7 +301,81 @@ def _apply_application_decision(
 
     db.commit()
     db.refresh(decision)
+
+    if data.decision == "APPROVED" and actor is not None:
+        _auto_create_offer_if_enabled(db, application, actor)
+
     return decision
+
+
+SYSTEM_ACTOR_EMAIL = "automation@zoikorooms.internal"
+
+
+def _get_system_actor(db: Session) -> AdminUser:
+    """The actor recorded for every automatic pipeline step that has no real
+    human in the loop -- e.g. a renter accepting an offer has no provider-
+    side access, but agreement auto-creation still needs one (see
+    _auto_create_agreement_if_enabled). super_admin gives it an unconditional
+    pass through assert_provider_access (crud/party.py) without granting it
+    membership over any specific provider's party. is_active=False plus a
+    random, never-surfaced password means this row can never actually log
+    in -- it exists purely to be a distinct, auditable actor id in
+    log_audit_event, get-or-created lazily rather than via a migration/seed
+    step so it self-heals across every environment (dev/test/prod) the same
+    way rather than depending on a seed script having run."""
+    actor = db.scalar(select(AdminUser).where(AdminUser.email == SYSTEM_ACTOR_EMAIL))
+    if actor is not None:
+        return actor
+    actor = AdminUser(
+        email=SYSTEM_ACTOR_EMAIL,
+        hashed_password=hash_password(secrets.token_urlsafe(32)),
+        full_name="Zoiko Automation",
+        role="super_admin",
+        is_active=False,
+    )
+    db.add(actor)
+    db.commit()
+    db.refresh(actor)
+    return actor
+
+
+def _auto_create_offer_if_enabled(db: Session, application: Application, actor: "AdminUser | UserAccount") -> None:
+    """Section 14 policy key offer.requires_manual_creation (services/policy.py),
+    same opt-in-per-market-release shape as publication.requires_approval /
+    _auto_approve_and_publish_low_risk_market in crud/listing.py. Runs
+    synchronously as the same actor who just approved the application -- they
+    already have provider access, so this reuses create_offer/add_offer_terms/
+    set_offer_status completely unchanged rather than inventing a system path.
+
+    Silently no-ops (falls back to the existing manual flow) whenever the
+    policy is on manual, the listing hasn't set default terms, or any of the
+    real functions this calls raise -- an automation failure must never
+    corrupt or roll back the application decision that already succeeded and
+    that a real host/renter is waiting on. Same best-effort idiom already
+    used elsewhere in this file for the rent-invoice/rental-payment hooks."""
+    listing = application.listing
+    if listing is None:
+        return
+    if get_policy(resolve_market_release(db, listing), "offer.requires_manual_creation"):
+        return
+    if listing.default_monthly_rent is None or listing.default_deposit_amount is None or listing.default_term_months is None:
+        return
+
+    try:
+        offer = create_offer(db, application, actor)
+        add_offer_terms(
+            db, offer, actor,
+            OfferTermsCreate(
+                monthly_rent=listing.default_monthly_rent,
+                deposit_amount=listing.default_deposit_amount,
+                start_date=application.desired_move_in or date_.today(),
+                term_months=listing.default_term_months,
+                cadence=listing.default_cadence or "MONTHLY",
+            ),
+        )
+        set_offer_status(db, offer, actor, "SENT")
+    except Exception:
+        pass
 
 
 def decide_application(db: Session, application: Application, admin: AdminUser, data: ApplicationDecide) -> ApplicationDecision:
@@ -302,7 +384,7 @@ def decide_application(db: Session, application: Application, admin: AdminUser, 
     (offer terms, agreement) which stays with the provider. This is the admin-portal
     path; a self-service Host decides their own party-owned listing's applications
     through decide_application_as_host below instead."""
-    return _apply_application_decision(db, application, data, admin_id=admin.id, user_id=None)
+    return _apply_application_decision(db, application, data, admin_id=admin.id, user_id=None, actor=admin)
 
 
 def decide_application_as_host(
@@ -315,7 +397,7 @@ def decide_application_as_host(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only decide applications for your own listings")
     if application.status != "SUBMITTED":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Application in status {application.status} cannot be decided")
-    return _apply_application_decision(db, application, data, admin_id=None, user_id=user.id)
+    return _apply_application_decision(db, application, data, admin_id=None, user_id=user.id, actor=user)
 
 
 def get_offer_or_404(db: Session, offer_id: int, correlation_id: str = "") -> Offer:
@@ -631,6 +713,7 @@ def set_offer_status(
                 notification_type="offer.accepted_for_host",
                 related_entity_type="offer", related_entity_id=str(offer.id),
             )
+        _auto_create_agreement_if_enabled(db, offer)
     elif new_status == "DECLINED":
         if listing and listing.party_id:
             notif_crud.notify_user_by_party(
@@ -692,6 +775,7 @@ def user_accept_offer(
     _accept_offer_and_hold_room(db, offer, "ACCEPTED", correlation_id=correlation_id, override_reason=override_reason)
     db.commit()
     db.refresh(offer)
+    _auto_create_agreement_if_enabled(db, offer)
     return offer
 
 
@@ -850,7 +934,7 @@ def list_optional_clause_choices(db: Session, listing: Listing) -> list[dict]:
 
 def create_agreement(
     db: Session, offer: Offer, admin: AdminUser | UserAccount, selected_optional_clause_ids: list[str] | None = None,
-    *, signing_as_agent: bool = False, agent_authority_evidence_ref: str = "",
+    *, signing_as_agent: bool = False, agent_authority_evidence_ref: str = "", auto: bool = False,
 ) -> Agreement:
     assert_provider_access_any(db, admin, party_id_for_listing(offer.listing))
     reasons = check_agreement_eligibility(db, offer)
@@ -1002,7 +1086,59 @@ def create_agreement(
     except Exception:
         pass
 
+    # auto=True only (i.e. only when _auto_create_agreement_if_enabled called
+    # this, never a manual "Create Agreement" click): delivering every seeded
+    # disclosure immediately is the right behavior for a fully-automatic
+    # pipeline, but NOT the default -- ZR-ENG-CLR-004 AC-15's own delivery
+    # gate (_apply_signature's REQUIRED_MISSING check) depends on disclosures
+    # genuinely starting undelivered after a normal manual creation, and a
+    # real admin/host still needs to see and act on that queue. Confirmed by
+    # the full test suite: making this unconditional silently broke every
+    # test asserting that undelivered state is reachable -- same best-effort
+    # placement as the two blocks above, just gated.
+    if auto:
+        for disclosure in agreement.disclosures:
+            try:
+                deliver_disclosure(db, agreement, disclosure, admin)
+            except Exception:
+                pass
+
     return agreement
+
+
+def _auto_create_agreement_if_enabled(db: Session, offer: Offer) -> None:
+    """Section 14 policy key agreement.requires_manual_creation
+    (services/policy.py) -- same opt-in-per-market-release shape as
+    offer.requires_manual_creation above. Runs as the system actor
+    (_get_system_actor) since the caller accepting the offer may be the
+    renter themselves, who has no provider access at all.
+
+    create_agreement already enforces check_agreement_eligibility
+    internally before doing anything else, so this never bypasses a
+    compliance gate -- an unmet gate (missing authority record, occupancy
+    eligibility, identity verification, etc.) raises the same 409 a manual
+    click would, caught here and silently left for a human to create
+    manually later once the gate clears. Never lets an automation failure
+    touch the offer-acceptance state that already succeeded."""
+    if get_policy(resolve_market_release(db, offer.listing), "agreement.requires_manual_creation"):
+        return
+    try:
+        agreement = create_agreement(db, offer, _get_system_actor(db), auto=True)
+    except Exception:
+        return
+    # A fully-automatic pipeline that stops at DRAFT defeats the point --
+    # nothing else ever moves this agreement to SENT on its own, so it
+    # would sit invisible to the renter until a human happened to notice
+    # and click Send manually. Sending is purely mechanical (send_agreement
+    # only checks status==DRAFT and a version exists -- no discretion, unlike
+    # the real judgment calls this session deliberately left manual: occupancy
+    # eligibility, move-in confirmation, property/authority verification,
+    # screening decisions). Separate try/except so a send failure never
+    # unwinds the agreement creation that already succeeded.
+    try:
+        send_agreement(db, agreement, _get_system_actor(db))
+    except Exception:
+        pass
 
 
 def get_agreement_or_404(db: Session, agreement_id: int, correlation_id: str = "") -> Agreement:

@@ -1,12 +1,17 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.correlation import get_correlation_id
 from app.core.image_uploads import save_listing_images
+from app.core.property_verification_uploads import (
+    resolve_property_verification_document_path,
+    save_property_verification_document,
+)
 from app.core.rate_limit import sublet_document_limiter
 from app.core.signed_urls import verify_signed_download_token
 from app.crud.audit import log_audit_event
@@ -49,7 +54,7 @@ from app.schemas.marketplace import AuthorityRecordDeclare, AuthorityRecordRead,
 from app.schemas.listing import ListingCreate, ListingRead, ListingUpdate
 from app.schemas.occupancy import OccupancyRead
 from app.schemas.rental_transaction_record import RentalTransactionRecordRead
-from app.schemas.verification import PropertyVerificationDeclare, PropertyVerificationRead
+from app.schemas.verification import PropertyVerificationRead
 from app.schemas.payment_connection import PaymentConnectionRead
 from app.models.payment_recipient_authority import PaymentRecipientAuthority
 from app.schemas.payment_recipient_authority import (
@@ -1014,25 +1019,61 @@ def list_hosted_room_property_verifications(
 @router.post(
     "/rooms/{room_id}/property-verifications", response_model=PropertyVerificationRead, status_code=status.HTTP_201_CREATED,
 )
-def declare_hosted_property_verification(
+async def declare_hosted_property_verification(
     room_id: int,
-    payload: PropertyVerificationDeclare,
     request: Request,
+    evidence_ref: str = Form(...),
+    file: UploadFile = File(...),
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if payload.room_id != room_id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "roomId in the body must match the room in the URL")
+    """A multipart request (not JSON) since it always carries a real
+    evidence file now -- see core/property_verification_uploads.py for
+    content validation and storage. Previously evidence_ref (free text)
+    was the only thing ever recorded, with no real document behind it."""
     room = get_room(db, room_id)
     if not room:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
-    record = property_verification_crud.declare_property_verification(db, user, room, evidence_ref=payload.evidence_ref)
+    stored_filename, original_filename, content_type, file_size, _sha256_hash = await save_property_verification_document(file)
+    record = property_verification_crud.declare_property_verification(
+        db, user, room, evidence_ref=evidence_ref,
+        stored_filename=stored_filename, original_filename=original_filename,
+        content_type=content_type, file_size=file_size,
+    )
     emit_event(
         db, "property_verification.declared", "property_verification", str(record.id),
         {"roomId": room_id}, correlation_id=get_correlation_id(request),
     )
     db.commit()
     return record
+
+
+@router.get("/rooms/{room_id}/property-verifications/{verification_id}/document")
+def download_hosted_property_verification_document(
+    room_id: int, verification_id: int,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Streams the host's own uploaded evidence document -- same
+    ownership-check + streaming shape as user_identity.py's
+    download_own_identity_document."""
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    record = property_verification_crud.get_property_verification_or_404(db, verification_id)
+    if not user.party_id or room.property.owner_party_id != user.party_id or record.room_id != room_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view property verification documents for your own room")
+    if not record.document_file_path:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No document was uploaded for this verification")
+
+    path = resolve_property_verification_document_path(record.document_file_path)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored document could not be found")
+
+    return FileResponse(
+        path,
+        media_type=record.document_file_content_type or "application/octet-stream",
+        filename=record.document_file_original_name or "document",
+    )
 
 
 # --- Rental Transaction Record: host-facing read-only view --------------
