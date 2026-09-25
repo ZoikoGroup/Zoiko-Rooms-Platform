@@ -960,7 +960,7 @@ def respond_to_sublet_info_request(db: Session, sublet_request: SubletRequest, u
 # States a tenant can still withdraw from -- a final decision (approved/
 # rejected) or an already-withdrawn request can never be withdrawn again.
 _WITHDRAWABLE_STATUSES = (
-    "pending_verification", "pending_admin_review", "more_information_requested", "tenant_response_submitted",
+    "draft", "pending_verification", "pending_admin_review", "more_information_requested", "tenant_response_submitted",
 )
 
 

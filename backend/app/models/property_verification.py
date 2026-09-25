@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -34,6 +34,16 @@ class PropertyVerification(Base):
     document_file_original_name: Mapped[str] = mapped_column(String(255), default="")
     document_file_content_type: Mapped[str] = mapped_column(String(100), default="")
     document_file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # services/document_ocr.py:check_property_document_address -- real check
+    # against this room's actual Property.address/city (unlike identity's
+    # address-document check, there IS a real known value here to compare
+    # against). ocr_address_matched is the actual pass/fail signal;
+    # ocr_extracted_text is a short snippet kept for admin review, never the
+    # full document text.
+    ocr_extracted_text: Mapped[str] = mapped_column(String(500), default="")
+    ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ocr_address_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     status: Mapped[str] = mapped_column(String(30), default="pending")
     verifier_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
