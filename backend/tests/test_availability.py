@@ -282,3 +282,21 @@ class TestAvailabilityEnforcedAcrossEntryPoints:
             cookies=admin_cookies,
         )
         assert r.status_code == 405, r.text
+
+    def test_admin_bookings_list_includes_real_rentals(self, client, db_session: Session):
+        """Nothing creates legacy Booking rows anymore, so the admin Bookings
+        page and dashboard cards must surface real Occupancies instead of
+        staying permanently empty."""
+        listing_id, room_id, _host, admin_cookies = _create_publish_listing(client, db_session)
+        occupancy = _make_active_occupancy(db_session, listing_id=listing_id, room_id=room_id)
+
+        r = client.get("/api/bookings", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        rows = r.json()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["id"] == f"OCC-{occupancy.id}"
+        assert row["listingId"] == listing_id
+        assert row["guestEmail"] == "renter@test.com"
+        assert row["status"] == "confirmed"
+        assert row["paymentStatus"] == "unpaid"

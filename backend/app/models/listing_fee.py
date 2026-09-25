@@ -34,6 +34,7 @@ LISTING_FEE_TAX_BEHAVIORS = ("INCLUSIVE", "EXCLUSIVE")
 LISTING_FEE_QUOTE_TTL_SECONDS = 1800
 
 LISTING_FEE_PAYMENT_STATUSES = ("PENDING", "SUCCEEDED", "FAILED")
+LISTING_FEE_DISPUTE_STATUSES = ("OPEN", "WON", "LOST")
 # ZR-PAY-002 Section 8.4's own state names, trimmed to what this build's
 # single-refund-per-request flow actually produces -- REFUND_ELIGIBLE is a
 # display-only derivation (a SUCCEEDED payment with remaining refundable
@@ -220,6 +221,12 @@ class ListingFeePayment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A bank chargeback against a SUCCEEDED payment (charge.dispute.*).
+    # OPEN/LOST mean the fee is no longer held, so it stops satisfying the
+    # publication gate; WON restores it. Null = never disputed.
+    dispute_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    provider_dispute_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    disputed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     quote: Mapped["ListingFeeQuote"] = relationship(back_populates="payments")
     listing: Mapped["Listing"] = relationship()

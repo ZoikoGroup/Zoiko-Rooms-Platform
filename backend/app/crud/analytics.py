@@ -1,5 +1,5 @@
 # NOTE: every function below combines the legacy short-stay Booking table
-# with the real self-service rental lifecycle (SimulatedPayment for revenue,
+# with the real self-service rental lifecycle (confirmed rent for revenue,
 # Occupancy for occupancy/bookings-by-type), so a renter who went through the
 # actual Application -> Offer -> Agreement -> Occupancy flow shows up in these
 # admin charts too, not just legacy admin-created bookings. Application rows
@@ -9,66 +9,75 @@
 from datetime import datetime
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.booking import Booking
-from app.models.finance import SimulatedPayment
+from app.models.finance import Obligation, PaymentAllocation, SimulatedPayment
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
+from app.models.rental_payment import RentalPaymentObligation, RentalPaymentRecord
 from app.schemas.analytics import BookingsByTypePoint, OccupancyByCityPoint, RevenueTrendPoint
 
 PROPERTY_TYPE_LABELS = {
     "private_room": "Private Rooms",
 }
 
-# nights * price_per_night, computed in SQL since neither column is stored.
-# Postgres `date - date` already yields an integer day count, so no date_part() needed.
-_nights_expr = func.greatest(1, Booking.check_out - Booking.check_in)
-_revenue_expr = _nights_expr * Listing.price_per_night
-
-
 def revenue_trend(db: Session, months: int = 6) -> list[RevenueTrendPoint]:
     """Merges legacy Booking revenue (nights * price, at booking creation
-    time) with real rental-lifecycle revenue -- confirmed SimulatedPayments,
-    at confirmation time -- bucketed by month."""
-    buckets: dict[datetime, dict[str, float]] = {}
+    time) with real rental-lifecycle rent, bucketed by month at confirmation
+    time: SimulatedPayment amounts allocated to RENT obligations, plus
+    recipient-confirmed RentalPaymentRecords against RENT obligations (the
+    ZR-PAY-002 record path, which never creates a SimulatedPayment).
+    Deposits are excluded on both paths -- held, not earned -- matching
+    crud/booking.py's totalAmount so the dashboard's Total Revenue card and
+    this chart agree. Rows are bucketed in Python rather than with Postgres'
+    date_trunc so this also runs on the SQLite test database."""
+    revenue: dict[tuple[int, int], float] = {}
+    events: dict[tuple[int, int], set[tuple[str, object]]] = {}
 
-    def _add(bucket: datetime, revenue: float, events: int) -> None:
-        entry = buckets.setdefault(bucket, {"revenue": 0.0, "events": 0})
-        entry["revenue"] += revenue
-        entry["events"] += events
+    def _add(at: datetime, amount: float, event: tuple[str, object]) -> None:
+        bucket = (at.year, at.month)
+        revenue[bucket] = revenue.get(bucket, 0.0) + amount
+        events.setdefault(bucket, set()).add(event)
 
-    booking_month = func.date_trunc("month", Booking.created_at)
-    booking_rows = db.execute(
-        select(
-            booking_month.label("bucket"),
-            func.sum(_revenue_expr).label("revenue"),
-            func.count(Booking.id).label("events"),
-        )
-        .join(Listing, Listing.id == Booking.listing_id)
-        .where(Booking.payment_status == "paid")
-        .group_by("bucket")
-    ).all()
-    for row in booking_rows:
-        _add(row.bucket, float(row.revenue or 0), row.events)
+    for booking in db.scalars(
+        select(Booking).options(joinedload(Booking.listing)).where(Booking.payment_status == "paid")
+    ):
+        _add(booking.created_at, float(booking.total_amount), ("booking", booking.id))
 
-    payment_month = func.date_trunc("month", SimulatedPayment.confirmed_at)
     payment_rows = db.execute(
-        select(
-            payment_month.label("bucket"),
-            func.sum(SimulatedPayment.amount).label("revenue"),
-            func.count(SimulatedPayment.id).label("events"),
+        select(SimulatedPayment.id, SimulatedPayment.confirmed_at, PaymentAllocation.amount_allocated)
+        .join(PaymentAllocation, PaymentAllocation.payment_id == SimulatedPayment.id)
+        .join(Obligation, Obligation.id == PaymentAllocation.obligation_id)
+        .where(
+            SimulatedPayment.status == "SUCCEEDED",
+            SimulatedPayment.confirmed_at.is_not(None),
+            Obligation.obligation_type == "RENT",
         )
-        .where(SimulatedPayment.status == "SUCCEEDED")
-        .group_by("bucket")
     ).all()
-    for row in payment_rows:
-        _add(row.bucket, float(row.revenue or 0), row.events)
+    for payment_id, confirmed_at, amount in payment_rows:
+        _add(confirmed_at, float(amount), ("payment", payment_id))
 
-    ordered = sorted(buckets.items(), key=lambda kv: kv[0])
+    record_rows = db.execute(
+        select(RentalPaymentRecord.id, RentalPaymentRecord.confirmed_at, RentalPaymentRecord.confirmed_amount)
+        .join(RentalPaymentObligation, RentalPaymentObligation.id == RentalPaymentRecord.obligation_id)
+        .where(
+            RentalPaymentRecord.status == "CONFIRMED",
+            RentalPaymentRecord.confirmed_at.is_not(None),
+            RentalPaymentObligation.obligation_type == "RENT",
+        )
+    ).all()
+    for record_id, confirmed_at, amount in record_rows:
+        _add(confirmed_at, float(amount or 0), ("record", record_id))
+
+    ordered = sorted(revenue)[-months:]
     return [
-        RevenueTrendPoint(month=bucket.strftime("%b"), revenue=round(data["revenue"], 2), bookings=data["events"])
-        for bucket, data in ordered[-months:]
+        RevenueTrendPoint(
+            month=datetime(year, month, 1).strftime("%b"),
+            revenue=round(revenue[(year, month)], 2),
+            bookings=len(events[(year, month)]),
+        )
+        for year, month in ordered
     ]
 
 

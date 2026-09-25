@@ -124,8 +124,9 @@ class Settings(BaseSettings):
     # Both point at RecipientRentalPaymentsManager (the only page that
     # renders ProviderAccountManager / "Connect payment account" /
     # "Resume onboarding") -- there is no dedicated /host/payouts page.
-    stripe_connect_refresh_url: str = "http://localhost:3001/account/host/payments"
-    stripe_connect_return_url: str = "http://localhost:3001/account/host/payments"
+    # Production: https://app.zoikorooms.com/account/host/payments (render.yaml).
+    stripe_connect_refresh_url: str = "http://localhost:3000/account/host/payments"
+    stripe_connect_return_url: str = "http://localhost:3000/account/host/payments"
     # ZR-PAY-002 Section 6/13: the Listing Fee is a separate Zoiko-own-account
     # checkout from the rent/payout domain above (see models/listing_fee.py's
     # own module docstring for why). Ops may register it as its own Stripe
@@ -251,6 +252,39 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.environment.strip().lower() == "production"
 
+    def _stripe_production_problems(self) -> list[str]:
+        """Real Stripe is on, so both webhook endpoints it actually uses must
+        verify signatures, and Connect onboarding must hand hosts back to the
+        real site. Without a secret, listing-fee refunds and rent paid after
+        the customer closes the tab never land, and host account status only
+        moves when the host clicks 'Refresh status'. The legacy
+        /payments/stripe/webhook (Zoiko-custody rent) is not checked -- that
+        flow is off by RENT_COLLECTION_ENABLED=false.
+
+        Enforced (boot refused) only for a live-mode key. While production
+        still runs on a Stripe test-mode key, the same gaps are only logged,
+        so a test deployment boots with its webhooks not yet registered."""
+        gaps: list[str] = []
+        if not (self.stripe_listing_fee_webhook_secret or self.stripe_webhook_secret):
+            gaps.append("STRIPE_LISTING_FEE_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET) must be set when STRIPE_SECRET_KEY is")
+        if not (self.stripe_rental_payment_webhook_secret or self.stripe_webhook_secret):
+            gaps.append("STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET) must be set when STRIPE_SECRET_KEY is")
+        for name in ("stripe_connect_refresh_url", "stripe_connect_return_url"):
+            url = getattr(self, name).strip().lower()
+            if not url.startswith("https://") or "localhost" in url or "127.0.0.1" in url:
+                gaps.append(f"{name.upper()} must be a public https:// URL in production")
+
+        if self.stripe_secret_key.startswith(("sk_live_", "rk_live_")):
+            return gaps
+
+        import logging
+
+        logger = logging.getLogger("uvicorn.error")
+        logger.warning("STRIPE_SECRET_KEY is a test-mode key in production -- no real charges will be made")
+        for gap in gaps:
+            logger.warning("stripe (test mode, not enforced): %s", gap)
+        return []
+
     @model_validator(mode="after")
     def _validate_production(self) -> "Settings":
         if not self.is_production:
@@ -278,6 +312,12 @@ class Settings(BaseSettings):
         for flag in RENTAL_MONEY_MOVEMENT_FLAGS:
             if getattr(self, flag):
                 problems.append(f"{flag.upper()} must be false -- Zoiko Rooms never moves rental money (ZR-PAY-CFG-001)")
+        if self.stripe_secret_key:
+            problems.extend(self._stripe_production_problems())
+        else:
+            # Without a key every Listing Fee checkout completes as SUCCEEDED
+            # (with a receipt) and nothing is charged -- a free publication gate.
+            problems.append("STRIPE_SECRET_KEY must be set in production (a test-mode sk_test_ key is allowed)")
         if not self.listing_fee_fail_closed:
             problems.append("LISTING_FEE_FAIL_CLOSED must be true in production")
         if not self.payment_receipt_authority_required:

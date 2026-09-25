@@ -627,6 +627,9 @@ def test_F_cookie_flags_production_like():
         os.environ['COOKIE_SECURE']='true'
         os.environ['JWT_SECRET']='x'*48
         os.environ['SEED_ADMIN_PASSWORD']='x'*16
+        # Independent of whatever Stripe config the local .env carries --
+        # a test-mode key boots with webhook gaps only logged.
+        os.environ['STRIPE_SECRET_KEY']='sk_test_dummy'
         from cryptography.fernet import Fernet
         os.environ['FIELD_ENCRYPTION_KEY']=Fernet.generate_key().decode()
         from app.main import app
