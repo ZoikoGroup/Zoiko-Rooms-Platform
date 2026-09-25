@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from io import BytesIO
 
 from fastapi import HTTPException, status
@@ -30,6 +31,8 @@ from app.crud import notification as notif_crud
 from app.models.admin_user import AdminUser
 from app.models.listing import Listing
 from app.models.listing_fee import (
+    LISTING_FEE_QUOTE_TTL_SECONDS,
+    LISTING_FEE_TAX_BEHAVIORS,
     ListingFeePayment,
     ListingFeePolicy,
     ListingFeeProviderEvent,
@@ -58,28 +61,79 @@ def listing_jurisdiction_code(listing: Listing) -> str | None:
     return None
 
 
+# ZR-PAY-CFG-001 Section 2.2: the exact copy the listing flow shows when a
+# market has no chargeable price.
+LISTING_FEE_UNAVAILABLE_MESSAGE = "Listing fee currently unavailable in this market."
+
+
+def _current_environment() -> str:
+    return settings.environment.strip().lower()
+
+
 def resolve_listing_fee_policy(db: Session, jurisdiction_code: str = DEFAULT_JURISDICTION, *, as_of: date | None = None) -> ListingFeePolicy:
     """The single entry point Listing Fee quoting must use -- never
-    hard-code an amount or branch on jurisdiction_code directly, same rule
-    crud/market_policy.py:resolve_market_policy already enforces for its own
-    domain. Fails closed (409) if unconfigured -- an un-quoted Listing Fee
-    must never silently default to some invented amount."""
+    hard-code an amount or branch on jurisdiction_code directly.
+
+    ZR-PAY-CFG-001: only an ACTIVE (approved) Price Book entry for this
+    market, created in this environment (PAY-CFG-12), and effective now can
+    resolve. With listing_fee_fail_closed on, it must also carry the billing
+    entity and tax configuration a production charge needs (Decisions 2 and
+    5). Anything missing fails closed with LISTING_FEE_UNAVAILABLE_MESSAGE --
+    never an invented default price or a currency conversion (PAY-CFG-01/02)."""
     as_of = as_of or date.today()
     policy = db.scalar(
         select(ListingFeePolicy)
         .where(
             ListingFeePolicy.jurisdiction_code == jurisdiction_code,
+            ListingFeePolicy.status == "ACTIVE",
+            ListingFeePolicy.environment == _current_environment(),
             ListingFeePolicy.effective_from <= as_of,
             (ListingFeePolicy.effective_to.is_(None)) | (ListingFeePolicy.effective_to >= as_of),
         )
         .order_by(ListingFeePolicy.version.desc())
+        .limit(1)
     )
     if not policy:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"No Listing Fee policy configured for jurisdiction '{jurisdiction_code}' as of {as_of}",
-        )
+        raise HTTPException(status.HTTP_409_CONFLICT, LISTING_FEE_UNAVAILABLE_MESSAGE)
+    if settings.listing_fee_fail_closed and _price_activation_problems(db, policy, as_of=as_of):
+        raise HTTPException(status.HTTP_409_CONFLICT, LISTING_FEE_UNAVAILABLE_MESSAGE)
     return policy
+
+
+def listing_fee_available(db: Session, jurisdiction_code: str) -> bool:
+    try:
+        resolve_listing_fee_policy(db, jurisdiction_code)
+    except HTTPException:
+        return False
+    return True
+
+
+def _price_activation_problems(db: Session, policy: ListingFeePolicy, *, as_of: date | None = None) -> list[str]:
+    """Everything a Price Book entry needs before it may be charged in
+    production (ZR-PAY-CFG-001 Sections 2, 3, 7 and 9.1)."""
+    from app.models.market_release import MarketRelease
+
+    as_of = as_of or date.today()
+    problems: list[str] = []
+    if not db.scalar(select(MarketRelease.id).where(MarketRelease.jurisdiction == policy.jurisdiction_code)):
+        problems.append(f"'{policy.jurisdiction_code}' is not a configured market")
+    if price_amount_minor(policy) < 0:
+        problems.append("The amount cannot be negative")
+    if policy.tax_behavior not in LISTING_FEE_TAX_BEHAVIORS:
+        problems.append(f"Tax behavior must be one of {list(LISTING_FEE_TAX_BEHAVIORS)}")
+    if not (policy.tax_rule_reference or "").strip():
+        problems.append("A Finance/Tax-approved tax rule reference is required")
+    entity = policy.billing_entity
+    if entity is None:
+        problems.append("A billing entity is required")
+    else:
+        if not entity.is_effective(as_of):
+            problems.append(f"Billing entity {entity.code} is not active")
+        if not entity.supports(policy.jurisdiction_code, policy.currency):
+            problems.append(
+                f"Billing entity {entity.code} is not approved to bill {policy.currency} in {policy.jurisdiction_code}"
+            )
+    return problems
 
 
 def list_listing_fee_policies(db: Session, jurisdiction_code: str | None = None) -> list[ListingFeePolicy]:
@@ -96,26 +150,53 @@ def get_listing_fee_policy_or_404(db: Session, policy_id: int) -> ListingFeePoli
     return policy
 
 
+def _to_amount_fields(amount_minor, amount, currency: str) -> dict:
+    if amount_minor is None:
+        amount_minor = stripe_client.to_minor_units(float(amount), currency)
+    return {"amount_minor": int(amount_minor), "amount": stripe_client.from_minor_units(int(amount_minor), currency)}
+
+
 def create_listing_fee_policy(db: Session, admin: AdminUser, data: dict, *, correlation_id: str = "") -> ListingFeePolicy:
-    """Always creates the next version for this jurisdiction_code
-    (append-only-by-version, same rule resolve_listing_fee_policy assumes) --
-    never edits a prior version's already-quoted terms in place."""
-    jurisdiction_code = data["jurisdiction_code"]
+    """Creates the next Price Book version for this market as a DRAFT --
+    never chargeable until approve_listing_fee_policy (ZR-PAY-CFG-001 2.1).
+    Append-only by version: a price already quoted is never edited."""
+    from app.models.market_release import MarketRelease
+
+    data = dict(data)
+    jurisdiction_code = data["jurisdiction_code"].strip()
+    if not db.scalar(select(MarketRelease.id).where(MarketRelease.jurisdiction == jurisdiction_code)):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"'{jurisdiction_code}' is not a configured market -- create its market release first",
+        )
+    data["jurisdiction_code"] = jurisdiction_code
+    data["currency"] = data["currency"].strip().upper()
+    data.update(_to_amount_fields(data.pop("amount_minor", None), data.get("amount"), data["currency"]))
+    data.pop("quote_validity_minutes", None)
+    if data.get("billing_entity_id") is not None:
+        from app.crud.billing_entity import get_billing_entity_or_404
+
+        get_billing_entity_or_404(db, data["billing_entity_id"])
+
     latest = db.scalar(
         select(ListingFeePolicy)
         .where(ListingFeePolicy.jurisdiction_code == jurisdiction_code)
         .order_by(ListingFeePolicy.version.desc())
+        .limit(1)
     )
     next_version = (latest.version + 1) if latest else 1
 
-    policy = ListingFeePolicy(**{**data, "version": next_version})
+    data.update(
+        version=next_version, status="DRAFT", environment=_current_environment(), created_by_admin_id=admin.id,
+    )
+    policy = ListingFeePolicy(**data)
     db.add(policy)
     db.commit()
     db.refresh(policy)
 
     log_audit_event(
         db, admin, "listing_fee_policy.create", "listing_fee_policy", str(policy.id), correlation_id,
-        reason=f"jurisdiction={jurisdiction_code}; version={next_version}",
+        reason=f"jurisdiction={jurisdiction_code}; version={next_version}; status=DRAFT",
     )
     db.commit()
     return policy
@@ -124,9 +205,25 @@ def create_listing_fee_policy(db: Session, admin: AdminUser, data: dict, *, corr
 def update_listing_fee_policy(
     db: Session, admin: AdminUser, policy: ListingFeePolicy, updates: dict, *, correlation_id: str = "",
 ) -> ListingFeePolicy:
+    """Only a DRAFT may be edited -- once approved, a price is part of the
+    commercial record and changes need a new version."""
+    if policy.status != "DRAFT":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"A {policy.status.lower()} price can't be edited -- create a new version instead",
+        )
+    updates = {k: v for k, v in updates.items() if v is not None}
+    updates.pop("quote_validity_minutes", None)
+    if "currency" in updates:
+        updates["currency"] = updates["currency"].strip().upper()
+    currency = updates.get("currency", policy.currency)
+    if "amount_minor" in updates or "amount" in updates:
+        updates.update(_to_amount_fields(updates.pop("amount_minor", None), updates.get("amount"), currency))
+    if updates.get("billing_entity_id") is not None:
+        from app.crud.billing_entity import get_billing_entity_or_404
+
+        get_billing_entity_or_404(db, updates["billing_entity_id"])
     for field, value in updates.items():
-        if value is not None:
-            setattr(policy, field, value)
+        setattr(policy, field, value)
     db.commit()
     db.refresh(policy)
 
@@ -138,19 +235,106 @@ def update_listing_fee_policy(
     return policy
 
 
+def approve_listing_fee_policy(
+    db: Session, admin: AdminUser, policy: ListingFeePolicy, *, correlation_id: str = "",
+) -> ListingFeePolicy:
+    """DRAFT -> ACTIVE. Refuses unless everything a production charge needs
+    is in place (market, tax rule, billing entity approved for this market
+    and currency). The previously ACTIVE price for the same market and
+    environment is RETIRED in the same transaction, so exactly one ACTIVE
+    price can ever resolve."""
+    if policy.status != "DRAFT":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a draft price can be approved")
+    problems = _price_activation_problems(db, policy)
+    if problems:
+        raise HTTPException(status.HTTP_409_CONFLICT, {"message": "This price can't be activated yet", "reasons": problems})
+
+    previous = db.scalars(
+        select(ListingFeePolicy).where(
+            ListingFeePolicy.jurisdiction_code == policy.jurisdiction_code,
+            ListingFeePolicy.environment == policy.environment,
+            ListingFeePolicy.status == "ACTIVE",
+            ListingFeePolicy.id != policy.id,
+        )
+    ).all()
+    for old in previous:
+        old.status = "RETIRED"
+    policy.status = "ACTIVE"
+    policy.approved_by_admin_id = admin.id
+    policy.approved_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(policy)
+
+    retired_ids = ",".join(str(o.id) for o in previous) or "none"
+    log_audit_event(
+        db, admin, "listing_fee_policy.approve", "listing_fee_policy", str(policy.id), correlation_id,
+        reason=f"jurisdiction={policy.jurisdiction_code}; version={policy.version}; retired={retired_ids}",
+    )
+    db.commit()
+    return policy
+
+
+def retire_listing_fee_policy(
+    db: Session, admin: AdminUser, policy: ListingFeePolicy, *, correlation_id: str = "",
+) -> ListingFeePolicy:
+    if policy.status == "RETIRED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This price is already retired")
+    policy.status = "RETIRED"
+    db.commit()
+    db.refresh(policy)
+    log_audit_event(
+        db, admin, "listing_fee_policy.retire", "listing_fee_policy", str(policy.id), correlation_id,
+        reason=f"jurisdiction={policy.jurisdiction_code}; version={policy.version}",
+    )
+    db.commit()
+    return policy
+
+
+def price_amount_minor(policy: ListingFeePolicy) -> int:
+    if policy.amount_minor is not None:
+        return int(policy.amount_minor)
+    return stripe_client.to_minor_units(float(policy.amount), policy.currency)
+
+
+def compute_tax_minor(amount_minor: int, tax_rate: float, tax_behavior: str) -> tuple[int, int, int]:
+    """Returns (fee_minor, tax_minor, total_minor). EXCLUSIVE adds tax on
+    top; INCLUSIVE identifies the tax already contained in the price
+    without adding it again (ZR-PAY-CFG-001 Section 3.2)."""
+    rate = Decimal(str(tax_rate))
+    amount = Decimal(amount_minor)
+    if tax_behavior == "INCLUSIVE":
+        tax = (amount - amount / (Decimal(1) + rate)).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+        return int(amount - tax), int(tax), int(amount)
+    tax = (amount * rate).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    return int(amount), int(tax), int(amount + tax)
+
+
 def to_policy_snapshot(policy: ListingFeePolicy) -> dict:
     """The dict frozen onto ListingFeeQuote.policy_snapshot -- an immutable
-    record of which policy version priced this quote, not a live reference,
-    same discipline as crud/market_policy.py:to_policy_snapshot."""
+    record of which price priced this quote (ZR-PAY-CFG-001 8.1: market,
+    currency, amount + Price Book version, tax mode/amount/rule, billing
+    entity), never a live reference."""
+    from app.crud.billing_entity import billing_entity_snapshot
+
+    entity = policy.billing_entity
     return {
         "jurisdiction": policy.jurisdiction_code,
+        "market": policy.jurisdiction_code,
         "policy_id": policy.id,
         "policy_version": policy.version,
-        "legal_entity_name": policy.legal_entity_name,
-        "tax_registration_number": policy.tax_registration_number,
+        "price_book_version": policy.version,
+        "environment": policy.environment,
+        "currency": policy.currency,
+        "amount_minor": price_amount_minor(policy),
+        "legal_entity_name": entity.customer_facing_name() if entity else policy.legal_entity_name,
+        "tax_registration_number": entity.tax_registration_number if entity else policy.tax_registration_number,
+        "billing_entity": billing_entity_snapshot(entity) if entity else None,
         "tax_rate": float(policy.tax_rate),
+        "tax_behavior": policy.tax_behavior,
+        "tax_rule_reference": policy.tax_rule_reference,
         "refund_eligible": policy.refund_eligible,
         "refund_window_days": policy.refund_window_days,
+        "disclosure_text": policy.disclosure_text,
     }
 
 
@@ -171,17 +355,23 @@ def create_quote(db: Session, listing: Listing, party: Party, *, correlation_id:
     jurisdiction_code = listing_jurisdiction_code(listing) or DEFAULT_JURISDICTION
     policy = resolve_listing_fee_policy(db, jurisdiction_code)
 
-    amount = _round2(policy.amount)
-    tax_amount = _round2(amount * float(policy.tax_rate))
+    fee_minor, tax_minor, total_minor = compute_tax_minor(
+        price_amount_minor(policy), float(policy.tax_rate), policy.tax_behavior,
+    )
+    amount = stripe_client.from_minor_units(fee_minor, policy.currency)
     quote = ListingFeeQuote(
         listing_id=listing.id,
         party_id=party.id,
         amount=amount,
-        tax_amount=tax_amount,
-        total_amount=_round2(amount + tax_amount),
+        tax_amount=stripe_client.from_minor_units(tax_minor, policy.currency),
+        total_amount=stripe_client.from_minor_units(total_minor, policy.currency),
+        amount_minor=fee_minor,
+        tax_amount_minor=tax_minor,
+        total_amount_minor=total_minor,
         currency=policy.currency,
         policy_snapshot=to_policy_snapshot(policy),
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=policy.quote_validity_minutes),
+        # ZR-PAY-CFG-001 Decision 6: 30 minutes, fixed.
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=LISTING_FEE_QUOTE_TTL_SECONDS),
     )
     db.add(quote)
     db.commit()
@@ -594,6 +784,7 @@ def get_or_create_listing_fee_receipt(db: Session, payment: ListingFeePayment) -
     pdf_bytes = _generate_listing_fee_receipt_pdf(
         payment, receipt_number, legal_entity_name=snapshot.get("legal_entity_name", "Zoiko Rooms"),
         tax_registration_number=snapshot.get("tax_registration_number", ""),
+        billing_entity=snapshot.get("billing_entity"),
     )
     storage_ref, content_hash = save_listing_fee_receipt_document(pdf_bytes)
 
@@ -618,6 +809,7 @@ def get_or_create_listing_fee_receipt(db: Session, payment: ListingFeePayment) -
 
 def _generate_listing_fee_receipt_pdf(
     payment: ListingFeePayment, receipt_number: str, *, legal_entity_name: str, tax_registration_number: str,
+    billing_entity: dict | None = None,
 ) -> bytes:
     """ZR-PAY-002 Section 8.5's minimum receipt/invoice data. Same plain
     summary-document framing as crud/finance.py:_generate_payment_receipt_pdf --
@@ -638,6 +830,13 @@ def _generate_listing_fee_receipt_pdf(
     write(f"{legal_entity_name} -- Listing Fee Receipt", size=16, bold=True, gap=10 * mm)
     write(f"Receipt {receipt_number}", size=10)
     write(f"Listing {payment.listing_id}  |  Payment #{payment.id}", size=10)
+    # ZR-PAY-CFG-001 Section 7: the legally required company details, from
+    # the Billing Entity Registry snapshot frozen at quote time.
+    if billing_entity:
+        if billing_entity.get("registered_address"):
+            write(f"Registered address: {billing_entity['registered_address']}", size=8, gap=5 * mm)
+        if billing_entity.get("company_registration_number"):
+            write(f"Company registration: {billing_entity['company_registration_number']}", size=8, gap=5 * mm)
     if tax_registration_number:
         write(f"Tax registration: {tax_registration_number}", size=9, gap=10 * mm)
     else:
@@ -646,9 +845,12 @@ def _generate_listing_fee_receipt_pdf(
     write(f"Paid {issued.strftime('%Y-%m-%d %H:%M UTC')}", size=9, gap=10 * mm)
 
     quote = payment.quote
+    snapshot = quote.policy_snapshot or {}
     write("Charge", size=12, bold=True)
     write(f"Listing Fee: {quote.currency} {float(quote.amount):.2f}", size=9, gap=6 * mm)
-    write(f"Tax: {quote.currency} {float(quote.tax_amount):.2f}", size=9, gap=6 * mm)
+    tax_label = "Tax (included)" if snapshot.get("tax_behavior") == "INCLUSIVE" else "Tax"
+    tax_rate = float(snapshot.get("tax_rate", 0.0))
+    write(f"{tax_label} at {tax_rate * 100:.2f}%: {quote.currency} {float(quote.tax_amount):.2f}", size=9, gap=6 * mm)
     write(f"Total: {quote.currency} {float(quote.total_amount):.2f}", size=9, gap=10 * mm)
 
     write(

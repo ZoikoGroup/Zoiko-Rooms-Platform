@@ -271,7 +271,9 @@ export const subletRequestStatusTone = {
 export const subletRequestStatusLabel = {
   draft: "Draft",
   pending_verification: "Pending Verification",
-  pending_admin_review: "Pending Admin Review",
+  // Backend status name predates host decisions -- the host decides it now
+  // (ZR-SUB-003), with Zoiko admins only able to override.
+  pending_admin_review: "Awaiting Host Decision",
   more_information_requested: "More Information Requested",
   tenant_response_submitted: "Tenant Responded",
   approved: "Approved",

@@ -9,8 +9,10 @@ import { Modal } from "@/components/ui/Modal";
 import { apiClientFetch } from "@/lib/api-client";
 import { depositStatusLabel, depositStatusTone, obligationStatusLabel, obligationStatusTone } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { useAdminPaymentCapabilities } from "@/components/admin/useAdminPaymentCapabilities";
 
 export function FinanceLedgerManager() {
+  const capabilities = useAdminPaymentCapabilities();
   const [obligations, setObligations] = useState<Obligation[]>([]);
   const [deposits, setDeposits] = useState<DepositRecord[]>([]);
   const [toast, setToast] = useState("");
@@ -111,9 +113,9 @@ export function FinanceLedgerManager() {
           <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Obligations</h2>
         </div>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          What each tenant owes the platform — rent, deposits, fees and tax. There is no live payment gateway
-          connected yet, so &quot;Record Payment in Full&quot; marks an obligation paid in Zoiko&apos;s own records; it
-          does not charge the tenant or move real money.
+          What each tenant owes for their rental — rent and deposit are paid directly to the landlord, agent or other
+          authorized recipient, never to Zoiko Rooms. An obligation is marked paid once the recipient confirms receipt
+          in Rent &amp; Deposit Payments.
         </p>
         <div className="mt-4 space-y-2">
           {obligations.map((obligation) => (
@@ -131,7 +133,8 @@ export function FinanceLedgerManager() {
               </div>
               <div className="flex items-center gap-2">
                 <Badge tone={obligationStatusTone[obligation.status]}>{obligationStatusLabel[obligation.status] ?? obligation.status}</Badge>
-                {(obligation.status === "PENDING" || obligation.status === "PARTIALLY_PAID") && (
+                {capabilities?.rent_collection_enabled &&
+                  (obligation.status === "PENDING" || obligation.status === "PARTIALLY_PAID") && (
                   <Button size="sm" variant="primary" disabled={payingId === obligation.id} onClick={() => openEvidenceModal(obligation)}>
                     <CreditCard className="h-3.5 w-3.5" /> {payingId === obligation.id ? "Recording…" : "Record Payment in Full"}
                   </Button>
@@ -149,7 +152,8 @@ export function FinanceLedgerManager() {
           <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Deposits</h2>
         </div>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Held in the safeguarded money plane, separate from rent and Zoiko&apos;s own revenue, until released or forfeited.
+          Deposit records for the rental. Zoiko Rooms doesn&apos;t hold deposits — the authorized recipient or deposit
+          scheme holds and returns them. Shown here for the record only.
         </p>
         <div className="mt-4 space-y-2">
           {deposits.map((deposit) => (
@@ -165,7 +169,8 @@ export function FinanceLedgerManager() {
               </div>
               <div className="flex items-center gap-2">
                 <Badge tone={depositStatusTone[deposit.status]}>{depositStatusLabel[deposit.status] ?? deposit.status}</Badge>
-                {(deposit.status === "HELD" || deposit.status === "PARTIALLY_RELEASED") && (
+                {capabilities?.deposit_collection_enabled &&
+                  (deposit.status === "HELD" || deposit.status === "PARTIALLY_RELEASED") && (
                   <>
                     <Button size="sm" variant="primary" onClick={() => releaseDeposit(deposit)}>
                       Release

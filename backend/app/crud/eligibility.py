@@ -20,7 +20,7 @@ from app.models.market_release import MarketRelease
 from app.models.occupancy import Occupancy
 from app.models.room import Room
 from app.services.agreement_effectiveness import is_agreement_effective
-from app.services.agreement_profile import resolve_agreement_profile
+from app.services.agreement_profile import no_agreement_profile_message, resolve_agreement_profile
 from app.services.eligibility import jurisdiction_gates_pass, listing_publication_eligible
 from app.services.verification_requirements import resolve_verification_requirements
 
@@ -109,7 +109,7 @@ def check_agreement_eligibility(db, offer: Offer) -> list[str]:
     # say "eligible: true" right up until that real call failed, since it
     # never actually resolved a profile. Same reason text as the real 409.
     if resolve_agreement_profile(db, listing, listing.room) is None:
-        reasons.append("No approved agreement profile for this listing's jurisdiction -- routed to manual review")
+        reasons.append(no_agreement_profile_message(db, listing, listing.room))
 
     # ZR-ENG-CLR-012 Section 5/AC-03/AC-04: "Global default: account/contact
     # verification before application; full identity verification may occur

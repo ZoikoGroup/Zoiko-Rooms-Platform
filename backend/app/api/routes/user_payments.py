@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.services.payment_boundary import assert_capability, capabilities_snapshot, require_capability
 from app.api.deps import get_current_user
 from app.core.receipt_documents import resolve_receipt_document_path
 from app.core.rent_invoice_documents import resolve_rent_invoice_document_path
@@ -30,6 +31,14 @@ from app.schemas.finance import (
 router = APIRouter(prefix="/api/users/payments", tags=["user-payments"], dependencies=[Depends(get_current_user)])
 
 
+@router.get("/capabilities")
+def get_payment_capabilities() -> dict:
+    """ZR-PAY-CFG-001 9.1: the frontend reads which payment actions exist from
+    here rather than inferring them -- rent/deposit collection, payouts and
+    commission are always off for Zoiko Rooms."""
+    return capabilities_snapshot()
+
+
 def _get_own_guest_or_403(db: Session, user: UserAccount):
     guest = get_guest_for_user(db, user)
     if not guest:
@@ -37,7 +46,7 @@ def _get_own_guest_or_403(db: Session, user: UserAccount):
     return guest
 
 
-@router.post("/mandates", response_model=AutopayMandateRead, status_code=status.HTTP_201_CREATED)
+@router.post("/mandates", response_model=AutopayMandateRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def create_autopay_mandate(
     payload: AutopayMandateCreate,
     user: UserAccount = Depends(get_current_user),
@@ -169,7 +178,7 @@ def get_own_obligation_available_methods(
     return AvailablePaymentMethodsRead(method_classes=resolve_available_payment_methods(db, jurisdiction_code))
 
 
-@router.post("/obligations/{obligation_id}/pay", response_model=SimulatedPaymentRead)
+@router.post("/obligations/{obligation_id}/pay", response_model=SimulatedPaymentRead, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def pay_own_obligation(
     obligation_id: int,
     payload: RenterPayObligationRequest,
@@ -182,5 +191,7 @@ def pay_own_obligation(
     uses (AC-27), rather than an admin manually marking it paid."""
     guest = _get_own_guest_or_403(db, user)
     obligation = get_obligation_or_404(db, obligation_id)
+    if obligation.obligation_type == "DEPOSIT":
+        assert_capability("deposit_collection_enabled")
     payment = payment_provider_crud.renter_pay_obligation(db, guest, obligation, method_class=payload.method_class)
     return SimulatedPaymentRead.model_validate(annotate_payment_context(payment))

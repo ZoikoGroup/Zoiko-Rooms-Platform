@@ -214,8 +214,11 @@ class TestExternalPaymentEvidence:
         assert r.json()["evidenceRef"] == ""
 
 
-class TestRunPayoutPostsFeeAndNetEntries:
-    def test_payout_posts_fee_and_net_entries_summing_to_gross(self, client, db_session: Session):
+class TestRunPayoutPostsNetEntryOnly:
+    """ZR-PAY-CFG-001 Decision 3: no commission, so a payout posts only the
+    net-to-host entry -- never a PLATFORM_FEE_REVENUE entry."""
+
+    def test_payout_posts_a_single_net_entry_for_the_full_gross(self, client, db_session: Session):
         obligation, admin, guest, party_id = _make_provider_rent_obligation(db_session, suffix="payout1", amount=1000.0)
         admin_cookies = auth_admin_cookie(admin)
 
@@ -244,24 +247,13 @@ class TestRunPayoutPostsFeeAndNetEntries:
         entries = db_session.scalars(
             select(LedgerEntry).where(LedgerEntry.source_type == "payout_record", LedgerEntry.source_id == str(payout_id))
         ).all()
-        assert len(entries) == 2
+        assert len(entries) == 1
+        [net_entry] = entries
+        assert net_entry.description == "Payout paid to host"
+        assert float(net_entry.amount) == 1000.0
 
-        fee_entry = next(e for e in entries if e.description == "Platform fee on payout")
-        net_entry = next(e for e in entries if e.description == "Payout paid to host")
-
-        gross = 1000.0
-        expected_fee = round(gross * 0.10, 2)
-        expected_net = round(gross - expected_fee, 2)
-        assert float(fee_entry.amount) == expected_fee
-        assert float(net_entry.amount) == expected_net
-        assert round(float(fee_entry.amount) + float(net_entry.amount), 2) == gross
-
-        fee_debit = db_session.get(LedgerAccount, fee_entry.debit_account_id)
-        fee_credit = db_session.get(LedgerAccount, fee_entry.credit_account_id)
         net_debit = db_session.get(LedgerAccount, net_entry.debit_account_id)
         net_credit = db_session.get(LedgerAccount, net_entry.credit_account_id)
-        assert fee_debit.account_type == "HOST_PAYABLE" and fee_debit.party_id == party_id
-        assert fee_credit.account_type == "PLATFORM_FEE_REVENUE"
         assert net_debit.account_type == "HOST_PAYABLE" and net_debit.party_id == party_id
         assert net_credit.account_type == "PLATFORM_CLEARING"
 

@@ -174,6 +174,10 @@ class ClauseDefinitionRead(CamelModel):
     created_at: datetime
 
 
+class ClauseCopyDefaultsRequest(CamelModel):
+    jurisdiction_scope: str
+
+
 class ClauseDraftCreate(CamelModel):
     clause_id: str
     jurisdiction_scope: str

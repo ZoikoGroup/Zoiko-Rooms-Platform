@@ -16,10 +16,22 @@ uses the platform_fee_* prefix."""
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Numeric, String
+from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.config import settings
 from app.db.base import Base
+
+# ZR-PAY-CFG-001 Section 2.1 Price Book lifecycle. A price is created DRAFT
+# and only becomes chargeable once an admin approves it (-> ACTIVE); the
+# previous ACTIVE price for the same market/environment is RETIRED at that
+# moment, so exactly one ACTIVE price can resolve.
+LISTING_FEE_PRICE_STATUSES = ("DRAFT", "APPROVED", "ACTIVE", "RETIRED")
+# INCLUSIVE: the amount already contains the tax (identified, not re-added).
+# EXCLUSIVE: tax is added on top of the amount.
+LISTING_FEE_TAX_BEHAVIORS = ("INCLUSIVE", "EXCLUSIVE")
+# ZR-PAY-CFG-001 Decision 6: fixed by decision, not per price.
+LISTING_FEE_QUOTE_TTL_SECONDS = 1800
 
 LISTING_FEE_PAYMENT_STATUSES = ("PENDING", "SUCCEEDED", "FAILED")
 # ZR-PAY-002 Section 8.4's own state names, trimmed to what this build's
@@ -60,7 +72,7 @@ class ListingFeePolicy(Base):
     # 16.1): checkout always reads amount/tax/currency off the frozen quote,
     # never re-resolves the policy, so nothing can drift between the two calls.
     quote_validity_minutes: Mapped[int] = mapped_column(default=30)
-    legal_entity_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    legal_entity_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     tax_registration_number: Mapped[str] = mapped_column(String(50), default="")
     # ZR-PAY-002 Section 8.1: "mandatory pre-payment disclosures" shown on the
     # publish/checkout screen before [Pay Listing Fee] -- resolved text, never
@@ -76,7 +88,30 @@ class ListingFeePolicy(Base):
     # payment it stays eligible once opted in -- null means no time limit.
     refund_eligible: Mapped[bool] = mapped_column(default=False)
     refund_window_days: Mapped[int | None] = mapped_column(nullable=True)
+
+    # -- ZR-PAY-CFG-001 Price Book fields --
+    # Integer minor units (pence/cents) -- the source of truth for pricing.
+    # `amount` above is kept as the decimal display value for older readers;
+    # crud/listing_fee.py:price_amount_minor derives minor units from it for
+    # any row created before this column existed.
+    amount_minor: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE")
+    tax_behavior: Mapped[str] = mapped_column(String(20), default="EXCLUSIVE")
+    # Finance/Tax-approved tax rule/classification this price's tax_rate
+    # comes from. Required before a price can be approved -- an unknown tax
+    # treatment fails closed (Decision 2).
+    tax_rule_reference: Mapped[str] = mapped_column(String(200), default="")
+    billing_entity_id: Mapped[int | None] = mapped_column(ForeignKey("billing_entities.id"), nullable=True)
+    # Environment isolation (PAY-CFG-12): a price only resolves in the
+    # environment it was created in, so test/staging prices can never
+    # become chargeable in production.
+    environment: Mapped[str] = mapped_column(String(20), default=lambda: settings.environment.strip().lower())
+    created_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    approved_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    billing_entity: Mapped["BillingEntity | None"] = relationship()
 
 
 class ListingFeeQuote(Base):
@@ -97,6 +132,10 @@ class ListingFeeQuote(Base):
     tax_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     total_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    # ZR-PAY-CFG-001 10.1 quote contract, in integer minor units.
+    amount_minor: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tax_amount_minor: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    total_amount_minor: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     policy_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -104,6 +143,42 @@ class ListingFeeQuote(Base):
     listing: Mapped["Listing"] = relationship()
     party: Mapped["Party"] = relationship()
     payments: Mapped[list["ListingFeePayment"]] = relationship(back_populates="quote")
+
+
+    # ZR-PAY-CFG-001 10.1 contract fields, read from the frozen snapshot.
+    @property
+    def fee_amount_minor(self) -> int | None:
+        return self.amount_minor
+
+    @property
+    def market(self) -> str | None:
+        return (self.policy_snapshot or {}).get("market") or (self.policy_snapshot or {}).get("jurisdiction")
+
+    @property
+    def tax_behavior(self) -> str | None:
+        return (self.policy_snapshot or {}).get("tax_behavior")
+
+    @property
+    def tax_rate(self) -> float | None:
+        return (self.policy_snapshot or {}).get("tax_rate")
+
+    @property
+    def price_book_version(self) -> int | None:
+        snapshot = self.policy_snapshot or {}
+        return snapshot.get("price_book_version", snapshot.get("policy_version"))
+
+    @property
+    def billing_entity_id(self) -> str | None:
+        entity = (self.policy_snapshot or {}).get("billing_entity")
+        return entity.get("code") if entity else None
+
+    @property
+    def billing_entity_name(self) -> str | None:
+        return (self.policy_snapshot or {}).get("legal_entity_name")
+
+    @property
+    def disclosure_text(self) -> str | None:
+        return (self.policy_snapshot or {}).get("disclosure_text")
 
 
 class ListingFeePayment(Base):
@@ -166,7 +241,7 @@ class ListingFeeReceipt(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     payment_id: Mapped[int] = mapped_column(ForeignKey("listing_fee_payments.id", ondelete="CASCADE"), unique=True, nullable=False)
     receipt_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
-    legal_entity_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    legal_entity_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     tax_registration_number: Mapped[str] = mapped_column(String(50), default="")
     amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     tax_rate: Mapped[float] = mapped_column(Numeric(6, 4), nullable=False)

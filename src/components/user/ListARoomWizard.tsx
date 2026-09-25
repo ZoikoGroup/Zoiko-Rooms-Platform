@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Switch } from "@/components/ui/Switch";
-import { AuthorityRelationshipType, Property, Room } from "@/lib/types";
+import { AuthorityRelationshipType, OpenJurisdiction, Property, Room } from "@/lib/types";
 import {
   HostedListingInput,
   createHostedListing,
@@ -18,8 +18,10 @@ import {
   errorMessage,
   listHostedProperties,
   listHostedRooms,
+  listOpenJurisdictions,
   submitHostedListingForReview,
 } from "@/lib/user-api";
+import { RegionSelect } from "@/components/user/RegionSelect";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { formatCurrency } from "@/lib/utils";
@@ -30,7 +32,9 @@ const MAX_LISTING_IMAGES = 10;
 const SUPPORTED_CURRENCIES = ["INR", "GBP", "USD", "EUR", "CAD", "AUD", "AED", "SGD", "NZD"];
 const STEPS = ["Property", "Room", "Listing", "Photos", "Review"] as const;
 
-type PropertyChoice = { mode: "existing"; propertyId: number } | { mode: "new"; address: string; city: string };
+type PropertyChoice =
+  | { mode: "existing"; propertyId: number }
+  | { mode: "new"; address: string; city: string; jurisdictionCode: string };
 type RoomChoice = { mode: "existing"; roomId: number } | { mode: "new"; size: string; hasEnsuite: boolean };
 
 interface ListingDetailsForm {
@@ -80,6 +84,11 @@ function emptyDetails(contact: { name: string; phone: string; email: string }): 
  *  friendlier entry point on top of the same backend endpoints, not a
  *  replacement. Review offers "Save as Draft" (create only, same as before) or
  *  "Submit for Review" (create, then immediately ask an admin to review it). */
+/** Pre-select the region only when there's exactly one to choose from. */
+function defaultRegion(regions: OpenJurisdiction[]): string {
+  return regions.length === 1 ? regions[0].code : "";
+}
+
 export function ListARoomWizard({
   open,
   onClose,
@@ -95,10 +104,16 @@ export function ListARoomWizard({
 }) {
   const [step, setStep] = useState(0);
   const [properties, setProperties] = useState<Property[]>([]);
+  const [regions, setRegions] = useState<OpenJurisdiction[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loadingContext, setLoadingContext] = useState(true);
 
-  const [propertyChoice, setPropertyChoice] = useState<PropertyChoice>({ mode: "new", address: "", city: "" });
+  const [propertyChoice, setPropertyChoice] = useState<PropertyChoice>({
+    mode: "new",
+    address: "",
+    city: "",
+    jurisdictionCode: "",
+  });
   const [roomChoice, setRoomChoice] = useState<RoomChoice>({ mode: "new", size: "", hasEnsuite: false });
   const [details, setDetails] = useState<ListingDetailsForm>(emptyDetails(contact));
   // Lister, Property & Authority Verification wireframe: optional, best-effort
@@ -122,12 +137,16 @@ export function ListARoomWizard({
     setAuthorityRelationshipType("OWNER");
     setAuthorityEvidenceRef("");
     setLoadingContext(true);
-    listHostedProperties()
-      .then((owned) => {
+    Promise.all([listHostedProperties().catch(() => [] as Property[]), listOpenJurisdictions().catch(() => [] as OpenJurisdiction[])])
+      .then(([owned, openRegions]) => {
         setProperties(owned);
-        setPropertyChoice(owned.length > 0 ? { mode: "existing", propertyId: owned[0].id } : { mode: "new", address: "", city: "" });
+        setRegions(openRegions);
+        setPropertyChoice(
+          owned.length > 0
+            ? { mode: "existing", propertyId: owned[0].id }
+            : { mode: "new", address: "", city: "", jurisdictionCode: defaultRegion(openRegions) }
+        );
       })
-      .catch(() => setProperties([]))
       .finally(() => setLoadingContext(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -151,6 +170,10 @@ export function ListARoomWizard({
     if (step === 0) {
       if (propertyChoice.mode === "new" && (!propertyChoice.address.trim() || !propertyChoice.city.trim())) {
         setError("Enter an address and city, or pick an existing property.");
+        return;
+      }
+      if (propertyChoice.mode === "new" && !propertyChoice.jurisdictionCode) {
+        setError("Select the region this property is located in.");
         return;
       }
       // Reduce duplicate entry: default the listing's area/neighbourhood from the
@@ -221,6 +244,7 @@ export function ListARoomWizard({
         const created = await createHostedProperty({
           address: propertyChoice.address.trim(),
           city: propertyChoice.city.trim(),
+          jurisdictionCode: propertyChoice.jurisdictionCode,
         });
         propertyId = created.id;
         city = created.city;
@@ -340,7 +364,9 @@ export function ListARoomWizard({
                     />
                     <span>
                       <span className="block text-sm font-semibold text-slate-700 dark:text-slate-200">{property.address}</span>
-                      <span className="block text-xs text-slate-400">{property.city}</span>
+                      <span className="block text-xs text-slate-400">
+                        {property.city} · {property.jurisdictionCode}
+                      </span>
                     </span>
                   </label>
                 ))}
@@ -356,7 +382,9 @@ export function ListARoomWizard({
                     type="radio"
                     name="property-choice"
                     checked={propertyChoice.mode === "new"}
-                    onChange={() => setPropertyChoice({ mode: "new", address: "", city: "" })}
+                    onChange={() =>
+                      setPropertyChoice({ mode: "new", address: "", city: "", jurisdictionCode: defaultRegion(regions) })
+                    }
                   />
                   <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
                     <Building2 className="h-4 w-4" /> Add a new property
@@ -381,6 +409,13 @@ export function ListARoomWizard({
                         className={inputClass}
                       />
                     </Field>
+                    <div className="sm:col-span-2">
+                      <RegionSelect
+                        regions={regions}
+                        value={propertyChoice.jurisdictionCode}
+                        onChange={(code) => setPropertyChoice({ ...propertyChoice, jurisdictionCode: code })}
+                      />
+                    </div>
                   </div>
                 )}
               </div>

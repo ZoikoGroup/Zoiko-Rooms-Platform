@@ -56,7 +56,7 @@ const navGroups = [
     label: "ACCOUNT",
     items: [
       { href: "/account/identity", label: "Identity Verification", icon: ShieldCheck },
-      { href: "/account/payments", label: "Payments", icon: CreditCard },
+      { href: "/account/payments", label: "Payment History", icon: CreditCard },
       { href: "/account/profile", label: "Profile", icon: UserCircle2 },
     ],
   },

@@ -107,7 +107,36 @@ export interface Property {
   address: string;
   city: string;
   status: "active" | "inactive";
+  /** The region whose market policy, market release and agreement clauses apply to this property. */
+  jurisdictionCode: string;
+  /** True once a live listing or tenancy is bound to the region's rules -- the region can no longer change. */
+  regionLocked: boolean;
   createdAt: string;
+}
+
+/** One version of an agreement clause in a region's registry (backend ClauseDefinitionRead). */
+export interface ClauseDefinition {
+  id: number;
+  clauseId: string;
+  jurisdictionScope: string;
+  agreementClass: string;
+  mandatoryLevel: "MANDATORY" | "OPTIONAL" | "PROHIBITED";
+  status: "DRAFT" | "APPROVED" | "RETIRED";
+  version: number;
+  effectiveFrom: string | null;
+  effectiveTo: string | null;
+  title: string;
+  approvalNote: string;
+  createdAt: string;
+}
+
+/** A region a property can be created in: active market release + current market policy pack. */
+export interface OpenJurisdiction {
+  code: string;
+  minStayNights: number;
+  marketPolicyVersion: number;
+  /** False when agreements in this region are routed to manual review (no approved clause registry yet). */
+  agreementsSupported: boolean;
 }
 
 export interface Room {
@@ -603,6 +632,10 @@ export interface ReconciliationRun {
 // separate from the "Finance ledger" domain above (rent/deposit custody).
 // Mirrors /api/users/listing-fees/* and /api/finance/listing-fees/*.
 
+export type ListingFeePriceStatus = "DRAFT" | "APPROVED" | "ACTIVE" | "RETIRED";
+export type ListingFeeTaxBehavior = "INCLUSIVE" | "EXCLUSIVE";
+
+/** A ZR-PAY-CFG-001 Price Book entry. Created as DRAFT; only an approved ACTIVE price can be charged. */
 export interface ListingFeePolicy {
   id: number;
   jurisdictionCode: string;
@@ -610,17 +643,62 @@ export interface ListingFeePolicy {
   effectiveFrom: string;
   effectiveTo: string | null;
   amount: number;
+  /** Integer minor units (pence/cents) -- the source of truth. */
+  amountMinor: number | null;
   currency: string;
   taxRate: number;
-  quoteValidityMinutes: number;
+  taxBehavior: ListingFeeTaxBehavior;
+  taxRuleReference: string;
+  billingEntityId: number | null;
+  status: ListingFeePriceStatus;
+  environment: string;
   legalEntityName: string;
   taxRegistrationNumber: string;
   disclosureText: string;
   refundEligible: boolean;
   refundWindowDays: number | null;
+  createdByAdminId: number | null;
+  approvedByAdminId: number | null;
+  approvedAt: string | null;
   createdAt: string;
 }
 
+/** ZR-PAY-CFG-001 Section 7.1 Billing Entity Registry. */
+export interface BillingEntity {
+  id: number;
+  code: string;
+  legalName: string;
+  tradingName: string;
+  registeredAddress: string;
+  companyRegistrationNumber: string;
+  taxRegistrationType: string;
+  taxRegistrationNumber: string;
+  supportedMarkets: string[];
+  supportedCurrencies: string[];
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  status: "ACTIVE" | "INACTIVE";
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Which payment actions exist -- rental money never moves through Zoiko Rooms (ZR-PAY-CFG-001). */
+export interface PaymentCapabilities {
+  listing_fee_enabled: boolean;
+  rental_payment_records_enabled: boolean;
+  rental_payment_instructions_enabled: boolean;
+  rental_money_movement_via_zoiko: boolean;
+  rent_collection_enabled: boolean;
+  deposit_collection_enabled: boolean;
+  host_payouts_enabled: boolean;
+  escrow_enabled: boolean;
+  wallet_enabled: boolean;
+  split_settlement_enabled: boolean;
+  platform_fee_rate: null;
+  host_commission_enabled: false;
+}
+
+/** Server-computed quote (ZR-PAY-CFG-001 10.1) -- the UI renders it and never calculates tax itself. */
 export interface ListingFeeQuote {
   id: number;
   listingId: string;
@@ -628,6 +706,16 @@ export interface ListingFeeQuote {
   taxAmount: number;
   totalAmount: number;
   currency: string;
+  feeAmountMinor: number | null;
+  taxAmountMinor: number | null;
+  totalAmountMinor: number | null;
+  market: string | null;
+  taxBehavior: ListingFeeTaxBehavior | null;
+  taxRate: number | null;
+  priceBookVersion: number | null;
+  billingEntityId: string | null;
+  billingEntityName: string | null;
+  disclosureText: string | null;
   expiresAt: string;
   createdAt: string;
 }
@@ -1024,6 +1112,11 @@ export interface AdminIdentityVerification {
   hasDocument: boolean;
   documentFileOriginalName: string;
   documentFileContentType: string;
+  /** What the automated scan read off the document, if it ran. */
+  ocrExtractedNumber: string | null;
+  ocrConfidence: number | null;
+  /** True when the automated scan (not an admin) sent this back for more evidence -- a super admin can overrule it. */
+  autoFlagged: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -1864,7 +1957,8 @@ export interface MarketPolicyPack {
   requiredPropertyComplianceCodes: string[];
   identityRequiredAtApplication: boolean;
   screeningProhibitedCheckTypes: string[];
-  platformFeeRate: number;
+  /** Always null -- Zoiko Rooms takes no commission on rent (ZR-PAY-CFG-001). */
+  platformFeeRate: null;
   fundsFlowProfile: string;
   permittedPaymentMethodClasses: string[];
   zoikoLegalEntityName: string;

@@ -18,11 +18,11 @@ class Property(Base):
     status: Mapped[str] = mapped_column(String(20), default="active")
     # ZR-ENG-CLR-006 Section 6: 'The Termination Policy Resolver must select
     # an effective-dated market rule set using the property jurisdiction.'
-    # Defaults to "England" -- the only jurisdiction this build actually has
-    # a real market-pack/agreement-clause registry for (see
-    # services/agreement_profile.py:SUPPORTED_JURISDICTION). This platform
-    # targets foreign markets, not India -- "IN" is not a supported
-    # jurisdiction and must never be the silent default.
+    # The single source of truth for which region's rules apply to this
+    # property: market policy, market release and agreement clauses all
+    # resolve from it. The API requires hosts/admins to pick an open region
+    # explicitly (services/jurisdictions.py) -- this column default only
+    # applies to rows created directly in code (seed data, tests).
     jurisdiction_code: Mapped[str] = mapped_column(String(10), nullable=False, default="England")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

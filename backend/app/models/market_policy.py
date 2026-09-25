@@ -79,7 +79,11 @@ class MarketPolicyPack(Base):
     # the only fee basis this MVP implements (Section 8.1's payer/basis/
     # tiered/hybrid dimensions are deferred until a market pack actually
     # needs them; renter fees stay OFF by default with no toggle here yet).
-    platform_fee_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=0.10)
+    # ZR-PAY-CFG-001 Decision 3: removed from Zoiko Rooms -- there is no
+    # percentage of rent. Kept only as an always-NULL column (migration
+    # b7d2e4f1a9c3 cleared existing values); the API rejects any value and
+    # crud/finance.py never reads it.
+    platform_fee_rate: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True, default=None)
     funds_flow_profile: Mapped[str] = mapped_column(String(30), default="DIRECT_SETTLEMENT")
     # ZR-ENG-CLR-005 Section 12.1/12.2/AC-12: "Payment method availability is
     # the intersection of... market pack... computed server-side... the UI

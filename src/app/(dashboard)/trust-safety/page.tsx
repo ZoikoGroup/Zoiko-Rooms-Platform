@@ -1,3 +1,4 @@
+import { AgreementClauseRegistryManager } from "@/components/admin/AgreementClauseRegistryManager";
 import { IdentityVerificationsManager } from "@/components/admin/IdentityVerificationsManager";
 import { MarketPolicyPackManager } from "@/components/admin/MarketPolicyPackManager";
 import { OccupancyEligibilityManager } from "@/components/admin/OccupancyEligibilityManager";
@@ -20,6 +21,7 @@ export default async function AdminTrustSafetyPage() {
       </div>
       <VerificationOperationsPanel />
       <MarketPolicyPackManager />
+      <AgreementClauseRegistryManager />
       <IdentityVerificationsManager />
       <OccupancyEligibilityManager />
       <ScreeningManager />

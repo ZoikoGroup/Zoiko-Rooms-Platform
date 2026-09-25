@@ -185,14 +185,50 @@ export function ListingFeeCheckout({
   const [agreed, setAgreed] = useState(false);
   const [startingCheckout, setStartingCheckout] = useState(false);
   const [failure, setFailure] = useState("");
+  const [unavailableMessage, setUnavailableMessage] = useState("");
+  /** Set when a re-quote came back with a different total -- the host must
+   *  explicitly re-confirm before paying (ZR-PAY-CFG-001 8.2 / PAY-CFG-10). */
+  const [previousTotal, setPreviousTotal] = useState<ListingFeeQuote | null>(null);
+
+  async function fetchQuote(): Promise<ListingFeeQuote | null> {
+    try {
+      const fresh = await createListingFeeQuote(listingId);
+      setUnavailableMessage("");
+      return fresh;
+    } catch (err) {
+      // No approved price for this market (fails closed server-side), or
+      // the fee was already paid through a different path.
+      setUnavailableMessage(errorMessage(err, "Listing fee currently unavailable in this market."));
+      return null;
+    }
+  }
 
   async function loadQuoteForRetry() {
-    try {
-      setQuote(await createListingFeeQuote(listingId));
-    } catch {
-      // Fee already paid via a different path, or no policy configured --
-      // the render below handles a null quote gracefully either way.
+    setQuote(await fetchQuote());
+  }
+
+  /** Quotes are valid for 30 minutes and expiry is enforced by the server;
+   *  this only avoids a round trip that would certainly be rejected. */
+  function isExpired(q: ListingFeeQuote) {
+    return Date.now() >= new Date(q.expiresAt).getTime();
+  }
+
+  /** Gets a fresh quote. Returns it when the total is unchanged (safe to
+   *  continue), or null after flagging a changed total for re-confirmation. */
+  async function requote(current: ListingFeeQuote): Promise<ListingFeeQuote | null> {
+    const fresh = await fetchQuote();
+    setQuote(fresh);
+    if (!fresh) return null;
+    const changed =
+      fresh.currency !== current.currency ||
+      (fresh.totalAmountMinor ?? Math.round(fresh.totalAmount * 100)) !==
+        (current.totalAmountMinor ?? Math.round(current.totalAmount * 100));
+    if (changed) {
+      setPreviousTotal(current);
+      setAgreed(false);
+      return null;
     }
+    return fresh;
   }
 
   useEffect(() => {
@@ -218,7 +254,7 @@ export function ListingFeeCheckout({
       .then((eligibility) => {
         const feeAlreadyPaid = !eligibility.reasons.some((r) => r.toLowerCase().includes("listing fee"));
         setAlreadyPaid(feeAlreadyPaid);
-        if (!feeAlreadyPaid) return createListingFeeQuote(listingId).then(setQuote);
+        if (!feeAlreadyPaid) return fetchQuote().then(setQuote);
       })
       .catch((err) => showToast(errorMessage(err, "Could not load the Listing Fee for this listing."), "error"))
       .finally(() => setLoading(false));
@@ -229,12 +265,31 @@ export function ListingFeeCheckout({
     if (!quote) return;
     setStartingCheckout(true);
     setFailure("");
+    setPreviousTotal(null);
     try {
-      const created = await createListingFeeCheckoutSession({
-        quoteId: quote.id,
-        idempotencyKey: crypto.randomUUID(),
-        billingCountry,
-      });
+      let payable: ListingFeeQuote | null = quote;
+      if (isExpired(quote)) {
+        payable = await requote(quote);
+        if (!payable) return;
+      }
+      let created;
+      try {
+        created = await createListingFeeCheckoutSession({
+          quoteId: payable.id,
+          idempotencyKey: crypto.randomUUID(),
+          billingCountry,
+        });
+      } catch (err) {
+        // Expired between render and click -- the server is the authority.
+        if (!errorMessage(err, "").toLowerCase().includes("expired")) throw err;
+        payable = await requote(payable);
+        if (!payable) return;
+        created = await createListingFeeCheckoutSession({
+          quoteId: payable.id,
+          idempotencyKey: crypto.randomUUID(),
+          billingCountry,
+        });
+      }
       if (created.status === "SUCCEEDED") {
         // Stripe not configured server-side -- completed synchronously,
         // nothing to redirect to.
@@ -291,7 +346,10 @@ export function ListingFeeCheckout({
     return (
       <Card>
         <p className="text-sm text-slate-500 dark:text-slate-400">
-          No Listing Fee policy is configured for this listing&apos;s jurisdiction yet.
+          {unavailableMessage || "Listing fee currently unavailable in this market."}
+        </p>
+        <p className="mt-1 text-xs text-slate-400">
+          Your listing can&apos;t be published until Zoiko Rooms sets a Listing Fee for this market.
         </p>
         <Toast toast={toast} />
       </Card>
@@ -312,7 +370,10 @@ export function ListingFeeCheckout({
           <dd className="font-semibold text-slate-700 dark:text-slate-200">{formatMoney(quote.amount, quote.currency)}</dd>
         </div>
         <div className="flex justify-between">
-          <dt className="text-slate-500 dark:text-slate-400">Applicable tax</dt>
+          <dt className="text-slate-500 dark:text-slate-400">
+            {quote.taxBehavior === "INCLUSIVE" ? "Includes tax" : "Applicable tax"}
+            {quote.taxRate != null && ` (${(quote.taxRate * 100).toFixed(2).replace(/\.00$/, "")}%)`}
+          </dt>
           <dd className="font-semibold text-slate-700 dark:text-slate-200">{formatMoney(quote.taxAmount, quote.currency)}</dd>
         </div>
         <div className="flex justify-between border-t border-slate-100 pt-1.5 font-semibold dark:border-white/10">
@@ -320,6 +381,23 @@ export function ListingFeeCheckout({
           <dd className="text-primary-900 dark:text-white">{formatMoney(quote.totalAmount, quote.currency)}</dd>
         </div>
       </dl>
+
+      {quote.billingEntityName && (
+        <p className="mt-3 text-xs text-slate-400">Billed by {quote.billingEntityName}.</p>
+      )}
+      {quote.disclosureText && (
+        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{quote.disclosureText}</p>
+      )}
+      <p className="mt-2 text-xs text-slate-400">
+        This price is held until {new Date(quote.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.
+      </p>
+
+      {previousTotal && (
+        <p role="alert" className="mt-4 rounded-xl bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+          The Listing Fee changed from {formatMoney(previousTotal.totalAmount, previousTotal.currency)} to{" "}
+          {formatMoney(quote.totalAmount, quote.currency)}. Please review the new amount and confirm again to continue.
+        </p>
+      )}
 
       {failure && (
         <p role="alert" className="mt-4 rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.mailer import (
@@ -33,9 +33,38 @@ def list_identity_verifications(
         query = query.where(IdentityVerification.party_id == party.id)
     elif party_id is not None:
         query = query.where(IdentityVerification.party_id == party_id)
+    if status == NEEDS_REVIEW_FILTER:
+        return _needs_review(list(db.scalars(query)))
     if status is not None:
         query = query.where(IdentityVerification.status == status)
     return list(db.scalars(query))
+
+
+# Pseudo-status for the admin review queue: everything a super admin should
+# look at, not just rows literally in "pending".
+NEEDS_REVIEW_FILTER = "needs_review"
+
+
+def _needs_review(records: list[IdentityVerification]) -> list[IdentityVerification]:
+    """Pending submissions, plus each party's latest scan-flagged submission
+    per document category -- the automated OCR check can wrongly reject a
+    genuine document, and without this a super admin never sees it at all.
+    Older flagged uploads the user has since replaced, and flagged uploads
+    for a category the party already has verified, are left out so the
+    queue shows one actionable row per person rather than every retry.
+    `records` is newest-first (list_identity_verifications' ordering)."""
+    verified_categories = {(r.party_id, r.document_category) for r in records if r.status == "verified"}
+    latest_seen: set[tuple[int, str]] = set()
+    queue = []
+    for record in records:
+        key = (record.party_id, record.document_category)
+        is_latest = key not in latest_seen
+        latest_seen.add(key)
+        if record.status == "pending":
+            queue.append(record)
+        elif record.auto_flagged and is_latest and key not in verified_categories:
+            queue.append(record)
+    return queue
 
 
 def get_identity_verification(db: Session, verification_id: int) -> IdentityVerification | None:
@@ -226,11 +255,19 @@ def submit_identity_verification_for_user(
     db.add(record)
     db.flush()
 
-    ocr_outcome = _run_ocr_check(db, record)
-    if ocr_outcome is not None:
-        db.commit()
-        db.refresh(record)
-        return record
+    # A document whose content matches an earlier submission is a fraud
+    # signal a human must see -- it must never be auto-verified by the scan
+    # below, which only checks what the document number looks like.
+    # After MAX_AUTOMATED_SCAN_ATTEMPTS scan rejections for the same document
+    # type, stop bouncing the user back to re-upload and let a reviewer
+    # decide instead (the scan can be wrong about a genuine document).
+    scan_failed_before = _prior_auto_flagged_count(db, record) >= MAX_AUTOMATED_SCAN_ATTEMPTS
+    if duplicate_of_verification_id is None:
+        ocr_outcome = _run_ocr_check(db, record, allow_reroute=not scan_failed_before)
+        if ocr_outcome is not None:
+            db.commit()
+            db.refresh(record)
+            return record
 
     message = f"{user_account.full_name} submitted a {document_type.replace('_', ' ')} for review."
     if duplicate_of_verification_id is not None:
@@ -238,6 +275,8 @@ def submit_identity_verification_for_user(
             f" Note: this document's content matches a previous submission "
             f"(verification #{duplicate_of_verification_id}) -- review for reuse or fraud."
         )
+    elif scan_failed_before and record.verifier_notes:
+        message += " The automated scan couldn't confirm it after repeated attempts -- please review it manually."
 
     notif_crud.notify_all_super_admins(
         db,
@@ -253,7 +292,24 @@ def submit_identity_verification_for_user(
     return record
 
 
-def _run_ocr_check(db: Session, record: IdentityVerification) -> str | None:
+# How many scan rejections for the same document type a user gets before
+# their next upload goes to a human reviewer instead of being rejected again.
+MAX_AUTOMATED_SCAN_ATTEMPTS = 2
+
+
+def _prior_auto_flagged_count(db: Session, record: IdentityVerification) -> int:
+    return db.scalar(
+        select(func.count(IdentityVerification.id)).where(
+            IdentityVerification.party_id == record.party_id,
+            IdentityVerification.document_type == record.document_type,
+            IdentityVerification.id != record.id,
+            IdentityVerification.status == "additional_evidence_required",
+            IdentityVerification.verifier_admin_id.is_(None),
+        )
+    ) or 0
+
+
+def _run_ocr_check(db: Session, record: IdentityVerification, *, allow_reroute: bool = True) -> str | None:
     """Dispatches to the real, local OCR check (services/document_ocr.py)
     appropriate for this record's category. Returns the outcome ("verified"
     or "additional_evidence_required") if OCR actually ran and decided
@@ -261,7 +317,9 @@ def _run_ocr_check(db: Session, record: IdentityVerification) -> str | None:
     notification -- or None if the record should stay "pending" as normal
     (OCR unavailable/errored, or category == "other", which has no
     checkable content at all). Fails OPEN (returns None) only for infra
-    problems -- never for a real bad result."""
+    problems -- never for a real bad result. With allow_reroute=False a
+    failed scan also returns None (stays "pending" for a human reviewer,
+    with the scan's finding recorded in verifier_notes)."""
     from app.services import document_ocr
 
     if record.document_category not in ("identity", "address"):
@@ -270,8 +328,29 @@ def _run_ocr_check(db: Session, record: IdentityVerification) -> str | None:
         return None
 
     if record.document_category == "identity":
-        return _run_identity_ocr_check(db, record, document_ocr)
-    return _run_address_ocr_check(db, record, document_ocr)
+        return _run_identity_ocr_check(db, record, document_ocr, allow_reroute=allow_reroute)
+    return _run_address_ocr_check(db, record, document_ocr, allow_reroute=allow_reroute)
+
+
+def _handle_scan_failure(db: Session, record: IdentityVerification, reason: str, *, allow_reroute: bool) -> str | None:
+    if not allow_reroute:
+        record.verifier_notes = (
+            f"Sent to a Zoiko reviewer -- the automated scan couldn't confirm this document. Scan result: {reason}"
+        )
+        return None
+    doc_label = record.document_type.replace("_", " ")
+    user = _user_for_party(db, record.party_id)
+    notif_crud.notify_all_super_admins(
+        db,
+        title="Identity document flagged by automated scan",
+        message=(
+            f"{user.full_name if user else f'Party #{record.party_id}'}'s {doc_label} was sent back for re-upload "
+            f"by the automated scan: {reason} You can review it and approve or reject it manually."
+        ),
+        notification_type="identity_verification.auto_flagged",
+        related_entity_type="identity_verification", related_entity_id=str(record.id),
+    )
+    return _reroute_to_additional_evidence(db, record, f"{reason} Please re-upload a clearer, well-lit photo of the full document.")
 
 
 def _reroute_to_additional_evidence(db: Session, record: IdentityVerification, note: str) -> str:
@@ -293,7 +372,7 @@ def _reroute_to_additional_evidence(db: Session, record: IdentityVerification, n
     return "additional_evidence_required"
 
 
-def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_ocr) -> str | None:
+def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_ocr, *, allow_reroute: bool = True) -> str | None:
     """A genuine match at or above that document type's own confidence
     threshold (document_ocr.confidence_threshold_for) -- plus, for Aadhaar,
     a genuinely valid Verhoeff checksum, and no conflict with whatever
@@ -344,11 +423,10 @@ def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_
         verify_identity_verification(db, record, get_system_admin(db), notes=note)
         return "verified"
 
-    note = f"{reject_reason} Please re-upload a clearer, well-lit photo of the full document."
-    return _reroute_to_additional_evidence(db, record, note)
+    return _handle_scan_failure(db, record, reject_reason, allow_reroute=allow_reroute)
 
 
-def _run_address_ocr_check(db: Session, record: IdentityVerification, document_ocr) -> str | None:
+def _run_address_ocr_check(db: Session, record: IdentityVerification, document_ocr, *, allow_reroute: bool = True) -> str | None:
     """No document NUMBER and nothing stored anywhere in this platform to
     check a claimed address against (see document_ocr.py's own docstring),
     so the only genuine signal is "does the content plausibly match the
@@ -387,8 +465,7 @@ def _run_address_ocr_check(db: Session, record: IdentityVerification, document_o
             f"Automated scan couldn't clearly read this {doc_label} "
             f"(confidence {confidence:.0f}%, below the {threshold:.0f}% minimum)."
         )
-    note = f"{reason} Please re-upload a clearer photo or scan of the correct document."
-    return _reroute_to_additional_evidence(db, record, note)
+    return _handle_scan_failure(db, record, reason, allow_reroute=allow_reroute)
 
 
 def list_user_identity_verifications(db: Session, user_account: "UserAccount") -> list[IdentityVerification]:

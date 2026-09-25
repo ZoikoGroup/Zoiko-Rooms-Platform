@@ -9,7 +9,6 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.market_policy import MarketPolicyPack
 from app.models.finance import ServiceFeeInvoice
 from tests.conftest import _make_admin, auth_admin_cookie
 from tests.test_ledger import _make_provider_rent_obligation
@@ -39,60 +38,19 @@ def _pay_and_run_payout(client, db_session: Session, *, suffix: str, amount: flo
     return r.json()["id"], admin, admin_cookies
 
 
-class TestRunPayoutGeneratesAServiceFeeInvoice:
-    def test_paid_payout_creates_exactly_one_invoice_with_resolved_entity_and_fee(self, client, db_session: Session):
-        payout_id, _admin, _admin_cookies = _pay_and_run_payout(client, db_session, suffix="invgen1", amount=1000.0)
+class TestNoServiceFeeInvoice:
+    """ZR-PAY-CFG-001 Decision 3: 'Do not calculate, display, invoice, accrue,
+    settle or report a rental commission.' Replaces the earlier ZR-ENG-CLR-005
+    AC-26 tests -- a payout no longer issues a service-fee invoice, and the
+    download route reports there is none."""
 
+    def test_paid_payout_creates_no_invoice(self, client, db_session: Session):
+        payout_id, _admin, _admin_cookies = _pay_and_run_payout(client, db_session, suffix="noinv1", amount=1000.0)
         invoices = db_session.scalars(select(ServiceFeeInvoice).where(ServiceFeeInvoice.payout_id == payout_id)).all()
-        assert len(invoices) == 1
-        invoice = invoices[0]
-        assert invoice.invoice_number == f"INV-{payout_id:08d}"
-        assert invoice.legal_entity_name == "Zoiko Realty Group"
-        assert float(invoice.fee_amount) == 100.0  # 10% default rate on 1000
-        assert float(invoice.tax_rate) == 0.0
-        assert float(invoice.tax_amount) == 0.0
+        assert invoices == []
 
-    def test_invoice_reflects_the_policys_configured_legal_entity_and_tax_rate(self, client, db_session: Session):
-        policy = db_session.query(MarketPolicyPack).filter_by(jurisdiction_code="IN").one()
-        policy.zoiko_legal_entity_name = "Zoiko Rooms India Pvt Ltd"
-        policy.zoiko_tax_registration_number = "GSTIN123456"
-        policy.service_fee_tax_rate = 0.18
-        db_session.commit()
-
-        payout_id, _admin, _admin_cookies = _pay_and_run_payout(client, db_session, suffix="invgen2", amount=1000.0)
-
-        invoice = db_session.scalar(select(ServiceFeeInvoice).where(ServiceFeeInvoice.payout_id == payout_id))
-        assert invoice.legal_entity_name == "Zoiko Rooms India Pvt Ltd"
-        assert invoice.tax_registration_number == "GSTIN123456"
-        assert float(invoice.tax_rate) == 0.18
-        assert float(invoice.fee_amount) == 100.0
-        assert float(invoice.tax_amount) == 18.0
-
-
-class TestServiceFeeInvoiceDownload:
-    def test_owning_admin_can_download_the_invoice_pdf(self, client, db_session: Session):
-        payout_id, _admin, admin_cookies = _pay_and_run_payout(client, db_session, suffix="invdl1")
-
+    def test_download_route_reports_no_invoice(self, client, db_session: Session):
+        payout_id, _admin, admin_cookies = _pay_and_run_payout(client, db_session, suffix="noinv2", amount=1000.0)
         r = client.get(f"/api/finance/payouts/{payout_id}/service-fee-invoice", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        assert r.headers["content-type"] == "application/pdf"
-        assert r.content.startswith(b"%PDF")
-        assert "attachment" in r.headers["content-disposition"]
-
-    def test_calling_it_twice_is_idempotent(self, client, db_session: Session):
-        payout_id, _admin, admin_cookies = _pay_and_run_payout(client, db_session, suffix="invdl2")
-
-        r1 = client.get(f"/api/finance/payouts/{payout_id}/service-fee-invoice", cookies=admin_cookies)
-        r2 = client.get(f"/api/finance/payouts/{payout_id}/service-fee-invoice", cookies=admin_cookies)
-        assert r1.status_code == 200 and r2.status_code == 200
-        assert r1.content == r2.content
-
-        invoices = db_session.scalars(select(ServiceFeeInvoice).where(ServiceFeeInvoice.payout_id == payout_id)).all()
-        assert len(invoices) == 1
-
-    def test_other_providers_admin_cannot_download_it(self, client, db_session: Session):
-        payout_id, _admin, _admin_cookies = _pay_and_run_payout(client, db_session, suffix="invdl3")
-        outsider = _make_admin(db_session, email="inv-outsider@test.com", role="admin")
-
-        r = client.get(f"/api/finance/payouts/{payout_id}/service-fee-invoice", cookies=auth_admin_cookie(outsider))
-        assert r.status_code == 403, r.text
+        assert r.status_code == 404, r.text
+        assert "no commission" in r.json()["detail"]

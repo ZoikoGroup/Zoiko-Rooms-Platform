@@ -49,6 +49,7 @@ import {
 } from "@/lib/user-api";
 import { Card, EmptyState, Field, Toast, inputClass, useToast } from "@/components/user/ui";
 import { SingleObligationPaymentCard } from "@/components/user/RentalPaymentsManager";
+import { DirectPaymentNotice, usePaymentCapabilities } from "@/components/user/DirectPaymentNotice";
 
 // Matches the backend's user_sign_agreement allowed-status set exactly
 // (crud/leasing.py) -- SENT is the original pre-execution flow;
@@ -74,6 +75,7 @@ const PAYMENT_METHOD_LABELS: Record<string, string> = {
 
 export function ApplicationsManager() {
   const { toast, showToast } = useToast();
+  const capabilities = usePaymentCapabilities();
   const { identityVerified } = useUserSession();
   const [applications, setApplications] = useState<UserApplication[]>([]);
   const [loading, setLoading] = useState(true);
@@ -689,7 +691,7 @@ export function ApplicationsManager() {
                         </span>
                         {o.status === "PAID" ? (
                           <Badge tone="success">Paid</Badge>
-                        ) : (
+                        ) : capabilities?.rent_collection_enabled ? (
                           <div className="flex items-center gap-2">
                             <select
                               className={`${inputClass} !w-auto py-1.5 text-xs`}
@@ -712,6 +714,8 @@ export function ApplicationsManager() {
                               Pay now
                             </Button>
                           </div>
+                        ) : (
+                          <DirectPaymentNotice compact />
                         )}
                       </div>
                     );
