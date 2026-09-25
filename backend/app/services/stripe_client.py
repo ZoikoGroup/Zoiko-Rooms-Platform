@@ -14,10 +14,17 @@ currencies Stripe defines, where the integer *is* the major unit."""
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Literal
 
 from app.core.config import settings
 from app.crud.ids import new_id
+
+logger = logging.getLogger(__name__)
+
+# Listing Fee hosted checkout lifetime -- see create_checkout_session.
+CHECKOUT_SESSION_TTL_SECONDS = 31 * 60
 
 # https://docs.stripe.com/currencies#zero-decimal -- currencies Stripe expects
 # as a whole-unit integer rather than its usual smallest-unit convention.
@@ -132,6 +139,10 @@ def create_checkout_session(
         success_url=success_url,
         cancel_url=cancel_url,
         metadata=metadata,
+        # Match the 30-minute Listing Fee quote instead of Stripe's 24-hour
+        # default; Stripe's own minimum is 30 minutes from creation, so one
+        # extra minute keeps clock skew from rejecting the request.
+        expires_at=int(time.time()) + CHECKOUT_SESSION_TTL_SECONDS,
         idempotency_key=idempotency_key,
     )
     return session.id, session.url or ""
@@ -187,14 +198,22 @@ def retrieve_checkout_session(*, checkout_session_id: str) -> dict | None:
     or ordinary webhook latency in any environment) -- the return page can
     ask Stripe directly, right now, whether it already knows this session
     succeeded, and self-heal immediately instead of only polling and
-    waiting. Returns {payment_status, payment_intent_id} when configured,
-    None otherwise -- nothing real to check without credentials, same
-    disclosed-simulation posture as every other function in this module."""
+    waiting. Returns {payment_status, payment_intent_id, status, url} when
+    configured, None otherwise -- nothing real to check without credentials,
+    same disclosed-simulation posture as every other function in this
+    module. `status` is the session's own open/complete/expired lifecycle
+    and `url` its hosted page, which lets a repeat checkout attempt resume
+    a still-open session instead of opening a second, separately payable one."""
     if not is_configured():
         return None
     stripe = _client()
     session = stripe.checkout.Session.retrieve(checkout_session_id)
-    return {"payment_status": session.payment_status, "payment_intent_id": session.payment_intent}
+    return {
+        "payment_status": session.payment_status,
+        "payment_intent_id": session.payment_intent,
+        "status": session.status,
+        "url": session.url or "",
+    }
 
 
 def retrieve_rent_payment_checkout_session(*, checkout_session_id: str, connected_account_id: str) -> dict | None:
@@ -404,6 +423,15 @@ def construct_webhook_event(*, payload: bytes, signature_header: str, secret: st
     payload was accepted. `secret` lets a caller verify against a different
     endpoint's own signing secret (e.g. the Listing Fee webhook route) --
     defaults to the shared settings.stripe_webhook_secret, unchanged for
-    every existing call site."""
+    every existing call site.
+
+    Fails closed when no signing secret resolves at all -- an unconfigured
+    endpoint rejects every delivery as unverifiable, and logs why, instead
+    of leaving ops to guess from a stream of anonymous 400s in Stripe's
+    dashboard."""
     stripe = _client()
-    return stripe.Webhook.construct_event(payload, signature_header, secret or settings.stripe_webhook_secret)
+    resolved_secret = secret or settings.stripe_webhook_secret
+    if not resolved_secret:
+        logger.error("stripe webhook: no signing secret configured for this endpoint -- rejecting delivery")
+        raise stripe.error.SignatureVerificationError("Webhook signing secret is not configured", signature_header)
+    return stripe.Webhook.construct_event(payload, signature_header, resolved_secret)
