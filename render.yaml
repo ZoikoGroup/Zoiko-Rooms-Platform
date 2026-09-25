@@ -47,6 +47,27 @@ services:
         sync: false
       - key: PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
         value: "30"
+      # Stripe -- currently TEST mode (sk_test_ key, test-mode webhook secrets).
+      # With a test key, missing webhook secrets / non-https Connect URLs are only
+      # logged at boot. With a live key (sk_live_), production refuses to boot
+      # until both webhook secrets are set and the Connect URLs are public https.
+      # Register two endpoints in the Stripe dashboard (same mode as the key):
+      #   <api>/api/finance/listing-fees/stripe/webhook -- checkout.session.completed,
+      #     checkout.session.async_payment_succeeded/_failed, checkout.session.expired,
+      #     payment_intent.succeeded, payment_intent.payment_failed, charge.refunded,
+      #     charge.dispute.created, charge.dispute.closed
+      #   <api>/api/finance/rental-payments/stripe/webhook (Connect events) --
+      #     account.updated, checkout.session.completed, checkout.session.async_payment_failed
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_LISTING_FEE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_CONNECT_REFRESH_URL
+        value: https://app.zoikorooms.com/account/host/payments
+      - key: STRIPE_CONNECT_RETURN_URL
+        value: https://app.zoikorooms.com/account/host/payments
       - key: LLM_PROVIDER
         value: groq
       - key: GROQ_API_KEY
