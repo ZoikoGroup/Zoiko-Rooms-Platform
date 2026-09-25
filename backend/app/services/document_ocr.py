@@ -207,6 +207,34 @@ def extract_and_score(document_bytes: bytes, document_type: str) -> tuple[str | 
     return matched_number, avg_confidence
 
 
+# Property verification checks against a REAL known value, unlike identity's
+# address-document check above (no stored address exists there to compare
+# against) -- the room's own actual Property.address/city. A real address
+# match is a genuine, non-fabricated signal that the uploaded evidence
+# actually describes this property, not just any document of a plausible
+# type.
+PROPERTY_ADDRESS_MATCH_CONFIDENCE_THRESHOLD = 40.0
+
+
+def check_property_document_address(document_bytes: bytes, real_address: str, real_city: str) -> tuple[bool, float, str]:
+    """Returns (address_matched, average_ocr_confidence_0_to_100, extracted_text_snippet).
+    A match requires BOTH the property's real city AND at least half of the
+    real address's significant (3+ character) words to appear in the
+    extracted text -- city alone is too common a false-positive (a random
+    London utility bill would match on "LONDON" alone); the address words
+    together with the city make this a real, specific match rather than a
+    coincidence."""
+    full_text, avg_confidence = _ocr_text_and_confidence(document_bytes)
+
+    city_found = bool(real_city.strip()) and real_city.strip().upper() in full_text
+
+    address_words = [w.strip(",.").upper() for w in real_address.split() if len(w.strip(",.")) >= 3]
+    matched_words = sum(1 for w in address_words if w in full_text)
+    address_found = bool(address_words) and matched_words >= max(1, len(address_words) // 2)
+
+    return (city_found and address_found), avg_confidence, full_text[:500]
+
+
 # Address/residency documents have no universal document NUMBER (unlike
 # identity documents) and nothing stored anywhere in this platform to check
 # a claimed address against (Party/UserAccount have no address field at

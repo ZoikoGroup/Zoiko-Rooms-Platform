@@ -91,6 +91,10 @@ def declare_property_verification(
         status="pending",
     )
     db.add(record)
+    db.flush()
+
+    _run_ocr_address_check(db, record, room)
+
     db.commit()
     db.refresh(record)
 
@@ -100,6 +104,65 @@ def declare_property_verification(
     )
     db.commit()
     return record
+
+
+def _run_ocr_address_check(db: Session, record: PropertyVerification, room: Room) -> None:
+    """Mirrors crud/identity_verification.py's own OCR dispatch shape
+    (_run_ocr_check/_run_identity_ocr_check) -- a genuine local OCR read of
+    the uploaded document, checked against this room's own real
+    Property.address/city (unlike identity verification, there IS a known-
+    correct value to compare against here). A genuine match auto-verifies
+    through the same real verify_property_verification crud path a human
+    admin's approval click uses; anything else reroutes to
+    additional_evidence_required with the real, specific reason -- never a
+    blind accept. Fails open (leaves the record "pending" for manual
+    review) only for infra problems -- OCR unavailable, unreadable file --
+    never for a real bad result."""
+    from app.core.property_verification_uploads import resolve_property_verification_document_path
+    from app.crud.payment_provider import get_system_admin
+    from app.services import document_ocr
+
+    if not document_ocr.is_available():
+        return
+    if not record.document_file_path:
+        return
+
+    try:
+        file_path = resolve_property_verification_document_path(record.document_file_path)
+        matched, confidence, snippet = document_ocr.check_property_document_address(
+            file_path.read_bytes(), room.property.address, room.property.city,
+        )
+    except Exception:
+        return
+
+    record.ocr_extracted_text = snippet
+    record.ocr_confidence = confidence
+    record.ocr_address_matched = matched
+    db.flush()
+
+    threshold = document_ocr.PROPERTY_ADDRESS_MATCH_CONFIDENCE_THRESHOLD
+
+    if matched and confidence >= threshold:
+        note = (
+            f"Auto-verified: automated scan found content matching this property's registered address "
+            f"({room.property.address}, {room.property.city}), at {confidence:.0f}% OCR confidence "
+            f"(minimum {threshold:.0f}%)."
+        )
+        verify_property_verification(db, record, get_system_admin(db), notes=note)
+        return
+
+    if not matched:
+        reason = (
+            f"Automated scan couldn't find content matching this property's registered address "
+            f"({room.property.address}, {room.property.city}) in this document."
+        )
+    else:
+        reason = (
+            f"Automated scan couldn't clearly read this document "
+            f"(confidence {confidence:.0f}%, below the {threshold:.0f}% minimum)."
+        )
+    record.status = "additional_evidence_required"
+    record.verifier_notes = f"{reason} Please re-upload a clearer document that shows the property's address."
 
 
 def list_property_verifications_for_room_owned_by(db: Session, user: UserAccount, room: Room) -> list[PropertyVerification]:

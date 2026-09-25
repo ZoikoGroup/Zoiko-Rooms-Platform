@@ -29,6 +29,8 @@ import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { ListingFeeCheckout } from "@/components/user/ListingFeeCheckout";
 import { PaymentRecipientSetup } from "@/components/user/PaymentRecipientSetup";
+import { PropertyVerificationManager } from "@/components/user/PropertyVerificationManager";
+import { AuthorityRecordManager } from "@/components/user/AuthorityRecordManager";
 
 const MAX_LISTING_IMAGES = 10;
 
@@ -110,6 +112,8 @@ export function HostingListingsManager() {
   const [payingFeeListingId, setPayingFeeListingId] = useState<string | null>(null);
   const [returningCheckoutSessionId, setReturningCheckoutSessionId] = useState<string | null>(null);
   const [paymentRecipientRoomId, setPaymentRecipientRoomId] = useState<number | null>(null);
+  const [propertyVerificationRoomId, setPropertyVerificationRoomId] = useState<number | null>(null);
+  const [authorityRecordRoomId, setAuthorityRecordRoomId] = useState<number | null>(null);
 
   // Landed back here from Stripe's own hosted checkout page (see
   // ListingFeeCheckout.tsx's real redirect, and crud/listing_fee.py's
@@ -313,6 +317,16 @@ export function HostingListingsManager() {
                     {listing.roomId !== null && (
                       <Button size="sm" variant="outline" onClick={() => setPaymentRecipientRoomId(listing.roomId)}>
                         <ShieldCheck className="h-3.5 w-3.5" /> Payment recipient
+                      </Button>
+                    )}
+                    {listing.roomId !== null && (
+                      <Button size="sm" variant="outline" onClick={() => setPropertyVerificationRoomId(listing.roomId)}>
+                        <ShieldCheck className="h-3.5 w-3.5" /> Property verification
+                      </Button>
+                    )}
+                    {listing.roomId !== null && (
+                      <Button size="sm" variant="outline" onClick={() => setAuthorityRecordRoomId(listing.roomId)}>
+                        <ShieldCheck className="h-3.5 w-3.5" /> Authority to list
                       </Button>
                     )}
                     {listing.state === "APPROVED" && (
@@ -635,6 +649,22 @@ export function HostingListingsManager() {
         title="Payment recipient"
       >
         {paymentRecipientRoomId !== null && <PaymentRecipientSetup roomId={paymentRecipientRoomId} />}
+      </Modal>
+
+      <Modal
+        open={propertyVerificationRoomId !== null}
+        onClose={() => setPropertyVerificationRoomId(null)}
+        title="Property verification"
+      >
+        {propertyVerificationRoomId !== null && <PropertyVerificationManager roomId={propertyVerificationRoomId} />}
+      </Modal>
+
+      <Modal
+        open={authorityRecordRoomId !== null}
+        onClose={() => setAuthorityRecordRoomId(null)}
+        title="Authority to list"
+      >
+        {authorityRecordRoomId !== null && <AuthorityRecordManager roomId={authorityRecordRoomId} />}
       </Modal>
 
       <Toast toast={toast} />

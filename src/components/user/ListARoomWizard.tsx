@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Building2, Check, ChevronLeft, ChevronRight, FileEdit, Send, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Building2, Check, ChevronLeft, ChevronRight, FileEdit, Send, ShieldCheck, Upload } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -27,6 +27,7 @@ import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { formatCurrency } from "@/lib/utils";
 import { Field, inputClass } from "@/components/user/ui";
 import { useUserSession } from "@/components/user/UserSessionContext";
+import { ACCEPTED_DOCUMENT_EXTENSIONS, MAX_DOCUMENT_SIZE_MB } from "@/lib/identity-documents";
 
 const MAX_LISTING_IMAGES = 10;
 const SUPPORTED_CURRENCIES = ["INR", "GBP", "USD", "EUR", "CAD", "AUD", "AED", "SGD", "NZD"];
@@ -120,6 +121,8 @@ export function ListARoomWizard({
   // evidence -- submitted after the room exists (see handleFinish) and never
   // blocks listing creation if left blank or if the submission call fails.
   const [propertyEvidenceRef, setPropertyEvidenceRef] = useState("");
+  const [propertyEvidenceFile, setPropertyEvidenceFile] = useState<File | null>(null);
+  const [propertyEvidenceFileError, setPropertyEvidenceFileError] = useState("");
   const [authorityRelationshipType, setAuthorityRelationshipType] = useState<AuthorityRelationshipType>("OWNER");
   const [authorityEvidenceRef, setAuthorityEvidenceRef] = useState("");
 
@@ -265,9 +268,11 @@ export function ListARoomWizard({
       // evidence, submitted best-effort -- never blocks listing creation.
       // Verification stays a separate, informational admin review step
       // (see PublishEligibility), not a hard gate on this wizard.
-      if (propertyEvidenceRef.trim()) {
+      if (propertyEvidenceRef.trim() && propertyEvidenceFile) {
         try {
-          await declareHostedPropertyVerification(roomId, { evidenceRef: propertyEvidenceRef.trim() });
+          await declareHostedPropertyVerification(roomId, {
+            evidenceRef: propertyEvidenceRef.trim(), file: propertyEvidenceFile,
+          });
         } catch {
           // Best-effort -- surfaced later via the verification status summary, not here.
         }
@@ -680,6 +685,37 @@ export function ListARoomWizard({
                       className={inputClass}
                     />
                   </Field>
+                  <div>
+                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                      Upload evidence document
+                    </span>
+                    <label className="flex cursor-pointer items-center gap-3 rounded-xl border-2 border-dashed border-slate-200 bg-white px-4 py-4 text-sm text-slate-500 transition-colors hover:border-primary-300 hover:bg-primary-50/50 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-400">
+                      <Upload className="h-5 w-5 shrink-0 text-slate-400" />
+                      <span className="min-w-0 flex-1 truncate">
+                        {propertyEvidenceFile ? propertyEvidenceFile.name : "Choose a PDF, JPG or PNG file"}
+                      </span>
+                      <input
+                        type="file"
+                        accept={ACCEPTED_DOCUMENT_EXTENSIONS}
+                        onChange={(e) => {
+                          const selected = e.target.files?.[0] ?? null;
+                          if (selected && selected.size > MAX_DOCUMENT_SIZE_MB * 1024 * 1024) {
+                            setPropertyEvidenceFileError(`That file is larger than ${MAX_DOCUMENT_SIZE_MB}MB.`);
+                            setPropertyEvidenceFile(null);
+                            e.target.value = "";
+                            return;
+                          }
+                          setPropertyEvidenceFileError("");
+                          setPropertyEvidenceFile(selected);
+                        }}
+                        className="hidden"
+                      />
+                    </label>
+                    <p className="mt-1.5 text-xs text-slate-400">PDF, JPG or PNG, up to {MAX_DOCUMENT_SIZE_MB}MB.</p>
+                    {propertyEvidenceFileError && (
+                      <p className="mt-1 text-xs font-medium text-accent-600">{propertyEvidenceFileError}</p>
+                    )}
+                  </div>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <Field label="Your relationship to this property">
                       <select

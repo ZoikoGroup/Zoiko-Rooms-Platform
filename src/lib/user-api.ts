@@ -570,10 +570,15 @@ export function listHostedRoomPropertyVerifications(roomId: number): Promise<Pro
   return apiClientFetch<PropertyVerification[]>(`/api/users/hosting/rooms/${roomId}/property-verifications`);
 }
 
-export function declareHostedPropertyVerification(roomId: number, payload: { evidenceRef: string }): Promise<PropertyVerification> {
+export function declareHostedPropertyVerification(
+  roomId: number, payload: { evidenceRef: string; file: File },
+): Promise<PropertyVerification> {
+  const form = new FormData();
+  form.append("evidence_ref", payload.evidenceRef);
+  form.append("file", payload.file);
   return apiClientFetch<PropertyVerification>(`/api/users/hosting/rooms/${roomId}/property-verifications`, {
     method: "POST",
-    body: JSON.stringify({ roomId, ...payload }),
+    body: form,
   });
 }
 
