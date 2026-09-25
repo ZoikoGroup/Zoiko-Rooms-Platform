@@ -394,6 +394,9 @@ def get_my_rental_payment_instructions(obligation_id: int, user: UserAccount = D
     guest = _get_own_guest_or_403(db, user)
     obligation = rp_crud.get_obligation_or_404(db, obligation_id)
     rp_crud.assert_tenant_owns_obligation(obligation, guest.id)
+    # PAY-CFG-06: never show payment details for a recipient whose
+    # PAYMENT_RECEIPT authority isn't verified.
+    rp_crud.assert_recipient_holds_payment_receipt_authority(db, obligation, obligation.recipient_party_id)
 
     instruction = rp_crud.get_active_rental_payment_instruction(db, obligation.recipient_party_id)
     if not instruction:

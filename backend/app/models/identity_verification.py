@@ -105,3 +105,12 @@ class IdentityVerification(Base):
     @property
     def has_document(self) -> bool:
         return bool(self.document_file_path)
+
+    @property
+    def auto_flagged(self) -> bool:
+        """True when the automated OCR scan (not a human admin) sent this
+        submission back for more evidence -- crud/identity_verification.py's
+        _reroute_to_additional_evidence never sets verifier_admin_id, while an
+        admin's request_additional_evidence always does. A super admin can
+        still overrule it (approve/reject) from the review queue."""
+        return self.status == "additional_evidence_required" and self.verifier_admin_id is None

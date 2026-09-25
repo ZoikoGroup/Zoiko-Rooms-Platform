@@ -507,7 +507,7 @@ class TestPlatformFeeReversal:
     on rent that later gets refunded through a termination case, once that
     rent had already gone through a COMPLETED payout."""
 
-    def test_fee_is_reversed_when_a_paid_out_obligation_is_later_refunded(self, client, db_session: Session):
+    def test_no_fee_reversal_because_no_commission_is_taken(self, client, db_session: Session):
         admin = _make_admin(db_session, email="refund-fee-admin@test.com", role="super_admin")
         occupancy, guest, _listing, agreement = _make_active_occupancy(db_session, admin=admin, suffix="fee1")
         admin_cookies = auth_admin_cookie(admin)
@@ -533,8 +533,6 @@ class TestPlatformFeeReversal:
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "PAID"
 
-        policy = db_session.query(MarketPolicyPack).filter_by(jurisdiction_code="IN").one()
-        expected_fee_reversal = round(1000.0 * float(policy.platform_fee_rate), 2)
 
         r = client.post(
             f"/api/occupancy/{occupancy.id}/termination-cases",
@@ -557,8 +555,8 @@ class TestPlatformFeeReversal:
                 LedgerEntry.description.like("Platform fee reversed%"),
             )
         )
-        assert entry is not None
-        assert round(float(entry.amount), 2) == expected_fee_reversal
+        # ZR-PAY-CFG-001 Decision 3: no commission was taken, so nothing is reversed.
+        assert entry is None
 
     def test_no_reversal_when_the_obligation_was_never_paid_out(self, client, db_session: Session):
         """The ordinary case -- most refunded obligations never went through

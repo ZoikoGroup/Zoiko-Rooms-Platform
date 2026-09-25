@@ -26,7 +26,7 @@ import {
   Users,
   XCircle,
 } from "lucide-react";
-import { AdminRole, Listing, ListingState, Property, PublishEligibility, Room } from "@/lib/types";
+import { AdminRole, Listing, ListingState, OpenJurisdiction, Property, PublishEligibility, Room } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { StarRating } from "@/components/ui/StarRating";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
@@ -69,7 +69,7 @@ const emptyForm = {
   contactEmail: "",
 };
 
-const emptyNewRoom = { address: "", city: "", size: "120", hasEnsuite: false };
+const emptyNewRoom = { address: "", city: "", jurisdictionCode: "", size: "120", hasEnsuite: false };
 
 export function PropertiesManager({ initialListings }: { initialListings: Listing[] }) {
   const [items, setItems] = useState(initialListings);
@@ -82,6 +82,7 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
   const [form, setForm] = useState(emptyForm);
   const [role, setRole] = useState<AdminRole | null>(null);
   const [roomOptions, setRoomOptions] = useState<RoomOption[]>([]);
+  const [regions, setRegions] = useState<OpenJurisdiction[]>([]);
   const [addingRoom, setAddingRoom] = useState(false);
   const [newRoom, setNewRoom] = useState(emptyNewRoom);
   const [reviewListing, setReviewListing] = useState<Listing | null>(null);
@@ -114,6 +115,9 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
   }, [searchParams]);
 
   async function loadRoomOptions() {
+    apiClientFetch<OpenJurisdiction[]>("/api/properties/jurisdictions")
+      .then(setRegions)
+      .catch(() => setRegions([]));
     try {
       const properties = await apiClientFetch<Property[]>("/api/properties");
       const rooms = await Promise.all(
@@ -302,10 +306,18 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
       showToast("Enter an address and city for the new property");
       return;
     }
+    if (!newRoom.jurisdictionCode) {
+      showToast("Select the region the new property is in");
+      return;
+    }
     try {
       const property = await apiClientFetch<Property>("/api/properties", {
         method: "POST",
-        body: JSON.stringify({ address: newRoom.address.trim(), city: newRoom.city.trim() }),
+        body: JSON.stringify({
+          address: newRoom.address.trim(),
+          city: newRoom.city.trim(),
+          jurisdictionCode: newRoom.jurisdictionCode,
+        }),
       });
       const room = await apiClientFetch<Room>(`/api/properties/${property.id}/rooms`, {
         method: "POST",
@@ -317,8 +329,8 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
       setAddingRoom(false);
       setNewRoom(emptyNewRoom);
       showToast("Property and room created");
-    } catch {
-      showToast("Failed to create property and room");
+    } catch (err) {
+      showToast(err instanceof Error && err.message ? err.message : "Failed to create property and room");
     }
   }
 
@@ -624,7 +636,7 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
                 <option value="">Select a room…</option>
                 {roomOptions.map((room) => (
                   <option key={room.id} value={room.id}>
-                    {room.property.address} — Room #{room.id}
+                    {room.property.address} ({room.property.jurisdictionCode}) — Room #{room.id}
                     {room.hasEnsuite ? " (ensuite)" : ""}
                   </option>
                 ))}
@@ -637,6 +649,21 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
                   placeholder="Property address"
                   className="w-full rounded-lg bg-white px-3 py-2 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700"
                 />
+                <select
+                  value={newRoom.jurisdictionCode}
+                  onChange={(e) => setNewRoom((r) => ({ ...r, jurisdictionCode: e.target.value }))}
+                  className="w-full rounded-lg bg-white px-3 py-2 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700"
+                >
+                  <option value="">
+                    {regions.length === 0 ? "No regions open — create a market release + policy pack first" : "Select a region…"}
+                  </option>
+                  {regions.map((region) => (
+                    <option key={region.code} value={region.code}>
+                      {region.code}
+                      {region.agreementsSupported ? "" : " (agreements manual)"}
+                    </option>
+                  ))}
+                </select>
                 <div className="grid grid-cols-2 gap-2">
                   <input
                     value={newRoom.city}

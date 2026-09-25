@@ -55,6 +55,7 @@ import {
   formatClassificationLabel,
 } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { useAdminPaymentCapabilities } from "@/components/admin/useAdminPaymentCapabilities";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -102,6 +103,10 @@ interface CaseDetail {
 }
 
 export function DisputeResolutionManager() {
+  // Financial holds freeze Zoiko-held rental money pending a dispute -- the
+  // escrow ZR-PAY-CFG-001 prohibits. Only offered if escrow were ever enabled.
+  const capabilities = useAdminPaymentCapabilities();
+  const holdsEnabled = Boolean(capabilities?.escrow_enabled);
   const [cases, setCases] = useState<DisputeCaseRead[]>([]);
   const [loadingCases, setLoadingCases] = useState(false);
   const [teamFilter, setTeamFilter] = useState<DisputeCaseTeam | "all">("all");
@@ -960,9 +965,11 @@ export function DisputeResolutionManager() {
                               Decide
                             </Button>
                           )}
-                          <Button size="sm" variant="ghost" onClick={() => setHoldOpenFor(holdOpenFor === claim.id ? null : claim.id)}>
-                            Financial Hold
-                          </Button>
+                          {holdsEnabled && (
+                            <Button size="sm" variant="ghost" onClick={() => setHoldOpenFor(holdOpenFor === claim.id ? null : claim.id)}>
+                              Financial Hold
+                            </Button>
+                          )}
                         </div>
 
                         {decideOpenFor === claim.id && (
@@ -1017,17 +1024,17 @@ export function DisputeResolutionManager() {
                                 </span>
                                 <div className="flex items-center gap-1.5">
                                   <Badge tone={disputeFinancialHoldStatusTone[h.status] ?? "neutral"}>{formatClassificationLabel(h.status)}</Badge>
-                                  {h.status === "PROPOSED" && (
+                                  {holdsEnabled && h.status === "PROPOSED" && (
                                     <Button size="sm" variant="ghost" loading={busy === `hold-approve-${h.id}`} onClick={() => approveHold(claim.id, h.id)}>
                                       Approve
                                     </Button>
                                   )}
-                                  {h.status === "ACTIVE" && (
+                                  {holdsEnabled && h.status === "ACTIVE" && (
                                     <Button size="sm" variant="ghost" loading={busy === `hold-release-${h.id}`} onClick={() => releaseHold(claim.id, h.id)}>
                                       Release
                                     </Button>
                                   )}
-                                  {h.status === "RELEASE_PENDING" && (
+                                  {holdsEnabled && h.status === "RELEASE_PENDING" && (
                                     <Button size="sm" variant="ghost" loading={busy === `hold-confirm-${h.id}`} onClick={() => confirmReleaseHold(claim.id, h.id)}>
                                       Confirm Release
                                     </Button>

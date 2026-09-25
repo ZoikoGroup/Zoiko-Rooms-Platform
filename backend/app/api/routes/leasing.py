@@ -46,6 +46,7 @@ from app.schemas.leasing import (
     BookingChangeDecisionRequest,
     LegalOrderChangeCreate,
     BookingChangeRequestRead,
+    ClauseCopyDefaultsRequest,
     ClauseDefinitionRead,
     ClauseDraftCreate,
     ClauseTranslationCreate,
@@ -462,12 +463,34 @@ def post_sign_agreement_wet_ink(
 
 
 @router.get("/agreement-clauses", response_model=list[ClauseDefinitionRead], dependencies=[Depends(require_super_admin)])
-def get_agreement_clauses(clause_id: str | None = None, db: Session = Depends(get_db)):
+def get_agreement_clauses(
+    clause_id: str | None = None, jurisdiction_scope: str | None = None, db: Session = Depends(get_db),
+):
     """ZR-ENG-CLR-004 AC-25/Section 12 'Change legal template: ... Legal
     content governance only' -- the full version history for one clause_id
-    (or every clause_id, unfiltered), so an admin can see what's currently
-    active vs retired vs still draft."""
-    return clause_crud.list_clause_versions(db, clause_id)
+    and/or one jurisdiction (or everything, unfiltered), so an admin can see
+    what's currently active vs retired vs still draft."""
+    return clause_crud.list_clause_versions(db, clause_id, jurisdiction_scope)
+
+
+@router.post(
+    "/agreement-clauses/copy-defaults", response_model=list[ClauseDefinitionRead],
+    dependencies=[Depends(require_super_admin)],
+)
+def post_copy_default_agreement_clauses(
+    payload: ClauseCopyDefaultsRequest, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    """Starts a new region's clause registry from the default placeholder
+    catalog, as DRAFTs an admin must review and approve before agreements
+    can be generated in that region."""
+    created = clause_crud.copy_default_clauses_to_jurisdiction(db, admin, payload.jurisdiction_scope)
+    log_audit_event(
+        db, admin, "agreement_clause.copy_defaults", "jurisdiction", payload.jurisdiction_scope.strip(),
+        get_correlation_id(request), reason=f"{len(created)} draft clause(s)",
+    )
+    db.commit()
+    return created
 
 
 @router.post("/agreement-clauses", response_model=ClauseDefinitionRead, dependencies=[Depends(require_super_admin)])

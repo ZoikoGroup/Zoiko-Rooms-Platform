@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.services.payment_boundary import require_capability
 from app.api.deps import get_current_admin, require_super_admin
 from app.core.correlation import get_correlation_id
 from app.core.signed_urls import verify_signed_download_token
@@ -614,7 +615,7 @@ def approve_refund_entitlement(
     return updated
 
 
-@router.post("/refund-entitlements/{entitlement_id}/execute", response_model=RefundEntitlementRead)
+@router.post("/refund-entitlements/{entitlement_id}/execute", response_model=RefundEntitlementRead, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def execute_refund_entitlement(
     entitlement_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):

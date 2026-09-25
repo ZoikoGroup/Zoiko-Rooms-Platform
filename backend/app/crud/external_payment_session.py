@@ -70,6 +70,21 @@ def get_latest_session_for_obligation(db: Session, obligation_id: int) -> Extern
     )
 
 
+def _require_market_approved_handoff(db: Session, jurisdiction_code: str) -> None:
+    """ZR-PAY-CFG-001 5.1: an external recipient-owned payment link opens
+    only where that handoff has been separately approved for the market."""
+    from app.models.market_release import MarketRelease
+    from app.services.policy import get_policy
+
+    release = db.scalar(select(MarketRelease).where(MarketRelease.jurisdiction == jurisdiction_code))
+    if not get_policy(release, "payment.external_handoff_approved"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Online payment to the recipient isn't available in this market. Use the payment instructions to pay "
+            "the recipient directly, then record the payment.",
+        )
+
+
 def create_session(
     db: Session, guest: Guest, obligation: RentalPaymentObligation, *, success_url: str, cancel_url: str,
     correlation_id: str = "",
@@ -110,12 +125,16 @@ def create_session(
     from app.crud.market_policy import DEFAULT_JURISDICTION, resolve_available_payment_methods
 
     jurisdiction_code = obligation.jurisdiction_code or DEFAULT_JURISDICTION
+    _require_market_approved_handoff(db, jurisdiction_code)
     available_methods = resolve_available_payment_methods(db, jurisdiction_code)
     if "CARD" not in available_methods:
         raise HTTPException(
             status.HTTP_409_CONFLICT, f"Secure online payment is not available for this jurisdiction ({jurisdiction_code})",
         )
 
+    from app.crud.rental_payment import assert_recipient_holds_payment_receipt_authority
+
+    assert_recipient_holds_payment_receipt_authority(db, obligation, obligation.recipient_party_id)
     provider_account = get_charge_ready_provider_account_for_party(db, obligation.recipient_party_id)
     if provider_account is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "The recipient has not connected a payment account yet")

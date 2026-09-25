@@ -8,7 +8,12 @@ to yield a session bound to the SQLite engine.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import typing
+
+# Force the file mailer before app settings load, so a developer's .env with
+# EMAIL_PROVIDER=smtp never makes the suite send real email.
+os.environ["EMAIL_PROVIDER"] = "file"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -39,6 +44,25 @@ def _isolate_from_real_provider_credentials(monkeypatch):
     monkeypatch.setattr(settings, "stripe_secret_key", "")
     monkeypatch.setattr(settings, "stripe_webhook_secret", "")
     monkeypatch.setattr(settings, "stripe_listing_fee_webhook_secret", "")
+
+
+@pytest.fixture(autouse=True)
+def _legacy_payment_capabilities(request, monkeypatch):
+    """ZR-PAY-CFG-001 turned off every rental money-movement path and made
+    the Listing Fee and PAYMENT_RECEIPT authority fail closed. Most of this
+    suite predates that and exercises those paths directly, so it opts back
+    in here. Tests marked @pytest.mark.payment_boundary run with the real
+    (production) defaults instead -- that's where the boundary itself is
+    tested."""
+    if request.node.get_closest_marker("payment_boundary"):
+        return
+    from app.services import policy
+
+    for flag in ("rent_collection_enabled", "deposit_collection_enabled", "host_payouts_enabled"):
+        monkeypatch.setattr(settings, flag, True)
+    monkeypatch.setattr(settings, "listing_fee_fail_closed", False)
+    monkeypatch.setattr(settings, "payment_receipt_authority_required", False)
+    monkeypatch.setitem(policy._DEFAULTS, "payment.external_handoff_approved", lambda: True)
 
 
 @pytest.fixture(autouse=True)

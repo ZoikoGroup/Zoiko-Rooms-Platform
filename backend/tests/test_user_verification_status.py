@@ -19,6 +19,7 @@ from app.models.room import Room
 from app.models.user_account import UserAccount
 from tests.conftest import _make_admin, _make_user, auth_user_cookie
 from tests.test_room_hold_atomicity import _make_verified_renter
+from tests.test_property_verification import _declare as _declare_property
 
 
 class TestRenterVerificationStatus:
@@ -116,11 +117,7 @@ class TestPropertyVerificationAndAuthorityToListClaims:
         user, room = self._make_host_with_room(db_session, email="uvs-host-verified@test.com")
         super_admin = _make_admin(db_session, email="uvs-host-verified-admin@test.com", role="super_admin")
 
-        property_record = property_verification_crud.declare_property_verification(
-            db_session, user, room, evidence_ref="deed.pdf",
-            stored_filename="test-stored.pdf", original_filename="deed.pdf",
-            content_type="application/pdf", file_size=1024,
-        )
+        property_record = _declare_property(db_session, user, room)
         property_verification_crud.verify_property_verification(db_session, property_record, super_admin)
 
         authority_record = authority_crud.declare_authority_record(
@@ -143,11 +140,7 @@ class TestPropertyVerificationAndAuthorityToListClaims:
 
     def test_pending_property_submission_reports_pending(self, client, db_session: Session):
         user, room = self._make_host_with_room(db_session, email="uvs-host-pv-pending@test.com")
-        property_verification_crud.declare_property_verification(
-            db_session, user, room, evidence_ref="deed.pdf",
-            stored_filename="test-stored.pdf", original_filename="deed.pdf",
-            content_type="application/pdf", file_size=1024,
-        )
+        _declare_property(db_session, user, room)
 
         r = client.get("/api/users/verification-status", cookies=auth_user_cookie(user))
         assert r.status_code == 200, r.text
@@ -156,11 +149,7 @@ class TestPropertyVerificationAndAuthorityToListClaims:
     def test_rejected_property_submission_reports_rejected(self, client, db_session: Session):
         user, room = self._make_host_with_room(db_session, email="uvs-host-pv-rejected@test.com")
         super_admin = _make_admin(db_session, email="uvs-host-pv-rejected-admin@test.com", role="super_admin")
-        record = property_verification_crud.declare_property_verification(
-            db_session, user, room, evidence_ref="deed.pdf",
-            stored_filename="test-stored.pdf", original_filename="deed.pdf",
-            content_type="application/pdf", file_size=1024,
-        )
+        record = _declare_property(db_session, user, room)
         property_verification_crud.reject_property_verification(db_session, record, super_admin, notes="Blurry photo")
 
         r = client.get("/api/users/verification-status", cookies=auth_user_cookie(user))
@@ -170,11 +159,7 @@ class TestPropertyVerificationAndAuthorityToListClaims:
     def test_additional_evidence_required_property_submission_reports_that_status(self, client, db_session: Session):
         user, room = self._make_host_with_room(db_session, email="uvs-host-pv-more-evidence@test.com")
         super_admin = _make_admin(db_session, email="uvs-host-pv-more-evidence-admin@test.com", role="super_admin")
-        record = property_verification_crud.declare_property_verification(
-            db_session, user, room, evidence_ref="deed.pdf",
-            stored_filename="test-stored.pdf", original_filename="deed.pdf",
-            content_type="application/pdf", file_size=1024,
-        )
+        record = _declare_property(db_session, user, room)
         property_verification_crud.request_additional_property_evidence(db_session, record, super_admin, notes="Need a second doc")
 
         r = client.get("/api/users/verification-status", cookies=auth_user_cookie(user))
@@ -184,11 +169,7 @@ class TestPropertyVerificationAndAuthorityToListClaims:
     def test_revoked_property_submission_reports_revoked(self, client, db_session: Session):
         user, room = self._make_host_with_room(db_session, email="uvs-host-pv-revoked@test.com")
         super_admin = _make_admin(db_session, email="uvs-host-pv-revoked-admin@test.com", role="super_admin")
-        record = property_verification_crud.declare_property_verification(
-            db_session, user, room, evidence_ref="deed.pdf",
-            stored_filename="test-stored.pdf", original_filename="deed.pdf",
-            content_type="application/pdf", file_size=1024,
-        )
+        record = _declare_property(db_session, user, room)
         property_verification_crud.verify_property_verification(db_session, record, super_admin)
         property_verification_crud.revoke_property_verification(db_session, record, super_admin, reason="Fraud found")
 
@@ -202,11 +183,7 @@ class TestPropertyVerificationAndAuthorityToListClaims:
         'expired' from expires_at rather than trusting the stale stored value."""
         user, room = self._make_host_with_room(db_session, email="uvs-host-pv-expired@test.com")
         super_admin = _make_admin(db_session, email="uvs-host-pv-expired-admin@test.com", role="super_admin")
-        record = property_verification_crud.declare_property_verification(
-            db_session, user, room, evidence_ref="deed.pdf",
-            stored_filename="test-stored.pdf", original_filename="deed.pdf",
-            content_type="application/pdf", file_size=1024,
-        )
+        record = _declare_property(db_session, user, room)
         property_verification_crud.verify_property_verification(db_session, record, super_admin)
         record.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
         db_session.commit()

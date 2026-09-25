@@ -7,6 +7,7 @@ Secure in production.
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
 from app.core.config import Settings
@@ -18,6 +19,7 @@ def _prod_settings(**overrides) -> Settings:
         jwt_secret="a" * 48,
         seed_admin_password="a-secure-password-123",
         cookie_secure=True,
+        field_encryption_key=Fernet.generate_key().decode(),
         database_url="sqlite://",
     )
     base.update(overrides)

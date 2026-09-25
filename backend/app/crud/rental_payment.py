@@ -543,6 +543,34 @@ def assert_party_is_recipient(obligation: RentalPaymentObligation, party_id: int
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You are not the authorized recipient for this obligation")
 
 
+def recipient_holds_payment_receipt_authority(db: Session, obligation: RentalPaymentObligation, party_id: int) -> bool:
+    """ZR-PAY-CFG-001 Section 6 / PAY-CFG-06/07: permission to list or manage
+    a property is not permission to receive rent. True only when this party
+    holds a verified, unexpired PAYMENT_RECEIPT authority for the
+    obligation's room. resolve_rent_recipient_party_id still falls back to
+    the property owner for *who the obligation names* (so a tenancy can be
+    recorded before authority is verified), but that fallback never lets
+    anyone see instructions or confirm receipt."""
+    from app.core.config import settings
+    from app.crud.payment_recipient_authority import get_valid_payment_recipient_authority_for_room
+
+    if not settings.payment_receipt_authority_required:
+        return True
+    room = obligation.room
+    if room is None:
+        return False
+    authority = get_valid_payment_recipient_authority_for_room(db, room.id)
+    return authority is not None and authority.party_id == party_id
+
+
+def assert_recipient_holds_payment_receipt_authority(db: Session, obligation: RentalPaymentObligation, party_id: int) -> None:
+    if not recipient_holds_payment_receipt_authority(db, obligation, party_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "The recipient's authority to receive payments for this rental hasn't been verified yet",
+        )
+
+
 def mark_paid(
     db: Session, guest: Guest, obligation: RentalPaymentObligation, *, amount: float, currency: str,
     declared_date: date, payment_method_category: str, external_reference: str = "", correlation_id: str = "",
@@ -728,6 +756,7 @@ def confirm_receipt(
     never exceed the declared amount (that would not be a confirmation of
     this declaration at all)."""
     assert_party_is_recipient(record.obligation, party.id)
+    assert_recipient_holds_payment_receipt_authority(db, record.obligation, party.id)
     if record.status not in RECORD_CONFIRMABLE_STATUSES:
         raise HTTPException(status.HTTP_409_CONFLICT, f"A record in status {record.status} cannot be confirmed")
 

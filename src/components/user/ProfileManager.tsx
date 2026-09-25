@@ -18,7 +18,7 @@ import { Card, Field, SectionHeading, Toast, inputClass, useToast } from "@/comp
 // drops it from any update anyway, so it's never offered as a toggle in the
 // first place.
 const OPTABLE_CATEGORIES: { value: NotificationCategory; label: string; hint: string }[] = [
-  { value: "PAYMENTS", label: "Payments & refunds", hint: "Payment confirmations, payouts, refunds, deposit updates." },
+  { value: "PAYMENTS", label: "Payments & refunds", hint: "Rent payment records and confirmations, Listing Fee receipts, refunds, deposit updates." },
   { value: "LEASING", label: "Applications & agreements", hint: "Application, offer, agreement and listing updates." },
   { value: "OCCUPANCY", label: "Tenancy & occupancy", hint: "Move-in/out, termination cases, sublets, host visits." },
 ];

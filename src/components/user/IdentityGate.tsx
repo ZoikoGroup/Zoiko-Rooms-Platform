@@ -8,12 +8,12 @@ import { useUserSession } from "@/components/user/UserSessionContext";
 const copy: Record<string, { title: string; body: string; cta: string }> = {
   not_submitted: {
     title: "Identity verification required",
-    body: "Submit an Aadhaar, Passport or Driving License document before you can continue.",
-    cta: "Verify my identity",
+    body: "Verify your identity using an accepted government-issued identity document. Available document types depend on your country or region.",
+    cta: "Verify identity",
   },
   pending: {
     title: "Your identity verification is still pending",
-    body: "A Zoiko super admin has to approve your document before this action becomes available.",
+    body: "A Zoiko reviewer has to approve your document before this action becomes available.",
     cta: "View verification status",
   },
   rejected: {
@@ -28,7 +28,7 @@ const copy: Record<string, { title: string; body: string; cta: string }> = {
   },
   additional_evidence_required: {
     title: "More evidence is needed",
-    body: "A reviewer asked for additional evidence before your identity can be approved.",
+    body: "We need a clearer or different document before your identity can be approved. Check the note on your submission for details.",
     cta: "Submit more evidence",
   },
 };

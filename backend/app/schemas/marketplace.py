@@ -40,12 +40,11 @@ class PropertyCreate(CamelModel):
     address: str
     city: str
     # ZR-ENG-CLR-006 Section 6: which market pack the Termination Policy
-    # Resolver (and any other jurisdiction-aware engine) uses for this
-    # property. Optional -- omitting it keeps this build's only real
-    # supported jurisdiction, "England" (see
-    # services/agreement_profile.py:SUPPORTED_JURISDICTION). This platform
-    # targets foreign markets, not India.
-    jurisdiction_code: str = "England"
+    # Resolver (and every other jurisdiction-aware engine) uses for this
+    # property. Required, with no default region -- the host picks it from
+    # the open regions (GET .../jurisdictions), and create/update rejects
+    # anything not open (services/jurisdictions.py:require_open_jurisdiction).
+    jurisdiction_code: str = Field(min_length=1, max_length=10)
 
 
 class PropertyRead(CamelModel):
@@ -56,6 +55,19 @@ class PropertyRead(CamelModel):
     status: str
     jurisdiction_code: str
     created_at: datetime
+    # True once the property has a live listing or a tenancy, after which its
+    # region can no longer change (services/jurisdictions.py:property_region_is_locked).
+    region_locked: bool = False
+
+
+class OpenJurisdictionRead(CamelModel):
+    code: str
+    min_stay_nights: int
+    market_policy_version: int
+    # False when this region's agreements can't be generated automatically
+    # yet (no approved clause registry, or the market is manual-only) --
+    # listings still work, agreements are routed to manual review.
+    agreements_supported: bool
 
 
 class RoomCreate(CamelModel):
@@ -137,6 +149,11 @@ class IdentityVerificationRead(CamelModel):
     has_document: bool
     document_file_original_name: str
     document_file_content_type: str
+    # What the automated scan read and how confident it was, so a reviewer
+    # can overrule a false rejection (models/identity_verification.py).
+    ocr_extracted_number: str | None = None
+    ocr_confidence: float | None = None
+    auto_flagged: bool = False
     created_at: datetime
     updated_at: datetime
 

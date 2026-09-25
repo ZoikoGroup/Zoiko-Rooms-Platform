@@ -20,7 +20,7 @@ from app.crud.party import assert_provider_access, party_id_for_listing
 from app.models.admin_user import AdminUser
 from app.models.agreement_amendment import AMENDMENT_TYPES, AgreementAmendment
 from app.models.leasing import Agreement, AgreementVersion
-from app.services.agreement_profile import resolve_agreement_profile
+from app.services.agreement_profile import no_agreement_profile_message, resolve_agreement_profile
 
 _PROPOSABLE_TERM_KEYS = ("monthlyRent", "depositAmount", "startDate", "termMonths")
 
@@ -171,7 +171,7 @@ def approve_amendment(db: Session, amendment: AgreementAmendment, admin: AdminUs
     if profile is None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "No approved agreement profile for this listing's jurisdiction -- routed to manual review",
+            no_agreement_profile_message(db, listing, listing.room),
         )
 
     new_snapshot = _merged_snapshot(source_version.snapshot, amendment.proposed_terms)

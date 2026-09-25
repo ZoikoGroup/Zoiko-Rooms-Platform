@@ -17,12 +17,16 @@ from app.core.config import settings
 from app.core.correlation import get_correlation_id
 from app.core.listing_fee_receipt_documents import resolve_listing_fee_receipt_document_path
 from app.crud import listing as listing_crud
+from app.crud import billing_entity as billing_entity_crud
 from app.crud import listing_fee as listing_fee_crud
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
 from app.models.party import Party
 from app.models.user_account import UserAccount
 from app.schemas.listing_fee import (
+    BillingEntityCreate,
+    BillingEntityRead,
+    BillingEntityUpdate,
     ListingFeeCheckoutSessionCreate,
     ListingFeeCheckoutSessionRead,
     ListingFeePaymentRead,
@@ -214,6 +218,54 @@ def put_update_listing_fee_policy(
     policy = listing_fee_crud.get_listing_fee_policy_or_404(db, policy_id)
     return listing_fee_crud.update_listing_fee_policy(
         db, admin, policy, payload.model_dump(exclude_unset=True), correlation_id=get_correlation_id(request),
+    )
+
+
+@admin_router.post("/policies/{policy_id}/approve", response_model=ListingFeePolicyRead, dependencies=[Depends(require_super_admin)])
+def post_approve_listing_fee_policy(
+    policy_id: int, request: Request, admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    """ZR-PAY-CFG-001 2.1: DRAFT -> ACTIVE, retiring the previous ACTIVE
+    price for the market. Refused until the billing entity and tax
+    configuration are in place."""
+    policy = listing_fee_crud.get_listing_fee_policy_or_404(db, policy_id)
+    return listing_fee_crud.approve_listing_fee_policy(db, admin, policy, correlation_id=get_correlation_id(request))
+
+
+@admin_router.post("/policies/{policy_id}/retire", response_model=ListingFeePolicyRead, dependencies=[Depends(require_super_admin)])
+def post_retire_listing_fee_policy(
+    policy_id: int, request: Request, admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    policy = listing_fee_crud.get_listing_fee_policy_or_404(db, policy_id)
+    return listing_fee_crud.retire_listing_fee_policy(db, admin, policy, correlation_id=get_correlation_id(request))
+
+
+@admin_router.get("/billing-entities", response_model=list[BillingEntityRead])
+def get_billing_entities(db: Session = Depends(get_db)):
+    return billing_entity_crud.list_billing_entities(db)
+
+
+@admin_router.post(
+    "/billing-entities", response_model=BillingEntityRead, status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_create_billing_entity(
+    payload: BillingEntityCreate, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    return billing_entity_crud.create_billing_entity(
+        db, admin, payload.model_dump(), correlation_id=get_correlation_id(request),
+    )
+
+
+@admin_router.put("/billing-entities/{entity_id}", response_model=BillingEntityRead, dependencies=[Depends(require_super_admin)])
+def put_update_billing_entity(
+    entity_id: int, payload: BillingEntityUpdate, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    entity = billing_entity_crud.get_billing_entity_or_404(db, entity_id)
+    return billing_entity_crud.update_billing_entity(
+        db, admin, entity, payload.model_dump(exclude_unset=True), correlation_id=get_correlation_id(request),
     )
 
 

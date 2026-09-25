@@ -50,6 +50,13 @@ _DEFAULTS: dict[str, Any] = {
     # itself, so this never bypasses any compliance gate; it only removes the
     # manual "Create Agreement" click once every gate already passes.
     "agreement.requires_manual_creation": lambda: True,
+    # ZR-PAY-CFG-001 Sections 5.1/9: "external_payment_handoff_enabled =
+    # MARKET_APPROVED_ONLY". Renters may be sent to the recipient's own
+    # payment provider (a direct charge on the recipient's connected
+    # account -- Zoiko is never in the flow of funds) only in a market an
+    # admin has explicitly approved it for. Off everywhere by default;
+    # renters otherwise pay using the recipient's payment instructions.
+    "payment.external_handoff_approved": lambda: False,
 }
 
 POLICY_KEYS = tuple(_DEFAULTS)
