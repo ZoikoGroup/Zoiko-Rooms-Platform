@@ -18,7 +18,7 @@ from fastapi import HTTPException, status
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -421,15 +421,41 @@ def get_payment_by_checkout_session_id(db: Session, checkout_session_id: str) ->
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Checkout session not found")
 
     if payment.status == "PENDING":
-        session_status = stripe_client.retrieve_checkout_session(checkout_session_id=checkout_session_id)
-        if session_status and session_status["payment_status"] == "paid":
-            if session_status["payment_intent_id"] and not payment.provider_payment_intent_id:
-                payment.provider_payment_intent_id = session_status["payment_intent_id"]
-                db.commit()
-            _complete_payment_success(db, payment)
-            db.refresh(payment)
+        _reconcile_pending_checkout(db, payment)
+        db.refresh(payment)
 
     return payment
+
+
+CHECKOUT_EXPIRED_MESSAGE = "The checkout session expired before payment was completed."
+
+
+def _reconcile_pending_checkout(db: Session, payment: ListingFeePayment, *, correlation_id: str = "") -> str:
+    """Asks Stripe where a PENDING payment's hosted checkout actually stands
+    and settles our row to match. Returns the session's hosted URL while it
+    is still open (so a repeat checkout attempt resumes it instead of
+    opening a second, separately payable session), "" otherwise.
+
+    paid                      -> SUCCEEDED
+    expired                   -> FAILED (quietly -- the lister walked away)
+    complete but still unpaid -> stays PENDING: an async method is settling,
+                                 and starting a new checkout now could
+                                 charge twice, so callers must refuse one."""
+    session = stripe_client.retrieve_checkout_session(checkout_session_id=payment.provider_checkout_session_id)
+    if not session:
+        return ""
+    if session.get("payment_status") == "paid":
+        if session.get("payment_intent_id") and not payment.provider_payment_intent_id:
+            payment.provider_payment_intent_id = session["payment_intent_id"]
+            db.commit()
+        _complete_payment_success(db, payment, correlation_id=correlation_id)
+        return ""
+    if session.get("status") == "expired":
+        _complete_payment_failure(db, payment, CHECKOUT_EXPIRED_MESSAGE, correlation_id=correlation_id, notify=False)
+        return ""
+    if session.get("status") == "open":
+        return session.get("url") or ""
+    return ""
 
 
 def list_listing_fee_payments_for_party(db: Session, party_id: int) -> list[ListingFeePayment]:
@@ -463,11 +489,27 @@ def listing_fee_is_paid(db: Session, listing_id: str) -> bool:
     crud/listing._require_listing_fee_paid_if_applicable (the actual hard
     publication gate -- ZR-PAY-002 A7/8.3). Paying the fee must never be
     treated as satisfying the other publication gates (identity/property/
-    authority/compliance) -- this function only ever answers one question."""
+    authority/compliance) -- this function only ever answers one question.
+
+    A payment whose refunds reached REFUNDED (the whole fee returned) no
+    longer counts: the lister has their money back, so the listing must pay
+    again before it can be published again. Partial refunds still count.
+    Neither does a payment under an OPEN or LOST chargeback -- the bank has
+    pulled the funds back; a WON dispute counts again."""
+    fully_refunded = (
+        select(ListingFeeRefund.id)
+        .where(ListingFeeRefund.payment_id == ListingFeePayment.id, ListingFeeRefund.status == "REFUNDED")
+        .exists()
+    )
     return (
         db.scalar(
             select(ListingFeePayment.id)
-            .where(ListingFeePayment.listing_id == listing_id, ListingFeePayment.status == "SUCCEEDED")
+            .where(
+                ListingFeePayment.listing_id == listing_id,
+                ListingFeePayment.status == "SUCCEEDED",
+                ~fully_refunded,
+                or_(ListingFeePayment.dispute_status.is_(None), ListingFeePayment.dispute_status == "WON"),
+            )
             .limit(1)
         )
         is not None
@@ -536,14 +578,50 @@ def create_checkout(
     if existing:
         if existing.quote_id != quote.id:
             raise HTTPException(status.HTTP_409_CONFLICT, "This idempotency key was already used for a different checkout")
-        return existing, ""
+        # A retried request gets the same live hosted page back, not an
+        # empty URL the frontend can't redirect to.
+        checkout_url = ""
+        if existing.status == "PENDING":
+            checkout_url = _reconcile_pending_checkout(db, existing, correlation_id=correlation_id)
+            db.refresh(existing)
+        return existing, checkout_url
 
     if quote.party_id != party.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This quote does not belong to you")
     if datetime.now(timezone.utc) >= quote.expires_at:
         raise HTTPException(status.HTTP_409_CONFLICT, "This quote has expired -- request a new one")
+
+    # Serialize checkout starts per listing (a no-op on SQLite), so two tabs
+    # can't both pass the checks below and each open a payable session.
+    db.scalar(select(Listing.id).where(Listing.id == quote.listing_id).with_for_update())
     if listing_fee_is_paid(db, quote.listing_id):
         raise HTTPException(status.HTTP_409_CONFLICT, "The Listing Fee for this listing has already been paid")
+
+    # Each click mints a fresh idempotency key, so the key alone can't stop
+    # a second session: a lister who opens checkout twice (another tab, the
+    # back button) must land on the session they already have, never on a
+    # second one that could be paid as well.
+    pending_payments = db.scalars(
+        select(ListingFeePayment)
+        .where(ListingFeePayment.listing_id == quote.listing_id, ListingFeePayment.status == "PENDING")
+        .order_by(ListingFeePayment.created_at.desc())
+    ).all()
+    for pending in pending_payments:
+        try:
+            checkout_url = _reconcile_pending_checkout(db, pending, correlation_id=correlation_id)
+        except Exception:
+            logger.exception("listing_fee: could not reconcile pending checkout (payment_id=%s)", pending.id)
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "The payment provider could not be reached -- please try again")
+        db.refresh(pending)
+        if pending.status == "SUCCEEDED":
+            raise HTTPException(status.HTTP_409_CONFLICT, "The Listing Fee for this listing has already been paid")
+        if checkout_url:
+            return pending, checkout_url
+        if pending.status == "PENDING" and stripe_client.is_configured():
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "A Listing Fee payment for this listing is still being processed -- please wait for it to finish",
+            )
 
     origin = frontend_origin or settings.frontend_url
     success_url = f"{origin}/account/host/listings?stripeCheckout=success&checkoutSessionId={{CHECKOUT_SESSION_ID}}"
@@ -627,8 +705,15 @@ def _complete_payment_success(db: Session, payment: ListingFeePayment, *, correl
     )
     db.commit()
 
-    get_or_create_listing_fee_receipt(db, payment)
-    db.commit()
+    # The payment is already committed as SUCCEEDED; a receipt render/storage
+    # failure must not also swallow the lister's notification (the receipt is
+    # created lazily on first download instead).
+    try:
+        get_or_create_listing_fee_receipt(db, payment)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("listing_fee: receipt generation failed (payment_id=%s)", payment.id)
 
     notif_crud.notify_user_by_party(
         db, payment.party_id,
@@ -651,7 +736,9 @@ def _complete_payment_success(db: Session, payment: ListingFeePayment, *, correl
     # the only way a listing actually goes live.
 
 
-def _complete_payment_failure(db: Session, payment: ListingFeePayment, message: str, *, correlation_id: str = "") -> None:
+def _complete_payment_failure(
+    db: Session, payment: ListingFeePayment, message: str, *, correlation_id: str = "", notify: bool = True,
+) -> None:
     if payment.status == "FAILED":
         return
     payment.status = "FAILED"
@@ -668,6 +755,8 @@ def _complete_payment_failure(db: Session, payment: ListingFeePayment, message: 
     )
     db.commit()
 
+    if not notify:
+        return
     notif_crud.notify_user_by_party(
         db, payment.party_id,
         title="Listing Fee payment failed",
@@ -695,6 +784,12 @@ STRIPE_EVENT_TYPE_MAP = {
     "checkout.session.completed": "CHECKOUT_SESSION_COMPLETED",
     "checkout.session.async_payment_succeeded": "CHECKOUT_SESSION_COMPLETED",
     "checkout.session.async_payment_failed": "CHECKOUT_SESSION_ASYNC_PAYMENT_FAILED",
+    # An abandoned hosted checkout -- without this the payment sat PENDING
+    # forever.
+    "checkout.session.expired": "CHECKOUT_SESSION_EXPIRED",
+    # Bank chargebacks against a paid fee.
+    "charge.dispute.created": "DISPUTE_OPENED",
+    "charge.dispute.closed": "DISPUTE_CLOSED",
 }
 
 
@@ -735,16 +830,36 @@ def ingest_stripe_webhook_event(db: Session, event, *, correlation_id: str = "")
         return
 
     if event_type == "REFUND_SUCCEEDED":
+        # charge.refunded carries a Charge (ch_...), not a PaymentIntent --
+        # the payment is found through the Charge's own payment_intent.
+        payment_intent_id = stripe_object.get("payment_intent")
+        if not payment_intent_id:
+            return
         payment = db.scalar(
-            select(ListingFeePayment).where(ListingFeePayment.provider_payment_intent_id == stripe_object["id"])
+            select(ListingFeePayment).where(ListingFeePayment.provider_payment_intent_id == payment_intent_id)
         )
         if not payment:
             return
-        refunded_amount = stripe_client.from_minor_units(stripe_object.get("amount_refunded", 0), payment.currency)
-        _apply_refund_confirmation(db, payment, refunded_amount, correlation_id=correlation_id)
+        # amount_refunded is the Charge's cumulative total across every refund.
+        refunded_total = stripe_client.from_minor_units(stripe_object.get("amount_refunded", 0), payment.currency)
+        _apply_refund_confirmation(db, payment, refunded_total, correlation_id=correlation_id)
+        _record_refund_issued_outside_the_app(
+            db, payment, refunded_total, provider_event_id=provider_event_id, correlation_id=correlation_id,
+        )
         return
 
-    if event_type in ("CHECKOUT_SESSION_COMPLETED", "CHECKOUT_SESSION_ASYNC_PAYMENT_FAILED"):
+    if event_type in ("DISPUTE_OPENED", "DISPUTE_CLOSED"):
+        # A Dispute object carries its own payment_intent (and charge).
+        payment_intent_id = stripe_object.get("payment_intent")
+        payment = payment_intent_id and db.scalar(
+            select(ListingFeePayment).where(ListingFeePayment.provider_payment_intent_id == payment_intent_id)
+        )
+        if not payment:
+            return
+        _apply_dispute_event(db, payment, stripe_object, opened=event_type == "DISPUTE_OPENED", correlation_id=correlation_id)
+        return
+
+    if event_type in ("CHECKOUT_SESSION_COMPLETED", "CHECKOUT_SESSION_ASYNC_PAYMENT_FAILED", "CHECKOUT_SESSION_EXPIRED"):
         # stripe_object here is the Checkout Session itself, not a
         # PaymentIntent -- looked up by the id create_checkout stored at
         # checkout-creation time (provider_payment_intent_id is still null
@@ -757,6 +872,12 @@ def ingest_stripe_webhook_event(db: Session, event, *, correlation_id: str = "")
         if event_type == "CHECKOUT_SESSION_ASYNC_PAYMENT_FAILED":
             _complete_payment_failure(db, payment, "Your payment method could not be charged.", correlation_id=correlation_id)
             return
+        if event_type == "CHECKOUT_SESSION_EXPIRED":
+            if payment.status == "PENDING":
+                _complete_payment_failure(
+                    db, payment, CHECKOUT_EXPIRED_MESSAGE, correlation_id=correlation_id, notify=False,
+                )
+            return
         # CHECKOUT_SESSION_COMPLETED fires for both a synchronous method
         # (card -- payment_status is already "paid") and the *start* of an
         # async one (payment_status "unpaid", resolved later by
@@ -768,6 +889,82 @@ def ingest_stripe_webhook_event(db: Session, event, *, correlation_id: str = "")
                 payment.provider_payment_intent_id = payment_intent_id
                 db.commit()
             _complete_payment_success(db, payment, correlation_id=correlation_id)
+
+
+def _record_refund_issued_outside_the_app(
+    db: Session, payment: ListingFeePayment, provider_refunded_total: float, *, provider_event_id: str,
+    correlation_id: str = "",
+) -> None:
+    """A refund issued straight from the Stripe dashboard never went through
+    request_refund, so no PROCESSING row exists for it and it would stay
+    invisible here. Once every app-initiated refund is confirmed, any amount
+    Stripe reports beyond what we've recorded becomes its own refund row,
+    attributed to the system admin. Skipped while an app refund is still
+    PROCESSING -- the gap can't be told apart from that refund then."""
+    db.refresh(payment)
+    if any(r.status in ("REQUESTED", "PROCESSING") for r in payment.refunds):
+        return
+    unrecorded = _round2(_round2(provider_refunded_total) - _confirmed_refund_total(payment))
+    if unrecorded <= 0:
+        return
+
+    from app.crud.payment_provider import get_system_admin
+
+    try:
+        system_admin = get_system_admin(db)
+    except HTTPException:
+        logger.error(
+            "listing_fee: %s %.2f refunded in Stripe for payment %s but no system admin exists to record it",
+            payment.currency, unrecorded, payment.id,
+        )
+        return
+
+    refund = ListingFeeRefund(
+        payment_id=payment.id, amount=unrecorded, currency=payment.currency,
+        reason="Refunded directly in the Stripe dashboard", idempotency_key=f"stripe_dashboard:{provider_event_id}",
+        requested_by_admin_id=system_admin.id, status="PROCESSING",
+    )
+    db.add(refund)
+    db.commit()
+    log_audit_event(
+        db, system_admin, "listing_fee.refund_recorded_from_provider", "listing_fee_refund", str(refund.id),
+        correlation_id, reason=refund.reason,
+    )
+    db.commit()
+    _apply_refund_confirmation(db, payment, provider_refunded_total, refund=refund, correlation_id=correlation_id)
+
+
+def _apply_dispute_event(
+    db: Session, payment: ListingFeePayment, dispute: dict, *, opened: bool, correlation_id: str = "",
+) -> None:
+    """charge.dispute.created -> OPEN; charge.dispute.closed -> WON or LOST
+    from Stripe's own final status (warning_closed -- an inquiry that never
+    became a chargeback -- counts as WON). Does not unpublish a live
+    listing; it only stops the fee satisfying the publication gate."""
+    if opened:
+        new_status = "OPEN"
+    else:
+        new_status = "LOST" if dispute.get("status") == "lost" else "WON"
+    if payment.dispute_status == new_status and payment.provider_dispute_id == dispute.get("id"):
+        return
+
+    previous_status = payment.dispute_status
+    payment.dispute_status = new_status
+    payment.provider_dispute_id = dispute.get("id")
+    if opened:
+        payment.disputed_at = datetime.now(timezone.utc)
+    db.commit()
+
+    log_audit_event(
+        db, None, f"listing_fee.dispute_{new_status.lower()}", "listing_fee_payment", str(payment.id), correlation_id,
+        reason=dispute.get("reason", ""), after_state=new_status,
+    )
+    emit_event(
+        db, f"listing_fee.dispute_{new_status.lower()}", "listing_fee_payment", str(payment.id),
+        {"listingId": payment.listing_id, "providerDisputeId": dispute.get("id"), "reason": dispute.get("reason", "")},
+        correlation_id=correlation_id, previous_state=previous_status or "NONE", new_state=new_status,
+    )
+    db.commit()
 
 
 def get_or_create_listing_fee_receipt(db: Session, payment: ListingFeePayment) -> ListingFeeReceipt:
@@ -951,49 +1148,67 @@ def request_refund(
     db.refresh(refund)
 
     if not stripe_client.is_configured():
-        _apply_refund_confirmation(db, payment, float(data.amount), refund=refund, correlation_id=correlation_id)
+        _apply_refund_confirmation(
+            db, payment, _confirmed_refund_total(payment) + _round2(data.amount), refund=refund,
+            correlation_id=correlation_id,
+        )
         db.refresh(refund)
 
     return refund
 
 
+def _confirmed_refund_total(payment: ListingFeePayment) -> float:
+    return sum(_round2(r.amount) for r in payment.refunds if r.status in ("PARTIALLY_REFUNDED", "REFUNDED"))
+
+
 def _apply_refund_confirmation(
-    db: Session, payment: ListingFeePayment, refunded_amount: float, refund: ListingFeeRefund | None = None,
+    db: Session, payment: ListingFeePayment, provider_refunded_total: float, refund: ListingFeeRefund | None = None,
     *, correlation_id: str = "",
 ) -> None:
-    """Marks the most recent PROCESSING refund (or the one explicitly
-    passed, for the synchronous simulated path) REFUNDED/PARTIALLY_REFUNDED
-    once the provider confirms it, and notifies the lister -- ZR-PAY-002
-    Section 8.4: 'Show amount and provider-confirmed status.'"""
-    target = refund or db.scalar(
-        select(ListingFeeRefund)
-        .where(ListingFeeRefund.payment_id == payment.id, ListingFeeRefund.status == "PROCESSING")
-        .order_by(ListingFeeRefund.created_at.desc())
+    """Confirms PROCESSING refunds, oldest first, up to the payment's
+    cumulative refunded total as the provider reports it (a Charge's
+    amount_refunded), and notifies the lister -- ZR-PAY-002 Section 8.4:
+    'Show amount and provider-confirmed status.' Each confirmed refund is
+    REFUNDED once the running total covers the whole fee, otherwise
+    PARTIALLY_REFUNDED. `refund` narrows it to that one row (the synchronous
+    simulated path). A replayed or stale event confirms nothing new."""
+    candidates = [refund] if refund is not None else sorted(
+        (r for r in payment.refunds if r.status == "PROCESSING"), key=lambda r: r.created_at,
     )
-    if not target or target.status not in ("PROCESSING",):
+    confirmed_total = _confirmed_refund_total(payment)
+    provider_total = _round2(provider_refunded_total)
+    payment_total = _round2(float(payment.amount))
+
+    newly_confirmed: list[ListingFeeRefund] = []
+    for target in candidates:
+        if target.status != "PROCESSING":
+            continue
+        if _round2(confirmed_total + _round2(target.amount)) > provider_total:
+            break
+        confirmed_total = _round2(confirmed_total + _round2(target.amount))
+        target.status = "REFUNDED" if confirmed_total >= payment_total else "PARTIALLY_REFUNDED"
+        target.completed_at = datetime.now(timezone.utc)
+        newly_confirmed.append(target)
+    if not newly_confirmed:
         return
-
-    total_refunded = sum(
-        _round2(r.amount) for r in payment.refunds if r.status == "REFUNDED"
-    ) + _round2(target.amount)
-    target.status = "REFUNDED" if total_refunded >= _round2(float(payment.amount)) else "PARTIALLY_REFUNDED"
-    target.completed_at = datetime.now(timezone.utc)
     db.commit()
 
-    log_audit_event(
-        db, None, f"listing_fee.{target.status.lower()}", "listing_fee_refund", str(target.id), correlation_id,
-        after_state=target.status,
-    )
-    emit_event(
-        db, "listing_fee.refunded", "listing_fee_refund", str(target.id),
-        {"paymentId": payment.id, "amount": float(target.amount)}, correlation_id=correlation_id, new_state=target.status,
-    )
-    db.commit()
+    for target in newly_confirmed:
+        log_audit_event(
+            db, None, f"listing_fee.{target.status.lower()}", "listing_fee_refund", str(target.id), correlation_id,
+            after_state=target.status,
+        )
+        emit_event(
+            db, "listing_fee.refunded", "listing_fee_refund", str(target.id),
+            {"paymentId": payment.id, "amount": float(target.amount)}, correlation_id=correlation_id,
+            new_state=target.status,
+        )
+        db.commit()
 
-    notif_crud.notify_user_by_party(
-        db, payment.party_id,
-        title="Listing Fee refunded",
-        message=f"{payment.currency} {float(target.amount):.2f} of your Listing Fee has been refunded.",
-        notification_type="listing_fee.refunded",
-        related_entity_type="listing_fee_refund", related_entity_id=str(target.id),
-    )
+        notif_crud.notify_user_by_party(
+            db, payment.party_id,
+            title="Listing Fee refunded",
+            message=f"{payment.currency} {float(target.amount):.2f} of your Listing Fee has been refunded.",
+            notification_type="listing_fee.refunded",
+            related_entity_type="listing_fee_refund", related_entity_id=str(target.id),
+        )
