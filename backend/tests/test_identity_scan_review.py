@@ -25,7 +25,7 @@ def uploads(tmp_path, monkeypatch):
 
 def _fake_scan(monkeypatch, *, number: str | None, confidence: float):
     monkeypatch.setattr(document_ocr, "is_available", lambda: True)
-    monkeypatch.setattr(document_ocr, "extract_and_score", lambda _bytes, _type: (number, confidence))
+    monkeypatch.setattr(document_ocr, "extract_and_score", lambda _bytes, _type, **_kwargs: (number, confidence))
 
 
 def _make_renter(db: Session, email: str):
@@ -166,3 +166,97 @@ class TestDuplicateDocument:
             Notification.related_entity_id == str(duplicate["id"]),
         ).first()
         assert "matches a previous submission" in alert.message
+
+
+def _valid_aadhaar(first_11: str = "48213579024") -> str:
+    for digit in "0123456789":
+        if document_ocr.is_valid_aadhaar_checksum(first_11 + digit):
+            return first_11 + digit
+    raise AssertionError("no check digit")
+
+
+def _submit_raw(client, user, *, document_type: str, document_number: str = "", content: bytes = b"%PDF-1.4doc"):
+    return client.post(
+        "/api/users/identity-verifications",
+        data={"document_type": document_type, "document_number": document_number},
+        files={"file": ("id.pdf", content, "application/pdf")},
+        cookies=auth_user_cookie(user),
+    )
+
+
+class TestTypedNumberValidation:
+    @pytest.mark.parametrize("typed, expected", [
+        ("7296498161", "exactly 12 digits"),
+        ("ABCD12345678", "exactly 12 digits"),
+    ])
+    def test_a_malformed_aadhaar_number_is_a_form_error(self, client, db_session: Session, uploads, typed, expected):
+        renter = _make_renter(db_session, f"typed-{typed}@test.com")
+        r = _submit_raw(client, renter, document_type="aadhaar", document_number=typed)
+        assert r.status_code == 400
+        assert expected in r.json()["detail"]
+        assert db_session.query(IdentityVerification).count() == 0
+
+    def test_an_aadhaar_number_failing_the_checksum_is_a_form_error(self, client, db_session: Session, uploads):
+        renter = _make_renter(db_session, "typed-checksum@test.com")
+        valid = _valid_aadhaar()
+        wrong = valid[:11] + str((int(valid[11]) + 1) % 10)
+        r = _submit_raw(client, renter, document_type="aadhaar", document_number=wrong)
+        assert r.status_code == 400
+        assert "not a valid Aadhaar number" in r.json()["detail"]
+
+    def test_a_spaced_valid_aadhaar_number_is_accepted_and_auto_verifies(
+        self, client, db_session: Session, uploads, monkeypatch,
+    ):
+        _super_admin(db_session)
+        renter = _make_renter(db_session, "typed-valid@test.com")
+        valid = _valid_aadhaar()
+        _fake_scan(monkeypatch, number=valid, confidence=72.0)
+        r = _submit_raw(client, renter, document_type="aadhaar", document_number=f"{valid[:4]} {valid[4:8]} {valid[8:]}")
+        assert r.status_code == 201, r.text
+        assert r.json()["status"] == "verified"
+
+    def test_a_malformed_pan_is_a_form_error(self, client, db_session: Session, uploads):
+        renter = _make_renter(db_session, "typed-pan@test.com")
+        r = _submit_raw(client, renter, document_type="pan_card", document_number="ABC123")
+        assert r.status_code == 400
+        assert "PAN" in r.json()["detail"]
+
+
+class TestScanMessages:
+    def test_no_number_found_says_so_instead_of_blaming_confidence(
+        self, client, db_session: Session, uploads, monkeypatch,
+    ):
+        _super_admin(db_session)
+        renter = _make_renter(db_session, "msg-no-number@test.com")
+        _fake_scan(monkeypatch, number=None, confidence=95.0)
+        body = _submit(client, renter)
+        assert body["status"] == "additional_evidence_required"
+        assert "couldn't find a passport number" in body["verifierNotes"]
+        assert "below the" not in body["verifierNotes"]
+
+    def test_a_crashing_scan_goes_to_a_reviewer_with_a_note(self, client, db_session: Session, uploads, monkeypatch):
+        renter = _make_renter(db_session, "msg-crash@test.com")
+        monkeypatch.setattr(document_ocr, "is_available", lambda: True)
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("tesseract exploded")
+
+        monkeypatch.setattr(document_ocr, "extract_and_score", _boom)
+        body = _submit(client, renter)
+        assert body["status"] == "pending"
+        assert "could not read this file" in body["verifierNotes"]
+
+
+class TestOwnReuploadIsScanned:
+    def test_re_uploading_your_own_photo_is_scanned_not_flagged_as_a_duplicate(
+        self, client, db_session: Session, uploads, monkeypatch,
+    ):
+        _super_admin(db_session)
+        renter = _make_renter(db_session, "own-reupload@test.com")
+        same_bytes = b"%PDF-1.4my own passport"
+
+        _fake_scan(monkeypatch, number=None, confidence=30.0)
+        assert _submit(client, renter, same_bytes)["status"] == "additional_evidence_required"
+
+        _fake_scan(monkeypatch, number=_PASSPORT_NUMBER, confidence=95.0)
+        assert _submit(client, renter, same_bytes)["status"] == "verified"

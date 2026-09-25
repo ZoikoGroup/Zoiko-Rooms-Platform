@@ -195,16 +195,35 @@ def _ocr_text_and_confidence(document_bytes: bytes) -> tuple[str, float]:
     return " ".join(words).upper(), avg_confidence
 
 
-def extract_and_score(document_bytes: bytes, document_type: str) -> tuple[str | None, float]:
-    """Returns (matched_document_number_or_None, average_ocr_confidence_0_to_100)."""
+def extract_and_score(
+    document_bytes: bytes, document_type: str, *, expected_number: str = "",
+) -> tuple[str | None, float]:
+    """Returns (matched_document_number_or_None, average_ocr_confidence_0_to_100).
+
+    Every overlapping window matching the format is a candidate, not just the
+    first: an Aadhaar card often prints another 4-digit group (a year, the
+    VID) right before the number, so the first 12-digit window can straddle
+    that group and the real number ("2011 7296 4981" out of
+    "2011 7296 4981 6197"). A candidate equal to the number the user typed
+    wins, then (Aadhaar) one passing the Verhoeff checksum, then the first --
+    only ever a number actually present in the scanned text."""
     full_text, avg_confidence = _ocr_text_and_confidence(document_bytes)
     pattern = DOCUMENT_NUMBER_PATTERNS.get(document_type)
     if pattern is None:
         return None, avg_confidence
 
-    match = re.search(pattern, full_text)
-    matched_number = match.group(0).replace(" ", "") if match else None
-    return matched_number, avg_confidence
+    candidates = [m.group(1).replace(" ", "") for m in re.finditer(f"(?=({pattern}))", full_text)]
+    if not candidates:
+        return None, avg_confidence
+
+    expected = expected_number.replace(" ", "").upper()
+    if expected and expected in candidates:
+        return expected, avg_confidence
+    if document_type == "aadhaar":
+        valid = [c for c in candidates if is_valid_aadhaar_checksum(c)]
+        if valid:
+            return valid[0], avg_confidence
+    return candidates[0], avg_confidence
 
 
 # Property verification checks against a REAL known value, unlike identity's

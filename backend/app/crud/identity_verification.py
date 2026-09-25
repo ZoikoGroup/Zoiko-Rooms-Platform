@@ -1,3 +1,5 @@
+import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
@@ -18,7 +20,68 @@ from app.models.user_account import UserAccount
 from app.models.verification_credential import VerificationCredential
 from app.schemas.marketplace import IdentityVerificationCreate
 
+logger = logging.getLogger(__name__)
+
 IDENTITY_VERIFICATION_VALIDITY_DAYS = 365
+
+# Typed-number checks for the document types that have one exact, public
+# format. Everything else (passport, driving licence, ...) varies too much
+# by country to reject a typed value up front -- the scan still checks it.
+_TYPED_NUMBER_RULES: dict[str, tuple[str, str]] = {
+    "aadhaar": (r"\d{12}", "An Aadhaar number has exactly 12 digits"),
+    "pan_card": (r"[A-Z]{5}\d{4}[A-Z]", "A PAN has 10 characters: 5 letters, 4 digits, 1 letter (e.g. ABCDE1234F)"),
+    "voter_id": (r"[A-Z]{3}\d{7}", "A Voter ID (EPIC) number has 3 letters followed by 7 digits"),
+}
+
+
+def normalize_document_number(document_number: str) -> str:
+    return re.sub(r"[\s-]", "", document_number or "").upper()
+
+
+def validate_typed_document_number(document_type: str, document_number: str) -> None:
+    """Rejects an obviously wrong typed number before anything is stored, so
+    a typo is a clear form error now instead of a scan mismatch later. An
+    empty number is allowed -- the scan then reads it off the document."""
+    number = normalize_document_number(document_number)
+    rule = _TYPED_NUMBER_RULES.get(document_type)
+    if not number or rule is None:
+        return
+    pattern, message = rule
+    if not re.fullmatch(pattern, number):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{message} -- please check the number you entered.")
+    if document_type == "aadhaar":
+        from app.services import document_ocr
+
+        if not document_ocr.is_valid_aadhaar_checksum(number):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "That is not a valid Aadhaar number -- please check the number you entered.",
+            )
+
+
+def find_identity_duplicate_from_another_party(db: Session, sha256_hash: str, party_id: int | None) -> int | None:
+    """The id of an earlier identity verification whose file is byte-identical
+    to this upload but belongs to a DIFFERENT person -- the reuse/fraud
+    signal a human must see. A person re-uploading their own earlier photo
+    (after a rejected scan, say) is not a duplicate of anyone else, so their
+    upload is scanned normally."""
+    from app.models.evidence_artifact import EvidenceArtifact
+
+    earlier_ids = db.scalars(
+        select(EvidenceArtifact.related_entity_id).where(
+            EvidenceArtifact.sha256_hash == sha256_hash,
+            EvidenceArtifact.related_entity_type == "identity_verification",
+        )
+    ).all()
+    ids = [int(i) for i in earlier_ids if str(i).isdigit()]
+    if not ids:
+        return None
+    return db.scalar(
+        select(IdentityVerification.id)
+        .where(IdentityVerification.id.in_(ids), IdentityVerification.party_id != party_id)
+        .order_by(IdentityVerification.id)
+        .limit(1)
+    )
 
 
 def list_identity_verifications(
@@ -238,6 +301,7 @@ def submit_identity_verification_for_user(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Please specify the document name for 'Other'")
     if not user_account.party_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "User has no associated party")
+    validate_typed_document_number(document_type, document_number)
 
     record = IdentityVerification(
         party_id=user_account.party_id,
@@ -372,6 +436,15 @@ def _reroute_to_additional_evidence(db: Session, record: IdentityVerification, n
     return "additional_evidence_required"
 
 
+def _scan_could_not_run(record: IdentityVerification) -> None:
+    """The scan itself crashed (unreadable file, OCR failure) -- still fails
+    open to a human reviewer, but no longer silently: the error is logged
+    and the reviewer sees why this one wasn't checked automatically."""
+    logger.exception("identity verification %s: automated scan failed to run", record.id)
+    record.verifier_notes = "The automated scan could not read this file -- please review it manually."
+    return None
+
+
 def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_ocr, *, allow_reroute: bool = True) -> str | None:
     """A genuine match at or above that document type's own confidence
     threshold (document_ocr.confidence_threshold_for) -- plus, for Aadhaar,
@@ -386,9 +459,11 @@ def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_
 
     try:
         file_path = resolve_identity_document_path(record.document_file_path)
-        matched_number, confidence = document_ocr.extract_and_score(file_path.read_bytes(), record.document_type)
+        matched_number, confidence = document_ocr.extract_and_score(
+            file_path.read_bytes(), record.document_type, expected_number=record.encrypted_reference or "",
+        )
     except Exception:
-        return None
+        return _scan_could_not_run(record)
 
     record.ocr_extracted_number = matched_number
     record.ocr_confidence = confidence
@@ -396,12 +471,14 @@ def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_
 
     doc_label = record.document_type.replace('_', ' ')
     threshold = document_ocr.confidence_threshold_for(record.document_type)
-    typed_number = (record.encrypted_reference or "").replace(" ", "").upper()
+    typed_number = normalize_document_number(record.encrypted_reference or "")
 
     reject_reason: str | None = None
-    if not matched_number or confidence < threshold:
+    if not matched_number:
+        reject_reason = f"Automated scan couldn't find a {doc_label} number in this photo."
+    elif confidence < threshold:
         reject_reason = (
-            f"Automated scan couldn't clearly read a valid {doc_label} number from this photo "
+            f"Automated scan couldn't read this photo clearly enough "
             f"(confidence {confidence:.0f}%, below the {threshold:.0f}% minimum)."
         )
     elif record.document_type == "aadhaar" and not document_ocr.is_valid_aadhaar_checksum(matched_number):
@@ -442,7 +519,7 @@ def _run_address_ocr_check(db: Session, record: IdentityVerification, document_o
             file_path.read_bytes(), record.document_type,
         )
     except Exception:
-        return None
+        return _scan_could_not_run(record)
 
     record.ocr_confidence = confidence
     db.flush()

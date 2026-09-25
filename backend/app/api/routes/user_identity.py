@@ -53,17 +53,15 @@ async def submit_identity_verification(
     """User submits their identity verification with an uploaded document. This is
     a multipart request (not JSON) because it always carries a real file -- see
     app/core/identity_uploads.py for the content validation and storage."""
+    # A mistyped number is a form error -- rejected before the file is stored.
+    crud.validate_typed_document_number(document_type, document_number)
     stored_filename, original_filename, content_type, file_size, sha256_hash = await save_identity_document(file)
 
     # ZR-ENG-CLR-012 Section 18: checked before the new record/artifact exist,
     # so a match here is necessarily a *prior* submission, never the one
-    # being created right now.
-    duplicate_artifact = evidence_vault_crud.find_duplicate_by_hash(db, sha256_hash)
-    duplicate_of_verification_id = (
-        int(duplicate_artifact.related_entity_id)
-        if duplicate_artifact and duplicate_artifact.related_entity_type == "identity_verification"
-        else None
-    )
+    # being created right now. Only another person's upload counts -- the
+    # same person re-uploading their own photo is scanned as normal.
+    duplicate_of_verification_id = crud.find_identity_duplicate_from_another_party(db, sha256_hash, user.party_id)
 
     record = crud.submit_identity_verification_for_user(
         db,
@@ -74,6 +72,7 @@ async def submit_identity_verification(
         stored_filename=stored_filename,
         original_filename=original_filename,
         content_type=content_type,
+        
         file_size=file_size,
         duplicate_of_verification_id=duplicate_of_verification_id,
     )
