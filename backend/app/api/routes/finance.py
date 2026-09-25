@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, 
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.services.payment_boundary import capabilities_snapshot, require_capability
 from app.api.deps import get_current_admin, require_super_admin
 from app.core.correlation import get_correlation_id
 from app.core.identity_uploads import resolve_identity_document_path, save_identity_document
@@ -62,6 +63,13 @@ from app.schemas.finance import (
 
 router = APIRouter(prefix="/api/finance", tags=["finance"], dependencies=[Depends(get_current_admin)])
 
+
+@router.get("/capabilities")
+def get_finance_capabilities() -> dict:
+    """ZR-PAY-CFG-001 9.1: which payment actions exist -- the admin UI hides
+    payouts, rental refunds and Zoiko-collected payments when they're off."""
+    return capabilities_snapshot()
+
 # No auth dependency -- Stripe's own servers call this directly, with no
 # admin session to present. The signature check inside the handler is the
 # real authentication here (ZR-ENG-CLR-005 AC-23 'authenticated, replay-
@@ -93,12 +101,12 @@ def get_payment_timeline(
     return {"payment_id": payment_id, "entries": entries}
 
 
-@router.post("/payments", response_model=SimulatedPaymentRead, status_code=status.HTTP_201_CREATED)
+@router.post("/payments", response_model=SimulatedPaymentRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def post_create_payment(payload: SimulatedPaymentCreate, db: Session = Depends(get_db)):
     return annotate_payment_context(crud.create_payment_intent(db, payload))
 
 
-@router.post("/payments/{payment_id}/confirm", response_model=SimulatedPaymentRead)
+@router.post("/payments/{payment_id}/confirm", response_model=SimulatedPaymentRead, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def post_confirm_payment(
     payment_id: int,
     payload: PaymentConfirm,
@@ -125,7 +133,7 @@ def post_confirm_payment(
     return annotate_payment_context(updated)
 
 
-@router.post("/payments/{payment_id}/dispatch", response_model=ProcessorTransactionRead)
+@router.post("/payments/{payment_id}/dispatch", response_model=ProcessorTransactionRead, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def post_dispatch_payment(
     payment_id: int, payload: PaymentDispatchRequest, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):
@@ -133,7 +141,7 @@ def post_dispatch_payment(
     return payment_provider_crud.dispatch_payment_to_provider(db, payment, admin, payload.allocations)
 
 
-@router.post("/payments/provider-callback/simulate", response_model=ProcessorTransactionRead)
+@router.post("/payments/provider-callback/simulate", response_model=ProcessorTransactionRead, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def post_simulate_payment_provider_callback(
     payload: PaymentProviderCallbackRequest, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):
@@ -232,7 +240,7 @@ def get_rent_invoice(
     )
 
 
-@router.post("/obligations/{obligation_id}/autopay-charge", response_model=SimulatedPaymentRead)
+@router.post("/obligations/{obligation_id}/autopay-charge", response_model=SimulatedPaymentRead, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def post_autopay_charge(
     obligation_id: int,
     request: Request,
@@ -254,7 +262,7 @@ def get_deposits(admin: AdminUser = Depends(get_current_admin), db: Session = De
     return [crud.to_deposit_record_read(r) for r in crud.list_deposit_records(db, admin)]
 
 
-@router.post("/deposits/{deposit_id}/release", response_model=DepositRecordRead)
+@router.post("/deposits/{deposit_id}/release", response_model=DepositRecordRead, dependencies=[Depends(require_capability("deposit_collection_enabled"))])
 def post_release_deposit(
     deposit_id: int,
     payload: DepositRelease,
@@ -270,7 +278,7 @@ def post_release_deposit(
     return crud.to_deposit_record_read(updated)
 
 
-@router.post("/deposits/{deposit_id}/forfeit", response_model=DepositRecordRead)
+@router.post("/deposits/{deposit_id}/forfeit", response_model=DepositRecordRead, dependencies=[Depends(require_capability("deposit_collection_enabled"))])
 def post_forfeit_deposit(
     deposit_id: int,
     request: Request,
@@ -351,7 +359,7 @@ def post_resolve_deposit_claim(
     return crud.to_deposit_claim_read(updated)
 
 
-@router.post("/payouts/run", response_model=PayoutRecordRead)
+@router.post("/payouts/run", response_model=PayoutRecordRead, dependencies=[Depends(require_capability("host_payouts_enabled"))])
 def post_run_payout(
     payload: PayoutRunRequest,
     request: Request,
@@ -374,7 +382,7 @@ def post_run_payout(
     return payout
 
 
-@router.post("/payouts/{payout_id}/retry", response_model=PayoutRecordRead)
+@router.post("/payouts/{payout_id}/retry", response_model=PayoutRecordRead, dependencies=[Depends(require_capability("host_payouts_enabled"))])
 def post_retry_payout(
     payout_id: int,
     request: Request,
@@ -403,7 +411,7 @@ def get_payouts(admin: AdminUser = Depends(get_current_admin), db: Session = Dep
     return crud.list_payouts_for(db, admin)
 
 
-@router.post("/payout-beneficiaries", response_model=PayoutBeneficiaryRead, status_code=status.HTTP_201_CREATED)
+@router.post("/payout-beneficiaries", response_model=PayoutBeneficiaryRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_capability("host_payouts_enabled"))])
 def post_payout_beneficiary(
     payload: PayoutBeneficiarySubmit, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):
@@ -421,7 +429,7 @@ def post_payout_beneficiary(
     return beneficiary
 
 
-@router.post("/payout-beneficiaries/{beneficiary_id}/resend-code", response_model=PayoutBeneficiaryRead)
+@router.post("/payout-beneficiaries/{beneficiary_id}/resend-code", response_model=PayoutBeneficiaryRead, dependencies=[Depends(require_capability("host_payouts_enabled"))])
 def post_resend_payout_beneficiary_code(
     beneficiary_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):
@@ -431,7 +439,7 @@ def post_resend_payout_beneficiary_code(
     return beneficiary
 
 
-@router.post("/payout-beneficiaries/{beneficiary_id}/confirm", response_model=PayoutBeneficiaryRead)
+@router.post("/payout-beneficiaries/{beneficiary_id}/confirm", response_model=PayoutBeneficiaryRead, dependencies=[Depends(require_capability("host_payouts_enabled"))])
 def post_confirm_payout_beneficiary(
     beneficiary_id: int, payload: PayoutBeneficiaryConfirm, request: Request,
     admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
@@ -455,7 +463,7 @@ def get_payout_beneficiaries(party_id: int, admin: AdminUser = Depends(get_curre
     return payout_beneficiary_crud.list_payout_beneficiaries_for(db, admin, party_id)
 
 
-@router.post("/host-stripe-accounts", response_model=HostStripeAccountRead, status_code=status.HTTP_201_CREATED)
+@router.post("/host-stripe-accounts", response_model=HostStripeAccountRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_capability("host_payouts_enabled"))])
 def post_create_host_stripe_account(
     payload: HostStripeAccountCreate, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):
@@ -470,7 +478,7 @@ def get_host_stripe_account(account_id: int, db: Session = Depends(get_db)):
     return host_stripe_account_crud.get_host_stripe_account_or_404(db, account_id)
 
 
-@router.post("/host-stripe-accounts/{account_id}/onboarding-link", response_model=HostStripeOnboardingLinkRead)
+@router.post("/host-stripe-accounts/{account_id}/onboarding-link", response_model=HostStripeOnboardingLinkRead, dependencies=[Depends(require_capability("host_payouts_enabled"))])
 def post_host_stripe_onboarding_link(
     account_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):
@@ -479,7 +487,7 @@ def post_host_stripe_onboarding_link(
     return HostStripeOnboardingLinkRead(url=url)
 
 
-@router.post("/host-stripe-accounts/{account_id}/refresh", response_model=HostStripeAccountRead)
+@router.post("/host-stripe-accounts/{account_id}/refresh", response_model=HostStripeAccountRead, dependencies=[Depends(require_capability("host_payouts_enabled"))])
 def post_refresh_host_stripe_account(
     account_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):
@@ -538,7 +546,7 @@ def get_service_fee_invoice(
     )
 
 
-@router.post("/refunds", response_model=RefundRequestRead, status_code=status.HTTP_201_CREATED)
+@router.post("/refunds", response_model=RefundRequestRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def post_request_refund(
     payload: RefundRequestCreate,
     request: Request,
@@ -556,7 +564,7 @@ def get_refunds(admin: AdminUser = Depends(get_current_admin), db: Session = Dep
     return crud.list_refund_requests(db, admin)
 
 
-@router.post("/refunds/{refund_id}/decide", response_model=RefundRequestRead)
+@router.post("/refunds/{refund_id}/decide", response_model=RefundRequestRead, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def post_decide_refund(
     refund_id: int,
     payload: RefundDecide,

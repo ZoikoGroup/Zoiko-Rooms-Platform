@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -10,16 +10,22 @@ from app.api.deps import get_current_user
 from app.core.agreement_documents import resolve_agreement_document_path
 from app.core.correlation import get_correlation_id
 from app.core.identity_uploads import resolve_identity_document_path
+from app.core.rate_limit import sublet_document_limiter, sublet_submit_limiter
+from app.core.signed_urls import verify_signed_download_token
 from app.crud import booking_change_requests as bcr_crud
+from app.crud import sublet_documents as sublet_documents_crud
 from app.crud import finance as finance_crud
 from app.crud import leasing as leasing_crud
 from app.crud import occupancy as occupancy_crud
+from app.crud import occupancy_condition_report as condition_report_crud
 from app.crud import habitability_incident as habitability_crud
+from app.crud import host_entry_visit as host_entry_visit_crud
 from app.crud import refund_entitlement as refund_entitlement_crud
 from app.crud import review as review_crud
 from app.crud import sublet as sublet_crud
 from app.crud import termination as termination_crud
-from app.crud.listing import assert_party_does_not_own_listing
+from app.crud.listing import assert_party_does_not_own_listing, resolve_market_release
+from app.crud.rental_transaction_record import build_rental_transaction_record
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
 from app.crud.eligibility import check_offer_eligibility
@@ -31,13 +37,13 @@ from app.db.session import get_db
 from app.models.leasing import Application
 from app.models.listing import Listing
 from app.models.listing_approval import CURRENT_POLICY_VERSION
-from app.models.market_release import MarketRelease
 from app.models.occupancy import Occupancy
 from app.services.booking_expiry import expire_offer_if_overdue
 from app.services.verification_requirements import is_identity_required_at_application
 from app.models.user_account import UserAccount
 from app.schemas.finance import DepositClaimItemRead, DepositClaimItemRespond, DepositClaimRead, PaymentPreviewRead
 from app.schemas.habitability import HabitabilityIncidentCreate, HabitabilityIncidentRead
+from app.schemas.host_entry_visit import HostEntryVisitRead
 from app.schemas.leasing import (
     AgreementRead,
     BookingChangeRequestCreate,
@@ -52,7 +58,9 @@ from app.schemas.leasing import (
     OfferRead,
     SubletRenterLookup,
     SubletRequestCreate,
+    SubletRequestDecision,
     SubletRequestRead,
+    SubletTerminologyRead,
     TermShiftRequestCreate,
     UserAgreementSignRequest,
     UserApplicationRead,
@@ -60,7 +68,10 @@ from app.schemas.leasing import (
     UserOccupancyRead,
 )
 from app.schemas.activation_gate import HandoverEventCreate, HandoverEventRead
+from app.schemas.occupancy import ConditionReportItemRead, PreMoveInCancellationRead, PreMoveInCancellationRequest
+from app.schemas.rental_transaction_record import RentalTransactionRecordRead
 from app.schemas.review import ReviewCreate, ReviewRead
+from app.schemas.sublet_document import SubletDocumentRead
 from app.schemas.termination import (
     RefundEntitlementRead,
     TerminationCaseCreate,
@@ -136,6 +147,8 @@ def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyR
         created_at=occupancy.created_at,
         ended_at=occupancy.ended_at,
         agreement_id=agreement.id if agreement else None,
+        currency=listing.currency if listing else "USD",
+        reassigned_via_sublet_request_id=occupancy_crud.get_reassigned_via_sublet_request_id(db, occupancy.id),
     )
 
 
@@ -157,8 +170,8 @@ def submit_rental_application(
     listing = db.get(Listing, payload.listing_id)
 
     jurisdiction_code = None
-    if listing and listing.market_release_id:
-        market_release = db.get(MarketRelease, listing.market_release_id)
+    if listing:
+        market_release = resolve_market_release(db, listing)
         jurisdiction_code = market_release.jurisdiction if market_release else None
     if jurisdiction_code and is_identity_required_at_application(db, jurisdiction_code):
         if not user.party_id or not get_verified_identity_for_party(db, user.party_id):
@@ -203,13 +216,10 @@ def submit_rental_application(
                 notification_type="application.received",
                 related_entity_type="application", related_entity_id=str(application.id),
             )
-        notif_crud.notify_all_super_admins(
-            db,
-            title="New rental application submitted",
-            message=f"{user.full_name} applied for listing {application.listing_id}.",
-            notification_type="application.submitted",
-            related_entity_type="application", related_entity_id=str(application.id),
-        )
+        # Deliberately renter <-> host only, no admin copy -- applying and
+        # deciding an application is a self-service host action (see
+        # decide_application_as_host in crud/leasing.py), not something
+        # Zoiko admin needs visibility into for every submission.
 
         db.commit()
 
@@ -508,7 +518,10 @@ def request_own_financial_change(
     crud/booking_change_requests.py:request_financial_change."""
     correlation_id = get_correlation_id(request)
     agreement = leasing_crud.get_agreement_or_404(db, agreement_id, correlation_id=correlation_id)
-    bcr = bcr_crud.request_financial_change(db, user, agreement, payload.proposed_monthly_rent, reason=payload.reason)
+    bcr = bcr_crud.request_financial_change(
+        db, user, agreement, payload.proposed_monthly_rent, reason=payload.reason,
+        proposed_deposit_amount=payload.proposed_deposit_amount,
+    )
     log_audit_event(db, None, "booking_change_request.submit", "booking_change_request", str(bcr.id), correlation_id, reason=f"user:{user.id}")
     db.commit()
     return bcr_crud.to_booking_change_request_read(bcr)
@@ -721,6 +734,75 @@ def get_occupancy_details(
     return _to_user_occupancy_read(db, occupancy)
 
 
+@router.get("/occupancies/{occupancy_id}/sublet-terminology", response_model=SubletTerminologyRead)
+def get_own_sublet_terminology(
+    occupancy_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Section 8 sublet.uiTerm -- resolved before the create
+    wizard renders, so it can show the jurisdiction-correct word."""
+    from app.crud.market_policy import jurisdiction_code_for_occupancy, resolve_market_policy
+
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own occupancies")
+    policy = resolve_market_policy(db, jurisdiction_code_for_occupancy(occupancy))
+    return SubletTerminologyRead(ui_term=policy.sublet_ui_term)
+
+
+@router.post("/occupancies/{occupancy_id}/cancel-before-move-in", response_model=PreMoveInCancellationRead)
+def cancel_own_booking_before_move_in(
+    occupancy_id: int,
+    request: Request,
+    payload: PreMoveInCancellationRequest = PreMoveInCancellationRequest(),
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Section 7 gap: a renter cancelling their own signed-but-not-moved-in
+    booking themselves, with a real refund -- previously the only thing
+    that could end a PENDING_MOVE_IN occupancy was an admin action."""
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No guest record for this account")
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    correlation_id = get_correlation_id(request)
+    updated, result = occupancy_crud.cancel_before_move_in(
+        db, occupancy, guest=guest, reason=payload.reason, correlation_id=correlation_id,
+    )
+    log_audit_event(
+        db, None, "occupancy.cancel_before_move_in", "occupancy", str(occupancy_id), correlation_id,
+        reason=f"user:{user.id}; {payload.reason}",
+    )
+    emit_event(db, "occupancy.cancelled_before_move_in", "occupancy", str(occupancy_id), result)
+    db.commit()
+    return PreMoveInCancellationRead(occupancy=occupancy_crud.to_occupancy_read(db, updated), **result)
+
+
+@router.get("/occupancies/{occupancy_id}/transaction-record", response_model=RentalTransactionRecordRead)
+def get_own_rental_transaction_record(
+    occupancy_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Rental Transaction Record wireframe: a computed, read-only composite
+    over this occupancy's own Application/Offer/Agreement, payments,
+    handover/activation, sublet, and termination records -- see
+    crud/rental_transaction_record.py:build_rental_transaction_record.
+    Same ownership check as get_occupancy_details above. include_identity=True
+    because this is the renter viewing their own identity claim."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own occupancies")
+
+    return build_rental_transaction_record(db, occupancy, include_identity=True)
+
+
 @router.post(
     "/occupancies/{occupancy_id}/termination-cases", response_model=TerminationCaseRead, status_code=status.HTTP_201_CREATED,
 )
@@ -802,6 +884,21 @@ def list_own_habitability_incidents(
     return habitability_crud.list_habitability_incidents_for_occupancy(db, occupancy)
 
 
+@router.get("/occupancies/{occupancy_id}/entry-visits", response_model=list[HostEntryVisitRead])
+def list_own_entry_visits(
+    occupancy_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Section 9 gap: read-only transparency -- the renter can see upcoming
+    and past Host entry visits for their own occupancy, never schedule one."""
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to you")
+    return host_entry_visit_crud.list_entry_visits_for_occupancy(db, occupancy)
+
+
 @router.post("/termination-cases/{case_id}/withdraw", response_model=TerminationCaseRead)
 def withdraw_own_termination_case(
     case_id: int,
@@ -878,7 +975,113 @@ def submit_handover_receipt(
     )
     emit_event(db, "occupancy.renter_receipt_recorded", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
     db.commit()
+    db.refresh(event)
     return event
+
+
+@router.post("/occupancies/{occupancy_id}/move-out/notice", response_model=HandoverEventRead)
+def submit_move_out_notice(
+    occupancy_id: int,
+    payload: HandoverEventCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Section 9 gap: the renter's own "I'm leaving on schedule" notice
+    step for a naturally-expiring tenancy -- previously the only way an
+    ACTIVE occupancy ended had zero renter-notice/host-verification
+    handshake, unlike move-in's own 3-step handover. Mirrors
+    submit_handover_receipt above -- the renter alone records their own
+    notice; a Host/admin cannot impersonate it."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only give move-out notice for your own occupancy")
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="MOVE_OUT_NOTICE_GIVEN", actor_kind="renter_user", actor_user_id=user.id,
+        evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),
+    )
+    log_audit_event(
+        db, None, "occupancy.move_out_notice", "occupancy", str(occupancy_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "occupancy.move_out_notice_given", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
+    db.commit()
+    db.refresh(event)
+    return event
+
+
+@router.post("/occupancies/{occupancy_id}/move-out/ready", response_model=HandoverEventRead)
+def submit_move_out_ready(
+    occupancy_id: int,
+    payload: HandoverEventCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The renter confirming they've actually vacated -- the second leg of
+    the move-out handshake, distinct from the earlier notice-of-intent."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only confirm move-out for your own occupancy")
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="MOVE_OUT_READY", actor_kind="renter_user", actor_user_id=user.id,
+        evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),
+    )
+    log_audit_event(
+        db, None, "occupancy.move_out_ready", "occupancy", str(occupancy_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "occupancy.move_out_ready", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
+    db.commit()
+    return event
+
+
+@router.post(
+    "/occupancies/{occupancy_id}/condition-report", response_model=ConditionReportItemRead, status_code=status.HTTP_201_CREATED,
+)
+async def post_add_condition_report_item(
+    occupancy_id: int,
+    report_type: str = Form(...), area: str = Form(default=""), condition_rating: str | None = Form(default=None),
+    notes: str = Form(default=""), file: UploadFile | None = File(default=None),
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Section 9 gap: the renter's own side of the move-in/move-out
+    condition report -- previously there was no structured way for either
+    party to document a room's condition with photos at all."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only add a condition report item for your own occupancy")
+    item = await condition_report_crud.add_condition_report_item(
+        db, occupancy, report_type=report_type, area=area, condition_rating=condition_rating, notes=notes,
+        file=file, guest=guest,
+    )
+    log_audit_event(db, None, "occupancy.condition_report_item.add", "occupancy", str(occupancy_id), reason=f"user:{user.id}")
+    db.commit()
+    return condition_report_crud.to_condition_report_item_read(item)
+
+
+@router.get("/occupancies/{occupancy_id}/condition-report", response_model=list[ConditionReportItemRead])
+def get_own_condition_report(
+    occupancy_id: int, report_type: str | None = None,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own occupancy's condition report")
+    items = condition_report_crud.list_condition_report_items(db, occupancy, report_type=report_type)
+    return [condition_report_crud.to_condition_report_item_read(i) for i in items]
 
 
 @router.get("/sublet-lookup", response_model=SubletRenterLookup)
@@ -908,6 +1111,9 @@ def submit_sublet_request(
     db: Session = Depends(get_db),
 ):
     """Current renter requests to sublet their occupancy."""
+    # ZR-SUB-003 Section 10: "Rate-limit submission... workflows."
+    if not sublet_submit_limiter.allow(f"sublet_submit:user:{user.id}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many sublet requests submitted -- please wait before trying again.")
     occupancy = db.get(Occupancy, occupancy_id)
     if not occupancy:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
@@ -925,7 +1131,9 @@ def submit_sublet_request(
 
     sublet_request = sublet_crud.submit_sublet_request(
         db, user, occupancy_id, payload.proposed_renter_party_id, payload.arrangement_type,
-        payload.authority_evidence_ref, payload.proposed_monthly_rent,
+        payload.authority_evidence_ref, payload.proposed_monthly_rent, payload.reason,
+        idempotency_key=payload.idempotency_key,
+        proposed_start_date=payload.proposed_start_date, proposed_end_date=payload.proposed_end_date,
     )
 
     log_audit_event(db, None, "user_sublet_request.submit", "sublet_request", str(sublet_request.id), get_correlation_id(request), reason=f"user:{user.id}")
@@ -933,6 +1141,31 @@ def submit_sublet_request(
     db.commit()
 
     return sublet_crud.to_sublet_request_read(db, sublet_request)
+
+
+@router.post("/occupancies/{occupancy_id}/sublet-request/draft", response_model=SubletRequestRead, status_code=status.HTTP_201_CREATED)
+def create_sublet_request_draft(
+    occupancy_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create an unsubmitted sublet-request draft for the tenant's own active occupancy."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only draft sublet requests for your own occupancies")
+
+    draft = sublet_crud.create_draft_sublet_request(db, user, occupancy_id)
+    log_audit_event(
+        db, None, "user_sublet_request.draft_created", "sublet_request", str(draft.id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "sublet_request.draft_created", "sublet_request", str(draft.id), {"occupancyId": occupancy_id})
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, draft)
 
 
 @router.get("/sublet-requests", response_model=list[SubletRequestRead])
@@ -948,6 +1181,138 @@ def list_user_sublet_requests(
     sublet_requests = sublet_crud.list_sublet_requests_for_guest(db, guest.id)
 
     return [sublet_crud.to_sublet_request_read(db, sr) for sr in sublet_requests]
+
+
+@router.get("/sublet-requests/{sublet_request_id}/record")
+def download_own_sublet_decision_record(
+    sublet_request_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Wireframe J: the tenant's own permanent, downloadable record
+    of a completed sublet request."""
+    guest = get_guest_for_user(db, user)
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    if not guest or sublet_request.requested_by_guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This sublet request does not belong to you")
+
+    pdf_bytes = sublet_crud.generate_sublet_decision_record_pdf(db, sublet_request)
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="sublet-request-{sublet_request_id}.pdf"'},
+    )
+
+
+@router.post("/sublet-requests/{sublet_request_id}/respond", response_model=SubletRequestRead)
+def respond_to_sublet_info_request(
+    sublet_request_id: int,
+    payload: SubletRequestDecision,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Section 5.1: the tenant supplies the additional information
+    the Host asked for, sending the request back to the Host's decision queue."""
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    updated = sublet_crud.respond_to_sublet_info_request(db, sublet_request, user, payload.notes)
+    log_audit_event(
+        db, None, "user_sublet_request.respond", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "sublet_request.tenant_response_submitted", "sublet_request", str(sublet_request_id), {})
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
+
+
+@router.post("/sublet-requests/{sublet_request_id}/withdraw", response_model=SubletRequestRead)
+def withdraw_sublet_request(
+    sublet_request_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """ZR-SUB-003: the tenant withdraws their own sublet request before a decision."""
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    updated = sublet_crud.withdraw_sublet_request(db, sublet_request, user)
+    log_audit_event(
+        db, None, "user_sublet_request.withdraw", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "sublet_request.withdrawn", "sublet_request", str(sublet_request_id), {})
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
+
+
+def _assert_tenant_owns_sublet_request(db: Session, sublet_request, user: UserAccount):
+    guest = get_guest_for_user(db, user)
+    if not guest or sublet_request.requested_by_guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This sublet request does not belong to you")
+    return guest
+
+
+@router.post(
+    "/sublet-requests/{sublet_request_id}/documents", response_model=SubletDocumentRead, status_code=status.HTTP_201_CREATED,
+)
+async def upload_own_sublet_document(
+    sublet_request_id: int, request: Request, file: UploadFile = File(...),
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Section 3 Step 3/Section 10: the tenant's own document
+    upload -- stored via the Evidence Vault (crud/sublet_documents.py),
+    never claimed CLEAN (no live malware-scanning provider exists in this
+    codebase)."""
+    # ZR-SUB-003 Section 10: "Rate-limit... document workflows."
+    if not sublet_document_limiter.allow(f"sublet_document_upload:user:{user.id}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many documents uploaded -- please wait before trying again.")
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    _assert_tenant_owns_sublet_request(db, sublet_request, user)
+    document = await sublet_documents_crud.upload_sublet_document(db, sublet_request, file, uploaded_by_user_id=user.id)
+    log_audit_event(
+        db, None, "user_sublet_document.upload", "evidence_artifact", str(document.id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    db.commit()
+    return sublet_documents_crud.to_sublet_document_read(
+        document, download_path=f"/api/users/rentals/sublet-requests/{sublet_request_id}/documents/{document.id}/file",
+    )
+
+
+@router.get("/sublet-requests/{sublet_request_id}/documents", response_model=list[SubletDocumentRead])
+def list_own_sublet_documents(
+    sublet_request_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    _assert_tenant_owns_sublet_request(db, sublet_request, user)
+    return [
+        sublet_documents_crud.to_sublet_document_read(
+            d, download_path=f"/api/users/rentals/sublet-requests/{sublet_request_id}/documents/{d.id}/file",
+        )
+        for d in sublet_documents_crud.list_sublet_documents(db, sublet_request)
+    ]
+
+
+@router.get("/sublet-requests/{sublet_request_id}/documents/{document_id}/file")
+def download_own_sublet_document(
+    sublet_request_id: int, document_id: int, token: str,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    _assert_tenant_owns_sublet_request(db, sublet_request, user)
+    document = sublet_documents_crud.get_sublet_document_or_404(db, sublet_request, document_id)
+    verify_signed_download_token(token, "sublet_document", str(document.id))
+    return sublet_documents_crud.sublet_document_file_response(document)
 
 
 @router.get("/deposit-claims", response_model=list[DepositClaimRead])

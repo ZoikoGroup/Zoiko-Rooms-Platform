@@ -88,6 +88,38 @@ class PropertyComplianceCredentialRead(CamelModel):
     sharing_scope: str = PROPERTY_COMPLIANCE_SHARING_SCOPE
 
 
+PROPERTY_VERIFICATION_SHARING_SCOPE = "Visible to admins and the property's own Host. Never exposed to renters as raw evidence."
+
+
+class PropertyVerificationReject(CamelModel):
+    notes: str = ""
+
+
+class PropertyVerificationRequestAdditionalEvidence(CamelModel):
+    notes: str = ""
+
+
+class PropertyVerificationRevoke(CamelModel):
+    reason: str = ""
+
+
+class PropertyVerificationRead(CamelModel):
+    id: int
+    party_id: int
+    room_id: int
+    evidence_ref: str
+    has_document: bool = False
+    document_file_original_name: str = ""
+    document_file_content_type: str = ""
+    status: str
+    verifier_admin_id: int | None = None
+    verifier_notes: str = ""
+    verified_at: datetime | None = None
+    expires_at: datetime | None = None
+    created_at: datetime
+    sharing_scope: str = PROPERTY_VERIFICATION_SHARING_SCOPE
+
+
 class ScreeningCheckCreate(CamelModel):
     party_id: int
     jurisdiction_code: str
@@ -142,6 +174,13 @@ class RenterVerificationStatusItem(CamelModel):
 class RenterVerificationStatus(CamelModel):
     identity: RenterVerificationStatusItem
     occupancy_eligibility: list[RenterVerificationStatusItem]
+    # Lister, Property & Authority Verification wireframe: two additional,
+    # deliberately SEPARATE claims -- one item per room the calling user
+    # hosts (empty for a renter with no hosted rooms). Never implies
+    # identity verification proves either of these; each is read from its
+    # own model (PropertyVerification / AuthorityRecord respectively).
+    property_verification: list[RenterVerificationStatusItem] = []
+    authority_to_list: list[RenterVerificationStatusItem] = []
 
 
 class VerificationOperationalMetricsRead(CamelModel):

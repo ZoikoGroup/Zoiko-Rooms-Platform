@@ -12,6 +12,14 @@ from app.db.base import Base
 # for actual legal review before any of this governs real money or real tenancies.
 MARKET_POLICY_CONFIDENCE_LEVELS = ("VERIFIED", "REVIEW_REQUIRED", "DEPRECATED", "EMERGENCY_BLOCK")
 
+# ZR-ENG-CLR-002 Section 2/13.2: whether a jurisdiction permits a deposit
+# instrument at all for this market. REQUIRED/PROHIBITED were previously
+# stored but never read by any business logic -- every pack this platform has
+# ever created uses OPTIONAL (the model default), and crud/leasing.py:
+# add_offer_terms validated only the deposit *amount* against the cap, never
+# whether a deposit was permitted in the first place.
+DEPOSIT_INSTRUMENT_ALLOWED_VALUES = ("REQUIRED", "OPTIONAL", "PROHIBITED", "NOT_APPLICABLE")
+
 DEPOSIT_CUSTODY_MODELS = ("STATUTORY_SCHEME", "GOVERNMENT_BOND", "REGULATED_ESCROW", "TRUST_ACCOUNT", "HOST_OR_AGENT", "OTHER_APPROVED")
 CONSENT_STANDARDS = ("HOST_ABSOLUTE_DISCRETION", "REASONABLE_REFUSAL_ONLY", "NOTICE_ONLY", "STATUTORY_RESPONSE_DEADLINE")
 PAYEE_MODELS = ("ORIGINAL_RENTER_PAYEE", "HOST_OR_LANDLORD_PAYEE", "AUTHORIZED_AGENT_PAYEE", "SPLIT_PAYEE", "EXTERNAL_PAYEE_RECORDED")
@@ -71,7 +79,11 @@ class MarketPolicyPack(Base):
     # the only fee basis this MVP implements (Section 8.1's payer/basis/
     # tiered/hybrid dimensions are deferred until a market pack actually
     # needs them; renter fees stay OFF by default with no toggle here yet).
-    platform_fee_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=0.10)
+    # ZR-PAY-CFG-001 Decision 3: removed from Zoiko Rooms -- there is no
+    # percentage of rent. Kept only as an always-NULL column (migration
+    # b7d2e4f1a9c3 cleared existing values); the API rejects any value and
+    # crud/finance.py never reads it.
+    platform_fee_rate: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True, default=None)
     funds_flow_profile: Mapped[str] = mapped_column(String(30), default="DIRECT_SETTLEMENT")
     # ZR-ENG-CLR-005 Section 12.1/12.2/AC-12: "Payment method availability is
     # the intersection of... market pack... computed server-side... the UI
@@ -100,6 +112,17 @@ class MarketPolicyPack(Base):
     deposit_custody_model: Mapped[str] = mapped_column(String(30), default="HOST_OR_AGENT")
     deposit_protection_deadline_days: Mapped[int | None] = mapped_column(nullable=True)
     deposit_release_deadline_days: Mapped[int] = mapped_column(default=30)
+    # Section 5 gap: an UPFRONT-cadence offer previously billed the entire
+    # lease term as advance rent with no jurisdiction ceiling at all -- a
+    # multi-year lease could collect that many years' rent in one lump-sum
+    # obligation. Default (12) is deliberately generous, same as
+    # deposit_max_rent_multiple's own non-zero default above -- it's a real
+    # ceiling against a genuinely runaway term, not a retroactive block on
+    # this platform's existing, intentional "bill the whole term upfront"
+    # UPFRONT cadence for an ordinary lease length. Enforced in
+    # crud/leasing.py:add_offer_terms against
+    # OfferTermsCreate.term_months whenever cadence == "UPFRONT".
+    advance_rent_max_months: Mapped[int] = mapped_column(default=12)
 
     # -- Sublet policy (Section 3) --
     sublet_consent_standard: Mapped[str] = mapped_column(String(30), default="STATUTORY_RESPONSE_DEADLINE")
@@ -107,6 +130,28 @@ class MarketPolicyPack(Base):
     sublet_max_rent_multiple_of_original: Mapped[float] = mapped_column(Numeric(6, 2), default=1.0)
     sublet_assignment_payee_model: Mapped[str] = mapped_column(String(30), default="HOST_OR_LANDLORD_PAYEE")
     sublet_sublease_payee_model: Mapped[str] = mapped_column(String(30), default="ORIGINAL_RENTER_PAYEE")
+
+    # ZR-SUB-003 Section 8's own jurisdiction-config-key table -- the UI/
+    # terminology/duration/document/signature/retention keys that table's own
+    # sublet_consent_*/sublet_*_payee_model fields above don't cover.
+    # crud/market_policy.py:to_policy_snapshot captures these at submission
+    # time the same way as every other jurisdiction-resolved field.
+    sublet_ui_term: Mapped[str] = mapped_column(String(30), default="sublet")
+    # Null = no jurisdiction-configured cap (this MVP's original, unbounded
+    # behavior) -- never silently invented as a number no jurisdiction
+    # actually specified.
+    sublet_max_duration_months: Mapped[int | None] = mapped_column(nullable=True)
+    sublet_required_fields: Mapped[list] = mapped_column(JSON, default=list)
+    sublet_required_documents: Mapped[list] = mapped_column(JSON, default=list)
+    # "None, acknowledgment, e-signature or external legal workflow" --
+    # crud/sublet.py:approve_sublet_request only actually enforces
+    # E_SIGNATURE today (for the co-tenancy path's new agreement); NONE/
+    # ACKNOWLEDGMENT/EXTERNAL_LEGAL_WORKFLOW are modeled but not yet gated
+    # on (same never-trim-the-taxonomy discipline as NOTICE_METHODS).
+    sublet_signature_mode: Mapped[str] = mapped_column(String(30), default="NONE")
+    sublet_notice_requirements: Mapped[str] = mapped_column(String(500), default="")
+    sublet_retention_class: Mapped[str] = mapped_column(String(30), default="STANDARD")
+    sublet_additional_gates: Mapped[list] = mapped_column(JSON, default=list)
 
     # -- Termination policy (ZR-ENG-CLR-006 Section 6/AC-03: "No global fixed
     # notice period is hard-coded" -- this is the configurable value the
@@ -142,6 +187,65 @@ class MarketPolicyPack(Base):
     # CAPPED_COMPENSATION's own ceiling, expressed the same way. Null means
     # uncapped (the break-fee multiple above stands unmodified).
     termination_liability_cap_rent_multiple: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
+    # Section 6 gap: some markets don't charge a single flat break-fee
+    # multiple -- the fee tapers down the further into the lease the renter
+    # got before leaving (e.g. "1.0x rent if <3 months in, 0.5x if 3-6
+    # months, 0x after 6 months"). Empty list (default) means "no bands
+    # configured" -- crud/refund_entitlement.py:_compute_policy_liability
+    # falls back to the single flat termination_break_fee_rent_multiple
+    # above unchanged, so this is purely additive, never a behavior change
+    # for a market pack that hasn't opted in. Each entry is
+    # {"maxElapsedMonths": int, "multiple": float}; entries are matched in
+    # ascending maxElapsedMonths order against whole months elapsed since
+    # move-in, first match wins -- elapsed time beyond every band's own
+    # ceiling means no fee (the tenancy has run long enough that the
+    # tapering schedule has run out).
+    termination_break_fee_bands: Mapped[list] = mapped_column(JSON, default=list)
+
+    # -- Pre-move-in cancellation policy (Section 7 gap) --
+    # A signed-but-not-moved-in booking is a genuinely different situation
+    # from an active tenancy (Occupancy.CANCELLED, not ENDED) and has its
+    # own, separate policy dimension -- see crud/occupancy.py:
+    # cancel_before_move_in. A free-cancellation window measured from
+    # booking creation (Occupancy.created_at), inside which a cancellation
+    # is always a full refund regardless of the fee multiple below.
+    pre_move_in_free_cancellation_hours: Mapped[int] = mapped_column(default=24)
+    # Outside the free window: a flat fee (same "multiple of one month's
+    # rent" idiom as termination_break_fee_rent_multiple), deducted from
+    # whatever was already paid before the remainder is refunded. 0
+    # (default) means full refund even outside the free window -- a market
+    # pack must set this to actually charge a fee.
+    pre_move_in_cancellation_fee_rent_multiple: Mapped[float] = mapped_column(Numeric(6, 2), default=0.0)
+
+    # -- Host entry-notice policy (Section 9 gap) --
+    # Previously nothing anywhere in this codebase modeled a Host's right to
+    # enter an occupied unit for inspection/repair, or how much advance
+    # notice they owe the tenant first -- see models/host_entry_visit.py.
+    # 24 hours is a common real-world minimum (not a verified legal figure
+    # for any specific jurisdiction -- same REVIEW_REQUIRED honesty as every
+    # other number on this pack); crud/host_entry_visit.py:schedule_entry_
+    # visit enforces it, with a real, auditable emergency-entry exception
+    # (fire, flood, gas leak, etc.) that bypasses it.
+    entry_notice_hours: Mapped[int] = mapped_column(default=24)
+
+    # -- Holdover policy (Section 9 gap) --
+    # An ACTIVE occupancy reaching its own expected_end_date with no
+    # renewal/termination case was (and by default still is) a silent
+    # no-op: rent generation (crud/occupancy.py:generate_next_rent_obligation)
+    # simply stops billing. False by default to exactly preserve that
+    # existing, deliberately-tested behavior
+    # (tests/test_occupancy_crud.py::test_refuses_to_run_past_the_leases_
+    # expected_end_date) -- this is opt-in per jurisdiction, not a default
+    # behavior change. What's newly built regardless of this flag is
+    # visibility: crud/occupancy.py:list_occupancies_in_holdover surfaces
+    # any ACTIVE occupancy past its own expected_end_date to staff, whether
+    # or not billing continues for it.
+    holdover_allowed: Mapped[bool] = mapped_column(default=False)
+    # A holdover premium, expressed as a multiple applied to the normal rent
+    # amount (1.0 = no premium, the default). Only read when holdover_allowed
+    # is true. Common real-world practice charges more for holding over past
+    # lease end.
+    holdover_rent_multiple: Mapped[float] = mapped_column(Numeric(6, 2), default=1.0)
 
     # -- Booking-change / rent-change policy (Section 8, ZR-ENG-CLR-008 §10/AC-24) --
     # Both the doc's own validation examples cite a minimum interval, not a
@@ -230,6 +334,15 @@ class MarketPolicyPack(Base):
     # audit -- see VerificationCredential). REVIEW_REQUIRED-level default,
     # like every other number in this pack.
     identity_evidence_retention_days: Mapped[int] = mapped_column(default=90)
+    # Section 12 gap: identity verification was the only evidence type with
+    # any retention_days concept at all -- dispute evidence (photos,
+    # documents backing a claim) had hold/redact/manual-delete but no
+    # time-bound expiry. Nullable, default None -- "not configured, no
+    # automatic sweep for this jurisdiction" (see
+    # services/evidence_retention.py:sweep_expired_dispute_evidence), never
+    # a behavior change for a market pack that hasn't opted in. An ACTIVE
+    # legal hold always overrides this and blocks deletion regardless.
+    dispute_evidence_retention_days: Mapped[int | None] = mapped_column(nullable=True)
     # Doc Section 14: "Property compliance should be modeled as structured
     # credentials, not attachment folders." Which certificate/registration
     # classes are actually mandatory (gas safety, EPC, HMO license, etc.) is

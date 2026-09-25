@@ -8,7 +8,12 @@ to yield a session bound to the SQLite engine.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import typing
+
+# Force the file mailer before app settings load, so a developer's .env with
+# EMAIL_PROVIDER=smtp never makes the suite send real email.
+os.environ["EMAIL_PROVIDER"] = "file"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +21,8 @@ from sqlalchemy import create_engine, event, text, Text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.config import settings
+from app.core.rate_limit import sublet_document_limiter, sublet_submit_limiter
 from app.core.security import create_access_token, hash_password
 from app.db.base import Base
 from app.db.session import get_db
@@ -23,6 +30,53 @@ from app.main import app
 from app.models.admin_user import AdminUser
 from app.models.market_policy import MarketPolicyPack
 from app.models.user_account import UserAccount
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_real_provider_credentials(monkeypatch):
+    """Tests must never depend on -- or be silently changed by -- whatever
+    real credentials happen to be in a developer's local backend/.env
+    (Settings() loads that file unconditionally). Without this, a real
+    STRIPE_SECRET_KEY flips every 'unconfigured Stripe -> simulated/
+    synchronous fallback' code path this suite relies on, and worse, makes
+    tests place real (if sandbox) API calls. Forced blank for every test
+    regardless of what .env says; monkeypatch restores it afterward."""
+    monkeypatch.setattr(settings, "stripe_secret_key", "")
+    monkeypatch.setattr(settings, "stripe_webhook_secret", "")
+    monkeypatch.setattr(settings, "stripe_listing_fee_webhook_secret", "")
+
+
+@pytest.fixture(autouse=True)
+def _legacy_payment_capabilities(request, monkeypatch):
+    """ZR-PAY-CFG-001 turned off every rental money-movement path and made
+    the Listing Fee and PAYMENT_RECEIPT authority fail closed. Most of this
+    suite predates that and exercises those paths directly, so it opts back
+    in here. Tests marked @pytest.mark.payment_boundary run with the real
+    (production) defaults instead -- that's where the boundary itself is
+    tested."""
+    if request.node.get_closest_marker("payment_boundary"):
+        return
+    from app.services import policy
+
+    for flag in ("rent_collection_enabled", "deposit_collection_enabled", "host_payouts_enabled"):
+        monkeypatch.setattr(settings, flag, True)
+    monkeypatch.setattr(settings, "listing_fee_fail_closed", False)
+    monkeypatch.setattr(settings, "payment_receipt_authority_required", False)
+    monkeypatch.setitem(policy._DEFAULTS, "payment.external_handoff_approved", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def _reset_sublet_rate_limiters():
+    """The sublet submit/document-upload limiters (app/core/rate_limit.py)
+    are true module-level singletons, keyed on user.id -- but each test gets
+    a brand-new in-memory SQLite DB (db_engine below), so autoincrement ids
+    restart at 1 every time. Without this reset, an unrelated test earlier
+    in the same pytest run can leave hits recorded against an id a later
+    test's tenant happens to reuse, producing a flaky 429 that has nothing
+    to do with that test's own behavior."""
+    sublet_submit_limiter.reset()
+    sublet_document_limiter.reset()
+    yield
 
 # ---------------------------------------------------------------------------
 # Monkey-patch: teach SQLite's type compiler how to handle PostgreSQL ARRAY

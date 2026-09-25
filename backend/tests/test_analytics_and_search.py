@@ -114,3 +114,45 @@ class TestGlobalSearchIncludesRealLifecycle:
 
         types_found = {item["type"] for item in r.json()}
         assert types_found.isdisjoint({"guest", "booking", "application", "occupancy"})
+
+
+class TestRevenueTrendIncludesConfirmedRentRecords:
+    def test_recipient_confirmed_rent_counts_and_deposit_does_not(self, client, db_session: Session):
+        """The ZR-PAY-002 record path confirms rent without ever creating a
+        SimulatedPayment -- that rent must still reach the revenue chart,
+        while a confirmed deposit (held, not earned) must not."""
+        from datetime import datetime, timezone
+
+        from app.models.rental_payment import RentalPaymentObligation, RentalPaymentRecord
+
+        _listing_id, occupancy = _make_listing_with_active_occupancy(db_session, guest_name="Rent Payer")
+        offer = db_session.get(Offer, occupancy.offer_id)
+        recipient_party_id = offer.listing.party_id
+        now = datetime.now(timezone.utc)
+
+        for obligation_type, amount in (("RENT", 129), ("DEPOSIT", 100)):
+            obligation = RentalPaymentObligation(
+                obligation_type=obligation_type, agreement_id=offer.agreement.id,
+                tenant_guest_id=occupancy.guest_id, recipient_party_id=recipient_party_id,
+                amount=amount, currency="GBP", due_date=date.today(), status="CONFIRMED",
+            )
+            db_session.add(obligation)
+            db_session.flush()
+            db_session.add(
+                RentalPaymentRecord(
+                    obligation_id=obligation.id, status="CONFIRMED", declared_amount=amount,
+                    declared_currency="GBP", declared_date=date.today(),
+                    declared_by_guest_id=occupancy.guest_id, confirmed_by_party_id=recipient_party_id,
+                    confirmed_at=now, confirmed_amount=amount,
+                )
+            )
+        db_session.commit()
+
+        admin = _make_admin(db_session, email="super3@test.com", role="super_admin")
+        r = client.get("/api/analytics/revenue-trend", cookies=auth_admin_cookie(admin))
+        assert r.status_code == 200, r.text
+
+        row = next((item for item in r.json() if item["month"] == now.strftime("%b")), None)
+        assert row is not None, r.json()
+        assert row["revenue"] == 129
+        assert row["bookings"] == 1

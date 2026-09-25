@@ -59,11 +59,23 @@ export interface Listing {
   // moved in. Computed server-side (crud.listing.annotate_availability) --
   // never infer "is this actually live" from state alone.
   available: boolean;
+  // Reusable offer terms, consulted only when a market release has opted
+  // into automatic offer creation. Leaving these unset keeps this listing
+  // on the manual offer flow regardless of that setting.
+  defaultMonthlyRent: number | null;
+  defaultDepositAmount: number | null;
+  defaultTermMonths: number | null;
+  defaultCadence: string;
 }
 
 export interface PublishEligibility {
   eligible: boolean;
   reasons: string[];
+}
+
+export interface OptionalClauseChoice {
+  clauseId: string;
+  title: string;
 }
 
 export type PartyType = "provider" | "renter" | "institution" | "zoiko_operator";
@@ -84,6 +96,9 @@ export interface MarketRelease {
   effectiveFrom: string | null;
   approvedAt: string | null;
   createdAt: string;
+  // See backend/app/services/policy.py for the known keys/defaults. Empty
+  // means every policy uses the platform-wide default (manual/on).
+  policyOverrides: Record<string, unknown>;
 }
 
 export interface Property {
@@ -92,7 +107,36 @@ export interface Property {
   address: string;
   city: string;
   status: "active" | "inactive";
+  /** The region whose market policy, market release and agreement clauses apply to this property. */
+  jurisdictionCode: string;
+  /** True once a live listing or tenancy is bound to the region's rules -- the region can no longer change. */
+  regionLocked: boolean;
   createdAt: string;
+}
+
+/** One version of an agreement clause in a region's registry (backend ClauseDefinitionRead). */
+export interface ClauseDefinition {
+  id: number;
+  clauseId: string;
+  jurisdictionScope: string;
+  agreementClass: string;
+  mandatoryLevel: "MANDATORY" | "OPTIONAL" | "PROHIBITED";
+  status: "DRAFT" | "APPROVED" | "RETIRED";
+  version: number;
+  effectiveFrom: string | null;
+  effectiveTo: string | null;
+  title: string;
+  approvalNote: string;
+  createdAt: string;
+}
+
+/** A region a property can be created in: active market release + current market policy pack. */
+export interface OpenJurisdiction {
+  code: string;
+  minStayNights: number;
+  marketPolicyVersion: number;
+  /** False when agreements in this region are routed to manual review (no approved clause registry yet). */
+  agreementsSupported: boolean;
 }
 
 export interface Room {
@@ -116,16 +160,70 @@ export type AuthorityStatus =
   | "review_required"
   | "revoked";
 
+export type AuthorityRelationshipType = "OWNER" | "AGENT" | "MANAGER";
+
 export interface AuthorityRecord {
   id: number;
   partyId: number;
   roomId: number;
   authorityType: string;
+  relationshipType: AuthorityRelationshipType | null;
   evidenceRef: string;
   verifiedAt: string | null;
   expiresAt: string | null;
   status: AuthorityStatus;
   createdAt: string;
+}
+
+/** ZR-PAY-LINK-003 Section 1.1/2: a separate claim from AuthorityRecord --
+ *  "authority to list" and "authority to receive payments" are separate
+ *  claims. partyId here is who actually receives rent for this room, which
+ *  may be a different party than whoever holds the room's own list-authority. */
+/** "pending_step_up" (ZR-PAY-LINK-003 Section 14.1) only appears for a
+ *  CHANGE -- a room that already has a live verified recipient getting a
+ *  new one -- never for a room's first-ever declaration, which goes
+ *  straight to "pending". */
+export type PaymentRecipientAuthorityStatus = "pending_step_up" | "pending" | "verified" | "failed" | "revoked";
+export type PaymentRecipientRelationshipType = "OWNER" | "AGENT" | "MANAGER" | "OTHER";
+
+export interface PaymentRecipientAuthority {
+  id: number;
+  partyId: number;
+  roomId: number;
+  relationshipType: PaymentRecipientRelationshipType;
+  evidenceRef: string;
+  verifiedAt: string | null;
+  expiresAt: string | null;
+  status: PaymentRecipientAuthorityStatus;
+  isHighRisk: boolean;
+  highRiskReason: string;
+  createdAt: string;
+}
+
+/** ZR-PAY-LINK-003 Section 3.1: the consolidated recipient+destination
+ *  status for a room -- what backs the "is rent collection actually usable
+ *  yet, and why not if not" banner. CLOSED is not yet derived server-side
+ *  (see crud/payment_connection.py's own docstring), so it never appears
+ *  here today. */
+export type PaymentConnectionState =
+  | "DRAFT"
+  | "RECIPIENT_SETUP_REQUIRED"
+  | "PENDING_VERIFICATION"
+  | "ACTIVE"
+  | "SUSPENDED";
+
+export interface PaymentConnection {
+  roomId: number;
+  state: PaymentConnectionState;
+  recipientPartyId: number | null;
+  recipientAuthorityId: number | null;
+  recipientRelationshipType: PaymentRecipientRelationshipType | null;
+  recipientAuthorityStatus: PaymentRecipientAuthorityStatus | null;
+  recipientVerifiedAt: string | null;
+  recipientExpiresAt: string | null;
+  destinationMethod: string | null;
+  destinationStatus: string | null;
+  destinationAccountIdentifierMasked: string | null;
 }
 
 export interface RoomPassportClaim {
@@ -182,6 +280,9 @@ export interface Guest {
   totalSpent: number;
   joinedAt: string;
   status: "active" | "inactive";
+  /** Null when this guest has no linked Zoiko login (e.g. an admin-recorded
+   *  walk-in) -- Party-keyed features like Occupancy Eligibility can't target them. */
+  partyId: number | null;
 }
 
 export interface Review {
@@ -313,6 +414,7 @@ export interface Application {
   guestId: string;
   guestName: string;
   guestEmail: string;
+  guestPartyId: number | null;
   status: ApplicationStatus;
   message: string;
   desiredMoveIn: string | null;
@@ -324,13 +426,16 @@ export interface Application {
 
 // --- Occupancy ---
 
-export type OccupancyStatus = "PENDING_MOVE_IN" | "ACTIVE" | "ENDED";
+export type OccupancyStatus = "PENDING_MOVE_IN" | "ACTIVE" | "ENDED" | "CANCELLED";
 
 export interface Occupancy {
   id: number;
   offerId: number;
   listingId: string;
+  listingName: string;
   roomId: number;
+  propertyAddress: string;
+  propertyCity: string;
   guestId: string;
   guestName: string;
   status: OccupancyStatus;
@@ -339,9 +444,12 @@ export interface Occupancy {
   moveOutDate: string | null;
   createdAt: string;
   endedAt: string | null;
+  reassignedViaSubletRequestId: number | null;
 }
 
-export type HandoverEventType = "HANDOVER_READY" | "POSSESSION_DELIVERED" | "RENTER_RECEIPT";
+export type HandoverEventType =
+  | "HANDOVER_READY" | "POSSESSION_DELIVERED" | "RENTER_RECEIPT"
+  | "MOVE_OUT_NOTICE_GIVEN" | "MOVE_OUT_READY" | "HOST_MOVE_OUT_CONFIRMED";
 
 export interface HandoverEvent {
   id: number;
@@ -349,6 +457,25 @@ export interface HandoverEvent {
   eventType: HandoverEventType;
   actorKind: string;
   createdAt: string;
+}
+
+export type ConditionReportType = "MOVE_IN" | "MOVE_OUT";
+export type ConditionRating = "GOOD" | "FAIR" | "DAMAGED";
+
+export interface ConditionReportItem {
+  id: number;
+  occupancyId: number;
+  reportType: ConditionReportType;
+  area: string;
+  conditionRating: ConditionRating | null;
+  notes: string;
+  originalFilename: string;
+  contentType: string;
+  sizeBytes: number;
+  recordedByGuestId: string | null;
+  recordedByAdminId: number | null;
+  createdAt: string;
+  hasFile: boolean;
 }
 
 export interface ActivationGateStatus {
@@ -421,6 +548,17 @@ export interface PaymentPreview {
   remainingScheduledCount: number;
 }
 
+export interface AutopayMandate {
+  id: number;
+  occupancyId: number;
+  payerGuestId: string;
+  providerRef: string;
+  status: string;
+  consentSnapshot: Record<string, unknown>;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
 export type DepositStatus = "HELD" | "RELEASED" | "FORFEITED" | "PARTIALLY_RELEASED";
 
 export interface DepositRecord {
@@ -431,6 +569,7 @@ export interface DepositRecord {
   releasedAmount: number;
   releasedAt: string | null;
   notes: string;
+  currency: string;
 }
 
 export type PayoutStatus = "PENDING" | "PAID" | "FAILED" | "HELD";
@@ -460,6 +599,7 @@ export interface RefundRequest {
   decidedByAdminId: number | null;
   createdAt: string;
   decidedAt: string | null;
+  currency: string;
 }
 
 export type DisputeCategory = "CHARGEBACK" | "COMPENSATION" | "OTHER";
@@ -485,6 +625,398 @@ export interface ReconciliationRun {
   totals: Record<string, number>;
   mismatches: string[];
   status: ReconciliationStatus;
+}
+
+// --- Listing Fee (ZR-PAY-002 Section 8) ---
+// The only payment Zoiko Rooms collects for itself -- architecturally
+// separate from the "Finance ledger" domain above (rent/deposit custody).
+// Mirrors /api/users/listing-fees/* and /api/finance/listing-fees/*.
+
+export type ListingFeePriceStatus = "DRAFT" | "APPROVED" | "ACTIVE" | "RETIRED";
+export type ListingFeeTaxBehavior = "INCLUSIVE" | "EXCLUSIVE";
+
+/** A ZR-PAY-CFG-001 Price Book entry. Created as DRAFT; only an approved ACTIVE price can be charged. */
+export interface ListingFeePolicy {
+  id: number;
+  jurisdictionCode: string;
+  version: number;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  amount: number;
+  /** Integer minor units (pence/cents) -- the source of truth. */
+  amountMinor: number | null;
+  currency: string;
+  taxRate: number;
+  taxBehavior: ListingFeeTaxBehavior;
+  taxRuleReference: string;
+  billingEntityId: number | null;
+  status: ListingFeePriceStatus;
+  environment: string;
+  legalEntityName: string;
+  taxRegistrationNumber: string;
+  disclosureText: string;
+  refundEligible: boolean;
+  refundWindowDays: number | null;
+  createdByAdminId: number | null;
+  approvedByAdminId: number | null;
+  approvedAt: string | null;
+  createdAt: string;
+}
+
+/** ZR-PAY-CFG-001 Section 7.1 Billing Entity Registry. */
+export interface BillingEntity {
+  id: number;
+  code: string;
+  legalName: string;
+  tradingName: string;
+  registeredAddress: string;
+  companyRegistrationNumber: string;
+  taxRegistrationType: string;
+  taxRegistrationNumber: string;
+  supportedMarkets: string[];
+  supportedCurrencies: string[];
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  status: "ACTIVE" | "INACTIVE";
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Which payment actions exist -- rental money never moves through Zoiko Rooms (ZR-PAY-CFG-001). */
+export interface PaymentCapabilities {
+  listing_fee_enabled: boolean;
+  rental_payment_records_enabled: boolean;
+  rental_payment_instructions_enabled: boolean;
+  rental_money_movement_via_zoiko: boolean;
+  rent_collection_enabled: boolean;
+  deposit_collection_enabled: boolean;
+  host_payouts_enabled: boolean;
+  escrow_enabled: boolean;
+  wallet_enabled: boolean;
+  split_settlement_enabled: boolean;
+  platform_fee_rate: null;
+  host_commission_enabled: false;
+}
+
+/** Server-computed quote (ZR-PAY-CFG-001 10.1) -- the UI renders it and never calculates tax itself. */
+export interface ListingFeeQuote {
+  id: number;
+  listingId: string;
+  amount: number;
+  taxAmount: number;
+  totalAmount: number;
+  currency: string;
+  feeAmountMinor: number | null;
+  taxAmountMinor: number | null;
+  totalAmountMinor: number | null;
+  market: string | null;
+  taxBehavior: ListingFeeTaxBehavior | null;
+  taxRate: number | null;
+  priceBookVersion: number | null;
+  billingEntityId: string | null;
+  billingEntityName: string | null;
+  disclosureText: string | null;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface ListingFeeCheckoutSession {
+  id: number;
+  quoteId: number;
+  listingId: string;
+  amount: number;
+  currency: string;
+  status: ListingFeePaymentStatus;
+  /** Stripe's own hosted payment page -- redirect the browser here directly
+   *  (window.location.href), never render a custom form for it. Empty when
+   *  Stripe isn't configured server-side -- the payment already completed
+   *  synchronously in that case; nothing to redirect to. */
+  checkoutUrl: string;
+  createdAt: string;
+}
+
+export type ListingFeePaymentStatus = "PENDING" | "SUCCEEDED" | "FAILED";
+
+export interface ListingFeePayment {
+  id: number;
+  quoteId: number;
+  listingId: string;
+  amount: number;
+  currency: string;
+  status: ListingFeePaymentStatus;
+  billingCountry: string;
+  failureMessage: string;
+  createdAt: string;
+  paidAt: string | null;
+  failedAt: string | null;
+  refundEligible: boolean;
+}
+
+export interface ListingFeeReceipt {
+  id: number;
+  paymentId: number;
+  receiptNumber: string;
+  legalEntityName: string;
+  taxRegistrationNumber: string;
+  amount: number;
+  taxRate: number;
+  taxAmount: number;
+  totalAmount: number;
+  currency: string;
+  issuedAt: string;
+}
+
+export type ListingFeeRefundStatus = "REQUESTED" | "PROCESSING" | "PARTIALLY_REFUNDED" | "REFUNDED" | "FAILED";
+
+export interface ListingFeeRefund {
+  id: number;
+  paymentId: number;
+  amount: number;
+  currency: string;
+  reason: string;
+  status: ListingFeeRefundStatus;
+  requestedByAdminId: number;
+  failureMessage: string;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+// --- Rental payment records (ZR-PAY-002 Section 4-11) ---
+// Zoiko Rooms never collects, holds or moves this money -- these are
+// declarations, confirmations, disputes and corrections only. Independent
+// of the "Finance ledger" domain above (see backend's own module docstring
+// for why the two temporarily coexist).
+
+export type RentalPaymentObligationType = "RENT" | "DEPOSIT" | "OTHER";
+
+/** ZR-PAY-LINK-003 Section 16. CONFIRMED collapses the ZR-PAY-002-era
+ *  CONFIRMED_BY_RECIPIENT/CONFIRMED_BY_PROVIDER pair -- "who confirmed" is
+ *  still available on RentalPaymentRecord.provenance, rendered as its own
+ *  field wherever status is shown. PROVIDER_PROCESSING has no producing
+ *  backend code path yet (see models/rental_payment.py's own docstring). */
+export type RentalPaymentStatus =
+  | "UPCOMING"
+  | "DUE"
+  | "PAYMENT_SESSION_STARTED"
+  | "PROVIDER_PROCESSING"
+  | "PAYER_RECORDED"
+  | "RECIPIENT_CONFIRMATION_PENDING"
+  | "CONFIRMED"
+  | "PARTIALLY_PAID"
+  | "OVERDUE"
+  | "DISPUTED"
+  | "REVERSED"
+  | "WAIVED"
+  | "CANCELLED";
+
+export type RentalPaymentProvenance =
+  | "TENANT_DECLARATION"
+  | "RECIPIENT_CONFIRMATION"
+  | "PROVIDER_CONFIRMATION"
+  | "ADMIN_CORRECTION"
+  | "SYSTEM_DERIVATION";
+
+export type RentalPaymentMethodCategory = "BANK_TRANSFER" | "CASH" | "CARD" | "OTHER";
+
+export interface RentalPaymentRecord {
+  id: number;
+  obligationId: number;
+  status: RentalPaymentStatus;
+  provenance: RentalPaymentProvenance;
+  declaredAmount: number;
+  declaredCurrency: string;
+  declaredDate: string;
+  paymentMethodCategory: RentalPaymentMethodCategory;
+  externalReference: string;
+  declaredByGuestId: string;
+  confirmedByPartyId: number | null;
+  /** Null until a confirmation exists. Less than declaredAmount means
+   *  PARTIALLY_PAID (ZR-PAY-002 Section 6). */
+  confirmedAmount: number | null;
+  /** Set only when provenance is PROVIDER_CONFIRMATION -- the external
+   *  provider's own transaction/reconciliation reference. */
+  providerReference: string;
+  confirmedAt: string | null;
+  createdAt: string;
+  /** ZR-PAY-LINK-003 Section 19/Wireframe PAY-18 -- previously only ever
+   *  visible to admins; now nested here for the tenant/recipient views. */
+  disputes: RentalPaymentDispute[];
+  corrections: RentalPaymentCorrection[];
+}
+
+/** ZR-PAY-LINK-003 Section 15/Wireframe PAY-17: one co-tenant's share of a
+ *  joint-tenancy obligation. Deliberately has no "contributed so far"
+ *  amount/status of its own -- match payerGuestId against
+ *  RentalPaymentObligation.records[].declaredByGuestId to find that payer's
+ *  own latest record and its status, same nest-don't-duplicate shape the
+ *  disputes/corrections nesting already uses. */
+export interface RentalPaymentAllocation {
+  id: number;
+  obligationId: number;
+  payerGuestId: string;
+  allocatedAmount: number;
+  createdAt: string;
+}
+
+export interface RentalPaymentObligation {
+  id: number;
+  obligationType: RentalPaymentObligationType;
+  agreementId: number | null;
+  occupancyId: number | null;
+  tenantGuestId: string;
+  recipientPartyId: number;
+  amount: number;
+  currency: string;
+  dueDate: string;
+  status: RentalPaymentStatus;
+  /** Jurisdiction-resolved display term -- "rent", or the jurisdiction's own
+   *  word for deposit ("tenancy deposit" / "bond" / "security deposit" / ...).
+   *  Always use this over obligationType for user-facing copy. */
+  displayLabel: string;
+  waivedReason: string;
+  waivedAt: string | null;
+  createdAt: string;
+  records: RentalPaymentRecord[];
+  /** Empty for the ordinary single-payer obligation (the default). */
+  payerAllocations: RentalPaymentAllocation[];
+}
+
+export interface RentalPaymentObligationsPage {
+  items: RentalPaymentObligation[];
+  limit: number;
+  offset: number;
+  total: number;
+  hasMore: boolean;
+}
+
+export type RentalPaymentDiscrepancyReason =
+  | "NOT_ARRIVED"
+  | "AMOUNT_DIFFERENT"
+  | "REFERENCE_MISMATCH"
+  | "RETURNED_OR_REVERSED"
+  | "OTHER";
+
+export interface RentalPaymentDispute {
+  id: number;
+  recordId: number;
+  reasonCode: RentalPaymentDiscrepancyReason;
+  details: string;
+  status: "OPEN" | "RESOLVED";
+  reportedByGuestId: string | null;
+  reportedByPartyId: number | null;
+  reportedAt: string;
+  resolvedByAdminId: number | null;
+  resolvedAt: string | null;
+  resolutionNotes: string;
+}
+
+export interface RentalPaymentCorrection {
+  id: number;
+  recordId: number;
+  fieldName: string;
+  previousValue: string;
+  newValue: string;
+  reason: string;
+  actorAdminId: number | null;
+  actorGuestId: string | null;
+  actorPartyId: number | null;
+  createdAt: string;
+}
+
+export type RentalPaymentInstructionStatus = "PENDING_VERIFICATION" | "PENDING_REVIEW" | "ACTIVE" | "SUPERSEDED" | "REJECTED";
+
+export interface RentalPaymentInstruction {
+  id: number;
+  partyId: number;
+  status: RentalPaymentInstructionStatus;
+  method: RentalPaymentMethodCategory;
+  recipientName: string;
+  countryCode: string;
+  accountIdentifierMasked: string;
+  /** ZR-PAY-LINK-003 Wireframe D's structured "Account details" -- decrypted
+   *  server-side (app/core/field_encryption.py), only ever populated when
+   *  the caller is actually authorized to see this party's instructions in
+   *  full (the tenant with a due obligation, the recipient themselves, or
+   *  restricted admin review). null everywhere else. */
+  bankDetails: Record<string, string> | null;
+  referenceFormat: string;
+  additionalInstructions: string;
+  verifiedAt: string | null;
+  createdAt: string;
+  isHighRisk: boolean;
+  highRiskReason: string;
+  reviewedAt: string | null;
+  reviewReason: string;
+}
+
+/** SUPERSEDED never appears on the account a recipient's own GET/change
+ *  routes return (those always resolve the current row) -- listed here
+ *  only because it's a real value the type could carry in principle. */
+export type RentalPaymentProviderAccountStatus = "ONBOARDING" | "COMPLETE" | "SUPERSEDED";
+
+/** ZR-PAY-LINK-003 Section 6/Wireframe C: a recipient's own connected Stripe
+ *  account for receiving rent/deposit payments directly -- never the raw
+ *  account id, same masking posture as RentalPaymentInstruction. */
+export interface RentalPaymentProviderAccount {
+  id: number;
+  status: RentalPaymentProviderAccountStatus;
+  detailsSubmitted: boolean;
+  chargesEnabled: boolean;
+  payoutsEnabled: boolean;
+  /** ZR-PAY-LINK-003 Section 14.1: set only on the row created by a
+   *  confirmed account change, same as RentalPaymentInstruction's own
+   *  isHighRisk/highRiskReason. */
+  isHighRisk: boolean;
+  highRiskReason: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RentalPaymentProviderAccountConnectResult {
+  account: RentalPaymentProviderAccount;
+  onboardingUrl: string;
+}
+
+export type ExternalPaymentSessionStatus = "STARTED" | "SUCCEEDED" | "FAILED";
+
+/** ZR-PAY-LINK-003 Section 6/10.1/Wireframe F: a short-lived,
+ *  provider-hosted payment handoff for one obligation. */
+export interface ExternalPaymentSession {
+  id: number;
+  obligationId: number;
+  status: ExternalPaymentSessionStatus;
+  amount: number;
+  currency: string;
+  failureMessage: string;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface ExternalPaymentSessionCreateResult {
+  session: ExternalPaymentSession;
+  checkoutUrl: string;
+}
+
+export interface EvidenceArtifact {
+  id: number;
+  relatedEntityType: string;
+  relatedEntityId: string;
+  originalFilename: string;
+  contentType: string;
+  fileSize: number;
+  scanStatus: string;
+  createdAt: string;
+}
+
+export interface RentalPaymentEvidenceHold {
+  id: number;
+  artifactId: number;
+  status: "ACTIVE" | "RELEASED";
+  reason: string;
+  placedByAdminId: number;
+  placedAt: string;
+  releasedByAdminId: number | null;
+  releasedAt: string | null;
 }
 
 // --- USER accounts (renters & hosts) ---
@@ -580,6 +1112,11 @@ export interface AdminIdentityVerification {
   hasDocument: boolean;
   documentFileOriginalName: string;
   documentFileContentType: string;
+  /** What the automated scan read off the document, if it ran. */
+  ocrExtractedNumber: string | null;
+  ocrConfidence: number | null;
+  /** True when the automated scan (not an admin) sent this back for more evidence -- a super admin can overrule it. */
+  autoFlagged: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -612,6 +1149,435 @@ export interface UserOccupancy {
   createdAt: string;
   endedAt: string | null;
   agreementId: number | null;
+  currency: string;
+  reassignedViaSubletRequestId: number | null;
+}
+
+export interface PreMoveInCancellationResult {
+  occupancy: { id: number; status: string; moveOutDate: string | null; endedAt: string | null };
+  feeAmount: number;
+  feeNote: string;
+  refundedAmount: number;
+}
+
+// -- Section 6 gap: termination cases + refund entitlements (ZR-ENG-CLR-006) --
+
+export type TerminationCauseCode =
+  | "RENTER_ORDINARY_EARLY_EXIT"
+  | "RENTER_CONTRACT_BREAK"
+  | "RENTER_STATUTORY_RIGHT"
+  | "MUTUAL_SURRENDER"
+  | "ASSIGNMENT_OR_REPLACEMENT"
+  | "HOST_FAULT_OR_NONPERFORMANCE"
+  | "HOST_LAWFUL_POSSESSION_ACTION"
+  | "RENTER_BREACH"
+  | "PROPERTY_UNINHABITABLE"
+  | "CASUALTY_OR_FORCE_EVENT"
+  | "ABANDONMENT_REPORTED"
+  | "PLATFORM_SAFETY_INTERVENTION"
+  | "LEGAL_OR_REGULATORY_ORDER"
+  | "OTHER_COUNSEL_APPROVED";
+
+export type TerminationCaseStatus =
+  | "OPENED"
+  | "SURRENDER_PROPOSED"
+  | "SURRENDER_DECLINED"
+  | "PENDING_REVIEW"
+  | "REJECTED_PATHWAY"
+  | "EFFECTIVE_DATE_SET"
+  | "TERMINATED"
+  | "WITHDRAWN";
+
+export interface TerminationCase {
+  id: number;
+  occupancyId: number;
+  agreementId: number;
+  initiatorGuestId: string | null;
+  initiatorAdminId: number | null;
+  causeCode: TerminationCauseCode;
+  status: TerminationCaseStatus;
+  notes: string;
+  noticeCreatedAt: string;
+  noticeServedAt: string | null;
+  noticeMethod: string;
+  evidenceRefs: string[];
+  earliestEffectiveDate: string | null;
+  effectiveTerminationDate: string | null;
+  withdrawnAt: string | null;
+  tribunalLiabilityAmount: number;
+  tribunalLiabilityReason: string;
+  adjudicatedEffectiveDate: string | null;
+  adjudicatedEffectiveDateReason: string;
+  createdAt: string;
+}
+
+export interface TerminationCasePreview {
+  causeCode: TerminationCauseCode;
+  resolvedStatus: string;
+  requiresHostConsent: boolean;
+  requiresEvidenceToResolveNow: boolean;
+  earliestEffectiveDate: string | null;
+  estimatedEarnedRent: number | null;
+  estimatedRefundableUnearnedRent: number | null;
+  estimatedLiabilityAmount: number | null;
+  estimatedLiabilityNote: string;
+  estimatedMitigationCredit: number | null;
+  estimatedNetRefund: number | null;
+  depositDisclaimer: string;
+  alternativesNote: string;
+}
+
+export interface MitigationRecord {
+  id: number;
+  terminationCaseId: number;
+  marketedForRelettingAt: string | null;
+  listingChannels: string[];
+  replacementBookingId: number | null;
+  replacementOccupancyStart: string | null;
+  replacementRentAmount: number | null;
+  reasonableRelettingCosts: number | null;
+  evidenceRefs: string[];
+  notes: string;
+  recordedByAdminId: number | null;
+  createdAt: string;
+}
+
+export type RefundEntitlementStatus = "CALCULATED" | "APPROVED" | "EXECUTED";
+
+export interface RefundEntitlementLineItem {
+  id: number;
+  type: string;
+  sourceObligationId: number | null;
+  periodDueDate: string | null;
+  amount: number;
+  basisNote: string;
+  refundRequestId: number | null;
+}
+
+export interface RefundEntitlement {
+  id: number;
+  terminationCaseId: number;
+  version: number;
+  currency: string;
+  grossRefundable: number;
+  netRefund: number;
+  status: RefundEntitlementStatus;
+  calculatedByAdminId: number | null;
+  calculatedAt: string;
+  approvedByAdminId: number | null;
+  approvedAt: string | null;
+  executedByAdminId: number | null;
+  executedAt: string | null;
+  lineItems: RefundEntitlementLineItem[];
+}
+
+// -- Section 10 gap: ZR-ENG-CLR-010 general-purpose Dispute Resolution
+// engine (DisputeResolutionCase et al, backend/app/models/dispute*.py) --
+// entirely separate from the older, simpler finance.DisputeCase
+// (chargeback/PSP-reversal-adjacent) already surfaced in
+// FinanceOpsManager.tsx's "Disputes" section. Field names mirror the
+// backend CamelModel schemas exactly (backend/app/schemas/disputes.py and
+// dispute_*.py).
+export type DisputeClaimFamily =
+  | "DEPOSIT" | "PAYMENT" | "REFUND_PAYOUT" | "PROPERTY_CONDITION" | "BOOKING_AGREEMENT"
+  | "SUBLET_OCCUPANCY" | "MARKETPLACE_CONDUCT" | "PROTECTED_SAFETY" | "VERIFICATION_FRAUD" | "ZOIKO_SERVICE";
+
+export type DisputeAuthorityClass = "A0" | "A1" | "A2" | "A3" | "A4" | "A5" | "A6";
+export type DisputeClaimantRole = "RENTER" | "HOST";
+export type DisputeResolverConfidence = "RESOLVED" | "LEGAL_REVIEW_REQUIRED";
+
+export type DisputeCaseStatus =
+  | "SUBMITTED" | "TRIAGED" | "LEGAL_REVIEW_REQUIRED" | "IN_PROGRESS"
+  | "PARTIALLY_RESOLVED" | "RESOLVED" | "CLOSED" | "ON_HOLD" | "EXTERNAL_PENDING" | "REOPENED";
+
+export type DisputeClaimStatus =
+  | "OPEN" | "RESPONSE_DUE" | "EVIDENCE" | "NEGOTIATION" | "INTERNAL_REVIEW"
+  | "EXTERNAL_REFERRAL" | "UPHELD" | "PARTLY_UPHELD" | "NOT_UPHELD" | "SETTLED" | "WITHDRAWN";
+
+export type DisputeCaseReopenGrounds =
+  | "MATERIAL_NEW_EVIDENCE" | "PROCESSING_ERROR" | "EXTERNAL_DECISION" | "FRAUD_FINDING"
+  | "INTERNAL_REVIEW_REQUESTED" | "OTHER";
+
+export type DisputeCaseTeam = "DISPUTE_OPERATIONS" | "TRUST_AND_SAFETY" | "LEGAL_COMPLIANCE" | "FINANCE";
+
+export type DisputeFinancialHoldStatus = "PROPOSED" | "ACTIVE" | "RELEASE_PENDING" | "RELEASED" | "CLOSED";
+
+export type DisputeEvidenceProvenance = "RENTER_SUBMITTED" | "HOST_SUBMITTED" | "ADMIN_COLLECTED" | "SYSTEM_GENERATED";
+export type DisputeEvidenceDisclosureClass = "ALL_PARTIES" | "HOST_VISIBLE_ONLY" | "RENTER_VISIBLE_ONLY" | "INTERNAL_ONLY";
+export type DisputeEvidenceVerificationStatus = "RECEIVED" | "VERIFIED" | "UNVERIFIED" | "ARCHIVED";
+
+export type DisputeSettlementStatus = "SENT" | "COUNTERED" | "ACCEPTED" | "REJECTED" | "EXPIRED" | "EFFECTIVE" | "VOID";
+export type DisputeSettlementProposerRole = "RENTER" | "HOST";
+export type DisputeSettlementRespondAction = "ACCEPT" | "REJECT" | "COUNTER";
+
+export type DisputeDeadlineType = "PARTY_RESPONSE" | "EVIDENCE_CLOSE" | "INTERNAL_REVIEW";
+export type DisputeDeadlineStatus = "PENDING" | "MET" | "EXTENDED" | "CANCELLED";
+export type DisputeDeadlineSource = "SYSTEM_DEFAULT" | "ADMIN_SET";
+
+export type DisputePartyRole = "RENTER" | "HOST" | "REPRESENTATIVE";
+export type DisputePartyRepresentationType = "SELF" | "PROPERTY_MANAGER" | "LEGAL_COUNSEL" | "OTHER_AUTHORIZED";
+
+export type DisputeExternalProceedingAuthorityType = string;
+export type DisputeExternalProceedingStatus = "FILED" | "ACCEPTED" | "PENDING" | "DISMISSED" | "WITHDRAWN";
+export type DisputeExternalProceedingFinalityState = "FINAL" | "UNDER_REVIEW";
+export type DisputeExternalProceedingOutcome = "UPHELD" | "PARTLY_UPHELD" | "NOT_UPHELD" | "SETTLED";
+
+export type DisputeMessageSenderRole = "RENTER" | "HOST" | "ADMIN";
+export type DisputeMessageVisibilityClass = "PARTY_VISIBLE" | "INTERNAL_ONLY";
+export type DisputeMessageModerationState = "VISIBLE" | "HIDDEN";
+
+export type DisputeClaimDecideOutcome = "UPHELD" | "PARTLY_UPHELD" | "NOT_UPHELD";
+
+export interface DisputeClaimCreate {
+  claimCode: string;
+  claimFamily: DisputeClaimFamily;
+  amount?: number | null;
+  currency?: string;
+  requestedRemedy?: string;
+  safetyFlag?: boolean;
+}
+
+export interface DisputeCaseCreate {
+  occupancyId?: number | null;
+  claim: DisputeClaimCreate;
+}
+
+export interface DisputeClaimRead {
+  id: number;
+  caseId: number;
+  claimCode: string;
+  claimFamily: DisputeClaimFamily;
+  claimantRole: DisputeClaimantRole;
+  amount: number | null;
+  currency: string;
+  requestedRemedy: string;
+  authorityClass: DisputeAuthorityClass | null;
+  resolverConfidence: DisputeResolverConfidence;
+  resolverNotes: string;
+  policyPackId: number | null;
+  policyPackVersion: number | null;
+  sourceRecordType: string | null;
+  sourceRecordId: string | null;
+  sourceRecordSnapshot: Record<string, unknown>;
+  status: DisputeClaimStatus;
+  outcome: DisputeClaimDecideOutcome | null;
+  reasonCode: string;
+  createdAt: string;
+  decidedAt: string | null;
+  decidedByAdminId: number | null;
+  version: number;
+}
+
+export interface DisputeMoneyStatusByCurrency {
+  currency: string;
+  amountDisputed: number;
+  amountHeld: number;
+  amountUndisputed: number;
+  amountSettled: number;
+}
+
+export interface DisputeCaseRead {
+  id: number;
+  occupancyId: number | null;
+  propertyId: number | null;
+  openedByGuestId: string | null;
+  openedByPartyId: number | null;
+  severity: string;
+  status: DisputeCaseStatus;
+  primaryClaimFamily: DisputeClaimFamily;
+  externalDependencyFlag: boolean;
+  openedAt: string;
+  closedAt: string | null;
+  reopenedAt: string | null;
+  reopenedByAdminId: number | null;
+  reopenGrounds: string | null;
+  reopenNote: string;
+  assignedTeam: DisputeCaseTeam | null;
+  assignedAdminId: number | null;
+  partialClosureReason: string;
+  version: number;
+  moneyStatus: DisputeMoneyStatusByCurrency[];
+  claims: DisputeClaimRead[];
+}
+
+export interface DisputeEvidenceRead {
+  id: number;
+  caseId: number;
+  provenance: DisputeEvidenceProvenance;
+  uploadedByGuestId: string | null;
+  uploadedByPartyId: number | null;
+  uploadedByAdminId: number | null;
+  originalFilename: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256Hash: string;
+  noteText: string;
+  disclosureClass: DisputeEvidenceDisclosureClass;
+  legalHold: boolean;
+  verificationStatus: DisputeEvidenceVerificationStatus;
+  redactedOfEvidenceId: number | null;
+  claimIds: number[];
+  deletionRequestedAt: string | null;
+  deletedAt: string | null;
+  deletionRefusedReason: string;
+  createdAt: string;
+  capturedAt: string | null;
+}
+
+export interface DisputeLegalHoldRead {
+  id: number;
+  evidenceId: number;
+  caseId: number;
+  status: "ACTIVE" | "RELEASED";
+  reason: string;
+  placedByAdminId: number;
+  placedAt: string;
+  releasedByAdminId: number | null;
+  releasedAt: string | null;
+}
+
+export interface DisputeSettlementRead {
+  id: number;
+  caseId: number;
+  proposedByRole: DisputeSettlementProposerRole;
+  proposedByGuestId: string | null;
+  proposedByPartyId: number | null;
+  status: DisputeSettlementStatus;
+  termsText: string;
+  amount: number | null;
+  currency: string;
+  termsHash: string;
+  acknowledgesNoNonwaivableWaiver: boolean;
+  offeredAt: string;
+  expiresAt: string | null;
+  respondedByGuestId: string | null;
+  respondedByPartyId: number | null;
+  respondedAt: string | null;
+  responseNote: string;
+  effectiveAt: string | null;
+  supersedesSettlementId: number | null;
+  claimIds: number[];
+  createdAt: string;
+  version: number;
+  acceptedPartySnapshot: Record<string, unknown>;
+}
+
+export interface DisputeCaseMessageRead {
+  id: number;
+  caseId: number;
+  senderRole: DisputeMessageSenderRole;
+  senderGuestId: string | null;
+  senderPartyId: number | null;
+  senderAdminId: number | null;
+  body: string;
+  visibilityClass: DisputeMessageVisibilityClass;
+  moderationState: DisputeMessageModerationState;
+  moderatedByAdminId: number | null;
+  moderatedAt: string | null;
+  createdAt: string;
+}
+
+export interface DisputePartyRead {
+  id: number;
+  caseId: number;
+  partyRole: DisputePartyRole;
+  guestId: string | null;
+  partyId: number | null;
+  represents: string | null;
+  representationType: DisputePartyRepresentationType;
+  authorityVerifiedAt: string | null;
+  authorityEvidenceRef: string;
+  communicationRestrictions: string;
+  addedAt: string;
+  addedByAdminId: number | null;
+}
+
+export interface DisputeDeadlineRead {
+  id: number;
+  caseId: number;
+  claimId: number | null;
+  deadlineType: DisputeDeadlineType;
+  dueAt: string;
+  originalDueAt: string | null;
+  status: DisputeDeadlineStatus;
+  extensionBasis: string;
+  source: DisputeDeadlineSource;
+  createdByAdminId: number | null;
+  createdAt: string;
+  reminderAt: string | null;
+  isOverdue: boolean;
+  isReminderDue: boolean;
+}
+
+export interface DisputeExternalProceedingRead {
+  id: number;
+  caseId: number;
+  authorityType: string;
+  authorityName: string;
+  externalReference: string;
+  status: DisputeExternalProceedingStatus;
+  finalityState: DisputeExternalProceedingFinalityState | null;
+  filedAt: string | null;
+  decisionDate: string | null;
+  outcomeEvidenceId: number | null;
+  outcomeSummary: string;
+  filedByAdminId: number;
+  decidedByAdminId: number | null;
+  claimIds: number[];
+  createdAt: string;
+  version: number;
+  externalDeadlineAt: string | null;
+  filedAfterDeadline: boolean;
+}
+
+export interface DisputeDecisionRead {
+  id: number;
+  claimId: number;
+  caseId: number;
+  outcome: string;
+  decisionBasis: string;
+  authority: "admin" | "external_proceeding" | "settlement";
+  decidedByAdminId: number | null;
+  reasonCode: string;
+  reasonCategory: string;
+  externalProceedingId: number | null;
+  settlementId: number | null;
+  decidedAt: string;
+}
+
+export interface DisputeFinancialHoldRead {
+  id: number;
+  claimId: number;
+  amount: number;
+  currency: string;
+  authorityBasis: string;
+  status: DisputeFinancialHoldStatus;
+  version: number;
+  reasonCode: string;
+  createdByAdminId: number;
+  createdAt: string;
+  approvedByAdminId: number | null;
+  approvedAt: string | null;
+  releaseRequestedByAdminId: number | null;
+  releaseRequestedAt: string | null;
+  releasedAt: string | null;
+  releaseReason: string;
+  reviewAt: string | null;
+  isOverdueForReview: boolean;
+}
+
+export interface DisputeChronologyEvent {
+  timestamp: string;
+  eventType: string;
+  summary: string;
+}
+
+export interface DisputeCaseExportRead {
+  case: DisputeCaseRead;
+  evidenceIndex: DisputeEvidenceRead[];
+  chronology: DisputeChronologyEvent[];
+  generatedAt: string;
+  note: string;
 }
 
 export type BookingChangeType =
@@ -663,13 +1629,30 @@ export interface BookingChangeRequest {
   authorityEvidenceRef: string;
   originalDepositAmount: number | null;
   proposedDepositAmount: number | null;
+  currency: string;
 }
 
 export type SubletRequestStatus =
+  | "draft"
   | "pending_verification"
   | "pending_admin_review"
+  | "more_information_requested"
+  | "tenant_response_submitted"
   | "approved"
-  | "rejected";
+  | "rejected"
+  | "withdrawn"
+  | "expired"
+  | "superseded"
+  | "cancelled_by_authority";
+
+export type SubletDeclineReasonCode =
+  | "PROPERTY_UNSUITABLE_FOR_ARRANGEMENT"
+  | "PROPOSED_OCCUPANT_NOT_ELIGIBLE"
+  | "INSUFFICIENT_INFORMATION_PROVIDED"
+  | "TERMS_NOT_ACCEPTABLE"
+  | "POLICY_OR_JURISDICTION_RESTRICTION"
+  | "AUTHORITY_OR_OWNERSHIP_CONCERN"
+  | "OTHER";
 
 export type SubletArrangementType =
   | "ASSIGNMENT_FULL"
@@ -682,14 +1665,29 @@ export type SubletArrangementType =
 export interface SubletRequest {
   id: number;
   currentOccupancyId: number;
-  proposedRenterPartyId: number;
+  proposedRenterPartyId: number | null;
   status: SubletRequestStatus;
   authorityEvidenceRef: string;
   adminDecision: string;
   adminNotes: string;
   decidedByAdminId: number | null;
+  decidedByUserId: number | null;
   createdAt: string;
   decidedAt: string | null;
+  infoRequestNote: string;
+  infoRequestedAt: string | null;
+  infoResponseNote: string;
+  infoRespondedAt: string | null;
+  infoRequestedDocumentTypes: string[];
+  infoRequestDueAt: string | null;
+  proposedStartDate: string | null;
+  proposedEndDate: string | null;
+  approvalConditions: string;
+  approvalConditionList: string[];
+  approvedWithAuthorityConfirmation: boolean;
+  approvalExpiresAt: string | null;
+  withdrawnAt: string | null;
+  reason: string;
   arrangementType: SubletArrangementType;
   listingName: string;
   listingCity: string;
@@ -699,6 +1697,24 @@ export interface SubletRequest {
   bathrooms: number;
   currentTenantName: string;
   proposedRenterName: string;
+  version: number;
+  declineReasonCode: string;
+  supersededBySubletRequestId: number | null;
+  expiredAt: string | null;
+  cancelledByAuthorityAt: string | null;
+  cancelledByAuthorityAdminId: number | null;
+  cancelledByAuthorityReason: string;
+  // Only set for SUBLEASE_PARTIAL/ADD_CO_TENANT/LODGER_OR_LICENSEE -- the
+  // co-tenant's own new agreement. When sublet.signatureMode is
+  // E_SIGNATURE for this jurisdiction, it's left unsigned until both
+  // parties actually sign it (see signOwnAgreement/signHostedAgreement).
+  newAgreementId: number | null;
+}
+
+export interface SubletChronologyEvent {
+  timestamp: string;
+  eventType: string;
+  summary: string;
 }
 
 export interface SubletRenterLookup {
@@ -757,6 +1773,9 @@ export interface PublicListingsPage {
 // /api/users/notifications (user) -- each endpoint only ever returns the
 // authenticated caller's own rows). ---
 
+export type NotificationCategory = "PAYMENTS" | "LEASING" | "OCCUPANCY" | "DISPUTES_AND_SAFETY";
+export type NotificationPriority = "NORMAL" | "HIGH";
+
 export interface AppNotification {
   id: number;
   title: string;
@@ -764,9 +1783,21 @@ export interface AppNotification {
   notificationType: string;
   relatedEntityType: string;
   relatedEntityId: string;
+  category: NotificationCategory;
+  priority: NotificationPriority;
   isRead: boolean;
   createdAt: string;
   readAt: string | null;
+}
+
+// Section 11 gap: category opt-out + quiet hours -- DISPUTES_AND_SAFETY is
+// deliberately not in NOTIFICATION_OPTABLE_CATEGORIES (backend/app/models/
+// notification.py) and is filtered out server-side if sent anyway.
+export interface NotificationPreference {
+  optedOutCategories: NotificationCategory[];
+  quietHoursEnabled: boolean;
+  quietHoursStartMinute: number;
+  quietHoursEndMinute: number;
 }
 
 // --- Verification (ZR-ENG-CLR-012) ---
@@ -830,6 +1861,27 @@ export interface RenterVerificationStatusItem {
 export interface RenterVerificationStatus {
   identity: RenterVerificationStatusItem;
   occupancyEligibility: RenterVerificationStatusItem[];
+  // Lister, Property & Authority Verification wireframe: separate claims from
+  // identity above -- one item per room the calling user hosts (empty for a
+  // renter with no hosted rooms). Never implies identity verification proves
+  // either of these.
+  propertyVerification: RenterVerificationStatusItem[];
+  authorityToList: RenterVerificationStatusItem[];
+}
+
+export type PropertyVerificationStatus = "pending" | "verified" | "rejected" | "additional_evidence_required" | "revoked";
+
+export interface PropertyVerification {
+  id: number;
+  partyId: number;
+  roomId: number;
+  evidenceRef: string;
+  status: PropertyVerificationStatus;
+  verifierAdminId: number | null;
+  verifierNotes: string;
+  verifiedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
 }
 
 export type ScreeningDecisionStatus = "AUTHORIZED" | "PASS" | "FAIL" | "INCONCLUSIVE" | "DISPUTED_SOURCE";
@@ -905,6 +1957,27 @@ export interface MarketPolicyPack {
   requiredPropertyComplianceCodes: string[];
   identityRequiredAtApplication: boolean;
   screeningProhibitedCheckTypes: string[];
+  /** Always null -- Zoiko Rooms takes no commission on rent (ZR-PAY-CFG-001). */
+  platformFeeRate: null;
+  fundsFlowProfile: string;
+  permittedPaymentMethodClasses: string[];
+  zoikoLegalEntityName: string;
+  zoikoTaxRegistrationNumber: string;
+  serviceFeeTaxRate: number;
+  terminationNoticeDays: number;
+  alignTerminationToRentCycle: boolean;
+  terminationLiabilityModel: string;
+  terminationBreakFeeRentMultiple: number;
+  terminationLiabilityCapRentMultiple: number | null;
+  disputeDepositAuthorityClass: string;
+  disputeBookingAgreementAuthorityClass: string;
+  disputePropertyConditionAuthorityClass: string;
+  disputeSubletOccupancyAuthorityClass: string;
+  disputeResponseWindowDays: number;
+  disputeEvidenceWindowDays: number;
+  disputeExternalFilingDeadlineDays: number | null;
+  disputeConciliationRequirement: string;
+  disputeNonWaivableClaimFamilies: string[];
   createdAt: string;
 }
 
@@ -925,4 +1998,72 @@ export interface ScreeningCheck {
   createdAt: string;
   disputeReason: string;
   disputedAt: string | null;
+}
+
+// --- Rental Transaction Record ---
+// A computed, read-only composite over existing authoritative records
+// (Occupancy is the root) -- see backend/app/schemas/rental_transaction_record.py.
+// Composed from the interfaces above wherever one already exists, rather
+// than redeclaring their fields.
+
+export interface ActivationDecision {
+  id: number;
+  occupancyId: number;
+  decisionVersion: number;
+  gateRuleVersion: number;
+  outcome: string;
+  reasonCodes: string[];
+  checks: Record<string, unknown>;
+  trigger: string;
+  evaluatingAdminId: number | null;
+  correlationId: string;
+  evaluatedAt: string;
+}
+
+export interface TerminationRecord {
+  id: number;
+  occupancyId: number;
+  agreementId: number;
+  basis: string;
+  noticeGivenAt: string | null;
+  liabilityEndDate: string | null;
+  terminationEffectiveDate: string | null;
+  physicalMoveOutDate: string | null;
+  createdAt: string;
+}
+
+export interface RentalTransactionTimelineEntry {
+  timestamp: string;
+  source: string;
+  eventType: string;
+  detail: Record<string, unknown>;
+}
+
+export interface RentalPaymentTimelinePage {
+  items: RentalTransactionTimelineEntry[];
+  limit: number;
+  offset: number;
+  total: number;
+  hasMore: boolean;
+}
+
+export interface RentalTransactionRecord {
+  occupancy: Occupancy;
+  application: Application | null;
+  amendments: AgreementAmendment[];
+  obligations: ObligationRead[];
+  payments: SimulatedPayment[];
+  deposit: DepositRecord | null;
+  /** ZR-PAY-002's own record/evidence-layer obligations (never money-moving),
+   *  kept alongside `obligations` above rather than replacing it. */
+  rentalPaymentObligations: RentalPaymentObligation[];
+  handoverEvents: HandoverEvent[];
+  activationDecisions: ActivationDecision[];
+  subletRequests: SubletRequest[];
+  terminationCases: TerminationCase[];
+  terminationRecord: TerminationRecord | null;
+  propertyVerification: RenterVerificationStatusItem | null;
+  authorityToList: RenterVerificationStatusItem | null;
+  identityVerification: RenterVerificationStatusItem | null;
+  timeline: RentalTransactionTimelineEntry[];
 }

@@ -9,6 +9,8 @@ delegate to them rather than re-deriving the same checks.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy.orm import Session
 
 from app.crud import eligibility as leasing_eligibility
@@ -17,9 +19,11 @@ from app.crud.party import get_or_create_default_party
 from app.models.authority_record import AuthorityRecord
 from app.models.identity_verification import IdentityVerification
 from app.models.listing import Listing
+from app.models.listing_fee import ListingFeePayment, ListingFeeQuote
 from app.models.market_release import MarketRelease
 from app.models.occupancy_classification import OccupancyClassification
 from app.models.property import Property
+from app.models.property_verification import PropertyVerification
 from app.models.room import Room
 from app.services.eligibility import jurisdiction_gates_pass, listing_publication_eligible
 from tests.conftest import _make_admin
@@ -39,9 +43,11 @@ def _make_room_with_good_standing(db: Session, admin) -> tuple[Room, MarketRelea
     db.add(AuthorityRecord(party_id=owner_party.id, room_id=room.id, authority_type="lease", status="verified"))
     db.add(OccupancyClassification(room_id=room.id, classification="long_term_residential", review_state="APPROVED"))
     # check_publish_eligibility (unlike jurisdiction_gates_pass/check_marketplace_standing)
-    # also requires the provider's identity verification -- a check unique to the
-    # Listing Service's admin-review screen, not part of the shared gate.
+    # also requires the provider's identity verification and a verified
+    # PropertyVerification -- checks unique to the Listing Service's
+    # admin-review screen, not part of the shared gate.
     db.add(IdentityVerification(party_id=owner_party.id, document_type="passport", status="verified"))
+    db.add(PropertyVerification(party_id=owner_party.id, room_id=room.id, evidence_ref="deed.pdf", status="verified"))
     db.flush()
     return room, market_release
 
@@ -56,6 +62,24 @@ def _make_listing(db: Session, admin, room: Room, market_release: MarketRelease,
     db.add(listing)
     db.flush()
     return listing
+
+
+def _pay_listing_fee(db: Session, listing: Listing, party_id: int) -> None:
+    """ZR-PAY-002 Section 8.3: check_publish_eligibility now also requires a
+    SUCCEEDED Listing Fee payment, same 'Listing Service admin-review screen'
+    layering as the IdentityVerification row _make_room_with_good_standing
+    already adds on top of the shared jurisdiction gate."""
+    quote = ListingFeeQuote(
+        listing_id=listing.id, party_id=party_id, amount=25, tax_amount=0, total_amount=25,
+        currency="GBP", expires_at=datetime.now(timezone.utc),
+    )
+    db.add(quote)
+    db.flush()
+    db.add(ListingFeePayment(
+        quote_id=quote.id, listing_id=listing.id, party_id=party_id, amount=25, currency="GBP",
+        status="SUCCEEDED", idempotency_key=f"test-listing-fee-{listing.id}",
+    ))
+    db.flush()
 
 
 class TestListingPublicationEligible:
@@ -135,6 +159,7 @@ class TestCallSitesDelegateToTheSharedService:
         admin = _make_admin(db_session)
         room, market_release = _make_room_with_good_standing(db_session, admin)
         listing = _make_listing(db_session, admin, room, market_release, state="PUBLISHED")
+        _pay_listing_fee(db_session, listing, room.property.owner_party_id)
 
         assert listing_crud.check_publish_eligibility(db_session, listing) == []
         assert leasing_eligibility.check_marketplace_standing(db_session, room, market_release) == []

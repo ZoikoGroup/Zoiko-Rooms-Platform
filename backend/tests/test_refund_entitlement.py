@@ -507,7 +507,7 @@ class TestPlatformFeeReversal:
     on rent that later gets refunded through a termination case, once that
     rent had already gone through a COMPLETED payout."""
 
-    def test_fee_is_reversed_when_a_paid_out_obligation_is_later_refunded(self, client, db_session: Session):
+    def test_no_fee_reversal_because_no_commission_is_taken(self, client, db_session: Session):
         admin = _make_admin(db_session, email="refund-fee-admin@test.com", role="super_admin")
         occupancy, guest, _listing, agreement = _make_active_occupancy(db_session, admin=admin, suffix="fee1")
         admin_cookies = auth_admin_cookie(admin)
@@ -533,8 +533,6 @@ class TestPlatformFeeReversal:
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "PAID"
 
-        policy = db_session.query(MarketPolicyPack).filter_by(jurisdiction_code="IN").one()
-        expected_fee_reversal = round(1000.0 * float(policy.platform_fee_rate), 2)
 
         r = client.post(
             f"/api/occupancy/{occupancy.id}/termination-cases",
@@ -557,8 +555,8 @@ class TestPlatformFeeReversal:
                 LedgerEntry.description.like("Platform fee reversed%"),
             )
         )
-        assert entry is not None
-        assert round(float(entry.amount), 2) == expected_fee_reversal
+        # ZR-PAY-CFG-001 Decision 3: no commission was taken, so nothing is reversed.
+        assert entry is None
 
     def test_no_reversal_when_the_obligation_was_never_paid_out(self, client, db_session: Session):
         """The ordinary case -- most refunded obligations never went through
@@ -839,6 +837,53 @@ class TestLiabilityModels:
         assert r.status_code == 200, r.text
         notice_line = next(item for item in r.json()["lineItems"] if item["type"] == "NOTICE_LIABILITY")
         assert float(notice_line["amount"]) == 0.0
+
+    def test_break_fee_bands_taper_by_elapsed_months(self, client, db_session: Session):
+        """Section 6 gap: the fee no longer has to be one flat multiple --
+        a market pack can now taper it down by how far into the lease the
+        renter got before leaving."""
+        policy = db_session.query(MarketPolicyPack).filter_by(jurisdiction_code="IN").one()
+        policy.termination_liability_model = "STATUTORY_BREAK_FEE"
+        policy.termination_break_fee_rent_multiple = 1.0  # flat fallback -- must be ignored once bands are set
+        policy.termination_break_fee_bands = [
+            {"maxElapsedMonths": 1, "multiple": 1.0},
+            {"maxElapsedMonths": 6, "multiple": 0.5},
+        ]
+        db_session.commit()
+        _admin, admin_cookies, _occupancy, case_id = self._open_case_with_schedule(client, db_session, suffix="band1", monthly_rent=1000.0)
+
+        # 0 whole months elapsed (move_in_date == today) -- lands in the first band.
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        notice_line = next(item for item in r.json()["lineItems"] if item["type"] == "NOTICE_LIABILITY")
+        assert float(notice_line["amount"]) == 1000.0  # 1.0x, not the flat 1.0x's own coincidental match
+
+    def test_break_fee_bands_taper_to_zero_beyond_every_band(self, client, db_session: Session):
+        policy = db_session.query(MarketPolicyPack).filter_by(jurisdiction_code="IN").one()
+        policy.termination_liability_model = "STATUTORY_BREAK_FEE"
+        policy.termination_break_fee_rent_multiple = 1.0
+        policy.termination_break_fee_bands = [{"maxElapsedMonths": 1, "multiple": 1.0}]
+        db_session.commit()
+        admin, admin_cookies, occupancy, case_id = self._open_case_with_schedule(client, db_session, suffix="band2", monthly_rent=1000.0)
+
+        # Push move_in_date far enough into the past that elapsed months
+        # exceeds the only configured band's own ceiling.
+        occupancy.move_in_date = date.today() - timedelta(days=365)
+        db_session.commit()
+
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        notice_line = next(item for item in r.json()["lineItems"] if item["type"] == "NOTICE_LIABILITY")
+        assert float(notice_line["amount"]) == 0.0
+
+    def test_no_bands_configured_falls_back_to_the_flat_multiple(self, client, db_session: Session):
+        self._set_liability_model(db_session, model="STATUTORY_BREAK_FEE", break_fee_multiple=0.5)
+        _admin, admin_cookies, _occupancy, case_id = self._open_case_with_schedule(client, db_session, suffix="band3", monthly_rent=1000.0)
+
+        r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        notice_line = next(item for item in r.json()["lineItems"] if item["type"] == "NOTICE_LIABILITY")
+        assert float(notice_line["amount"]) == 500.0
 
     def test_actual_reasonable_loss_charges_recorded_reletting_costs(self, client, db_session: Session):
         self._set_liability_model(db_session, model="ACTUAL_REASONABLE_LOSS")

@@ -1,6 +1,15 @@
 from datetime import date, datetime
 
+from pydantic import field_validator
+
+from app.models.market_policy import DEPOSIT_INSTRUMENT_ALLOWED_VALUES
 from app.schemas.common import CamelModel
+
+
+def _validate_deposit_instrument_allowed(value: str | None) -> str | None:
+    if value is not None and value not in DEPOSIT_INSTRUMENT_ALLOWED_VALUES:
+        raise ValueError(f"depositInstrumentAllowed must be one of {DEPOSIT_INSTRUMENT_ALLOWED_VALUES}")
+    return value
 
 
 class MarketPolicyPackCreate(CamelModel):
@@ -15,6 +24,7 @@ class MarketPolicyPackCreate(CamelModel):
     deposit_custody_model: str = "HOST_OR_AGENT"
     deposit_protection_deadline_days: int | None = None
     deposit_release_deadline_days: int = 30
+    advance_rent_max_months: int = 12
 
     sublet_consent_standard: str = "STATUTORY_RESPONSE_DEADLINE"
     sublet_consent_response_days: int = 14
@@ -31,6 +41,30 @@ class MarketPolicyPackCreate(CamelModel):
     required_property_compliance_codes: list[str] = []
     identity_required_at_application: bool = False
     screening_prohibited_check_types: list[str] = []
+
+    funds_flow_profile: str = "DIRECT_SETTLEMENT"
+    permitted_payment_method_classes: list[str] = []
+    zoiko_legal_entity_name: str = "Zoiko Realty Group"
+    zoiko_tax_registration_number: str = ""
+    service_fee_tax_rate: float = 0.0
+
+    termination_notice_days: int = 30
+    align_termination_to_rent_cycle: bool = False
+    termination_liability_model: str = "NOTICE_RENT"
+    termination_break_fee_rent_multiple: float = 0.0
+    termination_liability_cap_rent_multiple: float | None = None
+
+    dispute_deposit_authority_class: str = "A2"
+    dispute_booking_agreement_authority_class: str = "A1"
+    dispute_property_condition_authority_class: str = "A1"
+    dispute_sublet_occupancy_authority_class: str = "A1"
+    dispute_response_window_days: int = 5
+    dispute_evidence_window_days: int = 14
+    dispute_external_filing_deadline_days: int | None = None
+    dispute_conciliation_requirement: str = "NOT_REQUIRED"
+    dispute_non_waivable_claim_families: list[str] = []
+
+    _validate_deposit_instrument_allowed = field_validator("deposit_instrument_allowed")(_validate_deposit_instrument_allowed)
 
 
 class MarketPolicyPackUpdate(CamelModel):
@@ -49,6 +83,7 @@ class MarketPolicyPackUpdate(CamelModel):
     deposit_custody_model: str | None = None
     deposit_protection_deadline_days: int | None = None
     deposit_release_deadline_days: int | None = None
+    advance_rent_max_months: int | None = None
 
     sublet_consent_standard: str | None = None
     sublet_consent_response_days: int | None = None
@@ -66,6 +101,30 @@ class MarketPolicyPackUpdate(CamelModel):
     identity_required_at_application: bool | None = None
     screening_prohibited_check_types: list[str] | None = None
 
+    funds_flow_profile: str | None = None
+    permitted_payment_method_classes: list[str] | None = None
+    zoiko_legal_entity_name: str | None = None
+    zoiko_tax_registration_number: str | None = None
+    service_fee_tax_rate: float | None = None
+
+    termination_notice_days: int | None = None
+    align_termination_to_rent_cycle: bool | None = None
+    termination_liability_model: str | None = None
+    termination_break_fee_rent_multiple: float | None = None
+    termination_liability_cap_rent_multiple: float | None = None
+
+    dispute_deposit_authority_class: str | None = None
+    dispute_booking_agreement_authority_class: str | None = None
+    dispute_property_condition_authority_class: str | None = None
+    dispute_sublet_occupancy_authority_class: str | None = None
+    dispute_response_window_days: int | None = None
+    dispute_evidence_window_days: int | None = None
+    dispute_external_filing_deadline_days: int | None = None
+    dispute_conciliation_requirement: str | None = None
+    dispute_non_waivable_claim_families: list[str] | None = None
+
+    _validate_deposit_instrument_allowed = field_validator("deposit_instrument_allowed")(_validate_deposit_instrument_allowed)
+
 
 class MarketPolicyPackRead(CamelModel):
     id: int
@@ -81,6 +140,7 @@ class MarketPolicyPackRead(CamelModel):
     deposit_custody_model: str
     deposit_protection_deadline_days: int | None = None
     deposit_release_deadline_days: int
+    advance_rent_max_months: int
 
     sublet_consent_standard: str
     sublet_consent_response_days: int
@@ -97,5 +157,29 @@ class MarketPolicyPackRead(CamelModel):
     required_property_compliance_codes: list[str]
     identity_required_at_application: bool
     screening_prohibited_check_types: list[str]
+
+    # Always null -- Zoiko Rooms takes no commission (ZR-PAY-CFG-001).
+    platform_fee_rate: float | None = None
+    funds_flow_profile: str
+    permitted_payment_method_classes: list[str]
+    zoiko_legal_entity_name: str
+    zoiko_tax_registration_number: str
+    service_fee_tax_rate: float
+
+    termination_notice_days: int
+    align_termination_to_rent_cycle: bool
+    termination_liability_model: str
+    termination_break_fee_rent_multiple: float
+    termination_liability_cap_rent_multiple: float | None = None
+
+    dispute_deposit_authority_class: str
+    dispute_booking_agreement_authority_class: str
+    dispute_property_condition_authority_class: str
+    dispute_sublet_occupancy_authority_class: str
+    dispute_response_window_days: int
+    dispute_evidence_window_days: int
+    dispute_external_filing_deadline_days: int | None = None
+    dispute_conciliation_requirement: str
+    dispute_non_waivable_claim_families: list[str]
 
     created_at: datetime

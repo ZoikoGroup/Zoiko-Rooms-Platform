@@ -2,10 +2,21 @@
 
 import { useEffect, useState } from "react";
 import { CheckCircle2, ClipboardCheck, Landmark, Plus, ShieldCheck, ShieldX, XCircle } from "lucide-react";
-import { AuthorityRecord, MarketRelease, OccupancyClassification, OccupancyReviewState, Property, Room } from "@/lib/types";
+import {
+  AuthorityRecord,
+  AuthorityRelationshipType,
+  MarketRelease,
+  OccupancyClassification,
+  OccupancyReviewState,
+  PaymentRecipientAuthority,
+  Property,
+  PropertyVerification,
+  Room,
+} from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { Switch } from "@/components/ui/Switch";
 import { apiClientFetch } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import {
@@ -16,17 +27,22 @@ import {
   marketReleaseStatusTone,
   occupancyReviewStateLabel,
   occupancyReviewStateTone,
+  paymentRecipientAuthorityStatusLabel,
+  paymentRecipientAuthorityStatusTone,
+  propertyVerificationStatusLabel,
+  propertyVerificationStatusTone,
 } from "@/lib/status";
 
 type RoomOption = Room & { property: Property };
 
 const emptyReleaseForm = { jurisdiction: "IN", minStayNights: "30" };
 const emptyClassifyForm = { classification: "shared_residential_room", confidence: "1", evidenceRef: "", reviewState: "APPROVED" as OccupancyReviewState };
-const emptyAuthorityForm = { roomId: "", authorityType: "lease_agreement", evidenceRef: "" };
+const emptyAuthorityForm = { roomId: "", relationshipType: "OWNER" as AuthorityRelationshipType, authorityType: "lease_agreement", evidenceRef: "" };
 
 export function TrustSafetyManager() {
   const [releases, setReleases] = useState<MarketRelease[]>([]);
   const [authorityRecords, setAuthorityRecords] = useState<AuthorityRecord[]>([]);
+  const [propertyVerifications, setPropertyVerifications] = useState<PropertyVerification[]>([]);
   const [rooms, setRooms] = useState<RoomOption[]>([]);
   const [classifications, setClassifications] = useState<Record<number, OccupancyClassification | null>>({});
   const [toast, setToast] = useState("");
@@ -38,6 +54,11 @@ export function TrustSafetyManager() {
   const [authorityForm, setAuthorityForm] = useState(emptyAuthorityForm);
   const [revokeRecordId, setRevokeRecordId] = useState<number | null>(null);
   const [revokeReason, setRevokeReason] = useState("");
+  const [revokePropertyVerificationId, setRevokePropertyVerificationId] = useState<number | null>(null);
+  const [revokePropertyVerificationReason, setRevokePropertyVerificationReason] = useState("");
+  const [paymentRecipientAuthorities, setPaymentRecipientAuthorities] = useState<PaymentRecipientAuthority[]>([]);
+  const [revokePaymentRecipientAuthorityId, setRevokePaymentRecipientAuthorityId] = useState<number | null>(null);
+  const [revokePaymentRecipientAuthorityReason, setRevokePaymentRecipientAuthorityReason] = useState("");
 
   function showToast(message: string) {
     setToast(message);
@@ -47,13 +68,15 @@ export function TrustSafetyManager() {
   useEffect(() => {
     async function loadAll() {
       try {
-        const [releasesData, authorityData, properties] = await Promise.all([
+        const [releasesData, authorityData, paymentRecipientData, properties] = await Promise.all([
           apiClientFetch<MarketRelease[]>("/api/market-releases"),
           apiClientFetch<AuthorityRecord[]>("/api/authority-records"),
+          apiClientFetch<PaymentRecipientAuthority[]>("/api/payment-recipient-authorities"),
           apiClientFetch<Property[]>("/api/properties"),
         ]);
         setReleases(releasesData);
         setAuthorityRecords(authorityData);
+        setPaymentRecipientAuthorities(paymentRecipientData);
 
         const roomLists = await Promise.all(
           properties.map((property) =>
@@ -71,6 +94,13 @@ export function TrustSafetyManager() {
           )
         );
         setClassifications(Object.fromEntries(classificationEntries));
+
+        const propertyVerificationLists = await Promise.all(
+          roomOptions.map((room) =>
+            apiClientFetch<PropertyVerification[]>(`/api/verification/property-verifications/room/${room.id}`)
+          )
+        );
+        setPropertyVerifications(propertyVerificationLists.flat());
       } catch {
         showToast("Failed to load trust & safety data");
       }
@@ -108,6 +138,24 @@ export function TrustSafetyManager() {
     }
   }
 
+  // Section 14 automation toggles (backend/app/services/policy.py) -- default
+  // True/manual when the key is absent from policyOverrides, same as the
+  // backend's own get_policy() fallback. Always sends the FULL override set
+  // (set_market_release_policy_overrides replaces, never patches).
+  async function setAutomationPolicy(release: MarketRelease, key: string, requiresManual: boolean) {
+    try {
+      const overrides = { ...release.policyOverrides, [key]: requiresManual };
+      const updated = await apiClientFetch<MarketRelease>(`/api/market-releases/${release.id}/policy`, {
+        method: "PUT",
+        body: JSON.stringify({ overrides }),
+      });
+      setReleases((prev) => prev.map((r) => (r.id === release.id ? updated : r)));
+      showToast("Automation setting updated");
+    } catch {
+      showToast("Failed to update automation setting");
+    }
+  }
+
   async function submitAuthorityRecord(e: React.FormEvent) {
     e.preventDefault();
     if (!authorityForm.roomId || !authorityForm.authorityType.trim()) return;
@@ -117,6 +165,7 @@ export function TrustSafetyManager() {
         body: JSON.stringify({
           roomId: Number(authorityForm.roomId),
           authorityType: authorityForm.authorityType.trim(),
+          relationshipType: authorityForm.relationshipType,
           evidenceRef: authorityForm.evidenceRef.trim(),
         }),
       });
@@ -163,6 +212,102 @@ export function TrustSafetyManager() {
       showToast("Authority record revoked");
     } catch {
       showToast("Failed to revoke authority record");
+    }
+  }
+
+  async function verifyPaymentRecipientAuthority(id: number) {
+    try {
+      const updated = await apiClientFetch<PaymentRecipientAuthority>(`/api/payment-recipient-authorities/${id}/verify`, {
+        method: "POST",
+      });
+      setPaymentRecipientAuthorities((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      showToast("Payment recipient authority verified");
+    } catch {
+      showToast("Failed to verify payment recipient authority");
+    }
+  }
+
+  async function rejectPaymentRecipientAuthority(id: number) {
+    try {
+      const updated = await apiClientFetch<PaymentRecipientAuthority>(`/api/payment-recipient-authorities/${id}/reject`, {
+        method: "POST",
+      });
+      setPaymentRecipientAuthorities((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      showToast("Payment recipient authority rejected");
+    } catch {
+      showToast("Failed to reject payment recipient authority");
+    }
+  }
+
+  async function submitRevokePaymentRecipientAuthority(e: React.FormEvent) {
+    e.preventDefault();
+    if (revokePaymentRecipientAuthorityId === null || !revokePaymentRecipientAuthorityReason.trim()) return;
+    try {
+      const updated = await apiClientFetch<PaymentRecipientAuthority>(
+        `/api/payment-recipient-authorities/${revokePaymentRecipientAuthorityId}/revoke`,
+        { method: "POST", body: JSON.stringify({ reason: revokePaymentRecipientAuthorityReason.trim() }) }
+      );
+      setPaymentRecipientAuthorities((prev) => prev.map((r) => (r.id === revokePaymentRecipientAuthorityId ? updated : r)));
+      setRevokePaymentRecipientAuthorityId(null);
+      setRevokePaymentRecipientAuthorityReason("");
+      showToast("Payment recipient authority revoked");
+    } catch {
+      showToast("Failed to revoke payment recipient authority");
+    }
+  }
+
+  async function verifyPropertyVerification(id: number) {
+    try {
+      const updated = await apiClientFetch<PropertyVerification>(`/api/verification/property-verifications/${id}/verify`, {
+        method: "POST",
+      });
+      setPropertyVerifications((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      showToast("Property verification verified");
+    } catch {
+      showToast("Failed to verify property verification");
+    }
+  }
+
+  async function rejectPropertyVerification(id: number) {
+    try {
+      const updated = await apiClientFetch<PropertyVerification>(`/api/verification/property-verifications/${id}/reject`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setPropertyVerifications((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      showToast("Property verification rejected");
+    } catch {
+      showToast("Failed to reject property verification");
+    }
+  }
+
+  async function requestAdditionalPropertyEvidence(id: number) {
+    try {
+      const updated = await apiClientFetch<PropertyVerification>(
+        `/api/verification/property-verifications/${id}/request-additional-evidence`,
+        { method: "POST", body: JSON.stringify({}) }
+      );
+      setPropertyVerifications((prev) => prev.map((r) => (r.id === id ? updated : r)));
+      showToast("Additional evidence requested");
+    } catch {
+      showToast("Failed to request additional evidence");
+    }
+  }
+
+  async function submitRevokePropertyVerification(e: React.FormEvent) {
+    e.preventDefault();
+    if (revokePropertyVerificationId === null || !revokePropertyVerificationReason.trim()) return;
+    try {
+      const updated = await apiClientFetch<PropertyVerification>(
+        `/api/verification/property-verifications/${revokePropertyVerificationId}/revoke`,
+        { method: "POST", body: JSON.stringify({ reason: revokePropertyVerificationReason.trim() }) }
+      );
+      setPropertyVerifications((prev) => prev.map((r) => (r.id === revokePropertyVerificationId ? updated : r)));
+      setRevokePropertyVerificationId(null);
+      setRevokePropertyVerificationReason("");
+      showToast("Property verification revoked");
+    } catch {
+      showToast("Failed to revoke property verification");
     }
   }
 
@@ -222,24 +367,62 @@ export function TrustSafetyManager() {
           {releases.map((release) => (
             <div
               key={release.id}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-white/10"
+              className="space-y-3 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-white/10"
             >
-              <div>
-                <p className="text-sm font-semibold text-primary-900 dark:text-white">{release.jurisdiction}</p>
-                <p className="text-xs text-slate-500 dark:text-slate-400">Min stay: {release.minStayNights} nights</p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-semibold text-primary-900 dark:text-white">{release.jurisdiction}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Min stay: {release.minStayNights} nights</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge tone={marketReleaseStatusTone[release.status]}>{marketReleaseStatusLabel[release.status]}</Badge>
+                  {release.status !== "active" && (
+                    <Button size="sm" variant="primary" onClick={() => setReleaseStatus(release.id, "approve")}>
+                      Activate
+                    </Button>
+                  )}
+                  {release.status === "active" && (
+                    <Button size="sm" variant="outline" onClick={() => setReleaseStatus(release.id, "disable")}>
+                      Disable
+                    </Button>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Badge tone={marketReleaseStatusTone[release.status]}>{marketReleaseStatusLabel[release.status]}</Badge>
-                {release.status !== "active" && (
-                  <Button size="sm" variant="primary" onClick={() => setReleaseStatus(release.id, "approve")}>
-                    Activate
-                  </Button>
-                )}
-                {release.status === "active" && (
-                  <Button size="sm" variant="outline" onClick={() => setReleaseStatus(release.id, "disable")}>
-                    Disable
-                  </Button>
-                )}
+              <div className="space-y-2 border-t border-slate-200 pt-3 dark:border-white/10">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                  Automation — skips the manual click once every compliance gate already passes
+                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    Auto-create &amp; send offers once a host approves an application
+                  </span>
+                  <Switch
+                    checked={release.policyOverrides["offer.requires_manual_creation"] === false}
+                    onChange={(auto) => setAutomationPolicy(release, "offer.requires_manual_creation", !auto)}
+                    label="Auto-create offers"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    Auto-create the agreement once a renter accepts an offer
+                  </span>
+                  <Switch
+                    checked={release.policyOverrides["agreement.requires_manual_creation"] === false}
+                    onChange={(auto) => setAutomationPolicy(release, "agreement.requires_manual_creation", !auto)}
+                    label="Auto-create agreements"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    Let renters pay the recipient online through the recipient&apos;s own payment provider (Zoiko never
+                    holds the money) — market approval required
+                  </span>
+                  <Switch
+                    checked={release.policyOverrides["payment.external_handoff_approved"] === true}
+                    onChange={(approved) => setAutomationPolicy(release, "payment.external_handoff_approved", approved)}
+                    label="Approve online payment handoff"
+                  />
+                </div>
               </div>
             </div>
           ))}
@@ -273,6 +456,7 @@ export function TrustSafetyManager() {
               <div>
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
                   {room ? room.property.address : `Room #${record.roomId}`} — {record.authorityType}
+                  {record.relationshipType && ` (${record.relationshipType.toLowerCase()})`}
                 </p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   Evidence: {record.evidenceRef || "—"}
@@ -309,6 +493,139 @@ export function TrustSafetyManager() {
           })}
           {authorityRecords.length === 0 && (
             <p className="text-sm text-slate-400 dark:text-slate-400">No authority records submitted yet.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
+          <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Payment Recipient Authority</h2>
+        </div>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          A separate claim from Authority Records above -- being allowed to list a property does not automatically
+          mean that party is authorized to receive rent/deposit payments for it. Verifying this here is what
+          determines who rent payment obligations actually route to for a room going forward (see
+          resolve_rent_recipient_party_id) -- submitted by the host from their own listing flow.
+        </p>
+        <div className="mt-4 space-y-2">
+          {paymentRecipientAuthorities.map((record) => {
+            const room = rooms.find((r) => r.id === record.roomId);
+            return (
+              <div
+                key={record.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-white/10"
+              >
+                <div>
+                  <p className="text-sm font-semibold text-primary-900 dark:text-white">
+                    {room ? room.property.address : `Room #${record.roomId}`} — party #{record.partyId} (
+                    {record.relationshipType.toLowerCase()})
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Evidence: {record.evidenceRef || "—"}
+                    {record.expiresAt && ` · expires ${formatDate(record.expiresAt)}`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge tone={paymentRecipientAuthorityStatusTone[record.status]}>
+                    {paymentRecipientAuthorityStatusLabel[record.status]}
+                  </Badge>
+                  {record.status === "pending" && (
+                    <>
+                      <Button size="sm" variant="primary" onClick={() => verifyPaymentRecipientAuthority(record.id)}>
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Verify
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => rejectPaymentRecipientAuthority(record.id)}>
+                        <XCircle className="h-3.5 w-3.5" /> Reject
+                      </Button>
+                    </>
+                  )}
+                  {record.status === "verified" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setRevokePaymentRecipientAuthorityId(record.id);
+                        setRevokePaymentRecipientAuthorityReason("");
+                      }}
+                    >
+                      <XCircle className="h-3.5 w-3.5" /> Revoke
+                    </Button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {paymentRecipientAuthorities.length === 0 && (
+            <p className="text-sm text-slate-400 dark:text-slate-400">No payment recipient authority claims submitted yet.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
+          <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Property Verification</h2>
+        </div>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          Property Verification is evidence that the property/address itself is real (e.g. a title deed or utility
+          bill) -- a separate claim from Authority Records above (right to list) and from per-jurisdiction
+          compliance documents. Submitted by the Host from their own listing flow; this is an informational
+          compliance signal for admin review and does not automatically block publishing a listing.
+        </p>
+        <div className="mt-4 space-y-2">
+          {propertyVerifications.map((record) => {
+            const room = rooms.find((r) => r.id === record.roomId);
+            return (
+              <div
+                key={record.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-100 dark:bg-slate-800 dark:ring-white/10"
+              >
+                <div>
+                  <p className="text-sm font-semibold text-primary-900 dark:text-white">
+                    {room ? room.property.address : `Room #${record.roomId}`}
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Evidence: {record.evidenceRef || "—"}
+                    {record.expiresAt && ` · expires ${formatDate(record.expiresAt)}`}
+                    {record.verifierNotes && ` · ${record.verifierNotes}`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge tone={propertyVerificationStatusTone[record.status]}>{propertyVerificationStatusLabel[record.status]}</Badge>
+                  {(record.status === "pending" || record.status === "additional_evidence_required") && (
+                    <>
+                      <Button size="sm" variant="primary" onClick={() => verifyPropertyVerification(record.id)}>
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Verify
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => rejectPropertyVerification(record.id)}>
+                        <XCircle className="h-3.5 w-3.5" /> Reject
+                      </Button>
+                      {record.status === "pending" && (
+                        <Button size="sm" variant="outline" onClick={() => requestAdditionalPropertyEvidence(record.id)}>
+                          Request more evidence
+                        </Button>
+                      )}
+                    </>
+                  )}
+                  {record.status === "verified" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setRevokePropertyVerificationId(record.id);
+                        setRevokePropertyVerificationReason("");
+                      }}
+                    >
+                      <XCircle className="h-3.5 w-3.5" /> Revoke
+                    </Button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {propertyVerifications.length === 0 && (
+            <p className="text-sm text-slate-400 dark:text-slate-400">No property verification evidence submitted yet.</p>
           )}
         </div>
       </section>
@@ -408,6 +725,21 @@ export function TrustSafetyManager() {
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Relationship Type
+            </label>
+            <select
+              value={authorityForm.relationshipType}
+              onChange={(e) => setAuthorityForm((f) => ({ ...f, relationshipType: e.target.value as AuthorityRelationshipType }))}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              required
+            >
+              <option value="OWNER">Owner</option>
+              <option value="AGENT">Agent</option>
+              <option value="MANAGER">Manager</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
               Authority Type
             </label>
             <input
@@ -458,6 +790,63 @@ export function TrustSafetyManager() {
             />
           </div>
           <Button type="submit" variant="primary" fullWidth disabled={!revokeReason.trim()}>
+            Revoke
+          </Button>
+        </form>
+      </Modal>
+
+      <Modal
+        open={revokePropertyVerificationId !== null}
+        onClose={() => { setRevokePropertyVerificationId(null); setRevokePropertyVerificationReason(""); }}
+        title="Revoke Property Verification"
+      >
+        <form onSubmit={submitRevokePropertyVerification} className="space-y-3.5">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            This immediately invalidates the property evidence for eligibility checks, even though it hasn&apos;t
+            expired yet -- e.g. the evidence turned out to be fraudulent or forged.
+          </p>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Reason (required)
+            </label>
+            <textarea
+              value={revokePropertyVerificationReason}
+              onChange={(e) => setRevokePropertyVerificationReason(e.target.value)}
+              rows={3}
+              required
+              className="w-full resize-none rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <Button type="submit" variant="primary" fullWidth disabled={!revokePropertyVerificationReason.trim()}>
+            Revoke
+          </Button>
+        </form>
+      </Modal>
+
+      <Modal
+        open={revokePaymentRecipientAuthorityId !== null}
+        onClose={() => { setRevokePaymentRecipientAuthorityId(null); setRevokePaymentRecipientAuthorityReason(""); }}
+        title="Revoke Payment Recipient Authority"
+      >
+        <form onSubmit={submitRevokePaymentRecipientAuthority} className="space-y-3.5">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            This immediately stops rent obligations from routing to this party going forward -- e.g. the agent
+            relationship ended, or the evidence turned out to be fraudulent. Obligations already created keep their
+            original recipient.
+          </p>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Reason (required)
+            </label>
+            <textarea
+              value={revokePaymentRecipientAuthorityReason}
+              onChange={(e) => setRevokePaymentRecipientAuthorityReason(e.target.value)}
+              rows={3}
+              required
+              className="w-full resize-none rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            />
+          </div>
+          <Button type="submit" variant="primary" fullWidth disabled={!revokePaymentRecipientAuthorityReason.trim()}>
             Revoke
           </Button>
         </form>

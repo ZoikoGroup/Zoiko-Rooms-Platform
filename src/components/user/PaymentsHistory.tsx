@@ -59,14 +59,13 @@ export function PaymentsHistory() {
                 <td className="px-5 py-3 font-semibold text-slate-700 dark:text-slate-200">#{payment.id}</td>
                 <td className="px-5 py-3 text-slate-500 dark:text-slate-400">{formatDate(payment.createdAt)}</td>
                 <td className="px-5 py-3 font-semibold text-primary-900 dark:text-white">
-                  {formatCurrency(payment.amount)}
-                  <span className="ml-1 text-xs font-normal text-slate-400">{payment.currency}</span>
+                  {formatCurrency(payment.amount, payment.currency)}
                 </td>
                 <td className="px-5 py-3 text-xs text-slate-500 dark:text-slate-400">
                   {payment.allocations.length === 0
                     ? "Unallocated"
                     : payment.allocations
-                        .map((a) => `Obligation #${a.obligationId} (${formatCurrency(a.amountAllocated)})`)
+                        .map((a) => `Obligation #${a.obligationId} (${formatCurrency(a.amountAllocated, payment.currency)})`)
                         .join(", ")}
                 </td>
                 <td className="px-5 py-3">

@@ -8,7 +8,13 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { apiClientFetch } from "@/lib/api-client";
 import { getCurrentAdmin } from "@/lib/auth";
-import { subletArrangementTypeAdminLabel, subletRequestStatusLabel, subletRequestStatusTone } from "@/lib/status";
+import {
+  REPLACING_ARRANGEMENT_TYPES,
+  subletArrangementTypeAdminLabel,
+  subletDeclineReasonCodeLabel,
+  subletRequestStatusLabel,
+  subletRequestStatusTone,
+} from "@/lib/status";
 import { formatDate } from "@/lib/utils";
 
 export function SubletRequestsManager() {
@@ -19,6 +25,9 @@ export function SubletRequestsManager() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [rejectTarget, setRejectTarget] = useState<SubletRequest | null>(null);
   const [rejectNotes, setRejectNotes] = useState("");
+  const [rejectReasonCode, setRejectReasonCode] = useState("");
+  const [approveTarget, setApproveTarget] = useState<SubletRequest | null>(null);
+  const [approveStepUpPassword, setApproveStepUpPassword] = useState("");
   const [toast, setToast] = useState("");
 
   function showToast(message: string) {
@@ -47,34 +56,51 @@ export function SubletRequestsManager() {
     });
   }, [load]);
 
-  async function approve(request: SubletRequest) {
+  function requiresStepUp(request: SubletRequest): boolean {
+    return (REPLACING_ARRANGEMENT_TYPES as readonly string[]).includes(request.arrangementType);
+  }
+
+  async function approve(request: SubletRequest, stepUpPassword = "") {
     setBusyId(request.id);
     try {
       await apiClientFetch<SubletRequest>(`/api/occupancy/sublet-requests/${request.id}/approve`, {
         method: "POST",
-        body: JSON.stringify({ notes: "" }),
+        body: JSON.stringify({ notes: "", stepUpPassword }),
       });
       showToast("Sublet request approved — occupancy transferred");
+      setApproveTarget(null);
+      setApproveStepUpPassword("");
       await load();
     } catch {
       showToast("Failed to approve this sublet request");
+      setApproveStepUpPassword("");
     } finally {
       setBusyId(null);
     }
   }
 
+  function handleApproveClick(request: SubletRequest) {
+    if (requiresStepUp(request)) {
+      setApproveTarget(request);
+      setApproveStepUpPassword("");
+      return;
+    }
+    approve(request);
+  }
+
   function openReject(request: SubletRequest) {
     setRejectTarget(request);
     setRejectNotes("");
+    setRejectReasonCode("");
   }
 
   async function submitReject() {
-    if (!rejectTarget) return;
+    if (!rejectTarget || !rejectReasonCode) return;
     setBusyId(rejectTarget.id);
     try {
       await apiClientFetch<SubletRequest>(`/api/occupancy/sublet-requests/${rejectTarget.id}/reject`, {
         method: "POST",
-        body: JSON.stringify({ notes: rejectNotes.trim() }),
+        body: JSON.stringify({ notes: rejectNotes.trim(), declineReasonCode: rejectReasonCode }),
       });
       showToast("Sublet request rejected");
       setRejectTarget(null);
@@ -138,7 +164,7 @@ export function SubletRequestsManager() {
                 <Badge tone={subletRequestStatusTone[request.status] ?? "neutral"}>
                   {subletRequestStatusLabel[request.status] ?? request.status}
                 </Badge>
-                <Button size="sm" variant="primary" loading={busyId === request.id} onClick={() => approve(request)}>
+                <Button size="sm" variant="primary" loading={busyId === request.id} onClick={() => handleApproveClick(request)}>
                   <ThumbsUp className="h-3.5 w-3.5" /> Approve
                 </Button>
                 <Button size="sm" variant="outline" onClick={() => openReject(request)}>
@@ -152,6 +178,23 @@ export function SubletRequestsManager() {
 
       <Modal open={Boolean(rejectTarget)} onClose={() => setRejectTarget(null)} title="Reject sublet request">
         <div className="space-y-3.5">
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Reason
+            </label>
+            <select
+              value={rejectReasonCode}
+              onChange={(e) => setRejectReasonCode(e.target.value)}
+              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+            >
+              <option value="">Select a reason…</option>
+              {Object.entries(subletDeclineReasonCodeLabel).map(([code, label]) => (
+                <option key={code} value={code}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
           <p className="text-sm text-slate-500 dark:text-slate-400">
             Optionally tell the requester why this sublet was rejected — they will see this note.
           </p>
@@ -166,8 +209,45 @@ export function SubletRequestsManager() {
             <Button variant="ghost" onClick={() => setRejectTarget(null)}>
               Cancel
             </Button>
-            <Button variant="accent" loading={busyId === rejectTarget?.id} onClick={submitReject}>
+            <Button
+              variant="accent"
+              loading={busyId === rejectTarget?.id}
+              disabled={!rejectReasonCode || (rejectReasonCode === "OTHER" && !rejectNotes.trim())}
+              onClick={submitReject}
+            >
               Reject request
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={Boolean(approveTarget)} onClose={() => setApproveTarget(null)} title="Confirm approval">
+        <div className="space-y-3.5">
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            This hands the tenancy over to a new occupant and can&apos;t be undone — re-enter your admin password to
+            confirm (ZR-SUB-003 Section 10 step-up authentication).
+          </p>
+          <input
+            type="password"
+            autoComplete="off"
+            data-1p-ignore
+            data-lpignore="true"
+            value={approveStepUpPassword}
+            onChange={(e) => setApproveStepUpPassword(e.target.value)}
+            placeholder="Your admin password"
+            className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setApproveTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              loading={busyId === approveTarget?.id}
+              disabled={!approveStepUpPassword}
+              onClick={() => approveTarget && approve(approveTarget, approveStepUpPassword)}
+            >
+              Approve request
             </Button>
           </div>
         </div>

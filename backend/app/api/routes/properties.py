@@ -11,7 +11,8 @@ from app.crud.property import (
 )
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
-from app.schemas.marketplace import PropertyCreate, PropertyRead, RoomCreate, RoomRead
+from app.schemas.marketplace import OpenJurisdictionRead, PropertyCreate, PropertyRead, RoomCreate, RoomRead
+from app.services import jurisdictions as jurisdiction_service
 
 router = APIRouter(prefix="/api/properties", tags=["properties"], dependencies=[Depends(get_current_admin)])
 
@@ -31,14 +32,20 @@ def _owner_party_id(db: Session, admin: AdminUser) -> int:
     return get_or_create_default_party(db, admin).id
 
 
+@router.get("/jurisdictions", response_model=list[OpenJurisdictionRead])
+def get_open_jurisdictions(db: Session = Depends(get_db)):
+    """Regions a property can be created in (services/jurisdictions.py)."""
+    return jurisdiction_service.list_open_jurisdictions(db)
+
+
 @router.get("", response_model=list[PropertyRead])
 def get_properties(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    return list_properties_for(db, admin)
+    return [jurisdiction_service.to_property_read(db, prop) for prop in list_properties_for(db, admin)]
 
 
 @router.post("", response_model=PropertyRead, status_code=status.HTTP_201_CREATED)
 def post_property(payload: PropertyCreate, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    return create_property(db, admin, payload)
+    return jurisdiction_service.to_property_read(db, create_property(db, admin, payload))
 
 
 @router.get("/{property_id}/rooms", response_model=list[RoomRead])

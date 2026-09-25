@@ -13,8 +13,10 @@ only works for the original proposer while SENT."""
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.notification import Notification
 from tests.conftest import auth_user_cookie
 from tests.test_disputes import _make_occupancy_with_parties
 
@@ -134,6 +136,42 @@ class TestResponse:
         case = r.json()
         assert case["claims"][0]["status"] == "SETTLED"
         assert case["status"] == "RESOLVED"
+
+        # Section 10 gap: the original proposer (the renter) is now told
+        # their settlement was accepted -- previously silent.
+        notification = db_session.scalar(
+            select(Notification).where(
+                Notification.recipient_user_id == renter.id, Notification.notification_type == "dispute_settlement.responded",
+            )
+        )
+        assert notification is not None
+
+    def test_renter_is_notified_when_their_settlement_is_rejected(self, client, db_session: Session):
+        host, renter, occ = _make_occupancy_with_parties(db_session, host_email="eshost5b@test.com", renter_email="esrenter5b@test.com")
+        renter_cookies = auth_user_cookie(renter)
+        host_cookies = auth_user_cookie(host)
+        case_id, claim_id = _open_deposit_case(client, renter_cookies, occ.id)
+
+        r = client.post(
+            f"/api/users/rentals/disputes/{case_id}/settlements",
+            json={"claimIds": [claim_id], "termsText": "Refund $300", "amount": 300, "acknowledgesNoNonwaivableWaiver": True},
+            cookies=renter_cookies,
+        )
+        settlement_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/users/hosting/disputes/{case_id}/settlements/{settlement_id}/respond",
+            json={"action": "REJECT"},
+            cookies=host_cookies,
+        )
+        assert r.status_code == 200, r.text
+
+        notification = db_session.scalar(
+            select(Notification).where(
+                Notification.recipient_user_id == renter.id, Notification.notification_type == "dispute_settlement.responded",
+            )
+        )
+        assert notification is not None
 
     def test_counter_offer_creates_a_new_row_and_terminally_counters_the_original(self, client, db_session: Session):
         host, renter, occ = _make_occupancy_with_parties(db_session, host_email="eshost6@test.com", renter_email="esrenter6@test.com")

@@ -106,6 +106,39 @@ class TestSimulateOnboardingComplete:
         assert r.status_code == 403, r.text
 
 
+class TestApplyAccountUpdatedEvent:
+    """The webhook-driven counterpart to refresh_account_status -- see
+    crud/host_stripe_account.py:apply_account_updated_event's own
+    docstring."""
+
+    def test_a_matching_account_is_updated_and_synced_to_complete(self, db_session: Session):
+        from app.crud import host_stripe_account as hsa_crud
+
+        party = _make_owner_party(db_session)
+        account = hsa_crud.create_connected_account(
+            db_session, party, admin=_make_admin(db_session, email="hsa-webhook1@test.com", role="super_admin"),
+            country="GB", email="host@example.com",
+        )
+        assert account.status == "ONBOARDING"
+
+        updated = hsa_crud.apply_account_updated_event(
+            db_session, stripe_account_id=account.stripe_account_id,
+            details_submitted=True, charges_enabled=True, payouts_enabled=True,
+        )
+        assert updated is not None
+        assert updated.id == account.id
+        assert updated.status == "COMPLETE"
+
+    def test_an_unmatched_stripe_account_id_is_a_harmless_no_op(self, db_session: Session):
+        from app.crud import host_stripe_account as hsa_crud
+
+        result = hsa_crud.apply_account_updated_event(
+            db_session, stripe_account_id="acct_does_not_exist",
+            details_submitted=True, charges_enabled=True, payouts_enabled=True,
+        )
+        assert result is None
+
+
 class TestRunPayoutUsesStripeTransferWhenConnected:
     def test_payout_records_a_transfer_id_once_the_host_is_stripe_connected(self, client, db_session: Session):
         from datetime import date, timezone

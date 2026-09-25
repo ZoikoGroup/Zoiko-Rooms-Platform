@@ -28,6 +28,42 @@ const emptyForm = {
   identityRequiredAtApplication: false,
   requiredPropertyComplianceCodes: "",
   screeningProhibitedCheckTypes: "",
+
+  depositInstrumentAllowed: "OPTIONAL",
+  depositMaxRentMultiple: "3",
+  depositCustodyModel: "HOST_OR_AGENT",
+  depositProtectionDeadlineDays: "",
+  depositReleaseDeadlineDays: "30",
+
+  subletConsentStandard: "STATUTORY_RESPONSE_DEADLINE",
+  subletConsentResponseDays: "14",
+  subletMaxRentMultipleOfOriginal: "1",
+  subletAssignmentPayeeModel: "HOST_OR_LANDLORD_PAYEE",
+  subletSubleasePayeeModel: "ORIGINAL_RENTER_PAYEE",
+
+  rentChangeMinIntervalDays: "365",
+
+  fundsFlowProfile: "DIRECT_SETTLEMENT",
+  permittedPaymentMethodClasses: "",
+  zoikoLegalEntityName: "Zoiko Realty Group",
+  zoikoTaxRegistrationNumber: "",
+  serviceFeeTaxRate: "0",
+
+  terminationNoticeDays: "30",
+  alignTerminationToRentCycle: false,
+  terminationLiabilityModel: "NOTICE_RENT",
+  terminationBreakFeeRentMultiple: "0",
+  terminationLiabilityCapRentMultiple: "",
+
+  disputeDepositAuthorityClass: "A2",
+  disputeBookingAgreementAuthorityClass: "A1",
+  disputePropertyConditionAuthorityClass: "A1",
+  disputeSubletOccupancyAuthorityClass: "A1",
+  disputeResponseWindowDays: "5",
+  disputeEvidenceWindowDays: "14",
+  disputeExternalFilingDeadlineDays: "",
+  disputeConciliationRequirement: "NOT_REQUIRED",
+  disputeNonWaivableClaimFamilies: "",
 };
 
 /** Admin CRUD for MarketPolicyPack -- ZR-ENG-CLR-012 Section 34's own
@@ -37,9 +73,11 @@ const emptyForm = {
  * all. Every jurisdiction-aware domain (deposit, sublet, rent-change,
  * occupancy eligibility, property compliance, screening) resolves its
  * rules from what's created here -- see crud/market_policy.py's
- * resolve_market_policy(). Only the Section 12 verification fields are
- * exposed in this form; deposit/sublet/rent-change fields keep their
- * platform defaults unless edited via a future pass. */
+ * resolve_market_policy(). Every configurable dimension (verification,
+ * deposit, sublet, rent-change, payment/fee, termination, dispute-forum
+ * overrides) is exposed in this form -- a jurisdiction pack is never
+ * stuck on the model's Python-level defaults just because the admin
+ * surface didn't expose a field to change it. */
 export function MarketPolicyPackManager() {
   const [packs, setPacks] = useState<MarketPolicyPack[]>([]);
   const [loading, setLoading] = useState(true);
@@ -96,6 +134,46 @@ export function MarketPolicyPackManager() {
           requiredPropertyComplianceCodes: form.requiredPropertyComplianceCodes
             .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
           screeningProhibitedCheckTypes: form.screeningProhibitedCheckTypes
+            .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
+
+          depositInstrumentAllowed: form.depositInstrumentAllowed,
+          depositMaxRentMultiple: Number(form.depositMaxRentMultiple) || 0,
+          depositCustodyModel: form.depositCustodyModel,
+          depositProtectionDeadlineDays: form.depositProtectionDeadlineDays ? Number(form.depositProtectionDeadlineDays) : null,
+          depositReleaseDeadlineDays: Number(form.depositReleaseDeadlineDays) || 0,
+
+          subletConsentStandard: form.subletConsentStandard,
+          subletConsentResponseDays: Number(form.subletConsentResponseDays) || 0,
+          subletMaxRentMultipleOfOriginal: Number(form.subletMaxRentMultipleOfOriginal) || 0,
+          subletAssignmentPayeeModel: form.subletAssignmentPayeeModel,
+          subletSubleasePayeeModel: form.subletSubleasePayeeModel,
+
+          rentChangeMinIntervalDays: Number(form.rentChangeMinIntervalDays) || 0,
+
+          fundsFlowProfile: form.fundsFlowProfile,
+          permittedPaymentMethodClasses: form.permittedPaymentMethodClasses
+            .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
+          zoikoLegalEntityName: form.zoikoLegalEntityName.trim(),
+          zoikoTaxRegistrationNumber: form.zoikoTaxRegistrationNumber.trim(),
+          serviceFeeTaxRate: Number(form.serviceFeeTaxRate) || 0,
+
+          terminationNoticeDays: Number(form.terminationNoticeDays) || 0,
+          alignTerminationToRentCycle: form.alignTerminationToRentCycle,
+          terminationLiabilityModel: form.terminationLiabilityModel,
+          terminationBreakFeeRentMultiple: Number(form.terminationBreakFeeRentMultiple) || 0,
+          terminationLiabilityCapRentMultiple: form.terminationLiabilityCapRentMultiple
+            ? Number(form.terminationLiabilityCapRentMultiple) : null,
+
+          disputeDepositAuthorityClass: form.disputeDepositAuthorityClass.trim(),
+          disputeBookingAgreementAuthorityClass: form.disputeBookingAgreementAuthorityClass.trim(),
+          disputePropertyConditionAuthorityClass: form.disputePropertyConditionAuthorityClass.trim(),
+          disputeSubletOccupancyAuthorityClass: form.disputeSubletOccupancyAuthorityClass.trim(),
+          disputeResponseWindowDays: Number(form.disputeResponseWindowDays) || 0,
+          disputeEvidenceWindowDays: Number(form.disputeEvidenceWindowDays) || 0,
+          disputeExternalFilingDeadlineDays: form.disputeExternalFilingDeadlineDays
+            ? Number(form.disputeExternalFilingDeadlineDays) : null,
+          disputeConciliationRequirement: form.disputeConciliationRequirement,
+          disputeNonWaivableClaimFamilies: form.disputeNonWaivableClaimFamilies
             .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean),
         }),
       });
@@ -269,6 +347,231 @@ export function MarketPolicyPackManager() {
                   className="w-full rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
                 />
               </div>
+            </div>
+          </div>
+
+          <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Deposit policy
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                value={form.depositInstrumentAllowed}
+                onChange={(e) => setForm({ ...form, depositInstrumentAllowed: e.target.value })}
+                placeholder="Instrument allowed (e.g. OPTIONAL)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                value={form.depositCustodyModel}
+                onChange={(e) => setForm({ ...form, depositCustodyModel: e.target.value })}
+                placeholder="Custody model (e.g. HOST_OR_AGENT)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                type="number" step="0.1"
+                value={form.depositMaxRentMultiple}
+                onChange={(e) => setForm({ ...form, depositMaxRentMultiple: e.target.value })}
+                placeholder="Max rent multiple"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                type="number"
+                value={form.depositProtectionDeadlineDays}
+                onChange={(e) => setForm({ ...form, depositProtectionDeadlineDays: e.target.value })}
+                placeholder="Protection deadline (days, optional)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                type="number"
+                value={form.depositReleaseDeadlineDays}
+                onChange={(e) => setForm({ ...form, depositReleaseDeadlineDays: e.target.value })}
+                placeholder="Release deadline (days)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+            </div>
+          </div>
+
+          <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Sublet policy
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                value={form.subletConsentStandard}
+                onChange={(e) => setForm({ ...form, subletConsentStandard: e.target.value })}
+                placeholder="Consent standard"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                type="number"
+                value={form.subletConsentResponseDays}
+                onChange={(e) => setForm({ ...form, subletConsentResponseDays: e.target.value })}
+                placeholder="Consent response (days)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                type="number" step="0.1"
+                value={form.subletMaxRentMultipleOfOriginal}
+                onChange={(e) => setForm({ ...form, subletMaxRentMultipleOfOriginal: e.target.value })}
+                placeholder="Max rent multiple of original"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                value={form.subletAssignmentPayeeModel}
+                onChange={(e) => setForm({ ...form, subletAssignmentPayeeModel: e.target.value })}
+                placeholder="Assignment payee model"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                value={form.subletSubleasePayeeModel}
+                onChange={(e) => setForm({ ...form, subletSubleasePayeeModel: e.target.value })}
+                placeholder="Sublease payee model"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                type="number"
+                value={form.rentChangeMinIntervalDays}
+                onChange={(e) => setForm({ ...form, rentChangeMinIntervalDays: e.target.value })}
+                placeholder="Min rent-change interval (days)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+            </div>
+          </div>
+
+          <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Rental payment policy
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <p className="col-span-2 text-xs text-slate-500 dark:text-slate-400">
+                Renters pay the verified recipient directly — Zoiko Rooms takes no commission and never collects, holds
+                or pays out rent or deposits (ZR-PAY-CFG-001). The Listing Fee, its tax and billing entity are set in
+                Finance → Listing Fee Price Book.
+              </p>
+              <input
+                value={form.permittedPaymentMethodClasses}
+                onChange={(e) => setForm({ ...form, permittedPaymentMethodClasses: e.target.value })}
+                placeholder="Methods renters may use to pay the recipient (comma-separated, e.g. CARD,BANK_TRANSFER)"
+                className="col-span-2 rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+            </div>
+          </div>
+
+          <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Termination policy (Section 6)
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="number"
+                value={form.terminationNoticeDays}
+                onChange={(e) => setForm({ ...form, terminationNoticeDays: e.target.value })}
+                placeholder="Notice period (days)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <select
+                value={form.terminationLiabilityModel}
+                onChange={(e) => setForm({ ...form, terminationLiabilityModel: e.target.value })}
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              >
+                <option value="NOTICE_RENT">Notice rent</option>
+                <option value="STATUTORY_BREAK_FEE">Statutory break fee</option>
+                <option value="CONTRACT_BREAK_AMOUNT">Contract break amount</option>
+                <option value="ACTUAL_REASONABLE_LOSS">Actual reasonable loss</option>
+                <option value="CAPPED_COMPENSATION">Capped compensation</option>
+                <option value="ZERO_LIABILITY">Zero liability</option>
+                <option value="MIXED">Mixed</option>
+              </select>
+              <input
+                type="number" step="0.1"
+                value={form.terminationBreakFeeRentMultiple}
+                onChange={(e) => setForm({ ...form, terminationBreakFeeRentMultiple: e.target.value })}
+                placeholder="Break-fee rent multiple"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                type="number" step="0.1"
+                value={form.terminationLiabilityCapRentMultiple}
+                onChange={(e) => setForm({ ...form, terminationLiabilityCapRentMultiple: e.target.value })}
+                placeholder="Liability cap rent multiple (optional)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <label className="col-span-2 flex items-center gap-2 text-sm text-primary-900 dark:text-white">
+                <input
+                  type="checkbox"
+                  checked={form.alignTerminationToRentCycle}
+                  onChange={(e) => setForm({ ...form, alignTerminationToRentCycle: e.target.checked })}
+                />
+                Align termination to rent cycle
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Dispute-forum overrides (Section 10, optional)
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                value={form.disputeDepositAuthorityClass}
+                onChange={(e) => setForm({ ...form, disputeDepositAuthorityClass: e.target.value })}
+                placeholder="Deposit authority class (e.g. A2)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                value={form.disputeBookingAgreementAuthorityClass}
+                onChange={(e) => setForm({ ...form, disputeBookingAgreementAuthorityClass: e.target.value })}
+                placeholder="Booking/agreement authority class"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                value={form.disputePropertyConditionAuthorityClass}
+                onChange={(e) => setForm({ ...form, disputePropertyConditionAuthorityClass: e.target.value })}
+                placeholder="Property condition authority class"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                value={form.disputeSubletOccupancyAuthorityClass}
+                onChange={(e) => setForm({ ...form, disputeSubletOccupancyAuthorityClass: e.target.value })}
+                placeholder="Sublet/occupancy authority class"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                type="number"
+                value={form.disputeResponseWindowDays}
+                onChange={(e) => setForm({ ...form, disputeResponseWindowDays: e.target.value })}
+                placeholder="Response window (days)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                type="number"
+                value={form.disputeEvidenceWindowDays}
+                onChange={(e) => setForm({ ...form, disputeEvidenceWindowDays: e.target.value })}
+                placeholder="Evidence window (days)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <input
+                type="number"
+                value={form.disputeExternalFilingDeadlineDays}
+                onChange={(e) => setForm({ ...form, disputeExternalFilingDeadlineDays: e.target.value })}
+                placeholder="External filing deadline (days, optional)"
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
+              <select
+                value={form.disputeConciliationRequirement}
+                onChange={(e) => setForm({ ...form, disputeConciliationRequirement: e.target.value })}
+                className="rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              >
+                <option value="NOT_REQUIRED">Conciliation not required</option>
+                <option value="OPTIONAL">Conciliation optional</option>
+                <option value="MANDATORY">Conciliation mandatory</option>
+              </select>
+              <input
+                value={form.disputeNonWaivableClaimFamilies}
+                onChange={(e) => setForm({ ...form, disputeNonWaivableClaimFamilies: e.target.value })}
+                placeholder="Non-waivable claim families (comma-separated)"
+                className="col-span-2 rounded-lg bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
+              />
             </div>
           </div>
 

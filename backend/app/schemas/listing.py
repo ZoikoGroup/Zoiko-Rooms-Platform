@@ -35,6 +35,16 @@ class ListingBase(CamelModel):
     featured: bool = False
     room_id: int | None = None
     min_stay_nights: int = 30
+    # Section 14 offer.requires_manual_creation (services/policy.py): reusable
+    # offer terms for this listing, consulted only when a market release has
+    # opted into automatic offer creation (crud/leasing.py:
+    # _auto_create_offer_if_enabled). Optional -- leaving these unset keeps
+    # this listing on the existing fully-manual offer flow regardless of the
+    # policy setting.
+    default_monthly_rent: float | None = None
+    default_deposit_amount: float | None = None
+    default_term_months: int | None = None
+    default_cadence: str = "MONTHLY"
 
 
 class ListingCreate(ListingBase):
@@ -66,6 +76,10 @@ class ListingUpdate(CamelModel):
     contact_name: str | None = None
     contact_phone: str | None = None
     contact_email: str | None = None
+    default_monthly_rent: float | None = None
+    default_deposit_amount: float | None = None
+    default_term_months: int | None = None
+    default_cadence: str | None = None
 
 
 class ListingRead(ListingBase):

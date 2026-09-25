@@ -191,3 +191,46 @@ class TestManualOperationalHold:
             cookies=auth_admin_cookie(plain_admin),
         )
         assert r.status_code == 403, r.text
+
+    def test_an_open_hold_also_blocks_approving_a_refund(self, client, db_session: Session):
+        """Section 10 gap: this hold already blocked payout -- it previously
+        did nothing to a refund draining the exact same party's balance."""
+        obligation, admin, guest, party_id = _make_provider_rent_obligation(db_session, suffix="manualhold4", amount=500.0)
+        admin_cookies = auth_admin_cookie(admin)
+
+        r = client.post(
+            "/api/finance/payments",
+            json={"guestId": guest.id, "amount": 500.0, "currency": "INR", "idempotencyKey": "manualhold4-pay"},
+            cookies=admin_cookies,
+        )
+        payment_id = r.json()["id"]
+        client.post(
+            f"/api/finance/payments/{payment_id}/confirm",
+            json={"allocations": [{"obligationId": obligation.id, "amount": 500.0}]},
+            cookies=admin_cookies,
+        )
+
+        r = client.post(
+            "/api/finance/financial-holds",
+            json={"partyId": party_id, "description": "Fraud review in progress"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 201, r.text
+        hold_id = r.json()["id"]
+
+        r = client.post(
+            "/api/finance/refunds",
+            json={
+                "paymentId": payment_id, "obligationId": obligation.id, "amount": 500.0, "reason": "test",
+                "idempotencyKey": "manualhold4-refund",
+            },
+            cookies=admin_cookies,
+        )
+        refund_id = r.json()["id"]
+        r = client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
+        assert r.status_code == 409, r.text
+        assert "operational hold" in r.json()["detail"].lower()
+
+        client.post(f"/api/finance/financial-holds/{hold_id}/resolve", json={"notes": "Cleared"}, cookies=admin_cookies)
+        r = client.post(f"/api/finance/refunds/{refund_id}/decide", json={"approve": True}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text

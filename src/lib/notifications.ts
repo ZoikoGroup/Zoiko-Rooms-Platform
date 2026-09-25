@@ -1,5 +1,5 @@
 import { apiClientFetch } from "@/lib/api-client";
-import { AppNotification } from "@/lib/types";
+import { AppNotification, NotificationPreference } from "@/lib/types";
 
 /**
  * Shared client for the notification bell, used by both the Admin and USER
@@ -23,6 +23,19 @@ export function markNotificationRead(basePath: string, id: number): Promise<AppN
 
 export function markAllNotificationsRead(basePath: string): Promise<{ updated: number }> {
   return apiClientFetch<{ updated: number }>(`${basePath}/read-all`, { method: "PATCH" });
+}
+
+// Section 11 gap: category opt-out + quiet hours, shared by both topbars the
+// same way the four functions above are.
+export function getNotificationPreferences(basePath: string): Promise<NotificationPreference> {
+  return apiClientFetch<NotificationPreference>(`${basePath}/preferences`);
+}
+
+export function updateNotificationPreferences(basePath: string, payload: NotificationPreference): Promise<NotificationPreference> {
+  return apiClientFetch<NotificationPreference>(`${basePath}/preferences`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 }
 
 /**
@@ -74,11 +87,21 @@ export function resolveNotificationHref(
     notificationType === "occupancy.ended_for_host" ||
     notificationType === "payout.paid" ||
     notificationType === "payout.held" ||
-    notificationType === "sublet_request.tenant_changed" ||
     notificationType === "dispute.opened_for_host" ||
     notificationType === "dispute.resolved_for_host"
   ) {
     return "/account/host/listings";
+  }
+  // Sublet notifications that only ever go to the host (backend/app/crud/sublet.py
+  // sends them to the listing's party) -- the host decides sublet requests, so
+  // they open the host review page, never the renter's own /account/sublets.
+  if (
+    notificationType === "sublet_request.submitted" ||
+    notificationType === "sublet_request.tenant_response_submitted" ||
+    notificationType === "sublet_request.withdrawn" ||
+    notificationType === "sublet_request.tenant_changed"
+  ) {
+    return "/account/host/sublet-requests";
   }
   if (notificationType.startsWith("application.")) return "/account/applications";
   if (notificationType.startsWith("offer.")) return "/account/applications";

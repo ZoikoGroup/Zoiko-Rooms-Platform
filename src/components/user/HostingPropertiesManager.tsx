@@ -2,34 +2,54 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { BedDouble, Building2, MapPin, Pencil, Plus } from "lucide-react";
+import { BedDouble, Building2, ClipboardList, MapPin, Pencil, Plus } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
-import { Property, Room } from "@/lib/types";
+import { Occupancy, OpenJurisdiction, Property, Room } from "@/lib/types";
 import { Switch } from "@/components/ui/Switch";
 import {
+  confirmHostedMoveIn,
+  confirmHostedPossessionDelivered,
   createHostedProperty,
   createHostedRoom,
   errorMessage,
+  getHostedMoveInEligibility,
   listHostedProperties,
+  listHostedRoomOccupancies,
   listHostedRooms,
+  listOpenJurisdictions,
+  prepareHostedHandover,
   updateHostedProperty,
   updateHostedRoom,
 } from "@/lib/user-api";
 import { ListARoomWizard } from "@/components/user/ListARoomWizard";
+import { RegionSelect } from "@/components/user/RegionSelect";
+import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
+import { occupancyStatusTone } from "@/lib/status";
+import { formatDate } from "@/lib/utils";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 
-type PropertyForm = { id: number | null; address: string; city: string };
+type PropertyForm = {
+  id: number | null;
+  address: string;
+  city: string;
+  jurisdictionCode: string;
+  /** The saved region when editing -- stays selectable even if that market has since closed. */
+  savedJurisdictionCode?: string;
+  regionLocked: boolean;
+};
 type RoomForm = { propertyId: number; id: number | null; size: string; hasEnsuite: boolean };
 
 export function HostingPropertiesManager() {
   const { user } = useUserSession();
   const { toast, showToast } = useToast();
   const [properties, setProperties] = useState<Property[]>([]);
+  const [regions, setRegions] = useState<OpenJurisdiction[]>([]);
   const [roomsByProperty, setRoomsByProperty] = useState<Record<number, Room[]>>({});
+  const [occupanciesByRoom, setOccupanciesByRoom] = useState<Record<number, Occupancy[]>>({});
   const [loading, setLoading] = useState(true);
 
   const [propertyForm, setPropertyForm] = useState<PropertyForm | null>(null);
@@ -37,15 +57,27 @@ export function HostingPropertiesManager() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [recordOccupancyId, setRecordOccupancyId] = useState<number | null>(null);
+  const [handoverBusyId, setHandoverBusyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const owned = await listHostedProperties();
+      const [owned, openRegions] = await Promise.all([
+        listHostedProperties(),
+        listOpenJurisdictions().catch(() => [] as OpenJurisdiction[]),
+      ]);
       setProperties(owned);
+      setRegions(openRegions);
       const roomLists = await Promise.all(
         owned.map((property) => listHostedRooms(property.id).catch(() => [] as Room[]))
       );
       setRoomsByProperty(Object.fromEntries(owned.map((property, i) => [property.id, roomLists[i]])));
+
+      const allRooms = roomLists.flat();
+      const occupancyLists = await Promise.all(
+        allRooms.map((room) => listHostedRoomOccupancies(room.id).catch(() => [] as Occupancy[]))
+      );
+      setOccupanciesByRoom(Object.fromEntries(allRooms.map((room, i) => [room.id, occupancyLists[i]])));
     } catch (err) {
       showToast(errorMessage(err, "Could not load your properties."), "error");
     } finally {
@@ -64,10 +96,18 @@ export function HostingPropertiesManager() {
       setError("Both an address and a city are required.");
       return;
     }
+    if (!propertyForm.jurisdictionCode) {
+      setError("Select the region this property is located in.");
+      return;
+    }
     setError("");
     setSubmitting(true);
     try {
-      const payload = { address: propertyForm.address.trim(), city: propertyForm.city.trim() };
+      const payload = {
+        address: propertyForm.address.trim(),
+        city: propertyForm.city.trim(),
+        jurisdictionCode: propertyForm.jurisdictionCode,
+      };
       if (propertyForm.id === null) {
         await createHostedProperty(payload);
         showToast("Property added.");
@@ -112,6 +152,48 @@ export function HostingPropertiesManager() {
     }
   }
 
+  async function handlePrepareHandover(occupancyId: number) {
+    setHandoverBusyId(`${occupancyId}:prepare`);
+    try {
+      await prepareHostedHandover(occupancyId);
+      showToast("Marked handover ready.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not mark handover ready."), "error");
+    } finally {
+      setHandoverBusyId(null);
+    }
+  }
+
+  async function handlePossessionDelivered(occupancyId: number) {
+    setHandoverBusyId(`${occupancyId}:possession`);
+    try {
+      await confirmHostedPossessionDelivered(occupancyId);
+      showToast("Possession delivery recorded.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not record possession delivery."), "error");
+    } finally {
+      setHandoverBusyId(null);
+    }
+  }
+
+  async function handleConfirmMoveIn(occupancyId: number) {
+    setHandoverBusyId(`${occupancyId}:confirm`);
+    try {
+      const eligibility = await getHostedMoveInEligibility(occupancyId);
+      if (!eligibility.eligible) {
+        showToast(`Not ready for move-in yet: ${eligibility.reasons.join("; ")}`, "error");
+        return;
+      }
+      await confirmHostedMoveIn(occupancyId);
+      showToast("Move-in confirmed -- the tenancy is now active.");
+      await load();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not confirm move-in."), "error");
+    } finally {
+      setHandoverBusyId(null);
+    }
+  }
+
   if (loading) return <Loader label="Loading your properties" />;
 
   return (
@@ -122,7 +204,19 @@ export function HostingPropertiesManager() {
           subtitle="Use “List a Room” to add a room in one flow. The properties and rooms below are for editing what you already have."
         />
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="outline" onClick={() => setPropertyForm({ id: null, address: "", city: "" })}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              setPropertyForm({
+                id: null,
+                address: "",
+                city: "",
+                jurisdictionCode: regions.length === 1 ? regions[0].code : "",
+                regionLocked: false,
+              })
+            }
+          >
             <Plus className="h-4 w-4" /> Add Property
           </Button>
           <Button size="sm" onClick={() => setWizardOpen(true)}>
@@ -155,7 +249,8 @@ export function HostingPropertiesManager() {
                       {property.address}
                     </p>
                     <p className="mt-0.5 flex items-center gap-1.5 text-xs text-slate-400">
-                      <MapPin className="h-3.5 w-3.5" /> {property.city} · Property #{property.id}
+                      <MapPin className="h-3.5 w-3.5" /> {property.city} · {property.jurisdictionCode} · Property #
+                      {property.id}
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -164,7 +259,14 @@ export function HostingPropertiesManager() {
                       size="sm"
                       variant="ghost"
                       onClick={() =>
-                        setPropertyForm({ id: property.id, address: property.address, city: property.city })
+                        setPropertyForm({
+                          id: property.id,
+                          address: property.address,
+                          city: property.city,
+                          jurisdictionCode: property.jurisdictionCode,
+                          savedJurisdictionCode: property.jurisdictionCode,
+                          regionLocked: property.regionLocked,
+                        })
                       }
                     >
                       <Pencil className="h-3.5 w-3.5" /> Edit
@@ -194,36 +296,91 @@ export function HostingPropertiesManager() {
                     </p>
                   ) : (
                     <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {rooms.map((room) => (
+                      {rooms.map((room) => {
+                        const occupancies = occupanciesByRoom[room.id] ?? [];
+                        return (
                         <li
                           key={room.id}
-                          className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800/60"
+                          className="space-y-2 rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800/60"
                         >
-                          <div>
-                            <p className="flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
-                              <BedDouble className="h-4 w-4 text-primary-600" /> Room #{room.id}
-                            </p>
-                            <p className="mt-0.5 text-xs text-slate-400">
-                              {room.size > 0 ? `${room.size} sq ft` : "Size not set"} ·{" "}
-                              {room.hasEnsuite ? "En-suite" : "Shared bathroom"}
-                            </p>
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                                <BedDouble className="h-4 w-4 text-primary-600" /> Room #{room.id}
+                              </p>
+                              <p className="mt-0.5 text-xs text-slate-400">
+                                {room.size > 0 ? `${room.size} sq ft` : "Size not set"} ·{" "}
+                                {room.hasEnsuite ? "En-suite" : "Shared bathroom"}
+                              </p>
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() =>
+                                setRoomForm({
+                                  propertyId: property.id,
+                                  id: room.id,
+                                  size: String(room.size),
+                                  hasEnsuite: room.hasEnsuite,
+                                })
+                              }
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
                           </div>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() =>
-                              setRoomForm({
-                                propertyId: property.id,
-                                id: room.id,
-                                size: String(room.size),
-                                hasEnsuite: room.hasEnsuite,
-                              })
-                            }
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
+
+                          {occupancies.length > 0 && (
+                            <div className="space-y-2 border-t border-slate-200 pt-2 dark:border-white/10">
+                              {occupancies.map((occupancy) => (
+                                <div key={occupancy.id} className="space-y-1.5">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                                      <Badge tone={occupancyStatusTone[occupancy.status] ?? "neutral"}>
+                                        {occupancy.status.replace(/_/g, " ")}
+                                      </Badge>
+                                      <span>
+                                        {occupancy.guestName || "Renter"}
+                                        {occupancy.moveInDate ? ` · since ${formatDate(occupancy.moveInDate)}` : ""}
+                                      </span>
+                                    </div>
+                                    <Button size="sm" variant="ghost" onClick={() => setRecordOccupancyId(occupancy.id)}>
+                                      <ClipboardList className="h-3.5 w-3.5" /> Transaction record
+                                    </Button>
+                                  </div>
+                                  {occupancy.status === "PENDING_MOVE_IN" && (
+                                    <div className="flex flex-wrap items-center gap-1.5 rounded-lg bg-slate-50 p-2 dark:bg-slate-800/60">
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        loading={handoverBusyId === `${occupancy.id}:prepare`}
+                                        onClick={() => handlePrepareHandover(occupancy.id)}
+                                      >
+                                        Mark handover ready
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        loading={handoverBusyId === `${occupancy.id}:possession`}
+                                        onClick={() => handlePossessionDelivered(occupancy.id)}
+                                      >
+                                        Confirm possession delivered
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        loading={handoverBusyId === `${occupancy.id}:confirm`}
+                                        onClick={() => handleConfirmMoveIn(occupancy.id)}
+                                      >
+                                        Confirm move-in
+                                      </Button>
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </li>
-                      ))}
+                        );
+                      })}
                     </ul>
                   )}
                 </div>
@@ -262,6 +419,13 @@ export function HostingPropertiesManager() {
               className={inputClass}
             />
           </Field>
+          <RegionSelect
+            regions={regions}
+            value={propertyForm?.jurisdictionCode ?? ""}
+            onChange={(code) => setPropertyForm((f) => (f ? { ...f, jurisdictionCode: code } : f))}
+            currentCode={propertyForm?.savedJurisdictionCode}
+            locked={propertyForm?.regionLocked}
+          />
 
           {error && (
             <p className="rounded-lg bg-accent-50 px-3 py-2 text-xs font-medium text-accent-700 ring-1 ring-accent-200">
@@ -339,6 +503,10 @@ export function HostingPropertiesManager() {
           );
         }}
       />
+
+      <Modal open={recordOccupancyId !== null} onClose={() => setRecordOccupancyId(null)} title="Rental transaction record" size="xl">
+        {recordOccupancyId !== null && <RentalTransactionRecord occupancyId={recordOccupancyId} role="host" />}
+      </Modal>
 
       <Toast toast={toast} />
     </div>

@@ -1,11 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertOctagon, BadgeCheck, CheckCircle2, Landmark, ReceiptText, RotateCcw } from "lucide-react";
-import { AdminRole, DisputeCase, Obligation, PayoutRecord, ReconciliationRun, RefundRequest, SimulatedPayment } from "@/lib/types";
+import { AlertOctagon, BadgeCheck, CheckCircle2, Landmark, ReceiptText, RotateCcw, ShieldAlert } from "lucide-react";
+import {
+  AdminRole,
+  DisputeCase,
+  Obligation,
+  PaymentCapabilities,
+  PayoutRecord,
+  ReconciliationRun,
+  RefundRequest,
+  RentalPaymentInstruction,
+  SimulatedPayment,
+} from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { ListingFeePriceBookManager } from "@/components/admin/ListingFeePriceBookManager";
 import { apiClientFetch } from "@/lib/api-client";
 import { getCurrentAdmin } from "@/lib/auth";
 import {
@@ -23,7 +34,6 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 const emptyPayoutForm = { partyId: "", periodKey: "" };
 const emptyRefundForm = { paymentId: "", obligationId: "", amount: "", reason: "" };
 const emptyDisputeForm = { paymentId: "", category: "OTHER", description: "" };
-
 export function FinanceOpsManager() {
   const [payments, setPayments] = useState<SimulatedPayment[]>([]);
   const [obligations, setObligations] = useState<Obligation[]>([]);
@@ -31,6 +41,8 @@ export function FinanceOpsManager() {
   const [refunds, setRefunds] = useState<RefundRequest[]>([]);
   const [disputes, setDisputes] = useState<DisputeCase[]>([]);
   const [runs, setRuns] = useState<ReconciliationRun[]>([]);
+  const [pendingInstructions, setPendingInstructions] = useState<RentalPaymentInstruction[]>([]);
+  const [capabilities, setCapabilities] = useState<PaymentCapabilities | null>(null);
   const [toast, setToast] = useState("");
   const [role, setRole] = useState<AdminRole | null>(null);
 
@@ -41,15 +53,17 @@ export function FinanceOpsManager() {
   const [disputeModalOpen, setDisputeModalOpen] = useState(false);
   const [disputeForm, setDisputeForm] = useState(emptyDisputeForm);
 
-  function showToast(message: string) {
+  // Stable identity -- ListingFeePriceBookManager reloads when it changes.
+  const showToast = useCallback((message: string) => {
     setToast(message);
     setTimeout(() => setToast(""), 3600);
-  }
+  }, []);
 
   const loadAll = useCallback(async () => {
     try {
       const admin = await getCurrentAdmin();
       setRole(admin?.role ?? null);
+      setCapabilities(await apiClientFetch<PaymentCapabilities>("/api/finance/capabilities"));
 
       const [paymentsData, obligationsData, payoutsData, refundsData, disputesData] = await Promise.all([
         apiClientFetch<SimulatedPayment[]>("/api/finance/payments"),
@@ -68,11 +82,14 @@ export function FinanceOpsManager() {
       // separately so a 403 here never blocks the rest of the page for a provider.
       if (admin?.role === "super_admin") {
         setRuns(await apiClientFetch<ReconciliationRun[]>("/api/finance/reconciliation"));
+        setPendingInstructions(
+          await apiClientFetch<RentalPaymentInstruction[]>("/api/finance/rental-payments/instructions/pending-review"),
+        );
       }
     } catch {
       showToast("Failed to load finance operations data");
     }
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     loadAll();
@@ -85,7 +102,7 @@ export function FinanceOpsManager() {
         method: "POST",
         body: JSON.stringify({ partyId: Number(payoutForm.partyId), periodKey: payoutForm.periodKey }),
       });
-      showToast(payout.status === "HELD" ? `Payout held: ${payout.holdReason}` : `Payout of ${formatCurrency(payout.amount)} paid`);
+      showToast(payout.status === "HELD" ? `Payout held: ${payout.holdReason}` : `Payout of ${formatCurrency(payout.amount, payout.currency)} paid`);
       setPayoutModalOpen(false);
       setPayoutForm(emptyPayoutForm);
       loadAll();
@@ -158,6 +175,19 @@ export function FinanceOpsManager() {
     }
   }
 
+  async function reviewInstruction(id: number, approve: boolean) {
+    try {
+      await apiClientFetch(`/api/finance/rental-payments/instructions/${id}/${approve ? "approve" : "reject"}`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "" }),
+      });
+      showToast(approve ? "Payment instruction approved and activated" : "Payment instruction rejected");
+      loadAll();
+    } catch {
+      showToast("Failed to review this payment instruction");
+    }
+  }
+
   async function runReconciliation() {
     try {
       const run = await apiClientFetch<ReconciliationRun>("/api/finance/reconciliation/run", { method: "POST" });
@@ -176,16 +206,24 @@ export function FinanceOpsManager() {
             <Landmark className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
             <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Provider Payouts</h2>
           </div>
-          <Button size="sm" variant="accent" onClick={() => setPayoutModalOpen(true)}>
-            Run Payout
-          </Button>
+          {capabilities?.host_payouts_enabled && (
+            <Button size="sm" variant="accent" onClick={() => setPayoutModalOpen(true)}>
+              Run Payout
+            </Button>
+          )}
         </div>
+        {capabilities && !capabilities.host_payouts_enabled && (
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Zoiko Rooms doesn&apos;t collect or pay out rental money — renters pay hosts directly using their verified
+            payment instructions. Past payouts are shown for the record only.
+          </p>
+        )}
         <div className="mt-4 space-y-2">
           {payouts.map((payout) => (
             <div key={payout.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
               <div>
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                  Party {payout.partyId} · {formatCurrency(payout.amount)} · {payout.periodKey}
+                  Party {payout.partyId} · {formatCurrency(payout.amount, payout.currency)} · {payout.periodKey}
                 </p>
                 {payout.holdReason && <p className="text-xs text-accent-600">{payout.holdReason}</p>}
               </div>
@@ -202,22 +240,30 @@ export function FinanceOpsManager() {
             <RotateCcw className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
             <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Refunds</h2>
           </div>
-          <Button size="sm" variant="accent" onClick={() => setRefundModalOpen(true)}>
-            Request Refund
-          </Button>
+          {capabilities?.rent_collection_enabled && (
+            <Button size="sm" variant="accent" onClick={() => setRefundModalOpen(true)}>
+              Request Refund
+            </Button>
+          )}
         </div>
+        {capabilities && !capabilities.rent_collection_enabled && (
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Rental refunds happen directly between renter and recipient. Listing Fee refunds are handled from the Listing
+            Fee payment itself.
+          </p>
+        )}
         <div className="mt-4 space-y-2">
           {refunds.map((refund) => (
             <div key={refund.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
               <div>
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                  {formatCurrency(refund.amount)} · payment #{refund.paymentId} · obligation #{refund.obligationId}
+                  {formatCurrency(refund.amount, refund.currency)} · payment #{refund.paymentId} · obligation #{refund.obligationId}
                 </p>
                 <p className="text-xs text-slate-500 dark:text-slate-400">{refund.reason || "No reason given"}</p>
               </div>
               <div className="flex items-center gap-2">
                 <Badge tone={refundStatusTone[refund.status]}>{refundStatusLabel[refund.status] ?? refund.status}</Badge>
-                {refund.status === "REQUESTED" && (
+                {refund.status === "REQUESTED" && capabilities?.rent_collection_enabled && (
                   <>
                     <Button size="sm" variant="primary" onClick={() => decideRefund(refund.id, true)}>
                       Approve
@@ -269,6 +315,42 @@ export function FinanceOpsManager() {
           {disputes.length === 0 && <p className="text-sm text-slate-400">No disputes yet.</p>}
         </div>
       </section>
+
+      {role === "super_admin" && (
+        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
+          <div className="flex items-center gap-2">
+            <ShieldAlert className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
+            <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Payment instructions awaiting review</h2>
+          </div>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            ZR-PAY-002 Section 9.1: a landlord/agent&apos;s payment-instruction change flagged high-risk (e.g. right after a
+            password reset) still needs a restricted admin&apos;s approval before it can supersede the current instruction.
+          </p>
+          <div className="mt-4 space-y-2">
+            {pendingInstructions.map((i) => (
+              <div key={i.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
+                <div>
+                  <p className="text-sm font-semibold text-primary-900 dark:text-white">
+                    {i.recipientName} · {i.method.replace(/_/g, " ").toLowerCase()} · {i.accountIdentifierMasked}
+                  </p>
+                  <p className="text-xs text-amber-600 dark:text-amber-400">{i.highRiskReason || "Flagged high-risk"}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="primary" onClick={() => reviewInstruction(i.id, true)}>
+                    Approve
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => reviewInstruction(i.id, false)}>
+                    Reject
+                  </Button>
+                </div>
+              </div>
+            ))}
+            {pendingInstructions.length === 0 && <p className="text-sm text-slate-400">Nothing awaiting review right now.</p>}
+          </div>
+        </section>
+      )}
+
+      {role === "super_admin" && <ListingFeePriceBookManager showToast={showToast} />}
 
       {role === "super_admin" && (
         <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
@@ -355,7 +437,7 @@ export function FinanceOpsManager() {
               <option value="">Select a payment…</option>
               {payments.map((p) => (
                 <option key={p.id} value={p.id}>
-                  #{p.id} · {formatCurrency(p.amount)} · {p.status}
+                  #{p.id} · {formatCurrency(p.amount, p.currency)} · {p.status}
                 </option>
               ))}
             </select>
@@ -371,13 +453,18 @@ export function FinanceOpsManager() {
               <option value="">Select an obligation…</option>
               {obligations.map((o) => (
                 <option key={o.id} value={o.id}>
-                  #{o.id} · {o.obligationType} · {formatCurrency(o.amount)}
+                  #{o.id} · {o.obligationType} · {formatCurrency(o.amount, o.currency)}
                 </option>
               ))}
             </select>
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Amount (₹)</label>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Amount{(() => {
+                const selectedPayment = payments.find((p) => String(p.id) === refundForm.paymentId);
+                return selectedPayment ? ` (${selectedPayment.currency})` : "";
+              })()}
+            </label>
             <input
               type="number"
               min={0}
@@ -413,7 +500,7 @@ export function FinanceOpsManager() {
               <option value="">None</option>
               {payments.map((p) => (
                 <option key={p.id} value={p.id}>
-                  #{p.id} · {formatCurrency(p.amount)}
+                  #{p.id} · {formatCurrency(p.amount, p.currency)}
                 </option>
               ))}
             </select>
@@ -446,8 +533,13 @@ export function FinanceOpsManager() {
       </Modal>
 
       {toast && (
-        <div className="animate-fade-up fixed bottom-6 right-6 z-[300] flex max-w-sm items-center gap-2 rounded-xl bg-primary-900 px-4 py-3 text-sm font-medium text-white shadow-2xl">
-          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" /> {toast}
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="animate-fade-up fixed bottom-6 right-6 z-[300] flex max-w-sm items-center gap-2 rounded-xl bg-primary-900 px-4 py-3 text-sm font-medium text-white shadow-2xl"
+        >
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" aria-hidden="true" /> {toast}
         </div>
       )}
     </div>

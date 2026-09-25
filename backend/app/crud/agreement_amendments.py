@@ -13,13 +13,14 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.crud.agreement_legal_hold import get_active_legal_hold
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
 from app.crud.party import assert_provider_access, party_id_for_listing
 from app.models.admin_user import AdminUser
 from app.models.agreement_amendment import AMENDMENT_TYPES, AgreementAmendment
 from app.models.leasing import Agreement, AgreementVersion
-from app.services.agreement_profile import resolve_agreement_profile
+from app.services.agreement_profile import no_agreement_profile_message, resolve_agreement_profile
 
 _PROPOSABLE_TERM_KEYS = ("monthlyRent", "depositAmount", "startDate", "termMonths")
 
@@ -44,6 +45,14 @@ def request_amendment(db: Session, agreement: Agreement, admin: AdminUser, reaso
     source_version = agreement.versions[-1]
     if source_version.status != "EXECUTED_IMMUTABLE":
         raise HTTPException(status.HTTP_409_CONFLICT, "The current version is not yet executed")
+    # Section 4 gap: a legal hold is a preservation obligation -- amending
+    # must not be allowed to proceed over an active one (same shape as
+    # dispute_evidence.py:archive_evidence refusing over an active hold).
+    if get_active_legal_hold(db, agreement) is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Cannot amend an agreement under an active legal hold -- release the hold first",
+        )
 
     amendment = AgreementAmendment(
         agreement_id=agreement.id, source_version_id=source_version.id, reason=reason,
@@ -162,7 +171,7 @@ def approve_amendment(db: Session, amendment: AgreementAmendment, admin: AdminUs
     if profile is None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "No approved agreement profile for this listing's jurisdiction -- routed to manual review",
+            no_agreement_profile_message(db, listing, listing.room),
         )
 
     new_snapshot = _merged_snapshot(source_version.snapshot, amendment.proposed_terms)

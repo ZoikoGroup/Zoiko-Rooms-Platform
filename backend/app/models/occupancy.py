@@ -5,7 +5,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-OCCUPANCY_STATUSES = ("PENDING_MOVE_IN", "ACTIVE", "ENDED")
+OCCUPANCY_STATUSES = ("PENDING_MOVE_IN", "ACTIVE", "ENDED", "CANCELLED")
 
 
 class Occupancy(Base):
@@ -15,7 +15,15 @@ class Occupancy(Base):
     `generate_next_rent_obligation()` in crud/occupancy.py, triggered automatically
     right after the current period's rent obligation is marked paid, or manually via
     an admin action. `expected_end_date` bounds how far that generation can run
-    without a lease renewal step."""
+    without a lease renewal step.
+
+    Section 7 gap: CANCELLED is distinct from ENDED -- "someone lived here and
+    the tenancy lawfully ended" and "this signed booking was cancelled before
+    anyone ever moved in" are different facts for every downstream read
+    (occupancy lists, reporting), even though both are terminal, non-ACTIVE
+    states. Only reachable from PENDING_MOVE_IN, via
+    crud/occupancy.py:cancel_before_move_in -- never from ACTIVE (an active
+    tenancy is ended, not cancelled)."""
 
     __tablename__ = "occupancies"
 

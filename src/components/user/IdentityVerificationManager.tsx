@@ -25,7 +25,7 @@ export function IdentityVerificationManager() {
   const { toast, showToast } = useToast();
 
   const [category, setCategory] = useState<DocumentCategory>("identity");
-  const [documentType, setDocumentType] = useState<IdentityDocumentType>("aadhaar");
+  const [documentType, setDocumentType] = useState<IdentityDocumentType>(documentTypesByCategory.identity[0].value);
   const [customDocumentName, setCustomDocumentName] = useState("");
   const [documentNumber, setDocumentNumber] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -62,7 +62,7 @@ export function IdentityVerificationManager() {
     setError("");
     setSubmitting(true);
     try {
-      await submitIdentityVerification({
+      const submitted = await submitIdentityVerification({
         documentType,
         file,
         documentNumber: documentNumber.trim(),
@@ -72,7 +72,18 @@ export function IdentityVerificationManager() {
       setCustomDocumentName("");
       setFile(null);
       await refreshIdentity();
-      showToast("Document submitted. A Zoiko super admin will review it shortly.");
+      // The automated scan may already have decided -- only say a reviewer
+      // will look at it when one actually will.
+      if (submitted.status === "verified") {
+        showToast("Your document was verified automatically.");
+      } else if (submitted.status === "additional_evidence_required") {
+        showToast(
+          "We couldn't read this document clearly. Please upload a clearer photo — our team can also review it.",
+          "error"
+        );
+      } else {
+        showToast("Document submitted. A Zoiko reviewer will check it shortly.");
+      }
     } catch (err) {
       setError(errorMessage(err, "Could not submit your document. Please try again."));
     } finally {

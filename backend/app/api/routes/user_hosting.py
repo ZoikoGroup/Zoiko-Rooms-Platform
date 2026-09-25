@@ -1,18 +1,41 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
+from fastapi.responses import FileResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.correlation import get_correlation_id
 from app.core.image_uploads import save_listing_images
+from app.core.property_verification_uploads import (
+    resolve_property_verification_document_path,
+    save_property_verification_document,
+)
+from app.core.rate_limit import sublet_document_limiter
+from app.core.signed_urls import verify_signed_download_token
 from app.crud.audit import log_audit_event
+from app.crud.eligibility import check_move_in_eligibility
 from app.crud.events import emit_event
+from app.crud import activation_gate as gate_crud
+from app.crud import authority as authority_crud
 from app.crud import leasing as leasing_crud
 from app.crud import listing as listing_crud
-from app.crud.property import get_property, list_rooms_for_property
+from app.crud import occupancy as occupancy_crud
+from app.crud import payment_connection as payment_connection_crud
+from app.crud import payment_recipient_authority as payment_recipient_authority_crud
+from app.crud import property_verification as property_verification_crud
+from app.crud import sublet as sublet_crud
+from app.crud import sublet_documents as sublet_documents_crud
+from app.crud.property import get_property, get_room, list_rooms_for_property
+from app.crud.rental_transaction_record import build_rental_transaction_record
 from app.db.session import get_db
+from app.services import jurisdictions as jurisdiction_service
+from app.models.occupancy import Occupancy
 from app.models.user_account import UserAccount
+from app.schemas.activation_gate import HandoverEventCreate, HandoverEventRead
+from app.schemas.occupancy import PreMoveInCancellationRead, PreMoveInCancellationRequest
+from app.schemas.sublet_document import SubletDocumentRead
 from app.schemas.leasing import (
     AgreementCreateRequest,
     AgreementRead,
@@ -23,10 +46,25 @@ from app.schemas.leasing import (
     OfferRead,
     OfferTermsCreate,
     OfferTermsRead,
+    SubletChronologyEvent,
+    SubletRequestDecision,
+    SubletRequestRead,
     UserAgreementSignRequest,
 )
-from app.schemas.marketplace import PropertyCreate, PropertyRead, RoomCreate, RoomRead
+from app.schemas.marketplace import (
+    AuthorityRecordDeclare, AuthorityRecordRead, OpenJurisdictionRead, PropertyCreate, PropertyRead, RoomCreate, RoomRead,
+)
 from app.schemas.listing import ListingCreate, ListingRead, ListingUpdate
+from app.schemas.occupancy import OccupancyRead
+from app.schemas.rental_transaction_record import RentalTransactionRecordRead
+from app.schemas.verification import PropertyVerificationRead
+from app.schemas.payment_connection import PaymentConnectionRead
+from app.models.payment_recipient_authority import PaymentRecipientAuthority
+from app.schemas.payment_recipient_authority import (
+    PaymentRecipientAuthorityConfirmChange,
+    PaymentRecipientAuthorityDeclare,
+    PaymentRecipientAuthorityRead,
+)
 
 router = APIRouter(prefix="/api/users/hosting", tags=["user-hosting"], dependencies=[Depends(get_current_user)])
 
@@ -55,6 +93,177 @@ def _get_property_or_404(db: Session, property_id: int, user: UserAccount):
     return prop
 
 
+@router.post("/occupancies/{occupancy_id}/cancel-before-move-in", response_model=PreMoveInCancellationRead)
+def cancel_hosted_booking_before_move_in(
+    occupancy_id: int,
+    request: Request,
+    payload: PreMoveInCancellationRequest = PreMoveInCancellationRequest(),
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Section 7 gap: a Host cancelling a signed-but-not-moved-in booking on
+    their own property -- previously there was no Host-initiated pre-move-in
+    cancellation path at all (open_host_termination_case requires ACTIVE)."""
+    if not user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "No host party on this account")
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    correlation_id = get_correlation_id(request)
+    updated, result = occupancy_crud.cancel_before_move_in(
+        db, occupancy, host_party_id=user.party_id, reason=payload.reason, correlation_id=correlation_id,
+    )
+    log_audit_event(
+        db, None, "occupancy.cancel_before_move_in", "occupancy", str(occupancy_id), correlation_id,
+        reason=f"host_user:{user.id}; {payload.reason}",
+    )
+    emit_event(db, "occupancy.cancelled_before_move_in", "occupancy", str(occupancy_id), result)
+    db.commit()
+    return PreMoveInCancellationRead(occupancy=occupancy_crud.to_occupancy_read(db, updated), **result)
+
+
+def _get_own_occupancy_or_403(db: Session, occupancy_id: int, user: UserAccount) -> Occupancy:
+    from app.crud.party import party_id_for_listing
+
+    occupancy = occupancy_crud.get_occupancy_or_404(db, occupancy_id)
+    if not user.party_id or party_id_for_listing(occupancy.listing) != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to your property")
+    return occupancy
+
+
+@router.post("/occupancies/{occupancy_id}/handover/prepare", response_model=HandoverEventRead)
+def post_prepare_handover_as_host(
+    occupancy_id: int, payload: HandoverEventCreate, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The self-service Host counterpart to
+    api/routes/occupancy.py:post_prepare_handover -- one of the two
+    handover-evidence steps (alongside possession-delivered below) that,
+    same as confirm-move-in itself, were previously admin-portal-only
+    despite being the Host's own action. Without this, adding a
+    self-service confirm-move-in alone wouldn't be enough -- the
+    activation gate it evaluates still blocks on HANDOVER_READY_REQUIRED,
+    which nothing but a Zoiko admin could previously clear."""
+    occupancy = _get_own_occupancy_or_403(db, occupancy_id, user)
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="HANDOVER_READY", actor_kind="provider_user", actor_user_id=user.id,
+        evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),
+    )
+    log_audit_event(
+        db, None, "occupancy.handover_ready", "occupancy", str(occupancy_id), get_correlation_id(request),
+        reason=f"host_user:{user.id}",
+    )
+    emit_event(db, "occupancy.handover_ready", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
+    db.commit()
+    return event
+
+
+@router.post("/occupancies/{occupancy_id}/handover/possession-delivered", response_model=HandoverEventRead)
+def post_possession_delivered_as_host(
+    occupancy_id: int, payload: HandoverEventCreate, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The self-service Host counterpart to
+    api/routes/occupancy.py:post_possession_delivered -- see
+    post_prepare_handover_as_host's own docstring for why this exists
+    alongside it."""
+    occupancy = _get_own_occupancy_or_403(db, occupancy_id, user)
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="POSSESSION_DELIVERED", actor_kind="provider_user", actor_user_id=user.id,
+        evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),
+    )
+    log_audit_event(
+        db, None, "occupancy.possession_delivered", "occupancy", str(occupancy_id), get_correlation_id(request),
+        reason=f"host_user:{user.id}",
+    )
+    emit_event(db, "occupancy.possession_delivered", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
+    db.commit()
+    return event
+
+
+def _agreement_for_occupancy_or_404(db: Session, occupancy: Occupancy):
+    from app.models.leasing import Agreement
+
+    agreement = db.scalar(select(Agreement).where(Agreement.offer_id == occupancy.offer_id))
+    if not agreement:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No agreement found for this occupancy")
+    return agreement
+
+
+@router.get("/occupancies/{occupancy_id}/move-in-eligibility")
+def get_move_in_eligibility_as_host(
+    occupancy_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The host-facing, ownership-checked counterpart to
+    api/routes/occupancy.py's own get_move_in_eligibility (that one is
+    admin-portal-only and doesn't check listing ownership at all -- fine
+    for an internal Zoiko admin, wrong for a self-service Host). Keyed by
+    occupancy_id, not agreement_id, to match what the Host's own
+    HostingPropertiesManager.tsx already has on hand (schemas/occupancy.py:
+    OccupancyRead has no agreement_id field at all)."""
+    occupancy = _get_own_occupancy_or_403(db, occupancy_id, user)
+    agreement = _agreement_for_occupancy_or_404(db, occupancy)
+    reasons = check_move_in_eligibility(db, agreement)
+    return {"eligible": not reasons, "reasons": reasons}
+
+
+@router.post("/occupancies/{occupancy_id}/confirm-move-in", response_model=OccupancyRead)
+def post_confirm_move_in_as_host(
+    occupancy_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The self-service Host counterpart to
+    api/routes/occupancy.py:post_confirm_move_in -- same activation-gate
+    evaluation, same crud.confirm_move_in, so a real Host doesn't need a
+    Zoiko platform admin to click this for them (that was previously the
+    ONLY way this action was reachable, despite this being a Host
+    commercial decision, not an admin one -- see
+    occupancy_crud.confirm_move_in's own docstring). Keyed by occupancy_id
+    -- see get_move_in_eligibility_as_host's own docstring for why."""
+    occupancy = _get_own_occupancy_or_403(db, occupancy_id, user)
+    agreement = _agreement_for_occupancy_or_404(db, occupancy)
+    if occupancy.status == "ACTIVE":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Occupancy is already active")
+    if occupancy.status == "ENDED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Occupancy has already ended and cannot be reactivated")
+    if occupancy.status != "PENDING_MOVE_IN":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Occupancy is not awaiting move-in")
+
+    correlation_id = get_correlation_id(request)
+    evaluation = gate_crud.evaluate_activation_gate(db, occupancy)
+    decision = gate_crud.persist_activation_decision(
+        db, occupancy, evaluation, trigger="confirm_move_in", correlation_id=correlation_id,
+    )
+    log_audit_event(
+        db, None, "occupancy.activation_evaluated", "occupancy", str(occupancy.id), correlation_id,
+        reason=f"host_user:{user.id}; {evaluation.outcome}",
+    )
+    emit_event(db, "occupancy.activation_evaluated", "occupancy", str(occupancy.id), {"decisionId": decision.id, "outcome": evaluation.outcome})
+    if evaluation.outcome == "BLOCKED":
+        emit_event(db, "occupancy.activation_blocked", "occupancy", str(occupancy.id), {"decisionId": decision.id, "reasonCodes": evaluation.reason_codes})
+    if evaluation.outcome != "ACTIVATE":
+        db.commit()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"message": "Activation gate did not permit move-in", "outcome": evaluation.outcome,
+             "reasonCodes": evaluation.reason_codes, "decisionId": decision.id},
+        )
+
+    occupancy = occupancy_crud.confirm_move_in(db, agreement, user)
+    log_audit_event(db, None, "occupancy.move_in", "occupancy", str(occupancy.id), correlation_id, reason=f"host_user:{user.id}")
+    emit_event(db, "occupancy.active", "occupancy", str(occupancy.id), {"roomId": occupancy.room_id})
+    db.commit()
+    return occupancy_crud.to_occupancy_read(db, occupancy)
+
+
+@router.get("/jurisdictions", response_model=list[OpenJurisdictionRead])
+def list_open_jurisdictions(
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Regions a property can be created in: an active market release plus
+    a current market policy pack. Drives the region picker on the property
+    forms."""
+    return jurisdiction_service.list_open_jurisdictions(db)
+
+
 @router.get("/properties", response_model=list[PropertyRead])
 def list_properties(
     user: UserAccount = Depends(get_current_user),
@@ -63,14 +272,11 @@ def list_properties(
     """List all properties owned by current user."""
     if not user.party_id:
         return []
-    
-    from sqlalchemy import select
+
     from app.models.property import Property
 
-    properties = list(
-        db.scalars(select(Property).where(Property.owner_party_id == user.party_id))
-    )
-    return properties
+    properties = db.scalars(select(Property).where(Property.owner_party_id == user.party_id).order_by(Property.id))
+    return [jurisdiction_service.to_property_read(db, prop) for prop in properties]
 
 
 @router.post("/properties", response_model=PropertyRead, status_code=status.HTTP_201_CREATED)
@@ -80,10 +286,10 @@ def create_user_property(
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create a new property as a host."""
+    """Create a new property as a host, in one of the open regions."""
     if not user.party_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "User has no associated party")
-    
+
     from app.models.property import Property
 
     prop = Property(
@@ -91,15 +297,18 @@ def create_user_property(
         address=payload.address,
         city=payload.city,
         status="active",
-        jurisdiction_code=payload.jurisdiction_code,
+        jurisdiction_code=jurisdiction_service.require_open_jurisdiction(db, payload.jurisdiction_code),
     )
     db.add(prop)
     db.commit()
     db.refresh(prop)
 
-    log_audit_event(db, None, "user_property.create", "property", str(prop.id), get_correlation_id(request), reason=f"user:{user.id}")
+    log_audit_event(
+        db, None, "user_property.create", "property", str(prop.id), get_correlation_id(request),
+        reason=f"user:{user.id} region:{prop.jurisdiction_code}",
+    )
     db.commit()
-    return prop
+    return jurisdiction_service.to_property_read(db, prop)
 
 
 @router.put("/properties/{property_id}", response_model=PropertyRead)
@@ -110,18 +319,23 @@ def update_user_property(
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update a property."""
+    """Update a property. Its region can only change while nothing is bound
+    to the current region's rules yet (services/jurisdictions.py)."""
     prop = _get_property_or_404(db, property_id, user)
-    
+
+    previous_region = prop.jurisdiction_code
+    jurisdiction_service.apply_property_jurisdiction_change(db, prop, payload.jurisdiction_code)
     prop.address = payload.address
     prop.city = payload.city
-    prop.jurisdiction_code = payload.jurisdiction_code
     db.commit()
     db.refresh(prop)
 
-    log_audit_event(db, None, "user_property.update", "property", str(property_id), get_correlation_id(request), reason=f"user:{user.id}")
+    reason = f"user:{user.id}"
+    if prop.jurisdiction_code != previous_region:
+        reason += f" region:{previous_region}->{prop.jurisdiction_code}"
+    log_audit_event(db, None, "user_property.update", "property", str(property_id), get_correlation_id(request), reason=reason)
     db.commit()
-    return prop
+    return jurisdiction_service.to_property_read(db, prop)
 
 
 @router.get("/properties/{property_id}/rooms", response_model=list[RoomRead])
@@ -402,7 +616,11 @@ def create_hosted_agreement(
 ):
     correlation_id = get_correlation_id(request)
     offer = leasing_crud.get_offer_for_host_or_404(db, offer_id, user)
-    agreement = leasing_crud.create_agreement(db, offer, user, payload.selected_optional_clause_ids)
+    agreement = leasing_crud.create_agreement(
+        db, offer, user, payload.selected_optional_clause_ids,
+        signing_as_agent=payload.signing_as_agent,
+        agent_authority_evidence_ref=payload.agent_authority_evidence_ref,
+    )
     log_audit_event(
         db, None, "user_agreement.create", "agreement", str(agreement.id), correlation_id, reason=f"user:{user.id}",
     )
@@ -487,3 +705,430 @@ def sign_hosted_agreement(
         )
     db.commit()
     return updated
+
+
+# --- Sublet requests (ZR-SUB-003: 'A tenant's request for permission to sublet
+# must be sent to the verified landlord, agent or other authorized property
+# representative. Zoiko Rooms records and routes the request; it does not
+# grant permission on the owner's behalf.' -- the Host, not Zoiko Admin, is
+# the real decision-maker.) -------------------------------------------------
+
+
+@router.get("/sublet-requests", response_model=list[SubletRequestRead])
+def list_hosted_sublet_requests(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    requests = sublet_crud.list_sublet_requests_for_host(db, user)
+    return [sublet_crud.to_sublet_request_read(db, r) for r in requests]
+
+
+@router.get("/sublet-requests/{sublet_request_id}", response_model=SubletRequestRead)
+def get_hosted_sublet_request(
+    sublet_request_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    return sublet_crud.to_sublet_request_read(db, sublet_request)
+
+
+@router.get("/sublet-requests/{sublet_request_id}/record")
+def download_hosted_sublet_decision_record(
+    sublet_request_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Wireframe J: 'The provider sees the same canonical decision
+    facts.' The Host's own copy of the downloadable record."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    pdf_bytes = sublet_crud.generate_sublet_decision_record_pdf(db, sublet_request)
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="sublet-request-{sublet_request_id}.pdf"'},
+    )
+
+
+@router.post("/sublet-requests/{sublet_request_id}/request-info", response_model=SubletRequestRead)
+def request_hosted_sublet_more_info(
+    sublet_request_id: int,
+    request: Request,
+    payload: SubletRequestDecision,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The Host asks the tenant for more information before deciding."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    updated = sublet_crud.request_more_sublet_info(
+        db, sublet_request, user, payload.notes,
+        requested_document_types=payload.requested_document_types, due_at=payload.due_at,
+    )
+    log_audit_event(
+        db, None, "user_sublet_request.request_info", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "sublet_request.more_information_requested", "sublet_request", str(sublet_request_id), {})
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
+
+
+@router.post("/sublet-requests/{sublet_request_id}/approve", response_model=SubletRequestRead)
+def approve_hosted_sublet_request(
+    sublet_request_id: int,
+    request: Request,
+    payload: SubletRequestDecision | None = None,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The Host approves a sublet request for their own listing."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    approved = sublet_crud.approve_sublet_request(
+        db, sublet_request, user,
+        payload.notes if payload else "", payload.conditions if payload else "", payload.expires_at if payload else None,
+        condition_list=payload.condition_list if payload else None,
+        authority_confirmed=payload.authority_confirmed if payload else False,
+        step_up_password=payload.step_up_password if payload else "",
+    )
+    log_audit_event(
+        db, None, "user_sublet_request.approve", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(
+        db, "sublet_request.approved", "sublet_request", str(sublet_request_id),
+        {"occupancyId": approved.current_occupancy_id, "arrangementType": approved.arrangement_type},
+    )
+    db.commit()
+    db.refresh(approved)
+    return sublet_crud.to_sublet_request_read(db, approved)
+
+
+@router.post("/sublet-requests/{sublet_request_id}/decline", response_model=SubletRequestRead)
+def decline_hosted_sublet_request(
+    sublet_request_id: int,
+    request: Request,
+    payload: SubletRequestDecision | None = None,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The Host declines a sublet request for their own listing."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    declined = sublet_crud.reject_sublet_request(
+        db, sublet_request, user, payload.notes if payload else "", payload.decline_reason_code if payload else "",
+    )
+    log_audit_event(
+        db, None, "user_sublet_request.decline", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    emit_event(db, "sublet_request.rejected", "sublet_request", str(sublet_request_id), {"occupancyId": declined.current_occupancy_id})
+    db.commit()
+    db.refresh(declined)
+    return sublet_crud.to_sublet_request_read(db, declined)
+
+
+@router.get("/sublet-requests/{sublet_request_id}/audit", response_model=list[SubletChronologyEvent])
+def get_hosted_sublet_request_audit_trail(
+    sublet_request_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Section 12/Wireframe J: 'The provider sees the same
+    canonical decision facts.' The Host's own privileged audit view."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    return sublet_crud.build_sublet_audit_trail(sublet_request)
+
+
+@router.post(
+    "/sublet-requests/{sublet_request_id}/documents", response_model=SubletDocumentRead, status_code=status.HTTP_201_CREATED,
+)
+async def upload_hosted_sublet_document(
+    sublet_request_id: int, request: Request, file: UploadFile = File(...),
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The Host's own document upload (e.g. a landlord consent letter) on a
+    sublet request for their own listing."""
+    if not sublet_document_limiter.allow(f"sublet_document_upload:user:{user.id}"):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many documents uploaded -- please wait before trying again.")
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    document = await sublet_documents_crud.upload_sublet_document(db, sublet_request, file, uploaded_by_user_id=user.id)
+    log_audit_event(
+        db, None, "user_sublet_document.upload", "evidence_artifact", str(document.id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    db.commit()
+    return sublet_documents_crud.to_sublet_document_read(
+        document, download_path=f"/api/users/hosting/sublet-requests/{sublet_request_id}/documents/{document.id}/file",
+    )
+
+
+@router.get("/sublet-requests/{sublet_request_id}/documents", response_model=list[SubletDocumentRead])
+def list_hosted_sublet_documents(
+    sublet_request_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    return [
+        sublet_documents_crud.to_sublet_document_read(
+            d, download_path=f"/api/users/hosting/sublet-requests/{sublet_request_id}/documents/{d.id}/file",
+        )
+        for d in sublet_documents_crud.list_sublet_documents(db, sublet_request)
+    ]
+
+
+@router.get("/sublet-requests/{sublet_request_id}/documents/{document_id}/file")
+def download_hosted_sublet_document(
+    sublet_request_id: int, document_id: int, token: str,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    document = sublet_documents_crud.get_sublet_document_or_404(db, sublet_request, document_id)
+    verify_signed_download_token(token, "sublet_document", str(document.id))
+    return sublet_documents_crud.sublet_document_file_response(document)
+
+
+# --- Lister, Property & Authority Verification: Host self-service submission ---
+# Deliberately separate from IdentityVerification (who the lister is). Both
+# routes below scope themselves to a room the calling host's own party
+# actually owns via get_room + the crud layer's own ownership check --
+# same shape as _get_property_or_404 above, just at the room level.
+
+
+@router.get("/rooms/{room_id}/authority-records", response_model=list[AuthorityRecordRead])
+def list_hosted_room_authority_records(
+    room_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    return authority_crud.list_authority_records_for_room_owned_by(db, user, room)
+
+
+@router.post(
+    "/rooms/{room_id}/authority-records", response_model=AuthorityRecordRead, status_code=status.HTTP_201_CREATED,
+)
+def declare_hosted_authority_record(
+    room_id: int,
+    payload: AuthorityRecordDeclare,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if payload.room_id != room_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "roomId in the body must match the room in the URL")
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    record = authority_crud.declare_authority_record(
+        db, user, room, relationship_type=payload.relationship_type, evidence_ref=payload.evidence_ref,
+    )
+    emit_event(
+        db, "authority_record.declared", "authority_record", str(record.id),
+        {"roomId": room_id}, correlation_id=get_correlation_id(request),
+    )
+    db.commit()
+    return record
+
+
+# --- ZR-PAY-LINK-003 Section 1.1/2: payment-receipt authority, deliberately
+# separate from the list-authority routes above -- "authority to list" and
+# "authority to receive payments" are separate claims. Unlike the routes
+# above, recipient_party_id may name a party other than the caller.
+
+
+@router.get("/rooms/{room_id}/payment-connection", response_model=PaymentConnectionRead)
+def get_hosted_room_payment_connection(room_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """ZR-PAY-LINK-003 Section 3.1 -- the consolidated recipient+destination
+    status view, ahead of the raw authority-list route below so a host can
+    see *why* payments aren't ACTIVE yet without cross-referencing two
+    endpoints."""
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    return payment_connection_crud.get_payment_connection_for_room_owned_by(db, user, room)
+
+
+@router.get("/rooms/{room_id}/payment-recipient-authorities", response_model=list[PaymentRecipientAuthorityRead])
+def list_hosted_room_payment_recipient_authorities(
+    room_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    return payment_recipient_authority_crud.list_payment_recipient_authorities_for_room_owned_by(db, user, room)
+
+
+@router.post(
+    "/rooms/{room_id}/payment-recipient-authorities", response_model=PaymentRecipientAuthorityRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def declare_hosted_payment_recipient_authority(
+    room_id: int,
+    payload: PaymentRecipientAuthorityDeclare,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if payload.room_id != room_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "roomId in the body must match the room in the URL")
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    # Wireframe A's default choice, "Me / the property owner" -- the
+    # frontend has no reason to otherwise know its own party id.
+    recipient_party_id = payload.recipient_party_id if payload.recipient_party_id is not None else user.party_id
+    record, _raw_code = payment_recipient_authority_crud.declare_payment_recipient_authority(
+        db, user, room, recipient_party_id=recipient_party_id,
+        relationship_type=payload.relationship_type, evidence_ref=payload.evidence_ref,
+    )
+    emit_event(
+        db, "payment_recipient_authority.declared", "payment_recipient_authority", str(record.id),
+        {"roomId": room_id}, correlation_id=get_correlation_id(request),
+    )
+    db.commit()
+    return record
+
+
+def _get_room_scoped_payment_recipient_authority(db: Session, room_id: int, authority_id: int) -> PaymentRecipientAuthority:
+    record = payment_recipient_authority_crud.get_payment_recipient_authority_or_404(db, authority_id)
+    if record.room_id != room_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment recipient authority not found for this room")
+    return record
+
+
+@router.post("/rooms/{room_id}/payment-recipient-authorities/{authority_id}/resend-change-code")
+def resend_hosted_payment_recipient_authority_change_code(
+    room_id: int, authority_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-PAY-LINK-003 Section 14.1's step-up code, resent -- only the
+    submitting room's own owner, same ownership check
+    declare_payment_recipient_authority/confirm_payment_recipient_authority_change
+    already enforce."""
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    if not user.party_id or room.property.owner_party_id != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only manage payments for your own room")
+    record = _get_room_scoped_payment_recipient_authority(db, room_id, authority_id)
+    payment_recipient_authority_crud.resend_payment_recipient_authority_change_code(db, record, user)
+    return {"sent": True}
+
+
+@router.post(
+    "/rooms/{room_id}/payment-recipient-authorities/{authority_id}/confirm-change",
+    response_model=PaymentRecipientAuthorityRead,
+)
+def confirm_hosted_payment_recipient_authority_change(
+    room_id: int, authority_id: int, payload: PaymentRecipientAuthorityConfirmChange, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    if not user.party_id or room.property.owner_party_id != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only manage payments for your own room")
+    record = _get_room_scoped_payment_recipient_authority(db, room_id, authority_id)
+    updated = payment_recipient_authority_crud.confirm_payment_recipient_authority_change(db, record, user, payload.code)
+    emit_event(
+        db, "payment_recipient_authority.change_confirmed", "payment_recipient_authority", str(updated.id),
+        {"roomId": room_id}, correlation_id=get_correlation_id(request),
+    )
+    db.commit()
+    return updated
+
+
+@router.get("/rooms/{room_id}/property-verifications", response_model=list[PropertyVerificationRead])
+def list_hosted_room_property_verifications(
+    room_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    return property_verification_crud.list_property_verifications_for_room_owned_by(db, user, room)
+
+
+@router.post(
+    "/rooms/{room_id}/property-verifications", response_model=PropertyVerificationRead, status_code=status.HTTP_201_CREATED,
+)
+async def declare_hosted_property_verification(
+    room_id: int,
+    request: Request,
+    evidence_ref: str = Form(...),
+    file: UploadFile = File(...),
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """A multipart request (not JSON) since it always carries a real
+    evidence file now -- see core/property_verification_uploads.py for
+    content validation and storage. Previously evidence_ref (free text)
+    was the only thing ever recorded, with no real document behind it."""
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    stored_filename, original_filename, content_type, file_size, _sha256_hash = await save_property_verification_document(file)
+    record = property_verification_crud.declare_property_verification(
+        db, user, room, evidence_ref=evidence_ref,
+        stored_filename=stored_filename, original_filename=original_filename,
+        content_type=content_type, file_size=file_size,
+    )
+    emit_event(
+        db, "property_verification.declared", "property_verification", str(record.id),
+        {"roomId": room_id}, correlation_id=get_correlation_id(request),
+    )
+    db.commit()
+    return record
+
+
+@router.get("/rooms/{room_id}/property-verifications/{verification_id}/document")
+def download_hosted_property_verification_document(
+    room_id: int, verification_id: int,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Streams the host's own uploaded evidence document -- same
+    ownership-check + streaming shape as user_identity.py's
+    download_own_identity_document."""
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    record = property_verification_crud.get_property_verification_or_404(db, verification_id)
+    if not user.party_id or room.property.owner_party_id != user.party_id or record.room_id != room_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view property verification documents for your own room")
+    if not record.document_file_path:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No document was uploaded for this verification")
+
+    path = resolve_property_verification_document_path(record.document_file_path)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored document could not be found")
+
+    return FileResponse(
+        path,
+        media_type=record.document_file_content_type or "application/octet-stream",
+        filename=record.document_file_original_name or "document",
+    )
+
+
+# --- Rental Transaction Record: host-facing read-only view --------------
+# Same computed-composite build as the renter route (user_rentals.py's own
+# GET .../occupancies/{id}/transaction-record) -- ownership is checked
+# against the room's own owner_party_id (this file's established pattern),
+# never Listing.owner_id, since a self-service host authenticates as a
+# UserAccount, not the legacy AdminUser a Listing.owner_id check assumes.
+# include_identity is never set here -- a host must never see the renter's
+# own identity-verification claim.
+
+
+@router.get("/rooms/{room_id}/occupancies", response_model=list[OccupancyRead])
+def list_hosted_room_occupancies(
+    room_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The host-facing entry point into the Rental Transaction Record: lets
+    a host discover which occupancies (current and past tenancies) exist
+    for a room they own, so the UI has an occupancy_id to request a
+    transaction record for -- mirrors list_hosted_room_authority_records/
+    list_hosted_room_property_verifications above exactly."""
+    room = get_room(db, room_id)
+    if not room:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
+    return [occupancy_crud.to_occupancy_read(db, o) for o in occupancy_crud.list_occupancies_for_room_owned_by(db, user, room)]
+
+
+@router.get("/occupancies/{occupancy_id}/transaction-record", response_model=RentalTransactionRecordRead)
+def get_hosted_rental_transaction_record(
+    occupancy_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    if not user.party_id or not occupancy.room or occupancy.room.property.owner_party_id != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view rental records for your own rooms")
+    return build_rental_transaction_record(db, occupancy, include_identity=False)

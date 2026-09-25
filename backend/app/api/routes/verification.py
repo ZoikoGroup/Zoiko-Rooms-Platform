@@ -1,16 +1,21 @@
 """ZR-ENG-CLR-012: admin-facing Verification Operations routes. Manual-review
 only in this MVP -- see crud/occupancy_eligibility.py."""
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, require_super_admin
+from app.core.correlation import get_correlation_id
+from app.crud import identity_verification as identity_verification_crud
 from app.crud import occupancy_eligibility as crud
 from app.crud import property_compliance as compliance_crud
+from app.crud import property_verification as property_verification_crud
 from app.crud import screening as screening_crud
 from app.crud.audit import log_audit_event
 from app.db.session import get_db
 from app.models.admin_user import AdminUser
+from app.models.identity_verification import IdentityVerification
 from app.schemas.verification import (
     OccupancyEligibilityCheckCreate,
     OccupancyEligibilityCheckRead,
@@ -20,6 +25,10 @@ from app.schemas.verification import (
     PropertyComplianceCredentialRead,
     PropertyComplianceCredentialRevoke,
     PropertyComplianceCredentialVerifyDeclared,
+    PropertyVerificationRead,
+    PropertyVerificationReject,
+    PropertyVerificationRequestAdditionalEvidence,
+    PropertyVerificationRevoke,
     ScreeningCheckCreate,
     ScreeningCheckRead,
     ScreeningDecisionCreate,
@@ -154,6 +163,109 @@ def post_resume_property_compliance_credential(
     credential = compliance_crud.get_property_compliance_credential_or_404(db, credential_id)
     updated = compliance_crud.resume_property_compliance_credential(db, credential, admin)
     return compliance_crud.to_property_compliance_credential_read(db, updated)
+
+
+# --- Lister, Property & Authority Verification: admin review of Host-declared
+# property evidence (separate model/module from property-compliance-credentials
+# above -- see crud/property_verification.py's own docstring). ---
+
+
+@router.get("/property-verifications/room/{room_id}", response_model=list[PropertyVerificationRead])
+def get_property_verifications_for_room(room_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    return property_verification_crud.list_property_verifications_for_room(db, room_id)
+
+
+@router.get("/property-verifications/{verification_id}/document")
+def download_property_verification_document(
+    verification_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """Admin-side counterpart to user_hosting.py's own download route --
+    same streaming shape, no ownership check since any admin may review."""
+    from fastapi.responses import FileResponse
+
+    from app.core.property_verification_uploads import resolve_property_verification_document_path
+
+    record = property_verification_crud.get_property_verification_or_404(db, verification_id)
+    if not record.document_file_path:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No document was uploaded for this verification")
+
+    path = resolve_property_verification_document_path(record.document_file_path)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored document could not be found")
+
+    return FileResponse(
+        path,
+        media_type=record.document_file_content_type or "application/octet-stream",
+        filename=record.document_file_original_name or "document",
+    )
+
+
+@router.post(
+    "/property-verifications/{verification_id}/verify", response_model=PropertyVerificationRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_verify_property_verification(
+    verification_id: int, request: Request, admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    record = property_verification_crud.get_property_verification_or_404(db, verification_id)
+    updated = property_verification_crud.verify_property_verification(db, record, admin)
+    log_audit_event(db, admin, "property_verification.verify", "property_verification", str(verification_id), get_correlation_id(request))
+    db.commit()
+    return updated
+
+
+@router.post(
+    "/property-verifications/{verification_id}/reject", response_model=PropertyVerificationRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_reject_property_verification(
+    verification_id: int, payload: PropertyVerificationReject, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    record = property_verification_crud.get_property_verification_or_404(db, verification_id)
+    updated = property_verification_crud.reject_property_verification(db, record, admin, notes=payload.notes)
+    log_audit_event(
+        db, admin, "property_verification.reject", "property_verification", str(verification_id),
+        get_correlation_id(request), reason=payload.notes,
+    )
+    db.commit()
+    return updated
+
+
+@router.post(
+    "/property-verifications/{verification_id}/request-additional-evidence", response_model=PropertyVerificationRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_request_additional_property_evidence(
+    verification_id: int, payload: PropertyVerificationRequestAdditionalEvidence, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    record = property_verification_crud.get_property_verification_or_404(db, verification_id)
+    updated = property_verification_crud.request_additional_property_evidence(db, record, admin, notes=payload.notes)
+    log_audit_event(
+        db, admin, "property_verification.request_additional_evidence", "property_verification", str(verification_id),
+        get_correlation_id(request), reason=payload.notes,
+    )
+    db.commit()
+    return updated
+
+
+@router.post(
+    "/property-verifications/{verification_id}/revoke", response_model=PropertyVerificationRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def post_revoke_property_verification(
+    verification_id: int, payload: PropertyVerificationRevoke, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    record = property_verification_crud.get_property_verification_or_404(db, verification_id)
+    updated = property_verification_crud.revoke_property_verification(db, record, admin, reason=payload.reason)
+    log_audit_event(
+        db, admin, "property_verification.revoke", "property_verification", str(verification_id),
+        get_correlation_id(request), reason=payload.reason,
+    )
+    db.commit()
+    return updated
 
 
 @router.post("/occupancy-eligibility-checks/sweep-follow-ups", dependencies=[Depends(require_super_admin)])

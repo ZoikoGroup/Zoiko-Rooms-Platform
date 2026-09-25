@@ -2,16 +2,25 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { CalendarClock, ClipboardList, Search, ShieldAlert } from "lucide-react";
+import { CalendarClock, ClipboardList, Download, Search, ShieldAlert } from "lucide-react";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { ApiError } from "@/lib/api-client";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
-import { BookingChangeRequest, DisclosureRequirement, Offer, PaymentPreview, PublicListing, UserApplication } from "@/lib/types";
+import {
+  BookingChangeRequest,
+  DisclosureRequirement,
+  Offer,
+  PaymentPreview,
+  PublicListing,
+  RentalPaymentObligation,
+  UserApplication,
+} from "@/lib/types";
 import { applicationStatusTone, bookingChangeRequestStatusTone, bookingChangeTypeLabel } from "@/lib/status";
 import { addMonths, formatCurrency, formatDate } from "@/lib/utils";
+import { matchRentalPaymentObligation } from "@/lib/rentalPaymentMatch";
 import {
   acceptAlternativeChangeTerms,
   acceptOwnOffer,
@@ -23,6 +32,7 @@ import {
   getOwnAgreementPaymentPreview,
   getOwnOffer,
   listMyChangeRequests,
+  listMyRentalPaymentObligations,
   listOwnAgreementDisclosures,
   listPublicListings,
   listRentalApplications,
@@ -33,10 +43,13 @@ import {
   submitPremisesChangeRequest,
   submitShorteningRequest,
   submitTermShiftRequest,
+  tenantAgreementPdfUrl,
   withdrawChangeRequest,
   withdrawRentalApplication,
 } from "@/lib/user-api";
 import { Card, EmptyState, Field, Toast, inputClass, useToast } from "@/components/user/ui";
+import { SingleObligationPaymentCard } from "@/components/user/RentalPaymentsManager";
+import { DirectPaymentNotice, usePaymentCapabilities } from "@/components/user/DirectPaymentNotice";
 
 // Matches the backend's user_sign_agreement allowed-status set exactly
 // (crud/leasing.py) -- SENT is the original pre-execution flow;
@@ -62,6 +75,7 @@ const PAYMENT_METHOD_LABELS: Record<string, string> = {
 
 export function ApplicationsManager() {
   const { toast, showToast } = useToast();
+  const capabilities = usePaymentCapabilities();
   const { identityVerified } = useUserSession();
   const [applications, setApplications] = useState<UserApplication[]>([]);
   const [loading, setLoading] = useState(true);
@@ -74,6 +88,7 @@ export function ApplicationsManager() {
   const [disclosures, setDisclosures] = useState<DisclosureRequirement[]>([]);
   const [acknowledgingId, setAcknowledgingId] = useState<number | null>(null);
   const [paymentPreview, setPaymentPreview] = useState<PaymentPreview | null>(null);
+  const [rentalPaymentObligations, setRentalPaymentObligations] = useState<RentalPaymentObligation[]>([]);
   const [overlapMessage, setOverlapMessage] = useState("");
   const [overrideReasonInput, setOverrideReasonInput] = useState("");
   const [payingObligationId, setPayingObligationId] = useState<number | null>(null);
@@ -266,11 +281,24 @@ export function ApplicationsManager() {
     }
   }
 
+  // ZR-PAY-LINK-003: this agreement's own RENT/DEPOSIT RentalPaymentObligations
+  // (crud/leasing.py:create_agreement already creates these alongside the
+  // legacy pair) -- fetched separately so amountDueNow items below can be
+  // matched (src/lib/rentalPaymentMatch.ts) to the recipient-verified,
+  // non-custodial rail instead of the legacy Card/Pay-now one wherever a
+  // confident match exists.
+  function loadRentalPaymentObligations(agreementId: number) {
+    listMyRentalPaymentObligations(undefined, { agreementId })
+      .then((page) => setRentalPaymentObligations(page.items))
+      .catch(() => {});
+  }
+
   async function openOffer(application: UserApplication) {
     setOfferFor(application);
     setOffer(null);
     setDisclosures([]);
     setPaymentPreview(null);
+    setRentalPaymentObligations([]);
     setObligationMethods({});
     setOverlapMessage("");
     setOverrideReasonInput("");
@@ -282,6 +310,7 @@ export function ApplicationsManager() {
         listOwnAgreementDisclosures(loaded.agreement.id)
           .then(setDisclosures)
           .catch(() => {});
+        loadRentalPaymentObligations(loaded.agreement.id);
         getOwnAgreementPaymentPreview(loaded.agreement.id)
           .then((preview) => {
             setPaymentPreview(preview);
@@ -418,33 +447,37 @@ export function ApplicationsManager() {
     <div className="space-y-3">
       {applications.map((application) => (
         <Card key={application.id} className="flex flex-wrap items-center justify-between gap-4">
-          <Link href={`/account/rent/${application.listingId}`} className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="font-heading text-sm font-bold text-primary-900 hover:underline dark:text-white">
-                {application.listingName || application.listingId}
+          <div className="min-w-0 flex-1">
+            <Link href={`/account/rent/${application.listingId}`} className="block">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-heading text-sm font-bold text-primary-900 hover:underline dark:text-white">
+                  {application.listingName || application.listingId}
+                </p>
+                <Badge tone={applicationStatusTone[application.status] ?? "neutral"}>{application.status}</Badge>
+                {application.agreementStatus && <Badge tone="neutral">Agreement: {application.agreementStatus}</Badge>}
+                {!application.agreementStatus && application.offerStatus && (
+                  <Badge tone="neutral">Offer: {application.offerStatus}</Badge>
+                )}
+              </div>
+              <p className="mt-0.5 text-xs text-slate-400">Application #{application.listingId}</p>
+              <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+                <span className="flex items-center gap-1">
+                  <CalendarClock className="h-3 w-3" /> Submitted {formatDate(application.submittedAt)}
+                </span>
+                {application.desiredMoveIn && <span>Move-in {formatDate(application.desiredMoveIn)}</span>}
               </p>
-              <Badge tone={applicationStatusTone[application.status] ?? "neutral"}>{application.status}</Badge>
-              {application.agreementStatus && <Badge tone="neutral">Agreement: {application.agreementStatus}</Badge>}
-              {!application.agreementStatus && application.offerStatus && (
-                <Badge tone="neutral">Offer: {application.offerStatus}</Badge>
+              {application.message && (
+                <p className="mt-2 max-w-xl text-xs text-slate-500 dark:text-slate-400">“{application.message}”</p>
               )}
-            </div>
-            <p className="mt-0.5 text-xs text-slate-400">Application #{application.listingId}</p>
-            <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
-              <span className="flex items-center gap-1">
-                <CalendarClock className="h-3 w-3" /> Submitted {formatDate(application.submittedAt)}
-              </span>
-              {application.desiredMoveIn && <span>Move-in {formatDate(application.desiredMoveIn)}</span>}
-            </p>
-            {application.message && (
-              <p className="mt-2 max-w-xl text-xs text-slate-500 dark:text-slate-400">“{application.message}”</p>
-            )}
+            </Link>
             {/* ZR-ENG-CLR-012 Section 5/AC-04: identity is only required
                before CONFIRMED booking (agreement creation), not before
                applying -- once the offer is accepted and waiting on an
                agreement, an unverified renter is the one real, common
                reason nothing moves further, so surface it here instead of
-               leaving them to find out from a stalled admin-side 409. */}
+               leaving them to find out from a stalled admin-side 409.
+               A sibling of the listing Link above, not nested inside it --
+               <a> can never contain another <a> (invalid HTML, breaks hydration). */}
             {application.offerStatus === "ACCEPTED" && !application.agreementStatus && !identityVerified && (
               <Link
                 href="/account/identity"
@@ -453,7 +486,7 @@ export function ApplicationsManager() {
                 <ShieldAlert className="h-3.5 w-3.5" /> Verify your identity to keep this moving toward your agreement
               </Link>
             )}
-          </Link>
+          </div>
 
           <div className="flex shrink-0 items-center gap-2">
             {application.offerId && (
@@ -480,9 +513,16 @@ export function ApplicationsManager() {
           <Loader label="Loading your offer" />
         ) : offer ? (
           <div className="space-y-4">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Badge tone="neutral">Offer: {offer.status}</Badge>
               {offer.agreement && <Badge tone="neutral">Agreement: {offer.agreement.status}</Badge>}
+              {offer.agreement && (
+                <a href={tenantAgreementPdfUrl(offer.agreement.id)} download className="ml-auto">
+                  <Button size="sm" variant="outline">
+                    <Download className="h-3.5 w-3.5" /> Download agreement
+                  </Button>
+                </a>
+              )}
             </div>
 
             {offer.terms.length > 0 && (
@@ -618,41 +658,68 @@ export function ApplicationsManager() {
                 ) : paymentPreview.amountDueNow.length === 0 ? (
                   <p className="text-xs text-slate-400">Nothing due right now.</p>
                 ) : (
-                  paymentPreview.amountDueNow.map((o) => (
-                    <div key={o.id} className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-sm text-slate-700 dark:text-slate-200">
-                        {o.obligationType === "RENT" ? "Rent" : o.obligationType === "DEPOSIT" ? "Deposit" : o.obligationType}
-                        {" — "}
-                        {formatCurrency(o.amount, o.currency)}
-                      </span>
-                      {o.status === "PAID" ? (
-                        <Badge tone="success">Paid</Badge>
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <select
-                            className={`${inputClass} !w-auto py-1.5 text-xs`}
-                            value={selectedMethod[o.id] ?? ""}
-                            onChange={(e) => setSelectedMethod((prev) => ({ ...prev, [o.id]: e.target.value }))}
-                            disabled={!obligationMethods[o.id]?.length}
-                          >
-                            {(obligationMethods[o.id] ?? []).map((m) => (
-                              <option key={m} value={m}>
-                                {PAYMENT_METHOD_LABELS[m] ?? m}
-                              </option>
-                            ))}
-                          </select>
-                          <Button
-                            size="sm"
-                            loading={payingObligationId === o.id}
-                            disabled={!selectedMethod[o.id]}
-                            onClick={() => handlePayObligation(o.id)}
-                          >
-                            Pay now
-                          </Button>
+                  paymentPreview.amountDueNow.map((o) => {
+                    const match = matchRentalPaymentObligation(o, paymentPreview.amountDueNow, rentalPaymentObligations);
+                    if (match) {
+                      return (
+                        <div key={o.id} className="space-y-1.5">
+                          <SingleObligationPaymentCard
+                            obligation={match}
+                            onChanged={() => {
+                              if (offer?.agreement) {
+                                loadRentalPaymentObligations(offer.agreement.id);
+                                getOwnAgreementPaymentPreview(offer.agreement.id).then(setPaymentPreview).catch(() => {});
+                              }
+                              load();
+                            }}
+                          />
+                          {match.obligationType === "DEPOSIT" && (
+                            <p className="text-xs text-slate-400">
+                              Zoiko Rooms does not hold this deposit — it&apos;s held by your landlord or agent, per
+                              applicable local rules.
+                            </p>
+                          )}
                         </div>
-                      )}
-                    </div>
-                  ))
+                      );
+                    }
+                    return (
+                      <div key={o.id} className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-sm text-slate-700 dark:text-slate-200">
+                          {o.obligationType === "RENT" ? "Rent" : o.obligationType === "DEPOSIT" ? "Deposit" : o.obligationType}
+                          {" — "}
+                          {formatCurrency(o.amount, o.currency)}
+                        </span>
+                        {o.status === "PAID" ? (
+                          <Badge tone="success">Paid</Badge>
+                        ) : capabilities?.rent_collection_enabled ? (
+                          <div className="flex items-center gap-2">
+                            <select
+                              className={`${inputClass} !w-auto py-1.5 text-xs`}
+                              value={selectedMethod[o.id] ?? ""}
+                              onChange={(e) => setSelectedMethod((prev) => ({ ...prev, [o.id]: e.target.value }))}
+                              disabled={!obligationMethods[o.id]?.length}
+                            >
+                              {(obligationMethods[o.id] ?? []).map((m) => (
+                                <option key={m} value={m}>
+                                  {PAYMENT_METHOD_LABELS[m] ?? m}
+                                </option>
+                              ))}
+                            </select>
+                            <Button
+                              size="sm"
+                              loading={payingObligationId === o.id}
+                              disabled={!selectedMethod[o.id]}
+                              onClick={() => handlePayObligation(o.id)}
+                            >
+                              Pay now
+                            </Button>
+                          </div>
+                        ) : (
+                          <DirectPaymentNotice compact />
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
             )}

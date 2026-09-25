@@ -26,7 +26,9 @@ CLAUSE_STATUSES = ("DRAFT", "APPROVED", "RETIRED")
 
 class ClauseDefinition(Base):
     """ZR-ENG-CLR-004 AC-25/Section 7.2: clause_id is deliberately NOT unique
-    alone -- (clause_id, version) is, so a clause can have real history:
+    alone -- (clause_id, jurisdiction_scope, agreement_class, version) is, so
+    a clause can have real history, and each jurisdiction keeps its own
+    independent version of the same clause_id:
     create_clause_draft adds a new DRAFT row at version+1 without touching
     the currently-APPROVED row; approve_clause_version activates it
     (effective_from) and retires whatever was previously active for that
@@ -35,7 +37,12 @@ class ClauseDefinition(Base):
     crud/agreement_clauses.py."""
 
     __tablename__ = "agreement_clause_definitions"
-    __table_args__ = (UniqueConstraint("clause_id", "version", name="uq_agreement_clause_definitions_clause_id_version"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "clause_id", "jurisdiction_scope", "agreement_class", "version",
+            name="uq_agreement_clause_definitions_clause_scope_version",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     clause_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)

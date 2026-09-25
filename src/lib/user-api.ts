@@ -2,24 +2,72 @@ import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
   Agreement,
   Application,
+  AuthorityRecord,
+  AuthorityRelationshipType,
+  AutopayMandate,
   BookingChangeRequest,
+  ConditionRating,
+  ConditionReportItem,
+  ConditionReportType,
   DisclosureRequirement,
+  DisputeCaseCreate,
+  DisputeCaseExportRead,
+  DisputeCaseRead,
+  DisputeClaimCreate,
+  DisputeClaimRead,
+  DisputeDeadlineRead,
+  DisputeCaseMessageRead,
+  DisputeEvidenceRead,
+  DisputeExternalProceedingRead,
+  DisputePartyRead,
+  DisputeSettlementRead,
+  DisputeSettlementRespondAction,
+  EvidenceArtifact,
+  ExternalPaymentSession,
+  ExternalPaymentSessionCreateResult,
   HandoverEvent,
   HostedListing,
   IdentityDocumentType,
   IdentityVerificationRecord,
+  ListingFeeCheckoutSession,
+  ListingFeePayment,
+  ListingFeeQuote,
+  ListingFeeRefund,
+  Occupancy,
   Offer,
+  PaymentConnection,
   PaymentPreview,
+  PaymentRecipientAuthority,
+  PaymentRecipientRelationshipType,
+  PreMoveInCancellationResult,
+  OpenJurisdiction,
+  PaymentCapabilities,
   Property,
+  PropertyVerification,
   PublicListing,
   PublicListingsPage,
   PublishEligibility,
+  RefundEntitlement,
+  RentalPaymentCorrection,
+  RentalPaymentDiscrepancyReason,
+  RentalPaymentDispute,
+  RentalPaymentInstruction,
+  RentalPaymentMethodCategory,
+  RentalPaymentObligation,
+  RentalPaymentObligationsPage,
+  RentalPaymentProviderAccount,
+  RentalPaymentProviderAccountConnectResult,
+  RentalPaymentTimelinePage,
+  RentalTransactionRecord,
+  RentalTransactionTimelineEntry,
   RenterVerificationStatus,
   Room,
   SimulatedPayment,
   SubletArrangementType,
   SubletRenterLookup,
   SubletRequest,
+  TerminationCase,
+  TerminationCasePreview,
   UserApplication,
   UserOccupancy,
 } from "@/lib/types";
@@ -185,6 +233,15 @@ export function getOccupancy(occupancyId: number): Promise<UserOccupancy> {
   return apiClientFetch<UserOccupancy>(`/api/users/rentals/occupancies/${occupancyId}`);
 }
 
+/** Rental Transaction Record wireframe: a computed, read-only composite over
+ *  this occupancy's own Application/Offer/Agreement, payments, handover,
+ *  sublet and termination records -- see backend/app/crud/
+ *  rental_transaction_record.py. Renter-scoped: 403s for another renter's
+ *  occupancy, same as getOccupancy above. */
+export function getRentalTransactionRecord(occupancyId: number): Promise<RentalTransactionRecord> {
+  return apiClientFetch<RentalTransactionRecord>(`/api/users/rentals/occupancies/${occupancyId}/transaction-record`);
+}
+
 export function confirmHandoverReceipt(occupancyId: number): Promise<HandoverEvent> {
   return apiClientFetch<HandoverEvent>(`/api/users/rentals/occupancies/${occupancyId}/handover/receipt`, {
     method: "POST",
@@ -192,8 +249,108 @@ export function confirmHandoverReceipt(occupancyId: number): Promise<HandoverEve
   });
 }
 
+/** Section 9 gap: the move-out mirror of confirmHandoverReceipt above --
+ *  previously a naturally-expiring tenancy had no renter-notice step. */
+export function giveMoveOutNotice(occupancyId: number, notes: string): Promise<HandoverEvent> {
+  return apiClientFetch<HandoverEvent>(`/api/users/rentals/occupancies/${occupancyId}/move-out/notice`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+}
+
+export function confirmMoveOutReady(occupancyId: number, notes: string): Promise<HandoverEvent> {
+  return apiClientFetch<HandoverEvent>(`/api/users/rentals/occupancies/${occupancyId}/move-out/ready`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+}
+
+/** Section 9 gap: move-in/move-out condition report (photos + notes). */
+export function listOwnConditionReport(occupancyId: number, reportType?: ConditionReportType): Promise<ConditionReportItem[]> {
+  const query = reportType ? `?report_type=${reportType}` : "";
+  return apiClientFetch<ConditionReportItem[]>(`/api/users/rentals/occupancies/${occupancyId}/condition-report${query}`);
+}
+
+export function addOwnConditionReportItem(
+  occupancyId: number,
+  payload: { reportType: ConditionReportType; area?: string; conditionRating?: ConditionRating; notes?: string; file?: File | null },
+): Promise<ConditionReportItem> {
+  const form = new FormData();
+  form.set("report_type", payload.reportType);
+  if (payload.area) form.set("area", payload.area);
+  if (payload.conditionRating) form.set("condition_rating", payload.conditionRating);
+  if (payload.notes) form.set("notes", payload.notes);
+  if (payload.file) form.set("file", payload.file);
+  return apiClientFetch<ConditionReportItem>(`/api/users/rentals/occupancies/${occupancyId}/condition-report`, {
+    method: "POST",
+    body: form,
+  });
+}
+
 export function lookupSubletRenter(email: string): Promise<SubletRenterLookup> {
   return apiClientFetch<SubletRenterLookup>(`/api/users/rentals/sublet-lookup?email=${encodeURIComponent(email)}`);
+}
+
+/** ZR-SUB-003 Section 8 sublet.uiTerm -- the jurisdiction-resolved word for
+ *  "sublet" (e.g. "sublease" elsewhere), fetched before the create wizard
+ *  renders. Every jurisdiction defaults to "sublet" today, so this is real,
+ *  wired infrastructure with no visible effect yet -- see its own schema
+ *  docstring. */
+export function getOwnSubletTerminology(occupancyId: number): Promise<{ uiTerm: string }> {
+  return apiClientFetch<{ uiTerm: string }>(`/api/users/rentals/occupancies/${occupancyId}/sublet-terminology`);
+}
+
+/** Section 7 gap: cancel a signed-but-not-moved-in booking, with a real
+ *  refund (minus any cancellation fee outside the free-cancellation
+ *  window) -- not just a status flip. */
+export function cancelOwnBookingBeforeMoveIn(
+  occupancyId: number, reason: string
+): Promise<PreMoveInCancellationResult> {
+  return apiClientFetch<PreMoveInCancellationResult>(`/api/users/rentals/occupancies/${occupancyId}/cancel-before-move-in`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+// -- Section 6 gap: termination cases + refund entitlements -- previously
+// had a complete backend and zero renter-facing UI anywhere.
+
+export function previewOwnTermination(
+  occupancyId: number, payload: { causeCode: string; proposedEffectiveDate?: string; evidenceRefs?: string[] }
+): Promise<TerminationCasePreview> {
+  return apiClientFetch<TerminationCasePreview>(`/api/users/rentals/occupancies/${occupancyId}/termination-cases/preview`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function requestOwnTermination(
+  occupancyId: number, payload: { causeCode: string; notes?: string; proposedEffectiveDate?: string; evidenceRefs?: string[] }
+): Promise<TerminationCase> {
+  return apiClientFetch<TerminationCase>(`/api/users/rentals/occupancies/${occupancyId}/termination-cases`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listOwnTerminationCases(occupancyId: number): Promise<TerminationCase[]> {
+  return apiClientFetch<TerminationCase[]>(`/api/users/rentals/occupancies/${occupancyId}/termination-cases`);
+}
+
+export function withdrawOwnTerminationCase(caseId: number): Promise<TerminationCase> {
+  return apiClientFetch<TerminationCase>(`/api/users/rentals/termination-cases/${caseId}/withdraw`, { method: "POST" });
+}
+
+export function acceptOwnMutualSurrender(caseId: number): Promise<TerminationCase> {
+  return apiClientFetch<TerminationCase>(`/api/users/rentals/termination-cases/${caseId}/accept-surrender`, { method: "POST" });
+}
+
+export function declineOwnMutualSurrender(caseId: number): Promise<TerminationCase> {
+  return apiClientFetch<TerminationCase>(`/api/users/rentals/termination-cases/${caseId}/decline-surrender`, { method: "POST" });
+}
+
+export function getOwnRefundEntitlement(caseId: number): Promise<RefundEntitlement> {
+  return apiClientFetch<RefundEntitlement>(`/api/users/rentals/termination-cases/${caseId}/refund-entitlement`);
 }
 
 export function submitSubletRequest(
@@ -203,6 +360,9 @@ export function submitSubletRequest(
     authorityEvidenceRef?: string;
     arrangementType?: SubletArrangementType;
     proposedMonthlyRent?: number;
+    reason?: string;
+    proposedStartDate?: string;
+    proposedEndDate?: string;
   }
 ): Promise<SubletRequest> {
   return apiClientFetch<SubletRequest>(`/api/users/rentals/occupancies/${occupancyId}/sublet-request`, {
@@ -214,6 +374,33 @@ export function submitSubletRequest(
 
 export function listSubletRequests(): Promise<SubletRequest[]> {
   return apiClientFetch<SubletRequest[]>("/api/users/rentals/sublet-requests");
+}
+
+/** Answers the Host's "more information" request on the tenant's own sublet request. */
+export function respondToSubletInfoRequest(subletRequestId: number, notes: string): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/rentals/sublet-requests/${subletRequestId}/respond`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+}
+
+/** Tenant withdraws their own sublet request before a decision is made. */
+export function withdrawSubletRequest(subletRequestId: number): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/rentals/sublet-requests/${subletRequestId}/withdraw`, { method: "POST" });
+}
+
+/** The tenant's own downloadable decision record (ZR-SUB-003 Wireframe J) --
+ *  a direct link, same pattern as identityDocumentUrl above. 409s until the
+ *  request reaches a completed state (approved/rejected/withdrawn). */
+export function tenantSubletDecisionRecordUrl(subletRequestId: number): string {
+  return `${API_URL}/api/users/rentals/sublet-requests/${subletRequestId}/record`;
+}
+
+/** ZR-ENG-CLR-004 Section 4.10: "All contractual parties must have continuing
+ *  access." The renter's own copy of their agreement PDF -- the backend route
+ *  already existed with no frontend caller anywhere. */
+export function tenantAgreementPdfUrl(agreementId: number): string {
+  return `${API_URL}/api/users/rentals/agreements/${agreementId}/pdf`;
 }
 
 // --- Booking change requests (ZR-ENG-CLR-008 Section 8 MVP) ---------------
@@ -270,7 +457,7 @@ export function submitPremisesChangeRequest(
 
 export function submitFinancialChangeRequest(
   agreementId: number,
-  payload: { proposedMonthlyRent: number; reason?: string }
+  payload: { proposedMonthlyRent: number; proposedDepositAmount?: number; reason?: string }
 ): Promise<BookingChangeRequest> {
   return apiClientFetch<BookingChangeRequest>(`/api/users/rentals/agreements/${agreementId}/financial-change-requests`, {
     method: "POST",
@@ -316,17 +503,20 @@ export function listHostedProperties(): Promise<Property[]> {
   return apiClientFetch<Property[]>("/api/users/hosting/properties");
 }
 
-export function createHostedProperty(payload: { address: string; city: string }): Promise<Property> {
+export type HostedPropertyInput = { address: string; city: string; jurisdictionCode: string };
+
+export function listOpenJurisdictions(): Promise<OpenJurisdiction[]> {
+  return apiClientFetch<OpenJurisdiction[]>("/api/users/hosting/jurisdictions");
+}
+
+export function createHostedProperty(payload: HostedPropertyInput): Promise<Property> {
   return apiClientFetch<Property>("/api/users/hosting/properties", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
-export function updateHostedProperty(
-  propertyId: number,
-  payload: { address: string; city: string }
-): Promise<Property> {
+export function updateHostedProperty(propertyId: number, payload: HostedPropertyInput): Promise<Property> {
   return apiClientFetch<Property>(`/api/users/hosting/properties/${propertyId}`, {
     method: "PUT",
     body: JSON.stringify(payload),
@@ -358,6 +548,129 @@ export function updateHostedRoom(
   });
 }
 
+// Lister, Property & Authority Verification wireframe: host self-service
+// submission of authority-to-list and property evidence for a room they
+// own -- separate claims from identity (see VerificationStatusSummary).
+
+export function listHostedRoomAuthorityRecords(roomId: number): Promise<AuthorityRecord[]> {
+  return apiClientFetch<AuthorityRecord[]>(`/api/users/hosting/rooms/${roomId}/authority-records`);
+}
+
+export function declareHostedAuthorityRecord(
+  roomId: number,
+  payload: { relationshipType: AuthorityRelationshipType; evidenceRef: string }
+): Promise<AuthorityRecord> {
+  return apiClientFetch<AuthorityRecord>(`/api/users/hosting/rooms/${roomId}/authority-records`, {
+    method: "POST",
+    body: JSON.stringify({ roomId, ...payload }),
+  });
+}
+
+export function listHostedRoomPropertyVerifications(roomId: number): Promise<PropertyVerification[]> {
+  return apiClientFetch<PropertyVerification[]>(`/api/users/hosting/rooms/${roomId}/property-verifications`);
+}
+
+export function declareHostedPropertyVerification(
+  roomId: number, payload: { evidenceRef: string; file: File },
+): Promise<PropertyVerification> {
+  const form = new FormData();
+  form.append("evidence_ref", payload.evidenceRef);
+  form.append("file", payload.file);
+  return apiClientFetch<PropertyVerification>(`/api/users/hosting/rooms/${roomId}/property-verifications`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+// ZR-PAY-LINK-003 Section 1.1/2: "authority to list" and "authority to
+// receive payments" are separate claims -- a distinct submission from
+// declareHostedAuthorityRecord above, and the recipient may be a different
+// party than the submitting host (an authorized agent/manager).
+
+export function listHostedRoomPaymentRecipientAuthorities(roomId: number): Promise<PaymentRecipientAuthority[]> {
+  return apiClientFetch<PaymentRecipientAuthority[]>(`/api/users/hosting/rooms/${roomId}/payment-recipient-authorities`);
+}
+
+/** ZR-PAY-LINK-003 Section 3.1: the consolidated recipient+destination
+ *  status view for a room. */
+export function getHostedRoomPaymentConnection(roomId: number): Promise<PaymentConnection> {
+  return apiClientFetch<PaymentConnection>(`/api/users/hosting/rooms/${roomId}/payment-connection`);
+}
+
+export function declareHostedPaymentRecipientAuthority(
+  roomId: number,
+  payload: { recipientPartyId?: number; relationshipType: PaymentRecipientRelationshipType; evidenceRef: string }
+): Promise<PaymentRecipientAuthority> {
+  return apiClientFetch<PaymentRecipientAuthority>(`/api/users/hosting/rooms/${roomId}/payment-recipient-authorities`, {
+    method: "POST",
+    body: JSON.stringify({ roomId, ...payload }),
+  });
+}
+
+/** ZR-PAY-LINK-003 Section 14.1: step-up confirmation for a recipient
+ *  CHANGE -- only ever needed when declareHostedPaymentRecipientAuthority
+ *  returns a "pending_step_up" row. */
+export function resendPaymentRecipientAuthorityChangeCode(roomId: number, authorityId: number): Promise<{ sent: boolean }> {
+  return apiClientFetch<{ sent: boolean }>(
+    `/api/users/hosting/rooms/${roomId}/payment-recipient-authorities/${authorityId}/resend-change-code`,
+    { method: "POST" }
+  );
+}
+
+export function confirmPaymentRecipientAuthorityChange(
+  roomId: number,
+  authorityId: number,
+  code: string
+): Promise<PaymentRecipientAuthority> {
+  return apiClientFetch<PaymentRecipientAuthority>(
+    `/api/users/hosting/rooms/${roomId}/payment-recipient-authorities/${authorityId}/confirm-change`,
+    { method: "POST", body: JSON.stringify({ code }) }
+  );
+}
+
+/** Rental Transaction Record wireframe, host view -- lists the occupancies
+ *  (current and past tenancies) for a room the calling host's own party
+ *  owns, so the host UI has an occupancy id to request a transaction
+ *  record for. Same room ownership scoping as listHostedRoomAuthorityRecords
+ *  above. */
+export function listHostedRoomOccupancies(roomId: number): Promise<Occupancy[]> {
+  return apiClientFetch<Occupancy[]>(`/api/users/hosting/rooms/${roomId}/occupancies`);
+}
+
+/** Rental Transaction Record wireframe, host view -- scoped to a room the
+ *  calling host's own party owns (room.property.ownerPartyId). Never
+ *  includes the renter's own identity-verification claim -- see
+ *  backend/app/api/routes/user_hosting.py's own route docstring. */
+export function getHostedRentalTransactionRecord(occupancyId: number): Promise<RentalTransactionRecord> {
+  return apiClientFetch<RentalTransactionRecord>(`/api/users/hosting/occupancies/${occupancyId}/transaction-record`);
+}
+
+/** ZR-ENG-CLR-011 Section 10/ZR-ENG-CLR-004 Section 4.3: confirming move-in
+ *  is a Host commercial action -- previously reachable only from Zoiko's
+ *  internal admin console. Mirrors the gate this action itself evaluates:
+ *  the host must record HANDOVER_READY and POSSESSION_DELIVERED first (the
+ *  renter's own RENTER_RECEIPT confirmation already lives on their Rentals
+ *  page), then move-in-eligibility/confirm-move-in become available. */
+export function getHostedMoveInEligibility(occupancyId: number): Promise<{ eligible: boolean; reasons: string[] }> {
+  return apiClientFetch(`/api/users/hosting/occupancies/${occupancyId}/move-in-eligibility`);
+}
+
+export function confirmHostedMoveIn(occupancyId: number): Promise<Occupancy> {
+  return apiClientFetch<Occupancy>(`/api/users/hosting/occupancies/${occupancyId}/confirm-move-in`, { method: "POST" });
+}
+
+export function prepareHostedHandover(occupancyId: number): Promise<void> {
+  return apiClientFetch(`/api/users/hosting/occupancies/${occupancyId}/handover/prepare`, {
+    method: "POST", body: JSON.stringify({}),
+  });
+}
+
+export function confirmHostedPossessionDelivered(occupancyId: number): Promise<void> {
+  return apiClientFetch(`/api/users/hosting/occupancies/${occupancyId}/handover/possession-delivered`, {
+    method: "POST", body: JSON.stringify({}),
+  });
+}
+
 export interface HostedListingInput {
   name: string;
   roomType: string;
@@ -377,6 +690,10 @@ export interface HostedListingInput {
   contactName: string;
   contactPhone: string;
   contactEmail: string;
+  defaultMonthlyRent?: number | null;
+  defaultDepositAmount?: number | null;
+  defaultTermMonths?: number | null;
+  defaultCadence?: string;
 }
 
 export function listHostedListings(): Promise<HostedListing[]> {
@@ -428,6 +745,51 @@ export function decideHostedApplication(
     method: "POST",
     body: JSON.stringify({ reasonCode: "", note: "", ...payload }),
   });
+}
+
+// --- Sublet requests (ZR-SUB-003: the Host, not Zoiko Admin, decides) -------
+
+/** Sublet requests routed to any of the host's own party-owned listings. */
+export function listHostedSubletRequests(): Promise<SubletRequest[]> {
+  return apiClientFetch<SubletRequest[]>("/api/users/hosting/sublet-requests");
+}
+
+export function requestHostedSubletMoreInfo(
+  subletRequestId: number,
+  notes: string,
+  payload: { requestedDocumentTypes?: string[]; dueAt?: string | null } = {}
+): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/hosting/sublet-requests/${subletRequestId}/request-info`, {
+    method: "POST",
+    body: JSON.stringify({ notes, requestedDocumentTypes: [], dueAt: null, ...payload }),
+  });
+}
+
+export function approveHostedSubletRequest(
+  subletRequestId: number,
+  payload: {
+    notes?: string; conditions?: string; expiresAt?: string | null; conditionList?: string[];
+    authorityConfirmed?: boolean; stepUpPassword?: string;
+  } = {}
+): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/hosting/sublet-requests/${subletRequestId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({
+      notes: "", conditions: "", expiresAt: null, conditionList: [], authorityConfirmed: false, stepUpPassword: "", ...payload,
+    }),
+  });
+}
+
+export function declineHostedSubletRequest(subletRequestId: number, notes = "", declineReasonCode = ""): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/hosting/sublet-requests/${subletRequestId}/decline`, {
+    method: "POST",
+    body: JSON.stringify({ notes, declineReasonCode }),
+  });
+}
+
+/** The Host's own copy of the same downloadable decision record. */
+export function hostSubletDecisionRecordUrl(subletRequestId: number): string {
+  return `${API_URL}/api/users/hosting/sublet-requests/${subletRequestId}/record`;
 }
 
 // --- Offers and agreements (ZR-ENG-CLR-004 Section 4.3) ---------------------
@@ -488,6 +850,11 @@ export function listUserPayments(): Promise<SimulatedPayment[]> {
 
 /** Renter self-service payment for their own rent/deposit obligation --
  *  real PSP dispatch, not an admin manually recording it. */
+/** ZR-PAY-CFG-001 9.1: which payment actions exist (rental money never moves through Zoiko Rooms). */
+export function getPaymentCapabilities(): Promise<PaymentCapabilities> {
+  return apiClientFetch<PaymentCapabilities>("/api/users/payments/capabilities");
+}
+
 export function payOwnObligation(obligationId: number, methodClass: string): Promise<SimulatedPayment> {
   return apiClientFetch<SimulatedPayment>(`/api/users/payments/obligations/${obligationId}/pay`, {
     method: "POST",
@@ -504,4 +871,451 @@ export function getObligationAvailableMethods(obligationId: number): Promise<{ m
 export function getOwnAgreementPaymentPreview(agreementId: number): Promise<PaymentPreview> {
   return apiClientFetch<PaymentPreview>(`/api/users/rentals/agreements/${agreementId}/payment-preview`);
 }
+
+
+// --- Listing Fee (ZR-PAY-002 Section 8) --------------------------------------
+// The only payment Zoiko Rooms collects for itself.
+
+export function createListingFeeQuote(listingId: string): Promise<ListingFeeQuote> {
+  return apiClientFetch<ListingFeeQuote>(`/api/users/listing-fees/listings/${listingId}/quotes`, { method: "POST" });
+}
+
+export function createListingFeeCheckoutSession(payload: {
+  quoteId: number;
+  idempotencyKey: string;
+  billingCountry: string;
+}): Promise<ListingFeeCheckoutSession> {
+  return apiClientFetch<ListingFeeCheckoutSession>("/api/users/listing-fees/checkout-sessions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** ZR-PAY-002 Section 3.2: 'Listing fee receipts | View.' */
+export function listMyListingFeePayments(): Promise<ListingFeePayment[]> {
+  return apiClientFetch<ListingFeePayment[]>("/api/users/listing-fees/payments");
+}
+
+/** ZR-PAY-002 Section 8.4: the lister's own view of refund status against
+ *  their payment -- issuing one stays admin-restricted. */
+export function listListingFeeRefundsForPayment(paymentId: number): Promise<ListingFeeRefund[]> {
+  return apiClientFetch<ListingFeeRefund[]>(`/api/users/listing-fees/payments/${paymentId}/refunds`);
+}
+
+export function getListingFeePayment(paymentId: number): Promise<ListingFeePayment> {
+  return apiClientFetch<ListingFeePayment>(`/api/users/listing-fees/payments/${paymentId}`);
+}
+
+/** The return leg once Stripe redirects back from its own hosted checkout
+ *  page -- resolves the `checkoutSessionId` query param (Stripe's own
+ *  {CHECKOUT_SESSION_ID} placeholder, substituted server-side) to the
+ *  ListingFeePayment it belongs to. */
+export function resolveListingFeeCheckoutSession(checkoutSessionId: string): Promise<ListingFeePayment> {
+  return apiClientFetch<ListingFeePayment>(`/api/users/listing-fees/checkout-sessions/${checkoutSessionId}/resolve`);
+}
+
+/** Returns the receipt PDF as a Blob (not JSON) -- only exists once the
+ *  payment has SUCCEEDED. Caller is responsible for turning this into a
+ *  download (e.g. via URL.createObjectURL). */
+export async function downloadListingFeeReceipt(paymentId: number): Promise<Blob> {
+  const res = await fetch(`${API_URL}/api/users/listing-fees/payments/${paymentId}/receipt`, { credentials: "include" });
+  if (!res.ok) throw new ApiError(res.status, "Could not download the Listing Fee receipt.");
+  return res.blob();
+}
+
+// --- Rental payments: tenant view (ZR-PAY-002 Section 4) ---------------------
+// Evidence/workflow only -- Zoiko Rooms never receives or holds this money.
+
+export function listMyRentalPaymentObligations(
+  obligationType?: RentalPaymentObligation["obligationType"],
+  page?: { limit?: number; offset?: number; agreementId?: number; occupancyId?: number }
+): Promise<RentalPaymentObligationsPage> {
+  const params = new URLSearchParams();
+  if (obligationType) params.set("obligationType", obligationType);
+  if (page?.limit != null) params.set("limit", String(page.limit));
+  if (page?.offset != null) params.set("offset", String(page.offset));
+  if (page?.agreementId != null) params.set("agreementId", String(page.agreementId));
+  if (page?.occupancyId != null) params.set("occupancyId", String(page.occupancyId));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return apiClientFetch<RentalPaymentObligationsPage>(`/api/users/rental-payments/obligations${query}`);
+}
+
+export function getMyRentalPaymentObligation(obligationId: number): Promise<RentalPaymentObligation> {
+  return apiClientFetch<RentalPaymentObligation>(`/api/users/rental-payments/obligations/${obligationId}`);
+}
+
+export function markRentalPaymentPaid(
+  obligationId: number,
+  payload: {
+    amount: number;
+    currency: string;
+    declaredDate: string;
+    paymentMethodCategory: RentalPaymentMethodCategory;
+    externalReference?: string;
+  }
+): Promise<RentalPaymentObligation> {
+  return apiClientFetch<RentalPaymentObligation>(`/api/users/rental-payments/obligations/${obligationId}/mark-paid`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function uploadRentalPaymentEvidence(recordId: number, file: File): Promise<EvidenceArtifact> {
+  const form = new FormData();
+  form.append("file", file);
+  return apiClientFetch<EvidenceArtifact>(`/api/users/rental-payments/records/${recordId}/evidence`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+export function reportRentalPaymentDiscrepancyAsTenant(
+  recordId: number,
+  payload: { reasonCode: RentalPaymentDiscrepancyReason; details?: string }
+): Promise<RentalPaymentDispute> {
+  return apiClientFetch<RentalPaymentDispute>(`/api/users/rental-payments/records/${recordId}/disputes`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** field's *value* is the backend's own snake_case column name
+ *  ("external_reference" / "payment_method_category"), not a camelCase JS
+ *  field name -- it's used directly server-side in getattr/setattr. */
+export function correctOwnRentalPaymentRecord(
+  recordId: number,
+  payload: { fieldName: "external_reference" | "payment_method_category"; newValue: string; reason?: string }
+): Promise<RentalPaymentCorrection> {
+  return apiClientFetch<RentalPaymentCorrection>(`/api/users/rental-payments/records/${recordId}/self-correct`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getMyRentalPaymentInstructions(obligationId: number): Promise<RentalPaymentInstruction> {
+  return apiClientFetch<RentalPaymentInstruction>(`/api/users/rental-payments/obligations/${obligationId}/instructions`);
+}
+
+export function listRentalPaymentEvidence(recordId: number): Promise<EvidenceArtifact[]> {
+  return apiClientFetch<EvidenceArtifact[]>(`/api/users/rental-payments/records/${recordId}/evidence`);
+}
+
+/** ZR-PAY-LINK-003 Section 19: immutable declare/confirm/dispute/correction
+ *  timeline for one record -- available to either side of it (tenant or
+ *  the authorized recipient), same access rule as the evidence routes. */
+export function getRentalPaymentRecordTimeline(
+  recordId: number,
+  page?: { limit?: number; offset?: number }
+): Promise<RentalPaymentTimelinePage> {
+  const params = new URLSearchParams();
+  if (page?.limit != null) params.set("limit", String(page.limit));
+  if (page?.offset != null) params.set("offset", String(page.offset));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return apiClientFetch<RentalPaymentTimelinePage>(`/api/users/rental-payments/records/${recordId}/timeline${query}`);
+}
+
+export function downloadRentalPaymentEvidence(recordId: number, artifactId: number): Promise<Blob> {
+  return fetch(`${API_URL}/api/users/rental-payments/records/${recordId}/evidence/${artifactId}`, {
+    credentials: "include",
+  }).then((res) => {
+    if (!res.ok) throw new ApiError(res.status, "Could not open this evidence file.");
+    return res.blob();
+  });
+}
+
+// --- Rental payments: recipient view (ZR-PAY-002 Section 5/9) ---------------
+// The landlord/agent's own side -- confirming receipt, disputing, and
+// managing payment instructions. Same evidence/workflow-only boundary.
+
+export function listRecipientRentalPaymentObligations(
+  obligationType?: RentalPaymentObligation["obligationType"],
+  page?: { limit?: number; offset?: number; agreementId?: number }
+): Promise<RentalPaymentObligationsPage> {
+  const params = new URLSearchParams();
+  if (obligationType) params.set("obligationType", obligationType);
+  if (page?.limit != null) params.set("limit", String(page.limit));
+  if (page?.offset != null) params.set("offset", String(page.offset));
+  if (page?.agreementId != null) params.set("agreementId", String(page.agreementId));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return apiClientFetch<RentalPaymentObligationsPage>(`/api/users/rental-payments/recipient/obligations${query}`);
+}
+
+/** amount omitted means 'confirm the full declared amount'. A lesser
+ *  amount records a partial confirmation -- ZR-PAY-002 Section 6
+ *  PARTIALLY_PAID -- and can never exceed the record's own declared amount. */
+export function confirmRentalPaymentReceipt(recordId: number, amount?: number, note?: string): Promise<RentalPaymentObligation> {
+  return apiClientFetch<RentalPaymentObligation>(`/api/users/rental-payments/recipient/records/${recordId}/confirm-receipt`, {
+    method: "POST",
+    body: JSON.stringify({ amount: amount ?? null, note: note ?? "" }),
+  });
+}
+
+export function reportRentalPaymentDiscrepancyAsRecipient(
+  recordId: number,
+  payload: { reasonCode: RentalPaymentDiscrepancyReason; details?: string }
+): Promise<RentalPaymentDispute> {
+  return apiClientFetch<RentalPaymentDispute>(`/api/users/rental-payments/recipient/records/${recordId}/disputes`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateOwnOpenRentalPaymentDispute(
+  disputeId: number,
+  payload: { reasonCode?: RentalPaymentDiscrepancyReason; details?: string }
+): Promise<RentalPaymentDispute> {
+  return apiClientFetch<RentalPaymentDispute>(`/api/users/rental-payments/recipient/disputes/${disputeId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function uploadRentalPaymentEvidenceAsRecipient(recordId: number, file: File): Promise<EvidenceArtifact> {
+  const form = new FormData();
+  form.append("file", file);
+  return apiClientFetch<EvidenceArtifact>(`/api/users/rental-payments/recipient/records/${recordId}/evidence`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+export function listMyRentalPaymentInstructions(): Promise<RentalPaymentInstruction[]> {
+  return apiClientFetch<RentalPaymentInstruction[]>("/api/users/rental-payments/recipient/instructions");
+}
+
+export function submitRentalPaymentInstruction(payload: {
+  method: RentalPaymentMethodCategory;
+  recipientName: string;
+  countryCode: string;
+  bankDetails: Record<string, string>;
+  authorizedRecipientConfirmed: boolean;
+  referenceFormat?: string;
+  additionalInstructions?: string;
+}): Promise<RentalPaymentInstruction> {
+  return apiClientFetch<RentalPaymentInstruction>("/api/users/rental-payments/recipient/instructions", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function resendRentalPaymentInstructionCode(instructionId: number): Promise<void> {
+  return apiClientFetch<void>(`/api/users/rental-payments/recipient/instructions/${instructionId}/resend-code`, {
+    method: "POST",
+  });
+}
+
+export function confirmRentalPaymentInstruction(instructionId: number, code: string): Promise<RentalPaymentInstruction> {
+  return apiClientFetch<RentalPaymentInstruction>(`/api/users/rental-payments/recipient/instructions/${instructionId}/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
+/** ZR-PAY-LINK-003 Section 6/Wireframe C: the recipient's own connected
+ *  Stripe account for the online-payment rail -- a second, independent
+ *  destination alongside the direct-instruction functions above. */
+export function getRentalPaymentProviderAccount(): Promise<RentalPaymentProviderAccount> {
+  return apiClientFetch<RentalPaymentProviderAccount>("/api/users/rental-payments/recipient/provider-account");
+}
+
+export function connectRentalPaymentProviderAccount(payload: {
+  country: string;
+  email: string;
+}): Promise<RentalPaymentProviderAccountConnectResult> {
+  return apiClientFetch<RentalPaymentProviderAccountConnectResult>("/api/users/rental-payments/recipient/provider-account", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function refreshRentalPaymentProviderAccount(): Promise<RentalPaymentProviderAccount> {
+  return apiClientFetch<RentalPaymentProviderAccount>("/api/users/rental-payments/recipient/provider-account/refresh", {
+    method: "POST",
+  });
+}
+
+/** A fresh hosted onboarding link for the account already on file -- for a
+ *  host who closed the Stripe tab before finishing. Never creates a new
+ *  account (unlike connectRentalPaymentProviderAccount). */
+export function resumeRentalPaymentProviderAccountOnboarding(): Promise<RentalPaymentProviderAccountConnectResult> {
+  return apiClientFetch<RentalPaymentProviderAccountConnectResult>(
+    "/api/users/rental-payments/recipient/provider-account/resume-onboarding",
+    { method: "POST" }
+  );
+}
+
+/** Dev/test-only -- refuses once real Stripe credentials are configured
+ *  server-side, see crud/rental_payment_provider_account.py's own guard. */
+export function simulateRentalPaymentProviderAccountOnboardingComplete(): Promise<RentalPaymentProviderAccount> {
+  return apiClientFetch<RentalPaymentProviderAccount>(
+    "/api/users/rental-payments/recipient/provider-account/simulate-onboarding-complete",
+    { method: "POST" }
+  );
+}
+
+/** ZR-PAY-LINK-003 Section 14.1: the governed "change payment account" flow
+ *  -- mailed step-up code, same shape as
+ *  resendRentalPaymentInstructionCode/confirmRentalPaymentInstruction. The
+ *  current account stays fully usable while a change is only requested,
+ *  never confirmed. */
+export function requestRentalPaymentProviderAccountChange(): Promise<{ sent: boolean }> {
+  return apiClientFetch<{ sent: boolean }>("/api/users/rental-payments/recipient/provider-account/request-change", {
+    method: "POST",
+  });
+}
+
+export function resendRentalPaymentProviderAccountChangeCode(): Promise<{ sent: boolean }> {
+  return apiClientFetch<{ sent: boolean }>("/api/users/rental-payments/recipient/provider-account/resend-change-code", {
+    method: "POST",
+  });
+}
+
+export function confirmRentalPaymentProviderAccountChange(payload: {
+  code: string;
+  country: string;
+  email: string;
+}): Promise<RentalPaymentProviderAccountConnectResult> {
+  return apiClientFetch<RentalPaymentProviderAccountConnectResult>(
+    "/api/users/rental-payments/recipient/provider-account/confirm-change",
+    { method: "POST", body: JSON.stringify(payload) }
+  );
+}
+
+/** ZR-PAY-LINK-003 Section 3.1: the tenant-facing counterpart to
+ *  getHostedRoomPaymentConnection -- lets the tenant Payments UI warn when
+ *  their room's connection is SUSPENDED instead of silently offering
+ *  payment actions against it. */
+export function getRentalPaymentObligationConnection(obligationId: number): Promise<PaymentConnection> {
+  return apiClientFetch<PaymentConnection>(`/api/users/rental-payments/obligations/${obligationId}/connection`);
+}
+
+/** ZR-PAY-LINK-003 Section 19/Wireframe F: starts a provider-hosted checkout
+ *  for an obligation -- the tenant's own "Continue to secure payment." */
+export function startRentalPaymentSession(obligationId: number): Promise<ExternalPaymentSessionCreateResult> {
+  return apiClientFetch<ExternalPaymentSessionCreateResult>(
+    `/api/users/rental-payments/obligations/${obligationId}/payment-session`,
+    { method: "POST" }
+  );
+}
+
+/** The return-page resolve -- self-heals via the backend's own
+ *  resolve_session rather than only waiting on the webhook. */
+export function getRentalPaymentSession(sessionId: number): Promise<ExternalPaymentSession> {
+  return apiClientFetch<ExternalPaymentSession>(`/api/users/rental-payments/payment-sessions/${sessionId}`);
+}
+
+/** Same role as resolveListingFeeCheckoutSession plays for the Listing Fee
+ *  return leg -- looks up which of the tenant's own sessions a Stripe
+ *  `checkoutSessionId` query param refers to, self-healing its status. */
+export function resolveRentalPaymentCheckoutSession(checkoutSessionId: string): Promise<ExternalPaymentSession> {
+  return apiClientFetch<ExternalPaymentSession>(
+    `/api/users/rental-payments/payment-sessions/by-checkout-session/${checkoutSessionId}`
+  );
+}
+
+/** Section 5 gap: autopay mandates existed only in the admin/backend --
+ *  these are the renter's own self-service opt-in/list/revoke calls. */
+export function listMyAutopayMandates(): Promise<AutopayMandate[]> {
+  return apiClientFetch<AutopayMandate[]>("/api/users/payments/mandates");
+}
+
+export function createAutopayMandate(occupancyId: number): Promise<AutopayMandate> {
+  return apiClientFetch<AutopayMandate>("/api/users/payments/mandates", {
+    method: "POST",
+    body: JSON.stringify({ occupancyId }),
+  });
+}
+
+export function revokeAutopayMandate(mandateId: number): Promise<AutopayMandate> {
+  return apiClientFetch<AutopayMandate>(`/api/users/payments/mandates/${mandateId}`, {
+    method: "DELETE",
+  });
+}
+
+// -- Section 10 gap: ZR-ENG-CLR-010 general-purpose Dispute Resolution
+// engine -- previously had zero frontend anywhere despite a fully-built
+// backend (backend/app/api/routes/disputes.py's renter_router/host_router,
+// each ~30 identical endpoints mirrored one for RENTER, one for HOST). This
+// factory builds one identical client per side rather than hand-duplicating
+// every function twice -- the two backend routers really are byte-for-byte
+// mirrors of each other (guest-scoped vs party-scoped), so this isn't a
+// premature abstraction, it's just not retyping the same 20 functions twice.
+function makeDisputeClient(basePath: string) {
+  return {
+    openCase(payload: DisputeCaseCreate): Promise<DisputeCaseRead> {
+      return apiClientFetch<DisputeCaseRead>(basePath, { method: "POST", body: JSON.stringify(payload) });
+    },
+    listCases(): Promise<DisputeCaseRead[]> {
+      return apiClientFetch<DisputeCaseRead[]>(basePath);
+    },
+    getCase(caseId: number): Promise<DisputeCaseRead> {
+      return apiClientFetch<DisputeCaseRead>(`${basePath}/${caseId}`);
+    },
+    getCaseExport(caseId: number): Promise<DisputeCaseExportRead> {
+      return apiClientFetch<DisputeCaseExportRead>(`${basePath}/${caseId}/export`);
+    },
+    uploadEvidence(
+      caseId: number,
+      payload: { file?: File | null; noteText?: string; claimIds?: number[]; capturedAt?: string | null },
+    ): Promise<DisputeEvidenceRead> {
+      const form = new FormData();
+      if (payload.file) form.set("file", payload.file);
+      if (payload.noteText) form.set("note_text", payload.noteText);
+      for (const id of payload.claimIds ?? []) form.append("claim_ids", String(id));
+      if (payload.capturedAt) form.set("captured_at", payload.capturedAt);
+      return apiClientFetch<DisputeEvidenceRead>(`${basePath}/${caseId}/evidence`, { method: "POST", body: form });
+    },
+    listEvidence(caseId: number): Promise<DisputeEvidenceRead[]> {
+      return apiClientFetch<DisputeEvidenceRead[]>(`${basePath}/${caseId}/evidence`);
+    },
+    evidenceFileUrl(caseId: number, evidenceId: number): string {
+      return `${API_URL}${basePath}/${caseId}/evidence/${evidenceId}/file`;
+    },
+    requestEvidenceDeletion(caseId: number, evidenceId: number): Promise<DisputeEvidenceRead> {
+      return apiClientFetch<DisputeEvidenceRead>(`${basePath}/${caseId}/evidence/${evidenceId}/delete`, { method: "POST" });
+    },
+    listExternalProceedings(caseId: number): Promise<DisputeExternalProceedingRead[]> {
+      return apiClientFetch<DisputeExternalProceedingRead[]>(`${basePath}/${caseId}/external-proceedings`);
+    },
+    proposeSettlement(
+      caseId: number,
+      payload: { claimIds: number[]; termsText: string; amount?: number | null; currency?: string | null; expiresAt?: string | null; acknowledgesNoNonwaivableWaiver?: boolean },
+    ): Promise<DisputeSettlementRead> {
+      return apiClientFetch<DisputeSettlementRead>(`${basePath}/${caseId}/settlements`, { method: "POST", body: JSON.stringify(payload) });
+    },
+    listSettlements(caseId: number): Promise<DisputeSettlementRead[]> {
+      return apiClientFetch<DisputeSettlementRead[]>(`${basePath}/${caseId}/settlements`);
+    },
+    listDeadlines(caseId: number): Promise<DisputeDeadlineRead[]> {
+      return apiClientFetch<DisputeDeadlineRead[]>(`${basePath}/${caseId}/deadlines`);
+    },
+    postMessage(caseId: number, body: string): Promise<DisputeCaseMessageRead> {
+      return apiClientFetch<DisputeCaseMessageRead>(`${basePath}/${caseId}/messages`, { method: "POST", body: JSON.stringify({ body }) });
+    },
+    listMessages(caseId: number): Promise<DisputeCaseMessageRead[]> {
+      return apiClientFetch<DisputeCaseMessageRead[]>(`${basePath}/${caseId}/messages`);
+    },
+    listParties(caseId: number): Promise<DisputePartyRead[]> {
+      return apiClientFetch<DisputePartyRead[]>(`${basePath}/${caseId}/parties`);
+    },
+    respondSettlement(
+      caseId: number, settlementId: number,
+      payload: { action: DisputeSettlementRespondAction; counterTermsText?: string | null; counterAmount?: number | null; counterCurrency?: string | null; counterExpiresAt?: string | null },
+    ): Promise<DisputeSettlementRead> {
+      return apiClientFetch<DisputeSettlementRead>(`${basePath}/${caseId}/settlements/${settlementId}/respond`, { method: "POST", body: JSON.stringify(payload) });
+    },
+    voidSettlement(caseId: number, settlementId: number): Promise<DisputeSettlementRead> {
+      return apiClientFetch<DisputeSettlementRead>(`${basePath}/${caseId}/settlements/${settlementId}/void`, { method: "POST" });
+    },
+    addClaim(caseId: number, payload: DisputeClaimCreate): Promise<DisputeClaimRead> {
+      return apiClientFetch<DisputeClaimRead>(`${basePath}/${caseId}/claims`, { method: "POST", body: JSON.stringify(payload) });
+    },
+    requestClaimReview(caseId: number, claimId: number, reason: string): Promise<DisputeClaimRead> {
+      return apiClientFetch<DisputeClaimRead>(`${basePath}/${caseId}/claims/${claimId}/request-review`, { method: "POST", body: JSON.stringify({ reason }) });
+    },
+  };
+}
+
+export const renterDisputes = makeDisputeClient("/api/users/rentals/disputes");
+export const hostDisputes = makeDisputeClient("/api/users/hosting/disputes");
 

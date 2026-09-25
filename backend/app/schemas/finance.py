@@ -86,6 +86,16 @@ class SimulatedPaymentCreate(CamelModel):
 
 class PaymentConfirm(CamelModel):
     allocations: list[PaymentAllocationInput]
+    # Section 5 gap (AC-27's own carved-out EXTERNAL allowance had no
+    # evidence requirement attached to it): required whenever the payment
+    # being confirmed is method_class == "EXTERNAL" -- an admin
+    # self-attesting an off-platform cash/cheque payment happened, with
+    # nothing to check it against, was exactly the unaudited "mark paid
+    # myself" shortcut AC-27 already prohibits for every other method_class.
+    # Ignored (never required) for a real-PSP-dispatched payment, since that
+    # path is never reached by a direct confirm call in the first place --
+    # see crud/finance.py:confirm_payment's own method_class != EXTERNAL gate.
+    evidence_ref: str = ""
 
 
 class PaymentAllocationRead(CamelModel):
@@ -107,6 +117,7 @@ class SimulatedPaymentRead(CamelModel):
     idempotency_key: str
     status: str
     method_class: str
+    evidence_ref: str = ""
     created_at: datetime
     confirmed_at: datetime | None
     allocations: list[PaymentAllocationRead] = []
@@ -148,6 +159,7 @@ class DepositRecordRead(CamelModel):
     instrument: DepositInstrumentRead | None = None
     claimed_amount: float = 0
     disputed_amount: float = 0
+    currency: str = "USD"
 
 
 class DepositRelease(CamelModel):
@@ -282,6 +294,8 @@ class RefundRequestRead(CamelModel):
     decided_by_admin_id: int | None
     created_at: datetime
     decided_at: datetime | None
+    currency: str = "USD"
+    psp_refund_id: str = ""
 
 
 class DisputeCreate(CamelModel):

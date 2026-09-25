@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { AlertTriangle, BedDouble, MapPin, Pencil, Plus, Send, XCircle } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { AlertTriangle, BedDouble, MapPin, Pencil, Plus, Receipt, Send, ShieldCheck, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
@@ -16,6 +17,7 @@ import {
   listHostedListings,
   listHostedProperties,
   listHostedRooms,
+  resolveListingFeeCheckoutSession,
   submitHostedListingForReview,
   updateHostedListing,
 } from "@/lib/user-api";
@@ -25,6 +27,10 @@ import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
+import { ListingFeeCheckout } from "@/components/user/ListingFeeCheckout";
+import { PaymentRecipientSetup } from "@/components/user/PaymentRecipientSetup";
+import { PropertyVerificationManager } from "@/components/user/PropertyVerificationManager";
+import { AuthorityRecordManager } from "@/components/user/AuthorityRecordManager";
 
 const MAX_LISTING_IMAGES = 10;
 
@@ -52,6 +58,10 @@ interface ListingFormState {
   contactName: string;
   contactPhone: string;
   contactEmail: string;
+  defaultMonthlyRent: string;
+  defaultDepositAmount: string;
+  defaultTermMonths: string;
+  defaultCadence: string;
 }
 
 function toFormState(listing: HostedListing): ListingFormState {
@@ -75,12 +85,18 @@ function toFormState(listing: HostedListing): ListingFormState {
     contactName: listing.contactName,
     contactPhone: listing.contactPhone,
     contactEmail: listing.contactEmail,
+    defaultMonthlyRent: listing.defaultMonthlyRent === null ? "" : String(listing.defaultMonthlyRent),
+    defaultDepositAmount: listing.defaultDepositAmount === null ? "" : String(listing.defaultDepositAmount),
+    defaultTermMonths: listing.defaultTermMonths === null ? "" : String(listing.defaultTermMonths),
+    defaultCadence: listing.defaultCadence || "MONTHLY",
   };
 }
 
 export function HostingListingsManager() {
   const { user } = useUserSession();
   const { toast, showToast } = useToast();
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [listings, setListings] = useState<HostedListing[]>([]);
   const [properties, setProperties] = useState<Property[]>([]);
@@ -93,6 +109,30 @@ export function HostingListingsManager() {
   const [error, setError] = useState("");
 
   const [busyListingId, setBusyListingId] = useState<string | null>(null);
+  const [payingFeeListingId, setPayingFeeListingId] = useState<string | null>(null);
+  const [returningCheckoutSessionId, setReturningCheckoutSessionId] = useState<string | null>(null);
+  const [paymentRecipientRoomId, setPaymentRecipientRoomId] = useState<number | null>(null);
+  const [propertyVerificationRoomId, setPropertyVerificationRoomId] = useState<number | null>(null);
+  const [authorityRecordRoomId, setAuthorityRecordRoomId] = useState<number | null>(null);
+
+  // Landed back here from Stripe's own hosted checkout page (see
+  // ListingFeeCheckout.tsx's real redirect, and crud/listing_fee.py's
+  // success_url/cancel_url) -- resolve which listing/payment that was and
+  // reopen the fee modal in its "confirming" state, rather than making the
+  // host find the right listing and click "Listing fee" again themselves.
+  useEffect(() => {
+    const checkoutSessionId = searchParams.get("checkoutSessionId");
+    if (!checkoutSessionId) return;
+    resolveListingFeeCheckoutSession(checkoutSessionId)
+      .then((payment) => {
+        setPayingFeeListingId(payment.listingId);
+        setReturningCheckoutSessionId(checkoutSessionId);
+      })
+      .catch(() => showToast("Could not confirm your Listing Fee payment. Please try again from your listing.", "error"))
+      .finally(() => router.replace("/account/host/listings"));
+    // Only ever react to the query param changing, not to every toast/router update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const load = useCallback(async () => {
     if (!user) return;
@@ -174,6 +214,10 @@ export function HostingListingsManager() {
       contactName: form.contactName.trim(),
       contactPhone: form.contactPhone.trim(),
       contactEmail: form.contactEmail.trim(),
+      defaultMonthlyRent: form.defaultMonthlyRent.trim() ? Number(form.defaultMonthlyRent) : null,
+      defaultDepositAmount: form.defaultDepositAmount.trim() ? Number(form.defaultDepositAmount) : null,
+      defaultTermMonths: form.defaultTermMonths.trim() ? Math.round(Number(form.defaultTermMonths)) : null,
+      defaultCadence: form.defaultCadence,
     };
 
     setError("");
@@ -270,6 +314,26 @@ export function HostingListingsManager() {
                     <Button size="sm" variant="ghost" onClick={() => openEdit(listing)}>
                       <Pencil className="h-3.5 w-3.5" /> Edit
                     </Button>
+                    {listing.roomId !== null && (
+                      <Button size="sm" variant="outline" onClick={() => setPaymentRecipientRoomId(listing.roomId)}>
+                        <ShieldCheck className="h-3.5 w-3.5" /> Payment recipient
+                      </Button>
+                    )}
+                    {listing.roomId !== null && (
+                      <Button size="sm" variant="outline" onClick={() => setPropertyVerificationRoomId(listing.roomId)}>
+                        <ShieldCheck className="h-3.5 w-3.5" /> Property verification
+                      </Button>
+                    )}
+                    {listing.roomId !== null && (
+                      <Button size="sm" variant="outline" onClick={() => setAuthorityRecordRoomId(listing.roomId)}>
+                        <ShieldCheck className="h-3.5 w-3.5" /> Authority to list
+                      </Button>
+                    )}
+                    {listing.state === "APPROVED" && (
+                      <Button size="sm" variant="outline" onClick={() => setPayingFeeListingId(listing.id)}>
+                        <Receipt className="h-3.5 w-3.5" /> Listing fee
+                      </Button>
+                    )}
                     {(listing.state === "DRAFT" || listing.state === "REJECTED") && (
                       <Button size="sm" loading={busy} onClick={() => submitForReview(listing.id)}>
                         <Send className="h-3.5 w-3.5" /> Submit for Review
@@ -283,6 +347,15 @@ export function HostingListingsManager() {
                     <p className="flex items-center gap-1.5 font-semibold">
                       <AlertTriangle className="h-3.5 w-3.5" /> Awaiting review by a Zoiko admin.
                     </p>
+                  </div>
+                )}
+
+                {listing.state === "APPROVED" && (
+                  <div className="mt-4 rounded-xl bg-emerald-50 px-4 py-3 text-xs text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20">
+                    <p className="flex items-center gap-1.5 font-semibold">
+                      <Receipt className="h-3.5 w-3.5" /> Approved -- pay the Listing Fee
+                    </p>
+                    <p className="mt-1">A Zoiko admin has approved this listing. Paying the Listing Fee clears the last publication requirement, but a Zoiko admin still needs to publish it.</p>
                   </div>
                 )}
 
@@ -446,6 +519,57 @@ export function HostingListingsManager() {
             />
           </Field>
 
+          <div className="space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-100 dark:bg-slate-800/60 dark:ring-white/10">
+            <p className="text-xs font-semibold text-primary-900 dark:text-white">
+              Default offer terms <span className="font-normal text-slate-400">(optional, can be added later)</span>
+            </p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Only used if a Zoiko admin turns on automatic offer creation for your jurisdiction — leave blank to
+              keep sending offers yourself for this listing.
+            </p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+              <Field label="Monthly rent">
+                <input
+                  type="number"
+                  min="0"
+                  value={form?.defaultMonthlyRent ?? ""}
+                  onChange={(e) => setForm((f) => (f ? { ...f, defaultMonthlyRent: e.target.value } : f))}
+                  className={inputClass}
+                />
+              </Field>
+              <Field label="Deposit">
+                <input
+                  type="number"
+                  min="0"
+                  value={form?.defaultDepositAmount ?? ""}
+                  onChange={(e) => setForm((f) => (f ? { ...f, defaultDepositAmount: e.target.value } : f))}
+                  className={inputClass}
+                />
+              </Field>
+              <Field label="Term (months)">
+                <input
+                  type="number"
+                  min="1"
+                  value={form?.defaultTermMonths ?? ""}
+                  onChange={(e) => setForm((f) => (f ? { ...f, defaultTermMonths: e.target.value } : f))}
+                  className={inputClass}
+                />
+              </Field>
+              <Field label="Cadence">
+                <select
+                  value={form?.defaultCadence ?? "MONTHLY"}
+                  onChange={(e) => setForm((f) => (f ? { ...f, defaultCadence: e.target.value } : f))}
+                  className={inputClass}
+                >
+                  <option value="MONTHLY">Monthly</option>
+                  <option value="FORTNIGHTLY">Fortnightly</option>
+                  <option value="WEEKLY">Weekly</option>
+                  <option value="UPFRONT">Upfront</option>
+                </select>
+              </Field>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <Field label="Contact name">
               <input
@@ -501,6 +625,47 @@ export function HostingListingsManager() {
           );
         }}
       />
+
+      <Modal
+        open={Boolean(payingFeeListingId)}
+        onClose={() => {
+          setPayingFeeListingId(null);
+          setReturningCheckoutSessionId(null);
+          load();
+        }}
+        title="Listing fee"
+      >
+        {payingFeeListingId && (
+          <ListingFeeCheckout
+            listingId={payingFeeListingId}
+            returningCheckoutSessionId={returningCheckoutSessionId ?? undefined}
+          />
+        )}
+      </Modal>
+
+      <Modal
+        open={paymentRecipientRoomId !== null}
+        onClose={() => setPaymentRecipientRoomId(null)}
+        title="Payment recipient"
+      >
+        {paymentRecipientRoomId !== null && <PaymentRecipientSetup roomId={paymentRecipientRoomId} />}
+      </Modal>
+
+      <Modal
+        open={propertyVerificationRoomId !== null}
+        onClose={() => setPropertyVerificationRoomId(null)}
+        title="Property verification"
+      >
+        {propertyVerificationRoomId !== null && <PropertyVerificationManager roomId={propertyVerificationRoomId} />}
+      </Modal>
+
+      <Modal
+        open={authorityRecordRoomId !== null}
+        onClose={() => setAuthorityRecordRoomId(null)}
+        title="Authority to list"
+      >
+        {authorityRecordRoomId !== null && <AuthorityRecordManager roomId={authorityRecordRoomId} />}
+      </Modal>
 
       <Toast toast={toast} />
     </div>

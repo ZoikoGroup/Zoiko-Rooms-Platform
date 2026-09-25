@@ -216,6 +216,18 @@ class TerminationCase(Base):
     # leaving it null or inventing a delay.
     notice_served_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     notice_method: Mapped[str] = mapped_column(String(30), default="PORTAL")
+    # Section 11 gap: the delivery-proof half of the NOTICE_METHODS taxonomy
+    # above -- a non-PORTAL method (EMAIL/SMS/POSTAL/etc.) previously had no
+    # way to ever get notice_served_at populated at all once notice_method
+    # wasn't PORTAL, permanently stranding the case's own "when was notice
+    # legally recognized" question. crud/termination.py:record_notice_service
+    # is a Host/Admin's own attestation (courier receipt, read confirmation,
+    # signed acknowledgment, etc.) that real-world service occurred --
+    # proof_ref is an opaque reference into that evidence (same idiom as
+    # TerminationCase.evidence_refs), never independently verified by this
+    # build.
+    notice_service_proof_ref: Mapped[str] = mapped_column(String(500), default="")
+    notice_service_recorded_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     # ZR-ENG-CLR-006 AC-02/Section 6's own CONTROL: "A refund calculation must
     # always be reproducible from the policy_snapshot_id, not from whatever
     # policy happens to be current when an auditor later opens the case."

@@ -23,6 +23,7 @@ from app.api.routes import (
     identity_verification,
     leasing,
     listings,
+    listing_fees,
     knowledge,
     market_policy,
     market_releases,
@@ -30,9 +31,11 @@ from app.api.routes import (
     occupancy_classification,
     party,
     payments,
+    payment_recipient_authority,
     properties,
     public,
     public_assistant,
+    rental_payments,
     reviews,
     room_passport,
     search,
@@ -102,6 +105,10 @@ app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads"
 # /api/identity-verifications/{id}/document routes.
 Path(settings.identity_upload_dir).mkdir(parents=True, exist_ok=True)
 
+# Property/lister evidence -- same never-mounted convention, reachable only
+# through the authenticated property-verification document routes.
+Path(settings.property_verification_upload_dir).mkdir(parents=True, exist_ok=True)
+
 app.include_router(auth.router)
 app.include_router(user_auth.router)
 app.include_router(user_identity.router)
@@ -109,6 +116,13 @@ app.include_router(user_payments.router)
 app.include_router(user_rentals.router)
 app.include_router(user_hosting.router)
 app.include_router(listings.router)
+app.include_router(listing_fees.router)
+app.include_router(listing_fees.admin_router)
+app.include_router(listing_fees.webhook_router)
+app.include_router(rental_payments.router)
+app.include_router(rental_payments.recipient_router)
+app.include_router(rental_payments.admin_router)
+app.include_router(rental_payments.webhook_router)
 app.include_router(knowledge.router)
 app.include_router(bookings.router)
 app.include_router(guests.router)
@@ -126,6 +140,7 @@ app.include_router(market_policy.router)
 app.include_router(properties.router)
 app.include_router(party.router)
 app.include_router(authority.router)
+app.include_router(payment_recipient_authority.router)
 app.include_router(identity_verification.router)
 app.include_router(room_passport.router)
 app.include_router(occupancy_classification.router)

@@ -176,7 +176,14 @@ export function UserTopbar({ onOpenMobileSidebar }: { onOpenMobileSidebar: () =>
                   >
                     {!n.isRead && <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent-600" />}
                     <span className={n.isRead ? "ml-3.5" : ""}>
-                      <span className="block font-medium text-slate-700 dark:text-slate-200">{n.title}</span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="font-medium text-slate-700 dark:text-slate-200">{n.title}</span>
+                        {n.priority === "HIGH" && (
+                          <Badge tone="danger" className="px-1.5 py-0 text-[10px]">
+                            Urgent
+                          </Badge>
+                        )}
+                      </span>
                       {n.message && <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">{n.message}</span>}
                       <span className="mt-0.5 block text-xs text-slate-400">{relativeTime(n.createdAt)}</span>
                     </span>

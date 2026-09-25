@@ -8,11 +8,13 @@ from app.schemas.analytics import (
     BookingsByTypePoint,
     DisputeOperationalMetricsRead,
     OccupancyByCityPoint,
+    PaymentOperationalMetricsRead,
     RevenueTrendPoint,
     Section1MetricsRead,
 )
 from app.services.dispute_operational_metrics import compute_dispute_operational_metrics
 from app.services.operational_metrics import compute_section1_metrics
+from app.services.payment_operational_metrics import compute_payment_operational_metrics
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"], dependencies=[Depends(require_super_admin)])
 
@@ -44,3 +46,10 @@ def get_dispute_operational_metrics(db: Session = Depends(get_db)):
     """ZR-ENG-CLR-010 Section 28 metrics, computed on demand -- see
     app/services/dispute_operational_metrics.py."""
     return compute_dispute_operational_metrics(db)
+
+
+@router.get("/payment-operational-metrics", response_model=PaymentOperationalMetricsRead)
+def get_payment_operational_metrics(db: Session = Depends(get_db)):
+    """ZR-WIR-TRACE-001 TR-11 metrics for the Payments domain, computed on
+    demand -- see app/services/payment_operational_metrics.py."""
+    return compute_payment_operational_metrics(db)

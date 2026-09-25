@@ -11,6 +11,25 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 # ENVIRONMENT=production is set alongside any of these, the app refuses to boot.
 PLACEHOLDER_JWT_SECRETS = ("dev-secret-change-me", "change-me", "changeme", "secret")
 PLACEHOLDER_PASSWORDS = ("change-this-password", "change-me", "changeme", "password", "password123")
+# A real, valid Fernet key (unlike JWT_SECRET/SEED_ADMIN_PASSWORD's plain
+# placeholder strings, Fernet requires exactly 32 url-safe base64 bytes --
+# an arbitrary human-readable placeholder string would just crash
+# encrypt_json/decrypt_json in every dev/test run). Publicly known and
+# committed to source control by design -- it must never be the key any
+# real deployment actually uses, same as every other "change-this" default.
+DEV_FIELD_ENCRYPTION_KEY = "r9v5IfBTi6JMliPvOaRnR34vW4O8OP5Gq6X9NDpMAgQ="
+PLACEHOLDER_FIELD_ENCRYPTION_KEYS = (DEV_FIELD_ENCRYPTION_KEY,)
+
+
+# ZR-PAY-CFG-001 Section 9 capabilities Zoiko Rooms must never have on.
+RENTAL_MONEY_MOVEMENT_FLAGS = (
+    "rent_collection_enabled",
+    "deposit_collection_enabled",
+    "host_payouts_enabled",
+    "escrow_enabled",
+    "wallet_enabled",
+    "split_settlement_enabled",
+)
 
 
 class Settings(BaseSettings):
@@ -23,6 +42,14 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440
+    # ZR-PAY-LINK-003 Section 8.1: "Sensitive financial fields are encrypted
+    # and masked" -- the key for app/core/field_encryption.py's Fernet
+    # helper (RentalPaymentInstruction.encrypted_bank_details, the first
+    # at-rest-encrypted field in this codebase). A dev-only placeholder here
+    # is fine (see _validate_production below); generate a real one with
+    # `python -c "from cryptography.fernet import Fernet;
+    # print(Fernet.generate_key().decode())"` for any real deployment.
+    field_encryption_key: str = DEV_FIELD_ENCRYPTION_KEY
     # Comma-separated allow-list. Includes the authenticated platform frontend
     # and the public marketing site (local dev + deployed) so the anonymous
     # assistant widget can call /api/public/assistant cross-origin.
@@ -46,6 +73,11 @@ class Settings(BaseSettings):
     # route -- they live in their own directory that main.py never mounts.
     identity_upload_dir: str = "secure_uploads/identity"
     identity_document_max_size_mb: int = 10
+
+    # Host-submitted property/lister evidence (models/property_verification.py)
+    # -- same never-publicly-mounted convention as identity_upload_dir.
+    property_verification_upload_dir: str = "secure_uploads/property_verification"
+    property_verification_document_max_size_mb: int = 10
 
     # ZR-ENG-CLR-004 Section 13.1/AC-08: executed agreement PDFs, stored once
     # per AgreementVersion and never regenerated/overwritten -- same
@@ -89,8 +121,38 @@ class Settings(BaseSettings):
     # without any other code change.
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
-    stripe_connect_refresh_url: str = "http://localhost:3001/host/payouts/refresh"
-    stripe_connect_return_url: str = "http://localhost:3001/host/payouts/return"
+    # Both point at RecipientRentalPaymentsManager (the only page that
+    # renders ProviderAccountManager / "Connect payment account" /
+    # "Resume onboarding") -- there is no dedicated /host/payouts page.
+    stripe_connect_refresh_url: str = "http://localhost:3001/account/host/payments"
+    stripe_connect_return_url: str = "http://localhost:3001/account/host/payments"
+    # ZR-PAY-002 Section 6/13: the Listing Fee is a separate Zoiko-own-account
+    # checkout from the rent/payout domain above (see models/listing_fee.py's
+    # own module docstring for why). Ops may register it as its own Stripe
+    # webhook endpoint with its own signing secret; blank falls back to
+    # stripe_webhook_secret so a single-endpoint Stripe setup keeps working
+    # unchanged.
+    stripe_listing_fee_webhook_secret: str = ""
+    # ZR-PAY-LINK-003 Section 6: this domain's own Stripe Connect events
+    # (direct charges on a recipient's connected account) -- same
+    # separate-endpoint-with-its-own-secret, falls-back-to-shared-secret
+    # pattern as stripe_listing_fee_webhook_secret above.
+    stripe_rental_payment_webhook_secret: str = ""
+    # ZR-PAY-002 Section 13.1: one immutable PDF per SUCCEEDED ListingFeePayment.
+    # Same never-publicly-mounted secure_uploads/ convention as
+    # receipt_document_dir above, own directory/module (core/listing_fee_
+    # receipt_documents.py) since it's its own document series in its own domain.
+    listing_fee_receipt_document_dir: str = "secure_uploads/listing_fee_receipts"
+    # ZR-PAY-002 Section 10/13 'Retention: Minimum/maximum retention...
+    # Follow jurisdiction policy.' A reasonable default for financial
+    # evidence (7 years), not a verified legal figure for any specific
+    # jurisdiction -- same REVIEW_REQUIRED honesty as every other numeric
+    # default in this codebase (e.g. MarketPolicyPack.identity_evidence_
+    # retention_days). Flat platform-wide value rather than a MarketPolicyPack
+    # column: this domain (models/rental_payment.py) is deliberately kept
+    # independent of that table's schema (Section 12.1's architecture rule).
+    rental_payment_evidence_retention_days: int = 2555
+
     # ZR-ENG-CLR-010 Section 20/24, QA-Q19: the same "mandatory above
     # configured thresholds or for safety/legal/manual override cases" rule
     # Section 20 states for financial holds, applied to who may record an
@@ -141,6 +203,13 @@ class Settings(BaseSettings):
     login_rate_limit_max: int = 10
     login_rate_limit_window_seconds: int = 60
 
+    # ZR-SUB-003 Section 10: "Rate-limit submission and document workflows."
+    # Per-authenticated-actor, same keying discipline as chat above.
+    sublet_submit_rate_limit_max: int = 5
+    sublet_submit_rate_limit_window_seconds: int = 3600
+    sublet_document_rate_limit_max: int = 20
+    sublet_document_rate_limit_window_seconds: int = 3600
+
     # ZR-ENG-CLR-001 Rule 7 / policy key booking.acceptance_hold_duration:
     # once an offer is accepted, the room is held (see services/inventory.py)
     # but the renter must reach a confirmed move-in within this window or the
@@ -156,6 +225,27 @@ class Settings(BaseSettings):
     # client IP, fixed window (requests per IP per window).
     public_assistant_rate_limit_max: int = 10
     public_assistant_rate_limit_window_seconds: int = 60
+
+    # ZR-PAY-CFG-001 Section 9: Zoiko Rooms collects its own Listing Fee only.
+    # Rent and deposits go directly from renter to the verified recipient;
+    # Zoiko never collects, holds, escrows, settles or pays out rental money,
+    # and never takes a commission on rent. Every capability below is OFF and
+    # a production deployment refuses to boot if any is switched on (see
+    # _validate_production). Code paths behind them stay in the codebase but
+    # are blocked by services/payment_boundary.py. There is deliberately no
+    # setting for a rental commission at all -- it cannot be enabled.
+    rent_collection_enabled: bool = False
+    deposit_collection_enabled: bool = False
+    host_payouts_enabled: bool = False
+    escrow_enabled: bool = False
+    wallet_enabled: bool = False
+    split_settlement_enabled: bool = False
+    # Fail-closed rules for the Listing Fee (no approved ACTIVE price = no
+    # publication) and for payment instructions (no verified PAYMENT_RECEIPT
+    # authority = no instructions). On everywhere by default; only the legacy
+    # test suite turns them off for tests that predate these rules.
+    listing_fee_fail_closed: bool = True
+    payment_receipt_authority_required: bool = True
 
     @property
     def is_production(self) -> bool:
@@ -176,6 +266,22 @@ class Settings(BaseSettings):
             problems.append("SEED_ADMIN_PASSWORD is unset or is a known placeholder")
         if len(self.seed_admin_password) < 12:
             problems.append("SEED_ADMIN_PASSWORD is shorter than 12 characters")
+        if not self.field_encryption_key or self.field_encryption_key.strip() in PLACEHOLDER_FIELD_ENCRYPTION_KEYS:
+            problems.append("FIELD_ENCRYPTION_KEY is unset or is the known placeholder")
+        else:
+            from cryptography.fernet import Fernet
+
+            try:
+                Fernet(self.field_encryption_key.encode("utf-8"))
+            except Exception:
+                problems.append("FIELD_ENCRYPTION_KEY is not a valid Fernet key")
+        for flag in RENTAL_MONEY_MOVEMENT_FLAGS:
+            if getattr(self, flag):
+                problems.append(f"{flag.upper()} must be false -- Zoiko Rooms never moves rental money (ZR-PAY-CFG-001)")
+        if not self.listing_fee_fail_closed:
+            problems.append("LISTING_FEE_FAIL_CLOSED must be true in production")
+        if not self.payment_receipt_authority_required:
+            problems.append("PAYMENT_RECEIPT_AUTHORITY_REQUIRED must be true in production")
         if problems:
             raise ValueError(
                 "Refusing to boot in production due to insecure configuration:\n- " + "\n- ".join(problems)

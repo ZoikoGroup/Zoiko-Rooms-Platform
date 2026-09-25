@@ -7,11 +7,11 @@ from sqlalchemy.orm import Session
 
 from app.crud.eligibility import check_marketplace_standing
 from app.crud.identity_verification import get_verified_identity_for_party
+from app.crud.listing import resolve_market_release
 from app.models.admin_user import AdminUser
 from app.models.finance import DisputeCase
 from app.models.identity_verification import IdentityVerification
 from app.models.occupancy import Occupancy
-from app.models.market_release import MarketRelease
 from app.models.occupancy_activation import OccupancyActivationDecision, OccupancyHandoverEvent
 from app.services.agreement_effectiveness import is_agreement_effective
 
@@ -71,7 +71,7 @@ def evaluate_activation_gate(db: Session, occupancy: Occupancy) -> GateEvaluatio
     else:
         checks["offer"] = "PASSED"
 
-    market_release = db.get(MarketRelease, listing.market_release_id) if listing.market_release_id else None
+    market_release = resolve_market_release(db, listing)
     marketplace_reasons = check_marketplace_standing(db, listing.room, market_release)
     if marketplace_reasons:
         blocked.extend("MARKETPLACE_" + reason.upper().replace(" ", "_") for reason in marketplace_reasons)

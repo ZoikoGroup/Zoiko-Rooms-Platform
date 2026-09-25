@@ -215,11 +215,11 @@ export function BookingChangeRequestsManager() {
                     <>→ {request.targetListingName || request.targetListingId}</>
                   ) : request.changeType === "FINANCIAL_CHANGE" ? (
                     <>
-                      → {formatCurrency(request.originalMonthlyRent ?? 0)} → {formatCurrency(request.proposedMonthlyRent ?? 0)}/month
+                      → {formatCurrency(request.originalMonthlyRent ?? 0, request.currency)} → {formatCurrency(request.proposedMonthlyRent ?? 0, request.currency)}/month
                       {request.originalMonthlyRent != null && request.proposedMonthlyRent != null && (
                         <span className={request.proposedMonthlyRent > request.originalMonthlyRent ? "text-accent-700 dark:text-accent-400" : "text-emerald-600 dark:text-emerald-400"}>
                           {" "}({request.proposedMonthlyRent > request.originalMonthlyRent ? "+" : ""}
-                          {formatCurrency(request.proposedMonthlyRent - request.originalMonthlyRent)}/mo)
+                          {formatCurrency(request.proposedMonthlyRent - request.originalMonthlyRent, request.currency)}/mo)
                         </span>
                       )}
                     </>
@@ -233,12 +233,12 @@ export function BookingChangeRequestsManager() {
                     </>
                   ) : request.changeType === "DEPOSIT_CHANGE" ? (
                     <>
-                      → {formatCurrency(request.originalDepositAmount ?? 0)} → {formatCurrency(request.proposedDepositAmount ?? 0)}
+                      → {formatCurrency(request.originalDepositAmount ?? 0, request.currency)} → {formatCurrency(request.proposedDepositAmount ?? 0, request.currency)}
                       {" (approval is request-only -- process the actual amount via Deposit Records)"}
                     </>
                   ) : request.changeType === "LEGAL_ORDER_CHANGE" ? (
                     <>
-                      {request.proposedMonthlyRent != null && <>→ rent {formatCurrency(request.proposedMonthlyRent)}/month </>}
+                      {request.proposedMonthlyRent != null && <>→ rent {formatCurrency(request.proposedMonthlyRent, request.currency)}/month </>}
                       {request.additionalTermMonths != null && (
                         <>· move-in {formatDate(request.originalStartDate)} → {formatDate(request.proposedStartDate)}, new term: {request.additionalTermMonths} months </>
                       )}
@@ -356,7 +356,9 @@ export function BookingChangeRequestsManager() {
           )}
           {altTarget?.changeType === "FINANCIAL_CHANGE" && (
             <div>
-              <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Alternative monthly rent (₹)</label>
+              <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">
+                Alternative monthly rent{altTarget?.currency ? ` (${altTarget.currency})` : ""}
+              </label>
               <input
                 type="number"
                 min={0}

@@ -1,3 +1,4 @@
+import secrets
 from datetime import date as date_, datetime, timezone
 from io import BytesIO
 
@@ -11,19 +12,22 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.agreement_documents import resolve_agreement_document_path, save_agreement_document
 from app.core.mailer import send_agreement_executed_email, send_application_decided_email
+from app.core.security import hash_password
 from app.crud.audit import log_audit_event
 from app.crud.eligibility import check_agreement_eligibility, check_offer_eligibility
 from app.crud.events import emit_event
 from app.crud.guest import get_guest_for_user, get_user_for_guest
 from app.crud.ids import dicebear_avatar, new_id
-from app.crud.listing import is_listing_available
+from app.crud.listing import is_listing_available, resolve_market_release
 from app.crud.market_policy import resolve_market_policy
 from app.crud import notification as notif_crud
 from app.crud.occupancy import _add_months
 from app.crud.party import assert_provider_access, assert_provider_access_any, party_id_for_listing
 from app.crud.user import get_user_by_party_id
+from app.services.policy import get_policy
 from app.models.admin_user import AdminUser
 from app.models.agreement_amendment import AgreementAmendment
+from app.models.agreement_clause import ClauseDefinition
 from app.models.agreement_party import AgreementParty
 from app.models.agreement_version_detail import AgreementPremises, CommercialTermsSnapshot, ExecutionCertificate
 from app.models.disclosure_requirement import DisclosureRequirement
@@ -46,7 +50,7 @@ from app.models.signature_provider import SignatureRequest
 from app.models.user_account import UserAccount
 from app.schemas.leasing import ApplicationCreate, ApplicationDecide, ApplicationRead, ApplicationUpdate, OfferTermsCreate
 from app.services import inventory as inventory_service
-from app.services.agreement_profile import DEFAULT_DISCLOSURES, resolve_agreement_profile
+from app.services.agreement_profile import DEFAULT_DISCLOSURES, no_agreement_profile_message, resolve_agreement_profile
 from app.services.overlap import evaluate_occupant_overlap
 from app.services.booking_expiry import (
     compute_checkout_deadline,
@@ -64,6 +68,7 @@ def to_application_read(application: Application) -> ApplicationRead:
         guest_id=application.guest_id,
         guest_name=application.guest.name,
         guest_email=application.guest.email,
+        guest_party_id=application.guest.user_account.party_id if application.guest.user_account else None,
         named_occupant_guest_id=application.named_occupant_guest_id,
         status=application.status,
         message=application.message,
@@ -234,10 +239,15 @@ def withdraw_application(db: Session, application: Application, admin: AdminUser
 
 def _apply_application_decision(
     db: Session, application: Application, data: ApplicationDecide, *, admin_id: int | None, user_id: int | None,
+    actor: "AdminUser | UserAccount | None" = None,
 ) -> ApplicationDecision:
     """Shared core of decide_application/decide_application_as_host -- the same
     status transition and renter/host notifications regardless of which actor
-    decided. Exactly one of admin_id/user_id is set by the caller."""
+    decided. Exactly one of admin_id/user_id is set by the caller.
+
+    actor is the same admin_id/user_id, but as a real object -- needed (only
+    on the APPROVED branch) to auto-create an offer as that same
+    already-authorized provider actor, see _auto_create_offer_if_enabled."""
     if data.decision not in ("APPROVED", "REJECTED"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "decision must be APPROVED or REJECTED")
 
@@ -291,7 +301,81 @@ def _apply_application_decision(
 
     db.commit()
     db.refresh(decision)
+
+    if data.decision == "APPROVED" and actor is not None:
+        _auto_create_offer_if_enabled(db, application, actor)
+
     return decision
+
+
+SYSTEM_ACTOR_EMAIL = "automation@zoikorooms.internal"
+
+
+def _get_system_actor(db: Session) -> AdminUser:
+    """The actor recorded for every automatic pipeline step that has no real
+    human in the loop -- e.g. a renter accepting an offer has no provider-
+    side access, but agreement auto-creation still needs one (see
+    _auto_create_agreement_if_enabled). super_admin gives it an unconditional
+    pass through assert_provider_access (crud/party.py) without granting it
+    membership over any specific provider's party. is_active=False plus a
+    random, never-surfaced password means this row can never actually log
+    in -- it exists purely to be a distinct, auditable actor id in
+    log_audit_event, get-or-created lazily rather than via a migration/seed
+    step so it self-heals across every environment (dev/test/prod) the same
+    way rather than depending on a seed script having run."""
+    actor = db.scalar(select(AdminUser).where(AdminUser.email == SYSTEM_ACTOR_EMAIL))
+    if actor is not None:
+        return actor
+    actor = AdminUser(
+        email=SYSTEM_ACTOR_EMAIL,
+        hashed_password=hash_password(secrets.token_urlsafe(32)),
+        full_name="Zoiko Automation",
+        role="super_admin",
+        is_active=False,
+    )
+    db.add(actor)
+    db.commit()
+    db.refresh(actor)
+    return actor
+
+
+def _auto_create_offer_if_enabled(db: Session, application: Application, actor: "AdminUser | UserAccount") -> None:
+    """Section 14 policy key offer.requires_manual_creation (services/policy.py),
+    same opt-in-per-market-release shape as publication.requires_approval /
+    _auto_approve_and_publish_low_risk_market in crud/listing.py. Runs
+    synchronously as the same actor who just approved the application -- they
+    already have provider access, so this reuses create_offer/add_offer_terms/
+    set_offer_status completely unchanged rather than inventing a system path.
+
+    Silently no-ops (falls back to the existing manual flow) whenever the
+    policy is on manual, the listing hasn't set default terms, or any of the
+    real functions this calls raise -- an automation failure must never
+    corrupt or roll back the application decision that already succeeded and
+    that a real host/renter is waiting on. Same best-effort idiom already
+    used elsewhere in this file for the rent-invoice/rental-payment hooks."""
+    listing = application.listing
+    if listing is None:
+        return
+    if get_policy(resolve_market_release(db, listing), "offer.requires_manual_creation"):
+        return
+    if listing.default_monthly_rent is None or listing.default_deposit_amount is None or listing.default_term_months is None:
+        return
+
+    try:
+        offer = create_offer(db, application, actor)
+        add_offer_terms(
+            db, offer, actor,
+            OfferTermsCreate(
+                monthly_rent=listing.default_monthly_rent,
+                deposit_amount=listing.default_deposit_amount,
+                start_date=application.desired_move_in or date_.today(),
+                term_months=listing.default_term_months,
+                cadence=listing.default_cadence or "MONTHLY",
+            ),
+        )
+        set_offer_status(db, offer, actor, "SENT")
+    except Exception:
+        pass
 
 
 def decide_application(db: Session, application: Application, admin: AdminUser, data: ApplicationDecide) -> ApplicationDecision:
@@ -300,7 +384,7 @@ def decide_application(db: Session, application: Application, admin: AdminUser, 
     (offer terms, agreement) which stays with the provider. This is the admin-portal
     path; a self-service Host decides their own party-owned listing's applications
     through decide_application_as_host below instead."""
-    return _apply_application_decision(db, application, data, admin_id=admin.id, user_id=None)
+    return _apply_application_decision(db, application, data, admin_id=admin.id, user_id=None, actor=admin)
 
 
 def decide_application_as_host(
@@ -313,7 +397,7 @@ def decide_application_as_host(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only decide applications for your own listings")
     if application.status != "SUBMITTED":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Application in status {application.status} cannot be decided")
-    return _apply_application_decision(db, application, data, admin_id=None, user_id=user.id)
+    return _apply_application_decision(db, application, data, admin_id=None, user_id=user.id, actor=user)
 
 
 def get_offer_or_404(db: Session, offer_id: int, correlation_id: str = "") -> Offer:
@@ -385,6 +469,20 @@ def add_offer_terms(
             f"Deposit amount {data.deposit_amount:.2f} exceeds the resolved market cap of "
             f"{max_deposit:.2f} ({policy.deposit_max_rent_multiple}x monthly rent, jurisdiction={policy.jurisdiction_code})",
         )
+    # ZR-ENG-CLR-002 Section 2: deposit_instrument_allowed was previously stored
+    # but never read anywhere -- a PROHIBITED market could still have a deposit
+    # added, and a REQUIRED one could still have none. This is the single place
+    # a deposit amount is actually set, matching the cap check right above it.
+    if policy.deposit_instrument_allowed == "PROHIBITED" and data.deposit_amount > 0:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"A deposit is not permitted in this jurisdiction ({policy.jurisdiction_code}) -- deposit amount must be 0",
+        )
+    if policy.deposit_instrument_allowed == "REQUIRED" and data.deposit_amount <= 0:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"A deposit is required in this jurisdiction ({policy.jurisdiction_code}) -- deposit amount must be greater than 0",
+        )
 
     # ZR-ENG-CLR-005 AC-06: the cadence these terms will seed a PaymentSchedule
     # with (create_agreement) -- reject anything outside the supported set up
@@ -402,6 +500,18 @@ def add_offer_terms(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "customIntervalDays is required (a positive integer) for CUSTOM cadence")
     elif data.custom_interval_days is not None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "customIntervalDays only applies to CUSTOM cadence")
+
+    # Section 5 gap: an UPFRONT schedule bills the entire term as one advance
+    # payment (create_agreement: monthly_rent * term_months) -- without a
+    # ceiling, this could collect a whole multi-year lease's rent in a single
+    # obligation. Only UPFRONT is capped: every other cadence never collects
+    # more than one period's rent ahead of its own due date by construction.
+    if data.cadence == "UPFRONT" and data.term_months > policy.advance_rent_max_months:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"UPFRONT cadence would collect {data.term_months} months of rent in advance, exceeding the resolved "
+            f"market cap of {policy.advance_rent_max_months} month(s) (jurisdiction={policy.jurisdiction_code})",
+        )
 
     next_version = offer.current_version + 1
     terms = OfferTerms(
@@ -451,7 +561,7 @@ def _invalidate_pending_agreement_version(
     if profile is None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "No approved agreement profile for this listing's jurisdiction -- routed to manual review",
+            no_agreement_profile_message(db, listing, listing.room),
         )
 
     before_state = f"v{current_version.version_no}:{agreement.status}"
@@ -603,6 +713,7 @@ def set_offer_status(
                 notification_type="offer.accepted_for_host",
                 related_entity_type="offer", related_entity_id=str(offer.id),
             )
+        _auto_create_agreement_if_enabled(db, offer)
     elif new_status == "DECLINED":
         if listing and listing.party_id:
             notif_crud.notify_user_by_party(
@@ -664,6 +775,7 @@ def user_accept_offer(
     _accept_offer_and_hold_room(db, offer, "ACCEPTED", correlation_id=correlation_id, override_reason=override_reason)
     db.commit()
     db.refresh(offer)
+    _auto_create_agreement_if_enabled(db, offer)
     return offer
 
 
@@ -741,19 +853,34 @@ def _build_agreement_snapshot(
     }
 
 
-def _populate_agreement_parties(db: Session, agreement: Agreement, offer: Offer) -> None:
+def _populate_agreement_parties(
+    db: Session, agreement: Agreement, offer: Offer, *,
+    signing_as_agent: bool = False, agent_authority_evidence_ref: str = "",
+) -> None:
     """ZR-ENG-CLR-004 Section 13.1 agreement_party: the real per-party
     roster, populated once at create_agreement time from the same verified
     listing/guest facts _build_agreement_snapshot reads -- never Host free
     text (Section 5.2 lists 'legal label/authority of a party' among the
-    fields Host must not control)."""
+    fields Host must not control).
+
+    signing_as_agent/agent_authority_evidence_ref wire up the previously
+    unused party_type="agent"/authority_evidence_ref columns on
+    AgreementParty (models/agreement_party.py) for the one case this
+    codebase actually has: whoever created the agreement (admin or Host
+    UserAccount) may not be the property's own legal owner/company, and is
+    instead an authorized agent signing on its behalf -- see
+    create_agreement's own validation, which requires evidence before this
+    is ever set."""
     listing = offer.listing
     guest = offer.guest
     provider_name = listing.contact_name or (listing.owner.full_name if listing.owner else "Host")
     provider_email = listing.contact_email or (listing.owner.email if listing.owner else "")
     db.add(AgreementParty(
-        agreement_id=agreement.id, role="provider", party_type="individual",
+        agreement_id=agreement.id,
+        role="provider",
+        party_type="agent" if signing_as_agent else "individual",
         legal_name=provider_name, contact_email=provider_email,
+        authority_evidence_ref=agent_authority_evidence_ref if signing_as_agent else "",
     ))
     db.add(AgreementParty(
         agreement_id=agreement.id, role="renter", party_type="individual",
@@ -782,8 +909,36 @@ def _populate_version_detail_rows(db: Session, version: AgreementVersion, offer:
     ))
 
 
+def list_optional_clause_choices(db: Session, listing: Listing) -> list[dict]:
+    """ZR-ENG-CLR-004 AC-17: the Host's real, resolved choice set of approved
+    optional clauses (e.g. pets, parking) for Screen G -- previously only
+    reachable by already knowing a clause_id, since create_agreement's own
+    AC-17 validation is the only thing that ever read
+    profile.optional_clause_ids. Returns [] (not an error) when there's no
+    resolvable profile at all -- create_agreement's own fail-closed check is
+    what actually blocks agreement creation in that case."""
+    profile = resolve_agreement_profile(db, listing, listing.room)
+    if profile is None or not profile.optional_clause_ids:
+        return []
+    rows = db.scalars(
+        select(ClauseDefinition).where(
+            ClauseDefinition.clause_id.in_(profile.optional_clause_ids),
+            ClauseDefinition.jurisdiction_scope == profile.jurisdiction,
+            ClauseDefinition.agreement_class == profile.agreement_class,
+        )
+    ).all()
+    by_id_version = {(r.clause_id, r.version): r for r in rows}
+    choices = []
+    for clause_id in profile.optional_clause_ids:
+        row = by_id_version.get((clause_id, profile.clause_versions.get(clause_id)))
+        if row is not None:
+            choices.append({"clause_id": clause_id, "title": row.title})
+    return choices
+
+
 def create_agreement(
     db: Session, offer: Offer, admin: AdminUser | UserAccount, selected_optional_clause_ids: list[str] | None = None,
+    *, signing_as_agent: bool = False, agent_authority_evidence_ref: str = "", auto: bool = False,
 ) -> Agreement:
     assert_provider_access_any(db, admin, party_id_for_listing(offer.listing))
     reasons = check_agreement_eligibility(db, offer)
@@ -798,7 +953,7 @@ def create_agreement(
     if profile is None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "No approved agreement profile for this listing's jurisdiction -- routed to manual review",
+            no_agreement_profile_message(db, listing, listing.room),
         )
 
     # AC-17 'Host special terms use approved options; uncontrolled legal free
@@ -814,6 +969,12 @@ def create_agreement(
             f"Not an approved optional clause for this agreement: {invalid}",
         )
 
+    if signing_as_agent and not agent_authority_evidence_ref.strip():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Authority evidence is required when signing on behalf of the landlord/company as an agent",
+        )
+
     agreement = Agreement(offer_id=offer.id)
     db.add(agreement)
     db.flush()
@@ -826,7 +987,10 @@ def create_agreement(
     db.add(version)
     db.flush()
     _populate_version_detail_rows(db, version, offer, latest_terms)
-    _populate_agreement_parties(db, agreement, offer)
+    _populate_agreement_parties(
+        db, agreement, offer,
+        signing_as_agent=signing_as_agent, agent_authority_evidence_ref=agent_authority_evidence_ref.strip(),
+    )
 
     # ZR-ENG-CLR-004 Section 6.8/13.1: the disclosure checklist this
     # agreement must clear before signing -- see _apply_signature's gate
@@ -886,6 +1050,31 @@ def create_agreement(
     db.commit()
     db.refresh(agreement)
 
+    # ZR-PAY-002 Section 4/6: the record/evidence-layer counterpart to the
+    # two custody-based Obligation rows above -- see
+    # models/rental_payment.py's own module docstring for why this is a
+    # deliberate, temporary duplication rather than a replacement. Same
+    # best-effort placement as the rent-invoice hook below: a failure here
+    # must never undo or fail an already-committed agreement.
+    try:
+        from app.crud.rental_payment import create_obligation as create_rental_payment_obligation
+        from app.crud.rental_payment import resolve_rent_recipient_party_id
+
+        recipient_party_id = resolve_rent_recipient_party_id(db, listing.room) if listing.room else None
+        if recipient_party_id is not None:
+            create_rental_payment_obligation(
+                db, obligation_type="RENT", tenant_guest_id=offer.guest_id, recipient_party_id=recipient_party_id,
+                amount=first_rent_amount, currency=listing.currency, due_date=latest_terms.start_date,
+                agreement_id=agreement.id,
+            )
+            create_rental_payment_obligation(
+                db, obligation_type="DEPOSIT", tenant_guest_id=offer.guest_id, recipient_party_id=recipient_party_id,
+                amount=latest_terms.deposit_amount, currency=listing.currency, due_date=latest_terms.start_date,
+                agreement_id=agreement.id,
+            )
+    except Exception:
+        pass
+
     # ZR-ENG-CLR-005 Section 13.1: same best-effort placement as
     # crud/finance.py::confirm_payment's receipt hook -- an invoice-rendering
     # failure must never undo or fail an already-committed agreement. An
@@ -901,7 +1090,59 @@ def create_agreement(
     except Exception:
         pass
 
+    # auto=True only (i.e. only when _auto_create_agreement_if_enabled called
+    # this, never a manual "Create Agreement" click): delivering every seeded
+    # disclosure immediately is the right behavior for a fully-automatic
+    # pipeline, but NOT the default -- ZR-ENG-CLR-004 AC-15's own delivery
+    # gate (_apply_signature's REQUIRED_MISSING check) depends on disclosures
+    # genuinely starting undelivered after a normal manual creation, and a
+    # real admin/host still needs to see and act on that queue. Confirmed by
+    # the full test suite: making this unconditional silently broke every
+    # test asserting that undelivered state is reachable -- same best-effort
+    # placement as the two blocks above, just gated.
+    if auto:
+        for disclosure in agreement.disclosures:
+            try:
+                deliver_disclosure(db, agreement, disclosure, admin)
+            except Exception:
+                pass
+
     return agreement
+
+
+def _auto_create_agreement_if_enabled(db: Session, offer: Offer) -> None:
+    """Section 14 policy key agreement.requires_manual_creation
+    (services/policy.py) -- same opt-in-per-market-release shape as
+    offer.requires_manual_creation above. Runs as the system actor
+    (_get_system_actor) since the caller accepting the offer may be the
+    renter themselves, who has no provider access at all.
+
+    create_agreement already enforces check_agreement_eligibility
+    internally before doing anything else, so this never bypasses a
+    compliance gate -- an unmet gate (missing authority record, occupancy
+    eligibility, identity verification, etc.) raises the same 409 a manual
+    click would, caught here and silently left for a human to create
+    manually later once the gate clears. Never lets an automation failure
+    touch the offer-acceptance state that already succeeded."""
+    if get_policy(resolve_market_release(db, offer.listing), "agreement.requires_manual_creation"):
+        return
+    try:
+        agreement = create_agreement(db, offer, _get_system_actor(db), auto=True)
+    except Exception:
+        return
+    # A fully-automatic pipeline that stops at DRAFT defeats the point --
+    # nothing else ever moves this agreement to SENT on its own, so it
+    # would sit invisible to the renter until a human happened to notice
+    # and click Send manually. Sending is purely mechanical (send_agreement
+    # only checks status==DRAFT and a version exists -- no discretion, unlike
+    # the real judgment calls this session deliberately left manual: occupancy
+    # eligibility, move-in confirmation, property/authority verification,
+    # screening decisions). Separate try/except so a send failure never
+    # unwinds the agreement creation that already succeeded.
+    try:
+        send_agreement(db, agreement, _get_system_actor(db))
+    except Exception:
+        pass
 
 
 def get_agreement_or_404(db: Session, agreement_id: int, correlation_id: str = "") -> Agreement:
@@ -1317,8 +1558,22 @@ def confirm_agreement_payment(db: Session, agreement: Agreement, correlation_id:
     clears -- the only path (besides _apply_signature's already-paid shortcut
     above) that can move a PAYMENT_IN_PROGRESS/PAYMENT_PENDING agreement to
     the terminal SIGNED state. A no-op otherwise -- not waiting on payment, or
-    not every obligation clear yet."""
-    if agreement.status not in ("PAYMENT_IN_PROGRESS", "PAYMENT_PENDING"):
+    not every obligation clear yet.
+
+    Also reachable from SENT when both signatures are already in: the
+    checkout-expiry sweep (services/booking_expiry.py) resets an unpaid
+    PAYMENT_IN_PROGRESS agreement back to SENT after its 30-minute deadline
+    -- a timeout sized for the old custodial checkout-session flow, not the
+    non-custodial rail's own bridge (crud/rental_payment.py's
+    _sync_legacy_obligation_from_confirmation), where payment can
+    legitimately clear long after 30 minutes (a manual bank-transfer
+    instruction, or just a slower Stripe checkout). Without this, a fully-
+    signed, fully-paid agreement that happened to cross the 30-minute mark
+    stayed stuck at SENT forever even though the money had cleared --
+    requiring both signatures already present (not just any SENT
+    agreement) is what makes accepting SENT here safe."""
+    already_signed_both = bool(agreement.signed_by_provider_at and agreement.signed_by_renter_at)
+    if agreement.status not in ("PAYMENT_IN_PROGRESS", "PAYMENT_PENDING") and not (agreement.status == "SENT" and already_signed_both):
         return agreement
     if not _all_initial_obligations_paid(agreement):
         return agreement
@@ -1694,6 +1949,7 @@ def freeze_agreement_version(db: Session, agreement: Agreement) -> DocumentArtif
         pending_amendment.executed_at = now
         pending_amendment.effective_at = now
         _supersede_payment_schedule_if_rent_changed(db, agreement, pending_amendment)
+        _generate_deposit_topup_obligation(db, agreement, pending_amendment)
 
         # ZR-ENG-CLR-008 Section 8: if this amendment was generated from a
         # renter-initiated BookingChangeRequest, that request is only
@@ -1774,4 +2030,38 @@ def _supersede_payment_schedule_if_rent_changed(db: Session, agreement: Agreemen
         amount=float(amendment.proposed_terms["monthlyRent"]),
         first_due=date_.today(),
         anchor_day=current.anchor_day,
+    ))
+
+
+def _generate_deposit_topup_obligation(db: Session, agreement: Agreement, amendment: AgreementAmendment) -> None:
+    """Section 2 gap: a deposit top-up bundled with a rent change
+    (crud/booking_change_requests.py:request_financial_change) updates the
+    contractual deposit_amount figure via the same _merged_snapshot path any
+    other amendment uses, but that alone never actually bills the tenant for
+    the difference. Mirrors _supersede_payment_schedule_if_rent_changed's
+    shape: a no-op for the common case (no depositAmount in this amendment,
+    or a same/decreased figure -- a decrease is a refund, handled by Section
+    2's own deposit release path, not this one). Creates one new DEPOSIT
+    Obligation for exactly the incremental amount, due immediately -- the
+    original, already-paid obligation is never touched, so it becomes its
+    own separate DepositRecord once paid (crud/finance.py's existing
+    one-record-per-paid-obligation pattern), not a silent rewrite of the
+    first one's held_amount."""
+    if "depositAmount" not in amendment.proposed_terms:
+        return
+
+    source_version = db.get(AgreementVersion, amendment.source_version_id)
+    old_deposit = float(source_version.snapshot.get("deposit_amount", 0))
+    new_deposit = float(amendment.proposed_terms["depositAmount"])
+    topup = round(new_deposit - old_deposit, 2)
+    if topup <= 0:
+        return
+
+    db.add(Obligation(
+        obligation_type="DEPOSIT",
+        money_plane=OBLIGATION_TYPE_TO_PLANE["DEPOSIT"],
+        amount=topup,
+        currency=agreement.offer.listing.currency,
+        due_date=date_.today(),
+        agreement_id=agreement.id,
     ))

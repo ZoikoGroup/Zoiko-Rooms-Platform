@@ -2,33 +2,40 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Building2, Check, ChevronLeft, ChevronRight, FileEdit, Send, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Building2, Check, ChevronLeft, ChevronRight, FileEdit, Send, ShieldCheck, Upload } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Switch } from "@/components/ui/Switch";
-import { Property, Room } from "@/lib/types";
+import { AuthorityRelationshipType, OpenJurisdiction, Property, Room } from "@/lib/types";
 import {
   HostedListingInput,
   createHostedListing,
   createHostedProperty,
   createHostedRoom,
+  declareHostedAuthorityRecord,
+  declareHostedPropertyVerification,
   errorMessage,
   listHostedProperties,
   listHostedRooms,
+  listOpenJurisdictions,
   submitHostedListingForReview,
 } from "@/lib/user-api";
+import { RegionSelect } from "@/components/user/RegionSelect";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { formatCurrency } from "@/lib/utils";
 import { Field, inputClass } from "@/components/user/ui";
 import { useUserSession } from "@/components/user/UserSessionContext";
+import { ACCEPTED_DOCUMENT_EXTENSIONS, MAX_DOCUMENT_SIZE_MB } from "@/lib/identity-documents";
 
 const MAX_LISTING_IMAGES = 10;
 const SUPPORTED_CURRENCIES = ["INR", "GBP", "USD", "EUR", "CAD", "AUD", "AED", "SGD", "NZD"];
 const STEPS = ["Property", "Room", "Listing", "Photos", "Review"] as const;
 
-type PropertyChoice = { mode: "existing"; propertyId: number } | { mode: "new"; address: string; city: string };
+type PropertyChoice =
+  | { mode: "existing"; propertyId: number }
+  | { mode: "new"; address: string; city: string; jurisdictionCode: string };
 type RoomChoice = { mode: "existing"; roomId: number } | { mode: "new"; size: string; hasEnsuite: boolean };
 
 interface ListingDetailsForm {
@@ -78,6 +85,11 @@ function emptyDetails(contact: { name: string; phone: string; email: string }): 
  *  friendlier entry point on top of the same backend endpoints, not a
  *  replacement. Review offers "Save as Draft" (create only, same as before) or
  *  "Submit for Review" (create, then immediately ask an admin to review it). */
+/** Pre-select the region only when there's exactly one to choose from. */
+function defaultRegion(regions: OpenJurisdiction[]): string {
+  return regions.length === 1 ? regions[0].code : "";
+}
+
 export function ListARoomWizard({
   open,
   onClose,
@@ -93,12 +105,26 @@ export function ListARoomWizard({
 }) {
   const [step, setStep] = useState(0);
   const [properties, setProperties] = useState<Property[]>([]);
+  const [regions, setRegions] = useState<OpenJurisdiction[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loadingContext, setLoadingContext] = useState(true);
 
-  const [propertyChoice, setPropertyChoice] = useState<PropertyChoice>({ mode: "new", address: "", city: "" });
+  const [propertyChoice, setPropertyChoice] = useState<PropertyChoice>({
+    mode: "new",
+    address: "",
+    city: "",
+    jurisdictionCode: "",
+  });
   const [roomChoice, setRoomChoice] = useState<RoomChoice>({ mode: "new", size: "", hasEnsuite: false });
   const [details, setDetails] = useState<ListingDetailsForm>(emptyDetails(contact));
+  // Lister, Property & Authority Verification wireframe: optional, best-effort
+  // evidence -- submitted after the room exists (see handleFinish) and never
+  // blocks listing creation if left blank or if the submission call fails.
+  const [propertyEvidenceRef, setPropertyEvidenceRef] = useState("");
+  const [propertyEvidenceFile, setPropertyEvidenceFile] = useState<File | null>(null);
+  const [propertyEvidenceFileError, setPropertyEvidenceFileError] = useState("");
+  const [authorityRelationshipType, setAuthorityRelationshipType] = useState<AuthorityRelationshipType>("OWNER");
+  const [authorityEvidenceRef, setAuthorityEvidenceRef] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -110,13 +136,20 @@ export function ListARoomWizard({
     setStep(0);
     setError("");
     setDetails(emptyDetails(contact));
+    setPropertyEvidenceRef("");
+    setAuthorityRelationshipType("OWNER");
+    setAuthorityEvidenceRef("");
     setLoadingContext(true);
-    listHostedProperties()
-      .then((owned) => {
+    Promise.all([listHostedProperties().catch(() => [] as Property[]), listOpenJurisdictions().catch(() => [] as OpenJurisdiction[])])
+      .then(([owned, openRegions]) => {
         setProperties(owned);
-        setPropertyChoice(owned.length > 0 ? { mode: "existing", propertyId: owned[0].id } : { mode: "new", address: "", city: "" });
+        setRegions(openRegions);
+        setPropertyChoice(
+          owned.length > 0
+            ? { mode: "existing", propertyId: owned[0].id }
+            : { mode: "new", address: "", city: "", jurisdictionCode: defaultRegion(openRegions) }
+        );
       })
-      .catch(() => setProperties([]))
       .finally(() => setLoadingContext(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -140,6 +173,10 @@ export function ListARoomWizard({
     if (step === 0) {
       if (propertyChoice.mode === "new" && (!propertyChoice.address.trim() || !propertyChoice.city.trim())) {
         setError("Enter an address and city, or pick an existing property.");
+        return;
+      }
+      if (propertyChoice.mode === "new" && !propertyChoice.jurisdictionCode) {
+        setError("Select the region this property is located in.");
         return;
       }
       // Reduce duplicate entry: default the listing's area/neighbourhood from the
@@ -210,6 +247,7 @@ export function ListARoomWizard({
         const created = await createHostedProperty({
           address: propertyChoice.address.trim(),
           city: propertyChoice.city.trim(),
+          jurisdictionCode: propertyChoice.jurisdictionCode,
         });
         propertyId = created.id;
         city = created.city;
@@ -224,6 +262,30 @@ export function ListARoomWizard({
           hasEnsuite: roomChoice.hasEnsuite,
         });
         roomId = createdRoom.id;
+      }
+
+      // Lister, Property & Authority Verification wireframe: optional
+      // evidence, submitted best-effort -- never blocks listing creation.
+      // Verification stays a separate, informational admin review step
+      // (see PublishEligibility), not a hard gate on this wizard.
+      if (propertyEvidenceRef.trim() && propertyEvidenceFile) {
+        try {
+          await declareHostedPropertyVerification(roomId, {
+            evidenceRef: propertyEvidenceRef.trim(), file: propertyEvidenceFile,
+          });
+        } catch {
+          // Best-effort -- surfaced later via the verification status summary, not here.
+        }
+      }
+      if (authorityEvidenceRef.trim()) {
+        try {
+          await declareHostedAuthorityRecord(roomId, {
+            relationshipType: authorityRelationshipType,
+            evidenceRef: authorityEvidenceRef.trim(),
+          });
+        } catch {
+          // Best-effort -- surfaced later via the verification status summary, not here.
+        }
       }
 
       const payload: HostedListingInput = {
@@ -307,7 +369,9 @@ export function ListARoomWizard({
                     />
                     <span>
                       <span className="block text-sm font-semibold text-slate-700 dark:text-slate-200">{property.address}</span>
-                      <span className="block text-xs text-slate-400">{property.city}</span>
+                      <span className="block text-xs text-slate-400">
+                        {property.city} · {property.jurisdictionCode}
+                      </span>
                     </span>
                   </label>
                 ))}
@@ -323,7 +387,9 @@ export function ListARoomWizard({
                     type="radio"
                     name="property-choice"
                     checked={propertyChoice.mode === "new"}
-                    onChange={() => setPropertyChoice({ mode: "new", address: "", city: "" })}
+                    onChange={() =>
+                      setPropertyChoice({ mode: "new", address: "", city: "", jurisdictionCode: defaultRegion(regions) })
+                    }
                   />
                   <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
                     <Building2 className="h-4 w-4" /> Add a new property
@@ -348,6 +414,13 @@ export function ListARoomWizard({
                         className={inputClass}
                       />
                     </Field>
+                    <div className="sm:col-span-2">
+                      <RegionSelect
+                        regions={regions}
+                        value={propertyChoice.jurisdictionCode}
+                        onChange={(code) => setPropertyChoice({ ...propertyChoice, jurisdictionCode: code })}
+                      />
+                    </div>
                   </div>
                 )}
               </div>
@@ -594,6 +667,77 @@ export function ListARoomWizard({
                     </Link>
                   </div>
                 )}
+
+                <div className="space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-100 dark:bg-slate-800/60 dark:ring-white/10">
+                  <p className="text-xs font-semibold text-primary-900 dark:text-white">
+                    Property &amp; authority evidence <span className="font-normal text-slate-400">(optional, can be added later)</span>
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    These are separate from your identity verification above — they confirm the property itself is
+                    real, and that you have the right (owner, agent, or manager) to list it. An admin reviews them
+                    independently; the status is shown on your account&apos;s verification page.
+                  </p>
+                  <Field label="Property evidence reference" hint="e.g. title deed, utility bill, or uploaded document ID">
+                    <input
+                      value={propertyEvidenceRef}
+                      onChange={(e) => setPropertyEvidenceRef(e.target.value)}
+                      placeholder="Document ID or reference"
+                      className={inputClass}
+                    />
+                  </Field>
+                  <div>
+                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                      Upload evidence document
+                    </span>
+                    <label className="flex cursor-pointer items-center gap-3 rounded-xl border-2 border-dashed border-slate-200 bg-white px-4 py-4 text-sm text-slate-500 transition-colors hover:border-primary-300 hover:bg-primary-50/50 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-400">
+                      <Upload className="h-5 w-5 shrink-0 text-slate-400" />
+                      <span className="min-w-0 flex-1 truncate">
+                        {propertyEvidenceFile ? propertyEvidenceFile.name : "Choose a PDF, JPG or PNG file"}
+                      </span>
+                      <input
+                        type="file"
+                        accept={ACCEPTED_DOCUMENT_EXTENSIONS}
+                        onChange={(e) => {
+                          const selected = e.target.files?.[0] ?? null;
+                          if (selected && selected.size > MAX_DOCUMENT_SIZE_MB * 1024 * 1024) {
+                            setPropertyEvidenceFileError(`That file is larger than ${MAX_DOCUMENT_SIZE_MB}MB.`);
+                            setPropertyEvidenceFile(null);
+                            e.target.value = "";
+                            return;
+                          }
+                          setPropertyEvidenceFileError("");
+                          setPropertyEvidenceFile(selected);
+                        }}
+                        className="hidden"
+                      />
+                    </label>
+                    <p className="mt-1.5 text-xs text-slate-400">PDF, JPG or PNG, up to {MAX_DOCUMENT_SIZE_MB}MB.</p>
+                    {propertyEvidenceFileError && (
+                      <p className="mt-1 text-xs font-medium text-accent-600">{propertyEvidenceFileError}</p>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <Field label="Your relationship to this property">
+                      <select
+                        value={authorityRelationshipType}
+                        onChange={(e) => setAuthorityRelationshipType(e.target.value as AuthorityRelationshipType)}
+                        className={inputClass}
+                      >
+                        <option value="OWNER">Owner</option>
+                        <option value="AGENT">Agent</option>
+                        <option value="MANAGER">Manager</option>
+                      </select>
+                    </Field>
+                    <Field label="Authority evidence reference" hint="e.g. lease, ownership deed, or NOC">
+                      <input
+                        value={authorityEvidenceRef}
+                        onChange={(e) => setAuthorityEvidenceRef(e.target.value)}
+                        placeholder="Document ID or reference"
+                        className={inputClass}
+                      />
+                    </Field>
+                  </div>
+                </div>
 
                 <div className="overflow-hidden rounded-xl ring-1 ring-slate-100 dark:ring-white/10">
                   {details.images[0] ? (

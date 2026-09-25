@@ -1,8 +1,14 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
 from app.schemas.common import CamelModel
+
+# Lister, Property & Authority Verification wireframe: the structured
+# landlord/agent/manager relationship, kept separate from the pre-existing
+# free-text authority_type (evidence basis, e.g. "lease_agreement").
+AuthorityRelationshipType = Literal["OWNER", "AGENT", "MANAGER"]
 
 
 class MarketReleaseCreate(CamelModel):
@@ -34,12 +40,11 @@ class PropertyCreate(CamelModel):
     address: str
     city: str
     # ZR-ENG-CLR-006 Section 6: which market pack the Termination Policy
-    # Resolver (and any other jurisdiction-aware engine) uses for this
-    # property. Optional -- omitting it keeps this build's only real
-    # supported jurisdiction, "England" (see
-    # services/agreement_profile.py:SUPPORTED_JURISDICTION). This platform
-    # targets foreign markets, not India.
-    jurisdiction_code: str = "England"
+    # Resolver (and every other jurisdiction-aware engine) uses for this
+    # property. Required, with no default region -- the host picks it from
+    # the open regions (GET .../jurisdictions), and create/update rejects
+    # anything not open (services/jurisdictions.py:require_open_jurisdiction).
+    jurisdiction_code: str = Field(min_length=1, max_length=10)
 
 
 class PropertyRead(CamelModel):
@@ -50,6 +55,19 @@ class PropertyRead(CamelModel):
     status: str
     jurisdiction_code: str
     created_at: datetime
+    # True once the property has a live listing or a tenancy, after which its
+    # region can no longer change (services/jurisdictions.py:property_region_is_locked).
+    region_locked: bool = False
+
+
+class OpenJurisdictionRead(CamelModel):
+    code: str
+    min_stay_nights: int
+    market_policy_version: int
+    # False when this region's agreements can't be generated automatically
+    # yet (no approved clause registry, or the market is manual-only) --
+    # listings still work, agreements are routed to manual review.
+    agreements_supported: bool
 
 
 class RoomCreate(CamelModel):
@@ -70,7 +88,18 @@ class RoomRead(CamelModel):
 class AuthorityRecordCreate(CamelModel):
     room_id: int
     authority_type: str
+    relationship_type: AuthorityRelationshipType | None = None
     evidence_ref: str = ""
+
+
+class AuthorityRecordDeclare(CamelModel):
+    """Host self-service submission -- scoped server-side to a room the
+    calling host's own party actually owns (see
+    api/routes/user_hosting.py:declare_hosted_authority_record)."""
+
+    room_id: int
+    relationship_type: AuthorityRelationshipType
+    evidence_ref: str = Field(min_length=1)
 
 
 class AuthorityRecordRevoke(CamelModel):
@@ -85,6 +114,7 @@ class AuthorityRecordRead(CamelModel):
     party_id: int
     room_id: int
     authority_type: str
+    relationship_type: str | None = None
     evidence_ref: str
     verified_at: datetime | None
     expires_at: datetime | None
@@ -119,6 +149,11 @@ class IdentityVerificationRead(CamelModel):
     has_document: bool
     document_file_original_name: str
     document_file_content_type: str
+    # What the automated scan read and how confident it was, so a reviewer
+    # can overrule a false rejection (models/identity_verification.py).
+    ocr_extracted_number: str | None = None
+    ocr_confidence: float | None = None
+    auto_flagged: bool = False
     created_at: datetime
     updated_at: datetime
 

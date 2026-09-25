@@ -1,15 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.services.payment_boundary import require_capability
 from app.api.deps import get_current_admin, require_super_admin
 from app.core.correlation import get_correlation_id
+from app.core.signed_urls import verify_signed_download_token
 from app.crud import finance as finance_crud
 from app.crud import activation_gate as gate_crud
 from app.crud import habitability_incident as habitability_crud
+from app.crud import host_entry_visit as host_entry_visit_crud
 from app.crud import leasing as leasing_crud
 from app.crud import occupancy as crud
+from app.crud import occupancy_condition_report as condition_report_crud
 from app.crud import sublet as sublet_crud
+from app.crud import sublet_documents as sublet_documents_crud
 from app.crud import refund_entitlement as refund_entitlement_crud
 from app.crud import termination as termination_crud
 from app.crud.audit import log_audit_event
@@ -32,13 +37,24 @@ from app.schemas.habitability import (
     HabitabilityIncidentResolve,
 )
 from app.schemas.occupancy import (
+    ConditionReportItemRead,
     OccupancyCoTenantCreate,
     OccupancyCoTenantRead,
     OccupancyEndRequest,
     OccupancyRead,
+    PreMoveInCancellationRead,
+    PreMoveInCancellationRequest,
     TerminationRecordRead,
 )
-from app.schemas.leasing import SubletRequestDecision, SubletRequestRead
+from app.schemas.host_entry_visit import HostEntryVisitComplete, HostEntryVisitRead, HostEntryVisitSchedule
+from app.schemas.leasing import (
+    SubletChronologyEvent,
+    SubletDecisionAuthorityCancel,
+    SubletRequestDecision,
+    SubletRequestRead,
+    SubletSupersede,
+)
+from app.schemas.sublet_document import SubletDocumentRead
 from app.schemas.termination import (
     AdjudicatedEffectiveDateSet,
     MitigationRecordCreate,
@@ -49,6 +65,7 @@ from app.schemas.termination import (
     TerminationCaseRead,
     TerminationCaseTribunalLiability,
     TerminationDecisionRead,
+    TerminationNoticeServiceRecord,
 )
 
 router = APIRouter(prefix="/api/occupancy", tags=["occupancy"], dependencies=[Depends(get_current_admin)])
@@ -107,7 +124,7 @@ def post_confirm_move_in(
     log_audit_event(db, admin, "occupancy.move_in", "occupancy", str(occupancy.id), correlation_id)
     emit_event(db, "occupancy.active", "occupancy", str(occupancy.id), {"roomId": occupancy.room_id})
     db.commit()
-    return crud.to_occupancy_read(occupancy)
+    return crud.to_occupancy_read(db, occupancy)
 
 
 @router.post("/{occupancy_id}/handover/prepare", response_model=HandoverEventRead)
@@ -140,6 +157,56 @@ def post_possession_delivered(
     emit_event(db, "occupancy.possession_delivered", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
     db.commit()
     return event
+
+
+@router.post("/{occupancy_id}/move-out/confirm", response_model=HandoverEventRead)
+def post_confirm_move_out(
+    occupancy_id: int, payload: HandoverEventCreate, request: Request,
+    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """Section 9 gap: the Host's own verification step in the move-out
+    handshake -- confirming the physical handover back happened, the
+    move-out mirror of post_possession_delivered above."""
+    occupancy = _occupancy_for_provider(db, occupancy_id, admin)
+    event = crud.record_handover_event(
+        db, occupancy, event_type="HOST_MOVE_OUT_CONFIRMED", actor_kind="provider_admin", actor_admin_id=admin.id,
+        evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),
+    )
+    log_audit_event(db, admin, "occupancy.host_move_out_confirmed", "occupancy", str(occupancy_id), get_correlation_id(request))
+    emit_event(db, "occupancy.host_move_out_confirmed", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
+    db.commit()
+    return event
+
+
+@router.post(
+    "/{occupancy_id}/condition-report", response_model=ConditionReportItemRead, status_code=status.HTTP_201_CREATED,
+)
+async def post_add_condition_report_item_as_admin(
+    occupancy_id: int,
+    report_type: str = Form(...), area: str = Form(default=""), condition_rating: str | None = Form(default=None),
+    notes: str = Form(default=""), file: UploadFile | None = File(default=None),
+    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    """Section 9 gap: the Host/admin's own side of the move-in/move-out
+    condition report."""
+    occupancy = _occupancy_for_provider(db, occupancy_id, admin)
+    item = await condition_report_crud.add_condition_report_item(
+        db, occupancy, report_type=report_type, area=area, condition_rating=condition_rating, notes=notes,
+        file=file, admin=admin,
+    )
+    log_audit_event(db, admin, "occupancy.condition_report_item.add", "occupancy", str(occupancy_id))
+    db.commit()
+    return condition_report_crud.to_condition_report_item_read(item)
+
+
+@router.get("/{occupancy_id}/condition-report", response_model=list[ConditionReportItemRead])
+def get_condition_report_as_admin(
+    occupancy_id: int, report_type: str | None = None,
+    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+):
+    occupancy = _occupancy_for_provider(db, occupancy_id, admin)
+    items = condition_report_crud.list_condition_report_items(db, occupancy, report_type=report_type)
+    return [condition_report_crud.to_condition_report_item_read(i) for i in items]
 
 
 @router.post("/{occupancy_id}/activation-gate/evaluate", response_model=ActivationDecisionRead)
@@ -176,12 +243,19 @@ def get_occupancy_timeline(occupancy_id: int, admin: AdminUser = Depends(get_cur
 
 @router.get("", response_model=list[OccupancyRead])
 def get_occupancies(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    return [crud.to_occupancy_read(o) for o in crud.list_occupancies_for(db, admin)]
+    return [crud.to_occupancy_read(db, o) for o in crud.list_occupancies_for(db, admin)]
 
 
 @router.get("/rent-due-check", response_model=list[OccupancyRead])
 def get_rent_due_check(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    return [crud.to_occupancy_read(o) for o in crud.list_occupancies_missing_upcoming_rent(db, admin)]
+    return [crud.to_occupancy_read(db, o) for o in crud.list_occupancies_missing_upcoming_rent(db, admin)]
+
+
+@router.get("/holdover-check", response_model=list[OccupancyRead])
+def get_holdover_check(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Section 9 gap: surfaces any ACTIVE occupancy that's run past its own
+    expected_end_date with no renewal/termination case."""
+    return [crud.to_occupancy_read(db, o) for o in crud.list_occupancies_in_holdover(db, admin)]
 
 
 @router.post("/{occupancy_id}/generate-rent", response_model=ObligationRead | None)
@@ -222,7 +296,31 @@ def post_end_occupancy(
     log_audit_event(db, admin, "occupancy.end", "occupancy", str(occupancy_id), correlation_id, reason=payload.override_reason)
     emit_event(db, "occupancy.ended", "occupancy", str(occupancy_id), {})
     db.commit()
-    return crud.to_occupancy_read(updated)
+    return crud.to_occupancy_read(db, updated)
+
+
+@router.post("/{occupancy_id}/cancel-before-move-in", response_model=PreMoveInCancellationRead)
+def post_cancel_before_move_in(
+    occupancy_id: int,
+    request: Request,
+    payload: PreMoveInCancellationRequest = PreMoveInCancellationRequest(),
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Section 7 gap: an admin-initiated cancellation of a signed-but-not-
+    moved-in booking, with a real refund calculated and issued -- not just
+    a status flip."""
+    occupancy = crud.get_occupancy_or_404(db, occupancy_id)
+    correlation_id = get_correlation_id(request)
+    updated, result = crud.cancel_before_move_in(
+        db, occupancy, admin=admin, reason=payload.reason, correlation_id=correlation_id,
+    )
+    log_audit_event(
+        db, admin, "occupancy.cancel_before_move_in", "occupancy", str(occupancy_id), correlation_id, reason=payload.reason,
+    )
+    emit_event(db, "occupancy.cancelled_before_move_in", "occupancy", str(occupancy_id), result)
+    db.commit()
+    return PreMoveInCancellationRead(occupancy=crud.to_occupancy_read(db, updated), **result)
 
 
 @router.post(
@@ -374,6 +472,27 @@ def post_set_tribunal_liability(
     return updated
 
 
+@router.post("/termination-cases/{case_id}/notice-service", response_model=TerminationCaseRead)
+def post_record_notice_service(
+    case_id: int,
+    payload: TerminationNoticeServiceRecord,
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Section 11 gap: records real-world delivery proof for a non-PORTAL
+    notice_method -- see models/termination_case.py's own field docstring
+    for why this build can't confirm it automatically."""
+    case = termination_crud.get_termination_case_or_404(db, case_id)
+    updated = termination_crud.record_notice_service(db, case, admin, payload)
+    log_audit_event(
+        db, admin, "termination_case.notice_service_recorded", "termination_case", str(case_id), get_correlation_id(request),
+        reason=payload.proof_ref,
+    )
+    db.commit()
+    return updated
+
+
 @router.post(
     "/termination-cases/{case_id}/adjudicated-effective-date", response_model=TerminationCaseRead,
     dependencies=[Depends(require_super_admin)],
@@ -496,7 +615,7 @@ def approve_refund_entitlement(
     return updated
 
 
-@router.post("/refund-entitlements/{entitlement_id}/execute", response_model=RefundEntitlementRead)
+@router.post("/refund-entitlements/{entitlement_id}/execute", response_model=RefundEntitlementRead, dependencies=[Depends(require_capability("rent_collection_enabled"))])
 def execute_refund_entitlement(
     entitlement_id: int, request: Request, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):
@@ -524,6 +643,30 @@ def list_pending_sublet_requests(
     return [sublet_crud.to_sublet_request_read(db, sr) for sr in sublet_requests]
 
 
+@router.post("/sublet-requests/{sublet_request_id}/request-info", response_model=SubletRequestRead, dependencies=[Depends(require_super_admin)])
+def admin_request_sublet_more_info(
+    sublet_request_id: int,
+    request: Request,
+    payload: SubletRequestDecision,
+    admin: AdminUser = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    """Super admin asks the tenant for more information (legal-ops override --
+    the ordinary path is the Host's own dashboard, see user_hosting.py)."""
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+
+    updated = sublet_crud.request_more_sublet_info(
+        db, sublet_request, admin, payload.notes,
+        requested_document_types=payload.requested_document_types, due_at=payload.due_at,
+    )
+    log_audit_event(db, admin, "sublet_request.request_info", "sublet_request", str(sublet_request_id), get_correlation_id(request))
+    emit_event(db, "sublet_request.more_information_requested", "sublet_request", str(sublet_request_id), {})
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
+
+
 @router.post("/sublet-requests/{sublet_request_id}/approve", response_model=SubletRequestRead, dependencies=[Depends(require_super_admin)])
 def approve_sublet_request(
     sublet_request_id: int,
@@ -537,7 +680,13 @@ def approve_sublet_request(
     if not sublet_request:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
 
-    approved = sublet_crud.approve_sublet_request(db, sublet_request, admin, payload.notes if payload else "")
+    approved = sublet_crud.approve_sublet_request(
+        db, sublet_request, admin,
+        payload.notes if payload else "", payload.conditions if payload else "", payload.expires_at if payload else None,
+        condition_list=payload.condition_list if payload else None,
+        authority_confirmed=payload.authority_confirmed if payload else False,
+        step_up_password=payload.step_up_password if payload else "",
+    )
     log_audit_event(db, admin, "sublet_request.approve", "sublet_request", str(sublet_request_id), get_correlation_id(request))
     emit_event(
         db, "sublet_request.approved", "sublet_request", str(sublet_request_id),
@@ -561,12 +710,102 @@ def reject_sublet_request(
     if not sublet_request:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
 
-    rejected = sublet_crud.reject_sublet_request(db, sublet_request, admin, payload.notes if payload else "")
+    rejected = sublet_crud.reject_sublet_request(
+        db, sublet_request, admin, payload.notes if payload else "", payload.decline_reason_code if payload else "",
+    )
     log_audit_event(db, admin, "sublet_request.reject", "sublet_request", str(sublet_request_id), get_correlation_id(request))
     emit_event(db, "sublet_request.rejected", "sublet_request", str(sublet_request_id), {"occupancyId": rejected.current_occupancy_id})
     db.commit()
 
     return sublet_crud.to_sublet_request_read(db, rejected)
+
+
+@router.get("/sublet-requests/{sublet_request_id}/audit", response_model=list[SubletChronologyEvent], dependencies=[Depends(require_super_admin)])
+def get_sublet_request_audit_trail(sublet_request_id: int, db: Session = Depends(get_db)):
+    """ZR-SUB-003 Section 12: 'GET /{id}/audit: Privileged audit view; not
+    ordinary user endpoint.'"""
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    return sublet_crud.build_sublet_audit_trail(sublet_request)
+
+
+@router.get("/sublet-requests/{sublet_request_id}/documents", response_model=list[SubletDocumentRead], dependencies=[Depends(require_super_admin)])
+def list_sublet_documents_as_admin(sublet_request_id: int, db: Session = Depends(get_db)):
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    return [
+        sublet_documents_crud.to_sublet_document_read(
+            d, download_path=f"/api/occupancy/sublet-requests/{sublet_request_id}/documents/{d.id}/file",
+        )
+        for d in sublet_documents_crud.list_sublet_documents(db, sublet_request)
+    ]
+
+
+@router.get("/sublet-requests/{sublet_request_id}/documents/{document_id}/file", dependencies=[Depends(require_super_admin)])
+def download_sublet_document_as_admin(sublet_request_id: int, document_id: int, token: str, db: Session = Depends(get_db)):
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    document = sublet_documents_crud.get_sublet_document_or_404(db, sublet_request, document_id)
+    verify_signed_download_token(token, "sublet_document", str(document.id))
+    return sublet_documents_crud.sublet_document_file_response(document)
+
+
+@router.post(
+    "/sublet-requests/sweep-expired-approvals", response_model=list[SubletRequestRead],
+    dependencies=[Depends(require_super_admin)],
+)
+def sweep_expired_sublet_approvals(db: Session = Depends(get_db)):
+    """ZR-SUB-003 Section 6 EXPIRED -- manual substitute for a cron tick, same
+    shape as every other sweep in this stack (no scheduler exists here)."""
+    expired = sublet_crud.sweep_expired_sublet_approvals(db)
+    return [sublet_crud.to_sublet_request_read(db, sr) for sr in expired]
+
+
+@router.post(
+    "/sublet-requests/{sublet_request_id}/supersede", response_model=SubletRequestRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def supersede_sublet_request(
+    sublet_request_id: int, payload: SubletSupersede, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    old_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    new_request = sublet_crud.get_sublet_request(db, payload.new_sublet_request_id)
+    if not old_request or not new_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    updated = sublet_crud.supersede_sublet_request(db, admin, old_request, new_request)
+    log_audit_event(
+        db, admin, "sublet_request.supersede", "sublet_request", str(sublet_request_id), get_correlation_id(request),
+        reason=f"superseded_by:{payload.new_sublet_request_id}",
+    )
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
+
+
+@router.post(
+    "/sublet-requests/{sublet_request_id}/cancel-by-authority", response_model=SubletRequestRead,
+    dependencies=[Depends(require_super_admin)],
+)
+def cancel_sublet_decision_by_authority(
+    sublet_request_id: int, payload: SubletDecisionAuthorityCancel, request: Request,
+    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
+):
+    """ZR-SUB-003 Section 6 CANCELLED_BY_AUTHORITY -- restricted, record-level
+    correction; see crud/sublet.py's own docstring for what it does and does
+    not do."""
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    if not sublet_request:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    updated = sublet_crud.cancel_sublet_decision_by_authority(db, admin, sublet_request, payload.reason)
+    log_audit_event(
+        db, admin, "sublet_request.cancel_by_authority", "sublet_request", str(sublet_request_id), get_correlation_id(request),
+        reason=payload.reason,
+    )
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
 
 
 @router.post(
@@ -623,3 +862,44 @@ def apply_habitability_credit(
     an admin-applied amount, never a computed abatement formula."""
     incident = habitability_crud.get_habitability_incident_or_404(db, incident_id)
     return habitability_crud.apply_habitability_credit(db, incident, admin, payload)
+
+
+@router.post(
+    "/{occupancy_id}/entry-visits", response_model=HostEntryVisitRead, status_code=status.HTTP_201_CREATED,
+)
+def schedule_entry_visit(
+    occupancy_id: int,
+    payload: HostEntryVisitSchedule,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Section 9 gap: Host schedules a visit to an occupied unit. Must
+    respect the jurisdiction's MarketPolicyPack.entry_notice_hours unless
+    is_emergency is set with a non-blank emergency_reason."""
+    occupancy = crud.get_occupancy_or_404(db, occupancy_id)
+    return host_entry_visit_crud.schedule_entry_visit(
+        db, occupancy, admin,
+        purpose=payload.purpose, scheduled_at=payload.scheduled_at,
+        is_emergency=payload.is_emergency, emergency_reason=payload.emergency_reason, notes=payload.notes,
+    )
+
+
+@router.get("/{occupancy_id}/entry-visits", response_model=list[HostEntryVisitRead])
+def list_entry_visits(occupancy_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    occupancy = crud.get_occupancy_or_404(db, occupancy_id)
+    return host_entry_visit_crud.list_entry_visits_for_occupancy(db, occupancy)
+
+
+@router.post("/entry-visits/{visit_id}/complete", response_model=HostEntryVisitRead)
+def complete_entry_visit(
+    visit_id: int,
+    payload: HostEntryVisitComplete = HostEntryVisitComplete(),
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    return host_entry_visit_crud.complete_entry_visit(db, visit_id, admin, notes=payload.notes)
+
+
+@router.post("/entry-visits/{visit_id}/cancel", response_model=HostEntryVisitRead)
+def cancel_entry_visit(visit_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
+    return host_entry_visit_crud.cancel_entry_visit(db, visit_id, admin)

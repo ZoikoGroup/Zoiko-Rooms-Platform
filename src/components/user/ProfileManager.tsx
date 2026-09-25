@@ -1,15 +1,38 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { BadgeCheck, Lock, Mail, Phone, User } from "lucide-react";
+import { BadgeCheck, Bell, Lock, Mail, Phone, User } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { identityStatusLabel, identityStatusTone } from "@/lib/status";
 import { formatDate } from "@/lib/utils";
 import { changeUserPassword, updateUserProfile } from "@/lib/user-auth";
 import { errorMessage } from "@/lib/user-api";
+import { getNotificationPreferences, updateNotificationPreferences, USER_NOTIFICATIONS_BASE } from "@/lib/notifications";
+import { NotificationCategory, NotificationPreference } from "@/lib/types";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
+
+// Section 11 gap: DISPUTES_AND_SAFETY is deliberately absent here -- the
+// backend (models/notification.py:NOTIFICATION_OPTABLE_CATEGORIES) silently
+// drops it from any update anyway, so it's never offered as a toggle in the
+// first place.
+const OPTABLE_CATEGORIES: { value: NotificationCategory; label: string; hint: string }[] = [
+  { value: "PAYMENTS", label: "Payments & refunds", hint: "Rent payment records and confirmations, Listing Fee receipts, refunds, deposit updates." },
+  { value: "LEASING", label: "Applications & agreements", hint: "Application, offer, agreement and listing updates." },
+  { value: "OCCUPANCY", label: "Tenancy & occupancy", hint: "Move-in/out, termination cases, sublets, host visits." },
+];
+
+function minutesToTimeInput(minutes: number): string {
+  const h = Math.floor(minutes / 60) % 24;
+  const m = minutes % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function timeInputToMinutes(value: string): number {
+  const [h, m] = value.split(":").map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
 
 export function ProfileManager() {
   const { user, identityStatus, refreshUser } = useUserSession();
@@ -26,10 +49,43 @@ export function ProfileManager() {
   const [savingPassword, setSavingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState("");
 
+  const [prefs, setPrefs] = useState<NotificationPreference | null>(null);
+  const [savingPrefs, setSavingPrefs] = useState(false);
+  const [prefsError, setPrefsError] = useState("");
+
   useEffect(() => {
     setFullName(user?.fullName ?? "");
     setPhone(user?.phone ?? "");
   }, [user]);
+
+  useEffect(() => {
+    getNotificationPreferences(USER_NOTIFICATIONS_BASE).then(setPrefs).catch(() => {});
+  }, []);
+
+  function toggleCategory(category: NotificationCategory) {
+    setPrefs((prev) => {
+      if (!prev) return prev;
+      const optedOut = prev.optedOutCategories.includes(category)
+        ? prev.optedOutCategories.filter((c) => c !== category)
+        : [...prev.optedOutCategories, category];
+      return { ...prev, optedOutCategories: optedOut };
+    });
+  }
+
+  async function handleSavePreferences() {
+    if (!prefs) return;
+    setPrefsError("");
+    setSavingPrefs(true);
+    try {
+      const updated = await updateNotificationPreferences(USER_NOTIFICATIONS_BASE, prefs);
+      setPrefs(updated);
+      showToast("Notification preferences saved.");
+    } catch (err) {
+      setPrefsError(errorMessage(err, "Could not save your notification preferences."));
+    } finally {
+      setSavingPrefs(false);
+    }
+  }
 
   async function handleProfileSave(e: FormEvent) {
     e.preventDefault();
@@ -200,6 +256,93 @@ export function ProfileManager() {
           </Button>
         </form>
       </Card>
+
+      {prefs && (
+        <Card>
+          <SectionHeading
+            title="Notification preferences"
+            subtitle="Choose which kinds of updates you receive, and set quiet hours for non-urgent ones."
+          />
+          <div className="mt-5 space-y-3">
+            {OPTABLE_CATEGORIES.map((cat) => {
+              const optedOut = prefs.optedOutCategories.includes(cat.value);
+              return (
+                <label
+                  key={cat.value}
+                  className="flex cursor-pointer items-start justify-between gap-4 rounded-xl border border-slate-100 p-3.5 dark:border-white/10"
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-primary-900 dark:text-white">{cat.label}</p>
+                    <p className="text-xs text-slate-400">{cat.hint}</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={!optedOut}
+                    onChange={() => toggleCategory(cat.value)}
+                    className="mt-1 h-4 w-4 shrink-0 accent-accent-600"
+                  />
+                </label>
+              );
+            })}
+            <p className="text-xs text-slate-400">
+              Safety and dispute notifications (habitability issues, disputes, identity/screening decisions) always
+              reach you and cannot be turned off.
+            </p>
+          </div>
+
+          <div className="mt-5 border-t border-slate-100 pt-4 dark:border-white/10">
+            <label className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold text-primary-900 dark:text-white">Quiet hours</p>
+                <p className="text-xs text-slate-400">
+                  Pause routine notifications during this window (UTC). Urgent safety/dispute notifications still
+                  come through.
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                checked={prefs.quietHoursEnabled}
+                onChange={(e) => setPrefs((p) => (p ? { ...p, quietHoursEnabled: e.target.checked } : p))}
+                className="h-4 w-4 shrink-0 accent-accent-600"
+              />
+            </label>
+            {prefs.quietHoursEnabled && (
+              <div className="mt-3 grid grid-cols-2 gap-4">
+                <Field label="From (UTC)">
+                  <input
+                    type="time"
+                    value={minutesToTimeInput(prefs.quietHoursStartMinute)}
+                    onChange={(e) =>
+                      setPrefs((p) => (p ? { ...p, quietHoursStartMinute: timeInputToMinutes(e.target.value) } : p))
+                    }
+                    className={inputClass}
+                  />
+                </Field>
+                <Field label="Until (UTC)">
+                  <input
+                    type="time"
+                    value={minutesToTimeInput(prefs.quietHoursEndMinute)}
+                    onChange={(e) =>
+                      setPrefs((p) => (p ? { ...p, quietHoursEndMinute: timeInputToMinutes(e.target.value) } : p))
+                    }
+                    className={inputClass}
+                  />
+                </Field>
+              </div>
+            )}
+          </div>
+
+          {prefsError && (
+            <p className="mt-4 rounded-lg bg-accent-50 px-3 py-2 text-xs font-medium text-accent-700 ring-1 ring-accent-200">
+              {prefsError}
+            </p>
+          )}
+
+          <Button className="mt-5" onClick={handleSavePreferences} loading={savingPrefs}>
+            <Bell className="h-4 w-4" /> Save preferences
+          </Button>
+        </Card>
+      )}
 
       <Toast toast={toast} />
     </div>

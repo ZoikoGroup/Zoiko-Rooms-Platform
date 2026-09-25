@@ -51,6 +51,7 @@ from app.schemas.termination import (
     TerminationCasePreviewRequest,
     TerminationCaseRead,
     TerminationCaseTribunalLiability,
+    TerminationNoticeServiceRecord,
 )
 
 
@@ -679,8 +680,37 @@ def to_termination_case_read(case: TerminationCase, *, redact_notes: bool) -> Te
         tribunal_liability_amount=float(case.tribunal_liability_amount), tribunal_liability_reason=case.tribunal_liability_reason,
         adjudicated_effective_date=case.adjudicated_effective_date,
         adjudicated_effective_date_reason=case.adjudicated_effective_date_reason,
+        notice_service_proof_ref=case.notice_service_proof_ref,
+        notice_service_recorded_by_admin_id=case.notice_service_recorded_by_admin_id,
         created_at=case.created_at,
     )
+
+
+def record_notice_service(db: Session, case: TerminationCase, admin: AdminUser, data: TerminationNoticeServiceRecord) -> TerminationCase:
+    """Section 11 gap: records real-world delivery proof for a non-PORTAL
+    notice_method -- see models/termination_case.py's own field docstring.
+    PORTAL cases already have notice_served_at set at submission time and
+    have nothing to record here; a case can only have its service recorded
+    once (immutable, like notice_created_at)."""
+    assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
+    if case.notice_method == "PORTAL":
+        raise HTTPException(status.HTTP_409_CONFLICT, "PORTAL notice is served at submission time -- there is nothing to record")
+    if case.notice_served_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Notice service has already been recorded for this case")
+    if not data.proof_ref.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A proof reference is required to record notice service")
+
+    case.notice_served_at = data.served_at
+    case.notice_service_proof_ref = data.proof_ref
+    case.notice_service_recorded_by_admin_id = admin.id
+    emit_event(
+        db, "termination.notice_service_recorded", "termination_case", str(case.id),
+        {"occupancyId": case.occupancy_id, "noticeMethod": case.notice_method},
+        actor_kind="admin", actor_id=str(admin.id),
+    )
+    db.commit()
+    db.refresh(case)
+    return case
 
 
 def set_tribunal_liability(db: Session, case: TerminationCase, admin: AdminUser, data: TerminationCaseTribunalLiability) -> TerminationCase:

@@ -32,6 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.crud import notification as notif_crud
 from app.crud.ids import new_id
 from app.models.admin_user import AdminUser
 from app.services import stripe_client
@@ -256,6 +257,7 @@ def ingest_provider_callback(
         payment = db.get(SimulatedPayment, txn.payment_id)
         payment.status = "FAILED"
         db.commit()
+        _notify_payment_failed(db, payment)
         db.refresh(txn)
         return txn
 
@@ -274,6 +276,27 @@ def ingest_provider_callback(
     return txn
 
 
+def _notify_payment_failed(db: Session, payment: SimulatedPayment) -> None:
+    """Section 11 gap: confirm_payment's own success path
+    (crud/finance.py) notifies the renter with "Payment received" the
+    moment a payment succeeds -- nothing told them anything when one
+    failed, at either FAILED-transition site (a real PSP webhook, or this
+    module's own stalled-dispatch sweep below). Best-effort: a notification
+    failure must never mask the payment failure itself already committed."""
+    if payment.guest is None:
+        return
+    try:
+        notif_crud.notify_user_by_guest(
+            db, payment.guest,
+            title="Payment failed",
+            message=f"Your payment of {payment.currency} {payment.amount:.2f} could not be completed. Please try again.",
+            notification_type="payment.failed",
+            related_entity_type="simulated_payment", related_entity_id=str(payment.id),
+        )
+    except Exception:
+        pass
+
+
 def reconcile_stalled_payments(db: Session) -> list[ProcessorTransaction]:
     """Manual sweep (same on-demand pattern as services/booking_expiry.py's
     sweep_* functions -- no scheduler exists in this stack). Anything still
@@ -290,13 +313,17 @@ def reconcile_stalled_payments(db: Session) -> list[ProcessorTransaction]:
         ProcessorTransaction.dispatch_deadline.is_not(None),
         ProcessorTransaction.dispatch_deadline <= now,
     ).all()
+    failed_payments = []
     for txn in stalled:
         txn.status = "FAILED"
         txn.completed_at = now
         payment = db.get(SimulatedPayment, txn.payment_id)
         payment.status = "FAILED"
+        failed_payments.append(payment)
     if stalled:
         db.commit()
+        for payment in failed_payments:
+            _notify_payment_failed(db, payment)
     return stalled
 
 

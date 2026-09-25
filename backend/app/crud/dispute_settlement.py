@@ -106,6 +106,20 @@ def _notify_settlement(db: Session, case: DisputeResolutionCase, *, proposed_by_
             notif_crud.notify_user_by_guest(db, occ.guest, title=title, message=message, notification_type="dispute_settlement.event")
 
 
+def _notify_original_proposer(db: Session, case: DisputeResolutionCase, settlement: DisputeSettlement, *, title: str, message: str) -> None:
+    """The counterpart to _notify_settlement above -- notifies whoever
+    originally PROPOSED this settlement (settlement.proposed_by_role), not
+    whoever just responded to it."""
+    if settlement.proposed_by_role == "RENTER" and case.occupancy_id:
+        occ = db.get(Occupancy, case.occupancy_id)
+        if occ and occ.guest:
+            notif_crud.notify_user_by_guest(db, occ.guest, title=title, message=message, notification_type="dispute_settlement.responded")
+    if settlement.proposed_by_role == "HOST" and case.property_id:
+        prop = db.get(Property, case.property_id)
+        if prop:
+            notif_crud.notify_user_by_party(db, prop.owner_party_id, title=title, message=message, notification_type="dispute_settlement.responded")
+
+
 def propose_settlement(
     db: Session,
     case: DisputeResolutionCase,
@@ -286,11 +300,19 @@ def respond_settlement(
                 )
         _sync_case_status_after_claim_change(case)
         db.commit()
+        # Section 10 gap: the original proposer was never told their
+        # settlement was accepted -- only a fresh COUNTER proposal (which
+        # re-enters propose_settlement, notifying like any other proposal)
+        # ever notified anyone on this side of the response.
+        _notify_original_proposer(db, case, settlement, title="Your settlement offer was accepted", message=f"Settlement #{settlement.id} was accepted and is now effective.")
+        db.commit()
         db.refresh(settlement)
         return settlement
 
     if action == "REJECT":
         transition_settlement(settlement, "REJECTED")
+        db.commit()
+        _notify_original_proposer(db, case, settlement, title="Your settlement offer was rejected", message=f"Settlement #{settlement.id} was rejected.")
         db.commit()
         db.refresh(settlement)
         return settlement
