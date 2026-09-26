@@ -122,12 +122,24 @@ _WINDOWS_DEFAULT_PATHS = (
     r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
 )
 
+# apt's standard install location on Debian/Ubuntu (tesseract-ocr package).
+# shutil.which("tesseract") alone isn't enough in production: a systemd
+# service's PATH is whatever the unit's own environment provides, not the
+# deploy script's interactive SSH shell PATH the apt-get install ran under
+# -- the binary can be genuinely installed and still invisible to
+# shutil.which() here. Same "PATH first, then the real known install
+# location" shape as the Windows fallback above.
+_LINUX_DEFAULT_PATHS = (
+    "/usr/bin/tesseract",
+    "/usr/local/bin/tesseract",
+)
+
 
 def _resolve_tesseract_cmd() -> str | None:
     found = shutil.which("tesseract")
     if found:
         return found
-    for candidate in _WINDOWS_DEFAULT_PATHS:
+    for candidate in (*_WINDOWS_DEFAULT_PATHS, *_LINUX_DEFAULT_PATHS):
         if Path(candidate).is_file():
             return candidate
     return None
@@ -147,10 +159,17 @@ def _resolve_poppler_bin_dir() -> str | None:
     if found:
         return str(Path(found).parent)
     local_app_data = os.environ.get("LOCALAPPDATA")
-    if not local_app_data:
-        return None
-    matches = list(Path(local_app_data).glob("Microsoft/WinGet/Packages/*Poppler*/poppler-*/Library/bin/pdftoppm.exe"))
-    return str(matches[0].parent) if matches else None
+    if local_app_data:
+        matches = list(Path(local_app_data).glob("Microsoft/WinGet/Packages/*Poppler*/poppler-*/Library/bin/pdftoppm.exe"))
+        if matches:
+            return str(matches[0].parent)
+    # apt's poppler-utils package -- same PATH-visibility gap as
+    # _resolve_tesseract_cmd's Linux fallback above.
+    if Path("/usr/bin/pdftoppm").is_file():
+        return "/usr/bin"
+    if Path("/usr/local/bin/pdftoppm").is_file():
+        return "/usr/local/bin"
+    return None
 
 
 def _first_page_as_image(pdf_bytes: bytes) -> "Image":

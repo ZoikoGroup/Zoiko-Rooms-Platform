@@ -20,6 +20,20 @@ jobs:
             cd /var/www/zoiko-rooms-backend/app
             git pull origin main
             cd backend
+
+            # services/document_ocr.py's real identity/property-verification
+            # OCR checks (pytesseract/pdf2image, both in requirements.txt)
+            # are thin wrappers around these two system binaries -- pip
+            # installing the wrappers alone leaves is_available() False and
+            # every OCR check silently failing open (submissions stuck
+            # "pending" forever, with no error anywhere). Only installed
+            # when missing so a normal deploy doesn't pay for `apt-get
+            # update` every time.
+            if ! command -v tesseract >/dev/null 2>&1 || ! command -v pdftoppm >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y tesseract-ocr poppler-utils
+            fi
+
             source venv/bin/activate
             pip install -r requirements.txt
             alembic upgrade head
