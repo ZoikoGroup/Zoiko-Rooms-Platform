@@ -7,6 +7,7 @@ Mirrors AuthorityRecord's own shape and crud/authority.py's own functions
 closely -- same party_id+room_id scoping, same admin-decision workflow,
 same audit pattern -- rather than inventing a new one."""
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
@@ -18,6 +19,8 @@ from app.models.admin_user import AdminUser
 from app.models.property_verification import PropertyVerification
 from app.models.room import Room
 from app.models.user_account import UserAccount
+
+logger = logging.getLogger("uvicorn.error")
 
 PROPERTY_VERIFICATION_VALIDITY_DAYS = 365
 
@@ -149,12 +152,20 @@ def _run_ocr_identity_cross_check(db: Session, record: PropertyVerification, use
     from app.services import document_ocr
 
     if not document_ocr.is_available():
+        logger.warning(
+            "property_verification #%s: OCR unavailable (tesseract not found) -- "
+            "leaving record in 'pending' for manual review", record.id,
+        )
         return
     if not record.document_file_path:
         return
 
     credential = get_valid_identity_credential(db, record.party_id)
     if credential is None or credential.source_identity_verification_id is None:
+        logger.info(
+            "property_verification #%s: no valid identity credential for party #%s yet -- "
+            "leaving in 'pending' until owner's identity is verified", record.id, record.party_id,
+        )
         return
     identity_record = db.get(IdentityVerification, credential.source_identity_verification_id)
     if identity_record is None:
@@ -168,6 +179,10 @@ def _run_ocr_identity_cross_check(db: Session, record: PropertyVerification, use
             property_bytes, full_name=name_to_check, document_number=identity_record.ocr_extracted_number,
         )
     except Exception:
+        logger.exception(
+            "property_verification #%s: OCR check raised -- leaving record in 'pending' for manual review",
+            record.id,
+        )
         return
 
     record.ocr_extracted_text = snippet
