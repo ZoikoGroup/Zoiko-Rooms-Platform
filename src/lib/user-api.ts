@@ -37,8 +37,6 @@ import {
   Offer,
   PaymentConnection,
   PaymentPreview,
-  PaymentRecipientAuthority,
-  PaymentRecipientRelationshipType,
   PreMoveInCancellationResult,
   OpenJurisdiction,
   PaymentCapabilities,
@@ -57,6 +55,10 @@ import {
   RentalPaymentObligationsPage,
   RentalPaymentProviderAccount,
   RentalPaymentProviderAccountConnectResult,
+  RentalPaymentReturn,
+  RentalPaymentReturnCandidate,
+  RentalPaymentReturnKind,
+  RentalPaymentReturnMethod,
   RentalPaymentTimelinePage,
   RentalTransactionRecord,
   RentalTransactionTimelineEntry,
@@ -582,50 +584,10 @@ export function declareHostedPropertyVerification(
   });
 }
 
-// ZR-PAY-LINK-003 Section 1.1/2: "authority to list" and "authority to
-// receive payments" are separate claims -- a distinct submission from
-// declareHostedAuthorityRecord above, and the recipient may be a different
-// party than the submitting host (an authorized agent/manager).
-
-export function listHostedRoomPaymentRecipientAuthorities(roomId: number): Promise<PaymentRecipientAuthority[]> {
-  return apiClientFetch<PaymentRecipientAuthority[]>(`/api/users/hosting/rooms/${roomId}/payment-recipient-authorities`);
-}
-
 /** ZR-PAY-LINK-003 Section 3.1: the consolidated recipient+destination
  *  status view for a room. */
 export function getHostedRoomPaymentConnection(roomId: number): Promise<PaymentConnection> {
   return apiClientFetch<PaymentConnection>(`/api/users/hosting/rooms/${roomId}/payment-connection`);
-}
-
-export function declareHostedPaymentRecipientAuthority(
-  roomId: number,
-  payload: { recipientPartyId?: number; relationshipType: PaymentRecipientRelationshipType; evidenceRef: string }
-): Promise<PaymentRecipientAuthority> {
-  return apiClientFetch<PaymentRecipientAuthority>(`/api/users/hosting/rooms/${roomId}/payment-recipient-authorities`, {
-    method: "POST",
-    body: JSON.stringify({ roomId, ...payload }),
-  });
-}
-
-/** ZR-PAY-LINK-003 Section 14.1: step-up confirmation for a recipient
- *  CHANGE -- only ever needed when declareHostedPaymentRecipientAuthority
- *  returns a "pending_step_up" row. */
-export function resendPaymentRecipientAuthorityChangeCode(roomId: number, authorityId: number): Promise<{ sent: boolean }> {
-  return apiClientFetch<{ sent: boolean }>(
-    `/api/users/hosting/rooms/${roomId}/payment-recipient-authorities/${authorityId}/resend-change-code`,
-    { method: "POST" }
-  );
-}
-
-export function confirmPaymentRecipientAuthorityChange(
-  roomId: number,
-  authorityId: number,
-  code: string
-): Promise<PaymentRecipientAuthority> {
-  return apiClientFetch<PaymentRecipientAuthority>(
-    `/api/users/hosting/rooms/${roomId}/payment-recipient-authorities/${authorityId}/confirm-change`,
-    { method: "POST", body: JSON.stringify({ code }) }
-  );
 }
 
 /** Rental Transaction Record wireframe, host view -- lists the occupancies
@@ -917,6 +879,13 @@ export function resolveListingFeeCheckoutSession(checkoutSessionId: string): Pro
 /** Returns the receipt PDF as a Blob (not JSON) -- only exists once the
  *  payment has SUCCEEDED. Caller is responsible for turning this into a
  *  download (e.g. via URL.createObjectURL). */
+/** The credit note for a confirmed refund of the host's own Listing Fee. */
+export async function downloadListingFeeCreditNote(refundId: number): Promise<Blob> {
+  const res = await fetch(`${API_URL}/api/users/listing-fees/refunds/${refundId}/credit-note`, { credentials: "include" });
+  if (!res.ok) throw new Error("Could not download the credit note.");
+  return res.blob();
+}
+
 export async function downloadListingFeeReceipt(paymentId: number): Promise<Blob> {
   const res = await fetch(`${API_URL}/api/users/listing-fees/payments/${paymentId}/receipt`, { credentials: "include" });
   if (!res.ok) throw new ApiError(res.status, "Could not download the Listing Fee receipt.");
@@ -1047,6 +1016,69 @@ export function confirmRentalPaymentReceipt(recordId: number, amount?: number, n
   return apiClientFetch<RentalPaymentObligation>(`/api/users/rental-payments/recipient/records/${recordId}/confirm-receipt`, {
     method: "POST",
     body: JSON.stringify({ amount: amount ?? null, note: note ?? "" }),
+  });
+}
+
+/** The host marks rent/deposit as received -- paid to them directly,
+ *  outside Zoiko -- without the renter recording it first. amount omitted =
+ *  everything still outstanding. */
+export function recordRentalPaymentReceiptAsRecipient(
+  obligationId: number,
+  payload: {
+    amount?: number;
+    receivedDate: string;
+    paymentMethodCategory: RentalPaymentMethodCategory;
+    externalReference?: string;
+    note?: string;
+  }
+): Promise<RentalPaymentObligation> {
+  return apiClientFetch<RentalPaymentObligation>(`/api/users/rental-payments/recipient/obligations/${obligationId}/record-receipt`, {
+    method: "POST",
+    body: JSON.stringify({ ...payload, amount: payload.amount ?? null }),
+  });
+}
+
+// --- Money returned host -> renter directly (deposit / cancelled booking) ---
+
+export function listMyRentalPaymentReturns(): Promise<RentalPaymentReturn[]> {
+  return apiClientFetch<RentalPaymentReturn[]>("/api/users/rental-payments/returns");
+}
+
+export function confirmRentalPaymentReturn(returnId: number): Promise<RentalPaymentReturn> {
+  return apiClientFetch<RentalPaymentReturn>(`/api/users/rental-payments/returns/${returnId}/confirm`, { method: "POST" });
+}
+
+export function disputeRentalPaymentReturn(returnId: number, details: string): Promise<RentalPaymentReturn> {
+  return apiClientFetch<RentalPaymentReturn>(`/api/users/rental-payments/returns/${returnId}/dispute`, {
+    method: "POST",
+    body: JSON.stringify({ details }),
+  });
+}
+
+export function listRecipientRentalPaymentReturns(): Promise<RentalPaymentReturn[]> {
+  return apiClientFetch<RentalPaymentReturn[]>("/api/users/rental-payments/recipient/returns");
+}
+
+export function listRecipientRentalPaymentReturnCandidates(): Promise<RentalPaymentReturnCandidate[]> {
+  return apiClientFetch<RentalPaymentReturnCandidate[]>("/api/users/rental-payments/recipient/returns/candidates");
+}
+
+export function recordRentalPaymentReturn(
+  occupancyId: number,
+  payload: {
+    kind: RentalPaymentReturnKind;
+    amount: number;
+    deductionsAmount?: number;
+    deductionsReason?: string;
+    paymentMethodCategory: RentalPaymentReturnMethod;
+    returnedDate: string;
+    externalReference?: string;
+    note?: string;
+  }
+): Promise<RentalPaymentReturn> {
+  return apiClientFetch<RentalPaymentReturn>(`/api/users/rental-payments/recipient/occupancies/${occupancyId}/returns`, {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 

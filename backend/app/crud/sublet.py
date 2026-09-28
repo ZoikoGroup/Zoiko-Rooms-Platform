@@ -492,9 +492,39 @@ def _whole_months_between(start: date, end: date) -> int:
     return max(months, 0)
 
 
+def _sublet_agreement_snapshot(db: Session, offer: Offer, *, signed_on_approval: bool) -> dict:
+    """The frozen document snapshot for a sublet's own agreement -- the same
+    one an ordinary agreement gets (crud/leasing.py:_build_agreement_snapshot)
+    when the room has an agreement profile, so its executed PDF can be
+    rendered once payment confirms it. Without a profile, the fields the PDF
+    itself needs, taken from the sublet's own offer."""
+    from app.crud.leasing import _build_agreement_snapshot
+    from app.services.agreement_profile import resolve_agreement_profile
+
+    listing = offer.listing
+    terms = offer.terms[-1]
+    extra = {"source": "sublet_co_tenancy", "signed_on_approval": signed_on_approval}
+    profile = resolve_agreement_profile(db, listing, listing.room)
+    if profile is not None:
+        return {**_build_agreement_snapshot(offer, profile, latest_terms=terms), **extra}
+    guest = offer.guest
+    return {
+        "listing_id": listing.id, "listing_name": listing.name, "listing_location": listing.location,
+        "listing_city": listing.city, "room_size": listing.room.size if listing.room else None,
+        "room_has_ensuite": listing.room.has_ensuite if listing.room else None,
+        "provider_name": listing.contact_name or (listing.owner.full_name if listing.owner else "Host"),
+        "provider_email": listing.contact_email or (listing.owner.email if listing.owner else ""),
+        "renter_name": guest.name if guest else "", "renter_email": guest.email if guest else "",
+        "renter_phone": guest.phone if guest else "",
+        "monthly_rent": float(terms.monthly_rent), "deposit_amount": float(terms.deposit_amount),
+        "start_date": terms.start_date.isoformat(), "term_months": terms.term_months,
+        "clause_ids": [], "required_signers": ["provider", "renter"], **extra,
+    }
+
+
 def _create_co_tenancy_agreement(
     db: Session, occupancy: Occupancy, proposed_guest: Guest, monthly_rent_override: float | None = None,
-    *, require_e_signature: bool = False,
+    *, require_e_signature: bool = False, recipient_party_id: int | None = None,
 ) -> Agreement:
     """SUBLEASE_PARTIAL/ADD_CO_TENANT: builds a real, independent Application ->
     Offer -> Terms -> Agreement chain for the co-tenant, rather than overwriting
@@ -555,22 +585,42 @@ def _create_co_tenancy_agreement(
         db.flush()
         db.add(AgreementVersion(
             agreement_id=agreement.id, version_no=1, status="WORKING",
-            snapshot={"required_signers": ["provider", "renter"], "source": "sublet_co_tenancy"},
+            snapshot=_sublet_agreement_snapshot(db, offer, signed_on_approval=False),
         ))
         db.flush()
     else:
+        # Signed by both on approval, but -- like every other tenancy -- it only
+        # becomes SIGNED (and gets its move-in record) once the deposit and first
+        # rent are recorded as paid. Marking it SIGNED here skipped that, so the
+        # subtenant never got an occupancy and their later months never appeared.
+        from app.crud.leasing import _payment_deadline_after_signing
+
         now = datetime.now(timezone.utc)
-        agreement = Agreement(offer_id=offer.id, status="SIGNED", signature_ref=new_id("SIG"), signed_by_provider_at=now, signed_by_renter_at=now)
+        agreement = Agreement(
+            offer_id=offer.id, status="PAYMENT_IN_PROGRESS", signature_ref=new_id("SIG"),
+            signed_by_provider_at=now, signed_by_renter_at=now,
+        )
         db.add(agreement)
         db.flush()
+        # Same document version the e-signature path creates -- it's what gets
+        # frozen into the executed PDF once payment confirms the agreement.
+        db.add(AgreementVersion(
+            agreement_id=agreement.id, version_no=1, status="WORKING",
+            snapshot=_sublet_agreement_snapshot(db, offer, signed_on_approval=True),
+        ))
+        db.flush()
+        agreement.offer = offer
+        agreement.payment_session_expires_at = _payment_deadline_after_signing(agreement, now)
 
+    # The sublet's own terms: the negotiated rent, due from the sublet's start
+    # (today) -- not the original tenancy's rent and long-past start date.
     db.add(Obligation(
         obligation_type="RENT", money_plane=OBLIGATION_TYPE_TO_PLANE["RENT"],
-        amount=latest_terms.monthly_rent, currency=listing.currency, due_date=latest_terms.start_date, agreement_id=agreement.id,
+        amount=monthly_rent, currency=listing.currency, due_date=start_date, agreement_id=agreement.id,
     ))
     db.add(Obligation(
         obligation_type="DEPOSIT", money_plane=OBLIGATION_TYPE_TO_PLANE["DEPOSIT"],
-        amount=latest_terms.deposit_amount, currency=listing.currency, due_date=latest_terms.start_date, agreement_id=agreement.id,
+        amount=latest_terms.deposit_amount, currency=listing.currency, due_date=start_date, agreement_id=agreement.id,
     ))
     db.flush()
 
@@ -583,16 +633,19 @@ def _create_co_tenancy_agreement(
         from app.crud.rental_payment import create_obligation as create_rental_payment_obligation
         from app.crud.rental_payment import resolve_rent_recipient_party_id
 
-        recipient_party_id = resolve_rent_recipient_party_id(db, listing.room) if listing.room else None
+        # The caller decides who's paid (the original renter for a sublease/
+        # lodger, the host for a co-tenant); the host is the fallback.
+        if recipient_party_id is None:
+            recipient_party_id = resolve_rent_recipient_party_id(db, listing.room) if listing.room else None
         if recipient_party_id is not None:
             create_rental_payment_obligation(
                 db, obligation_type="RENT", tenant_guest_id=proposed_guest.id, recipient_party_id=recipient_party_id,
-                amount=latest_terms.monthly_rent, currency=listing.currency, due_date=latest_terms.start_date,
+                amount=monthly_rent, currency=listing.currency, due_date=start_date,
                 agreement_id=agreement.id,
             )
             create_rental_payment_obligation(
                 db, obligation_type="DEPOSIT", tenant_guest_id=proposed_guest.id, recipient_party_id=recipient_party_id,
-                amount=latest_terms.deposit_amount, currency=listing.currency, due_date=latest_terms.start_date,
+                amount=latest_terms.deposit_amount, currency=listing.currency, due_date=start_date,
                 agreement_id=agreement.id,
             )
     except Exception:
@@ -663,6 +716,23 @@ def _assert_current_decision_authority(db: Session, room_id: int) -> None:
         )
 
 
+def _reassign_open_rent_to(db: Session, occupancy: Occupancy, guest_id: str) -> None:
+    """On a full assignment, move the tenancy's open rent/deposit obligations
+    with no payment recorded against them to the assignee -- anything the
+    original renter already paid or recorded stays theirs."""
+    from sqlalchemy import or_
+
+    from app.models.rental_payment import RentalPaymentObligation
+
+    agreement = occupancy.offer.agreement if occupancy.offer is not None else None
+    scopes = [RentalPaymentObligation.occupancy_id == occupancy.id]
+    if agreement is not None:
+        scopes.append(RentalPaymentObligation.agreement_id == agreement.id)
+    for obligation in db.scalars(select(RentalPaymentObligation).where(or_(*scopes))):
+        if obligation.status in ("UPCOMING", "DUE", "OVERDUE") and not obligation.records:
+            obligation.tenant_guest_id = guest_id
+
+
 def approve_sublet_request(
     db: Session, sublet_request: SubletRequest, actor: "AdminUser | UserAccount", notes: str = "",
     conditions: str = "", expires_at: datetime | None = None,
@@ -717,9 +787,30 @@ def approve_sublet_request(
         if capacity_reasons:
             raise HTTPException(status.HTTP_409_CONFLICT, {"message": "Room cannot accept a co-tenant", "reasons": capacity_reasons})
         negotiated_rent = sublet_request.policy_snapshot.get("proposed_monthly_rent")
+        # Who the new occupant pays: a subtenant/lodger contracts with the
+        # original renter, so under the market's ORIGINAL_RENTER_PAYEE model
+        # they pay that renter (who keeps paying the host); a co-tenant is the
+        # host's own joint tenant and pays the host.
+        from app.crud.rental_payment import SUBLET_ARRANGEMENTS_PAID_TO_ORIGINAL_RENTER, original_renter_party_id
+
+        payee_model = policy.sublet_sublease_payee_model
+        recipient_party_id = None
+        if (
+            sublet_request.arrangement_type in SUBLET_ARRANGEMENTS_PAID_TO_ORIGINAL_RENTER
+            and payee_model == "ORIGINAL_RENTER_PAYEE"
+        ):
+            recipient_party_id = original_renter_party_id(db, sublet_request.current_occupancy)
+            if recipient_party_id is None:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "The original renter has no account to receive the subtenant's rent",
+                )
+        elif sublet_request.arrangement_type == "ADD_CO_TENANT":
+            payee_model = "HOST_OR_LANDLORD_PAYEE"
         new_agreement = _create_co_tenancy_agreement(
             db, sublet_request.current_occupancy, proposed_guest, negotiated_rent,
             require_e_signature=(policy.sublet_signature_mode == "E_SIGNATURE"),
+            recipient_party_id=recipient_party_id,
         )
         sublet_request.new_agreement_id = new_agreement.id
         # Both tenants remain fully active and liable -- adding a co-tenant
@@ -740,7 +831,7 @@ def approve_sublet_request(
         # *entire existing* tenancy's payment relationship to one new
         # occupant, while a co-tenancy/sublease creates an independent one
         # alongside the original.
-        sublet_request.payee_model = policy.sublet_sublease_payee_model
+        sublet_request.payee_model = payee_model
         requester_guest_id = sublet_request.current_occupancy.guest_id
     else:
         # Capture who to notify *before* reassigning the occupancy's guest below --
@@ -762,6 +853,9 @@ def approve_sublet_request(
             # keeps authorizing the released original renter instead of the
             # assignee who actually now holds the tenancy.
             sublet_request.current_occupancy.offer.guest_id = proposed_guest.id
+            # The released renter owes nothing more -- rent that's open and
+            # untouched (nothing recorded on it yet) now belongs to the assignee.
+            _reassign_open_rent_to(db, sublet_request.current_occupancy, proposed_guest.id)
         else:  # REPLACEMENT_OCCUPANT
             sublet_request.original_renter_liability = "LIMITED"
             sublet_request.new_occupant_liability = "SUBORDINATE"
@@ -795,6 +889,19 @@ def approve_sublet_request(
             related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
         )
     elif is_co_tenancy:
+        if sublet_request.payee_model == "ORIGINAL_RENTER_PAYEE":
+            requester = db.get(Guest, requester_guest_id)
+            if requester is not None:
+                notif_crud.notify_user_by_guest(
+                    db, requester, title="You'll receive your subtenant's rent",
+                    message=(
+                        "Your subtenant pays their rent and deposit to you directly. Add your payment instructions "
+                        "(bank, UPI or cash) in Payments so they know how to pay you, then mark their payments as "
+                        "received there. You keep paying your own rent to your host as before."
+                    ),
+                    notification_type="sublet_request.payee_setup",
+                    related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+                )
         next_step = (
             "Sign your agreement, then complete payment to move in."
             if policy.sublet_signature_mode == "E_SIGNATURE"

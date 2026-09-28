@@ -47,6 +47,12 @@ _US_ACCOUNT_NUMBER = re.compile(r"^\d{4,17}$")
 # validator (that's a heavier lift this build doesn't need for a UX-level
 # field-shape check).
 _IBAN = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{1,30}$")
+# India: IFSC is 4 letters, a literal 0, then 6 letters/digits; account
+# numbers run 9-18 digits depending on the bank.
+_IN_IFSC = re.compile(r"^[A-Za-z]{4}0[A-Za-z0-9]{6}$")
+_IN_ACCOUNT_NUMBER = re.compile(r"^\d{9,18}$")
+# A UPI ID (virtual payment address): handle@provider, e.g. name@okhdfcbank.
+_UPI_ID = re.compile(r"^[A-Za-z0-9.\-_]{2,256}@[A-Za-z][A-Za-z0-9]{1,63}$")
 _GENERIC_IDENTIFIER = re.compile(r"^.{4,64}$")
 
 _GB_SCHEMA = BankFieldSchema(
@@ -67,6 +73,20 @@ _IBAN_SCHEMA = BankFieldSchema(
     fields=(BankField("iban", "IBAN", _IBAN, "e.g. DE89370400440532013000"),),
     primary_field_key="iban",
 )
+_IN_SCHEMA = BankFieldSchema(
+    fields=(
+        BankField("ifsc", "IFSC", _IN_IFSC, "11 characters, e.g. HDFC0001234"),
+        BankField("account_number", "Account number", _IN_ACCOUNT_NUMBER, "9-18 digits"),
+    ),
+    primary_field_key="account_number",
+)
+UPI_SCHEMA = BankFieldSchema(
+    fields=(BankField("upi_id", "UPI ID", _UPI_ID, "e.g. name@okhdfcbank"),),
+    primary_field_key="upi_id",
+)
+# Cash is paid in person -- there are no account details to collect; the
+# host describes where/when in the instruction's additional_instructions.
+CASH_SCHEMA = BankFieldSchema(fields=(), primary_field_key="")
 # The pre-existing single-generic-field behavior, preserved as the fallback
 # for any country not explicitly listed below.
 _FALLBACK_SCHEMA = BankFieldSchema(
@@ -83,6 +103,7 @@ _IBAN_COUNTRIES = frozenset({"DE", "FR", "ES", "IT", "NL", "IE", "PT", "BE"})
 BANK_FIELD_SCHEMAS: dict[str, BankFieldSchema] = {
     "GB": _GB_SCHEMA,
     "US": _US_SCHEMA,
+    "IN": _IN_SCHEMA,
     **{code: _IBAN_SCHEMA for code in _IBAN_COUNTRIES},
 }
 
@@ -94,6 +115,10 @@ def resolve_bank_field_schema(country_code: str, method: str = "BANK_TRANSFER") 
     payment would be nonsensical, not just unhelpful. Every non-bank-
     transfer method always gets the generic single-field fallback,
     regardless of country_code."""
+    if method == "UPI":
+        return UPI_SCHEMA
+    if method == "CASH":
+        return CASH_SCHEMA
     if method != "BANK_TRANSFER":
         return _FALLBACK_SCHEMA
     return BANK_FIELD_SCHEMAS.get(country_code.strip().upper(), _FALLBACK_SCHEMA)

@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from pydantic import computed_field
+
 from app.schemas.common import CamelModel
 
 
@@ -16,6 +18,17 @@ class RentalPaymentProviderAccountRead(CamelModel):
     high_risk_reason: str = ""
     created_at: datetime
     updated_at: datetime
+
+    @computed_field
+    @property
+    def can_simulate_onboarding(self) -> bool:
+        """Whether the dev-only 'simulate onboarding complete' action will be
+        accepted -- only while no real Stripe key is configured (see
+        crud/rental_payment_provider_account.py:simulate_onboarding_complete).
+        The frontend shows that button off this, never off its own build mode."""
+        from app.services import stripe_client
+
+        return not stripe_client.is_configured()
 
 
 class RentalPaymentProviderAccountCreate(CamelModel):

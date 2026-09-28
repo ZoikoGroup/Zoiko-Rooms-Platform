@@ -14,6 +14,9 @@ import typing
 # Force the file mailer before app settings load, so a developer's .env with
 # EMAIL_PROVIDER=smtp never makes the suite send real email.
 os.environ["EMAIL_PROVIDER"] = "file"
+# The app now assumes production unless told otherwise (core/config.py) --
+# the suite is explicitly a development environment.
+os.environ["ENVIRONMENT"] = "development"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -42,6 +45,8 @@ def _isolate_from_real_provider_credentials(monkeypatch):
     tests place real (if sandbox) API calls. Forced blank for every test
     regardless of what .env says; monkeypatch restores it afterward."""
     monkeypatch.setattr(settings, "stripe_secret_key", "")
+    # The in-process scheduler would open real DB sessions in the background.
+    monkeypatch.setattr(settings, "scheduler_enabled", False)
     monkeypatch.setattr(settings, "stripe_webhook_secret", "")
     monkeypatch.setattr(settings, "stripe_listing_fee_webhook_secret", "")
 
@@ -58,7 +63,7 @@ def _legacy_payment_capabilities(request, monkeypatch):
         return
     from app.services import policy
 
-    for flag in ("rent_collection_enabled", "deposit_collection_enabled", "host_payouts_enabled"):
+    for flag in ("rent_collection_enabled", "deposit_collection_enabled", "host_payouts_enabled", "rent_card_checkout_enabled"):
         monkeypatch.setattr(settings, flag, True)
     monkeypatch.setattr(settings, "listing_fee_fail_closed", False)
     monkeypatch.setattr(settings, "payment_receipt_authority_required", False)
@@ -293,6 +298,20 @@ def _make_user(db: Session, *, email: str = "user@test.com") -> UserAccount:
     db.add(user)
     db.flush()
     return user
+
+
+def _make_room_owned_by(db: Session, party) -> "Room":
+    """A property + room owned by `party` -- shared by the rental payment tests."""
+    from app.models.property import Property
+    from app.models.room import Room
+
+    prop = Property(owner_party_id=party.id, address="1 Recipient St", city="Bengaluru", status="active")
+    db.add(prop)
+    db.flush()
+    room = Room(property_id=prop.id, room_type="private_room", size=100, has_ensuite=True, status="active")
+    db.add(room)
+    db.commit()
+    return room
 
 
 def auth_admin_cookie(admin: AdminUser) -> dict[str, str]:

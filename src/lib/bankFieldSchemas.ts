@@ -23,6 +23,9 @@ const US_ROUTING_NUMBER = /^\d{9}$/;
 const US_ACCOUNT_NUMBER = /^\d{4,17}$/;
 const IBAN = /^[A-Z]{2}\d{2}[A-Z0-9]{1,30}$/;
 const GENERIC_IDENTIFIER = /^.{4,64}$/;
+const IN_IFSC = /^[A-Za-z]{4}0[A-Za-z0-9]{6}$/;
+const IN_ACCOUNT_NUMBER = /^\d{9,18}$/;
+const UPI_ID = /^[A-Za-z0-9.\-_]{2,256}@[A-Za-z][A-Za-z0-9]{1,63}$/;
 
 const GB_SCHEMA: BankFieldSchema = {
   fields: [
@@ -38,6 +41,20 @@ const US_SCHEMA: BankFieldSchema = {
   ],
   primaryFieldKey: "account_number",
 };
+const IN_SCHEMA: BankFieldSchema = {
+  fields: [
+    { key: "ifsc", label: "IFSC", pattern: IN_IFSC, hint: "11 characters, e.g. HDFC0001234" },
+    { key: "account_number", label: "Account number", pattern: IN_ACCOUNT_NUMBER, hint: "9-18 digits" },
+  ],
+  primaryFieldKey: "account_number",
+};
+export const UPI_SCHEMA: BankFieldSchema = {
+  fields: [{ key: "upi_id", label: "UPI ID", pattern: UPI_ID, hint: "e.g. name@okhdfcbank" }],
+  primaryFieldKey: "upi_id",
+};
+/** Cash is paid in person -- no account details; the host describes where
+ *  and when in the instruction's notes. */
+export const CASH_SCHEMA: BankFieldSchema = { fields: [], primaryFieldKey: "" };
 const IBAN_SCHEMA: BankFieldSchema = {
   fields: [{ key: "iban", label: "IBAN", pattern: IBAN, hint: "e.g. DE89370400440532013000" }],
   primaryFieldKey: "iban",
@@ -52,6 +69,7 @@ const IBAN_COUNTRIES = ["DE", "FR", "ES", "IT", "NL", "IE", "PT", "BE"] as const
 export const BANK_FIELD_SCHEMAS: Record<string, BankFieldSchema> = {
   GB: GB_SCHEMA,
   US: US_SCHEMA,
+  IN: IN_SCHEMA,
   ...Object.fromEntries(IBAN_COUNTRIES.map((code) => [code, IBAN_SCHEMA])),
 };
 
@@ -63,6 +81,7 @@ export const BANK_FIELD_SCHEMAS: Record<string, BankFieldSchema> = {
 export const COUNTRY_OPTIONS: { code: string; label: string }[] = [
   { code: "GB", label: "United Kingdom" },
   { code: "US", label: "United States" },
+  { code: "IN", label: "India" },
   { code: "DE", label: "Germany" },
   { code: "FR", label: "France" },
   { code: "ES", label: "Spain" },
@@ -81,6 +100,8 @@ export const COUNTRY_OPTIONS: { code: string; label: string }[] = [
  *  backend/app/services/bank_field_schemas.py:resolve_bank_field_schema's
  *  own method check exactly. */
 export function resolveBankFieldSchema(countryCode: string, method: string = "BANK_TRANSFER"): BankFieldSchema {
+  if (method === "UPI") return UPI_SCHEMA;
+  if (method === "CASH") return CASH_SCHEMA;
   if (method !== "BANK_TRANSFER") return FALLBACK_SCHEMA;
   return BANK_FIELD_SCHEMAS[countryCode.toUpperCase()] ?? FALLBACK_SCHEMA;
 }

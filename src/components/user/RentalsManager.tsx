@@ -373,10 +373,19 @@ export function RentalsManager() {
     try {
       const result = await cancelOwnBookingBeforeMoveIn(cancelFor.id, cancelReason.trim());
       setCancelFor(null);
+      // Card payments are refunded by the host's own Stripe account straight
+      // back to the card -- the bank, not us, decides when it shows up.
+      const cardNote = " Card refunds usually take 5–10 business days to appear.";
       showToast(
-        result.feeAmount > 0
-          ? `Booking cancelled. ${formatCurrency(result.refundedAmount, cancelFor.currency)} refunded (a ${formatCurrency(result.feeAmount, cancelFor.currency)} cancellation fee applied).`
-          : `Booking cancelled. ${formatCurrency(result.refundedAmount, cancelFor.currency)} refunded in full.`,
+        result.refundedAmount <= 0
+          ? // Rent and deposit are paid to the host directly, so any refund
+            // comes from the host directly too -- Zoiko never holds it.
+            result.feeAmount > 0
+            ? `Booking cancelled. A ${formatCurrency(result.feeAmount, cancelFor.currency)} cancellation fee applies. If you've paid your host directly, they'll return the rest to you directly.`
+            : "Booking cancelled. If you've paid your host directly, they'll return that money to you directly -- Zoiko doesn't hold or refund rent."
+          : result.feeAmount > 0
+            ? `Booking cancelled. ${formatCurrency(result.refundedAmount, cancelFor.currency)} refunded (a ${formatCurrency(result.feeAmount, cancelFor.currency)} cancellation fee applied).${cardNote}`
+            : `Booking cancelled. ${formatCurrency(result.refundedAmount, cancelFor.currency)} refunded in full.${cardNote}`,
       );
       await load();
     } catch (err) {

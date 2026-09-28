@@ -60,7 +60,12 @@ RENTAL_PAYMENT_STATUSES = (
 RENTAL_PAYMENT_PROVENANCE = (
     "TENANT_DECLARATION", "RECIPIENT_CONFIRMATION", "PROVIDER_CONFIRMATION", "ADMIN_CORRECTION", "SYSTEM_DERIVATION",
 )
-RENTAL_PAYMENT_METHOD_CATEGORIES = ("BANK_TRANSFER", "CASH", "CARD", "OTHER")
+RENTAL_PAYMENT_METHOD_CATEGORIES = ("BANK_TRANSFER", "UPI", "CASH", "CARD", "OTHER")
+# The direct methods a host may offer renters in new payment instructions
+# (Zoiko Rooms Payment Model: rent is paid straight to the host -- bank
+# transfer, UPI or cash). CARD/OTHER instructions saved before this stay
+# valid; they just can't be created any more.
+RENTAL_PAYMENT_INSTRUCTION_METHODS = ("BANK_TRANSFER", "UPI", "CASH")
 RENTAL_PAYMENT_DISCREPANCY_REASONS = ("NOT_ARRIVED", "AMOUNT_DIFFERENT", "REFERENCE_MISMATCH", "RETURNED_OR_REVERSED", "OTHER")
 RENTAL_PAYMENT_DISPUTE_STATUSES = ("OPEN", "RESOLVED")
 # ZR-PAY-002 Section 9.1: same create-then-confirm shape as
@@ -164,6 +169,21 @@ class RentalPaymentObligation(Base):
             return resolve_deposit_terminology(self.jurisdiction_code)
         return self.obligation_type.lower()
 
+    @property
+    def outstanding_amount(self) -> float:
+        """What is still unpaid: the amount less every record that currently
+        counts as money received (CONFIRMED/PARTIALLY_PAID, at its
+        confirmed_amount -- which is already net of any card refund). A
+        REVERSED or DISPUTED record counts for nothing. This is what an
+        online checkout charges, so a partly-paid obligation can be settled
+        for exactly the remainder."""
+        received = sum(
+            float(record.confirmed_amount or 0)
+            for record in self.records
+            if record.status in ("CONFIRMED", "PARTIALLY_PAID")
+        )
+        return max(round(float(self.amount) - received, 2), 0.0)
+
 
 class RentalPaymentAllocation(Base):
     """ZR-PAY-LINK-003 Section 15: one co-tenant's share of a joint-tenancy
@@ -222,6 +242,16 @@ class RentalPaymentRecord(Base):
     # reference a PROVIDER_CONFIRMATION-provenance confirmation is backed
     # by. Never set for any other provenance.
     provider_reference: Mapped[str] = mapped_column(String(255), default="")
+    # A card payment refunded back to the tenant straight out of the host's
+    # own connected account (e.g. crud/occupancy.py:cancel_before_move_in) --
+    # never out of Zoiko Rooms' balance. Null/blank until a refund is issued.
+    refunded_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    provider_refund_id: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    # A card chargeback the tenant raised with their bank, as reported by
+    # Stripe (charge.dispute.*) -- the host's own dispute to answer in their
+    # Stripe Dashboard; mirrored here so both sides see it. Blank if none.
+    provider_dispute_id: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    provider_dispute_status: Mapped[str] = mapped_column(String(30), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     obligation: Mapped["RentalPaymentObligation"] = relationship(back_populates="records")

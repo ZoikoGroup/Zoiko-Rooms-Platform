@@ -31,6 +31,7 @@ from app.models.party import Party
 from app.models.payment_recipient_authority import PaymentRecipientAuthority
 from app.models.rental_payment import (
     RENTAL_PAYMENT_DISCREPANCY_REASONS,
+    RENTAL_PAYMENT_INSTRUCTION_METHODS,
     RENTAL_PAYMENT_METHOD_CATEGORIES,
     RentalPaymentAllocation,
     RentalPaymentCorrection,
@@ -100,15 +101,76 @@ def resolve_rent_recipient_party_id(db: Session, room) -> int | None:
     ZR-PAY-LINK-003 Section 24's own 'historical obligations retain
     original payee lineage'), so a claim that gets verified later only
     ever governs obligations created from that point on, never
-    retroactively changes who could act on ones already created."""
-    from app.crud.payment_recipient_authority import get_valid_payment_recipient_authority_for_room
+    retroactively changes who could act on ones already created.
+
+    Rent is paid to whoever holds the room's admin-verified listing
+    authority (crud/authority.py) -- the same verification that already
+    lets them list it. There is no separate payment-recipient step any more;
+    the property owner is the fallback until that authority is verified."""
+    from app.crud.authority import get_valid_authority_for_room
 
     if room is None or room.property is None:
         return None
-    authority = get_valid_payment_recipient_authority_for_room(db, room.id)
+    authority = get_valid_authority_for_room(db, room.id)
     if authority is not None:
         return authority.party_id
     return room.property.owner_party_id
+
+
+# Sublet arrangements whose new occupant's contract is with the original
+# renter (a subtenant or a lodger), not with the host -- so, under the
+# market's ORIGINAL_RENTER_PAYEE payee model, they pay the original renter,
+# who keeps paying the host their own rent. ADD_CO_TENANT isn't here: a
+# co-tenant is a joint tenant of the host and pays the host.
+SUBLET_ARRANGEMENTS_PAID_TO_ORIGINAL_RENTER = ("SUBLEASE_PARTIAL", "LODGER_OR_LICENSEE")
+
+
+def original_renter_party_id(db: Session, occupancy) -> int | None:
+    """The party of the renter who holds `occupancy` -- the one a subtenant pays."""
+    from app.crud.guest import get_user_for_guest
+
+    guest = occupancy.guest if occupancy is not None else None
+    user = get_user_for_guest(db, guest) if guest is not None else None
+    return user.party_id if user is not None else None
+
+
+def sublet_payee_party_id(db: Session, agreement_id: int | None) -> int | None:
+    """If `agreement_id` is a sublease/lodger agreement created by an approved
+    sublet under the ORIGINAL_RENTER_PAYEE model, the original renter's party
+    (who receives this rent); otherwise None (rent goes to the room's host)."""
+    from app.models.sublet_request import SubletRequest
+
+    if agreement_id is None:
+        return None
+    sublet = db.scalar(
+        select(SubletRequest).where(SubletRequest.new_agreement_id == agreement_id).order_by(SubletRequest.id.desc()).limit(1)
+    )
+    if (
+        sublet is None
+        or sublet.arrangement_type not in SUBLET_ARRANGEMENTS_PAID_TO_ORIGINAL_RENTER
+        or sublet.payee_model != "ORIGINAL_RENTER_PAYEE"
+    ):
+        return None
+    return original_renter_party_id(db, sublet.current_occupancy)
+
+
+def _agreement_id_for_obligation(obligation: RentalPaymentObligation) -> int | None:
+    if obligation.agreement_id is not None:
+        return obligation.agreement_id
+    occupancy = obligation.occupancy
+    agreement = occupancy.offer.agreement if occupancy is not None and occupancy.offer is not None else None
+    return agreement.id if agreement is not None else None
+
+
+def resolve_rent_recipient_for_occupancy(db: Session, occupancy) -> int | None:
+    """Who a tenancy's recurring rent is paid to -- the original renter for a
+    sublease/lodger arrangement (sublet_payee_party_id), otherwise the room's
+    host (resolve_rent_recipient_party_id)."""
+    agreement = occupancy.offer.agreement if occupancy.offer is not None else None
+    payee = sublet_payee_party_id(db, agreement.id if agreement is not None else None)
+    if payee is not None:
+        return payee
+    return resolve_rent_recipient_party_id(db, occupancy.room) if occupancy.room else None
 
 
 def create_obligation(
@@ -256,6 +318,72 @@ def recompute_obligation_status(db: Session, obligation: RentalPaymentObligation
     # the old domain.
     if obligation.status == "CONFIRMED" and (obligation.agreement_id is not None or obligation.occupancy_id is not None):
         _sync_legacy_obligation_from_confirmation(db, obligation)
+    elif obligation.status in ("REVERSED", "PARTIALLY_PAID") and (
+        obligation.agreement_id is not None or obligation.occupancy_id is not None
+    ):
+        _unsync_legacy_obligation_after_reversal(db, obligation)
+
+
+def _find_synced_legacy_obligation(db: Session, obligation: RentalPaymentObligation):
+    """The legacy Obligation _sync_legacy_obligation_from_confirmation pairs
+    with this one -- the earliest of the same type in the same scope."""
+    from app.models.finance import Obligation as LegacyObligation
+
+    scope_column = LegacyObligation.agreement_id if obligation.agreement_id is not None else LegacyObligation.occupancy_id
+    scope_value = obligation.agreement_id if obligation.agreement_id is not None else obligation.occupancy_id
+    return db.scalar(
+        select(LegacyObligation)
+        .where(scope_column == scope_value, LegacyObligation.obligation_type == obligation.obligation_type)
+        .order_by(LegacyObligation.id)
+        .limit(1)
+    )
+
+
+def _unsync_legacy_obligation_after_reversal(db: Session, obligation: RentalPaymentObligation) -> None:
+    """The reverse of _sync_legacy_obligation_from_confirmation: the money
+    that made this obligation CONFIRMED went back to the tenant (a lost
+    chargeback, or a refund), so the legacy Obligation that sync marked PAID
+    must stop saying so -- otherwise move-in eligibility
+    (crud/activation_gate.py) would keep treating an unpaid deposit/first
+    rent as paid. Only ever undoes the sync's own work: a legacy Obligation
+    actually paid through the legacy rail (it has a real allocation) is left
+    alone. Its DepositRecord, created by the sync, is removed only while
+    nothing has happened to it yet (HELD, nothing released, no claims);
+    otherwise it is kept and flagged for staff instead of silently
+    rewritten. Re-syncs normally once the obligation is paid again."""
+    legacy_obligation = _find_synced_legacy_obligation(db, obligation)
+    if legacy_obligation is None or legacy_obligation.status != "PAID":
+        return
+    if any(float(a.amount_allocated or 0) > 0 for a in legacy_obligation.allocations):
+        return
+
+    legacy_obligation.status = "PENDING"
+    deposit_record = legacy_obligation.deposit_record
+    deposit_note = ""
+    if deposit_record is not None:
+        untouched = (
+            deposit_record.status == "HELD" and float(deposit_record.released_amount or 0) == 0 and not deposit_record.claims
+        )
+        if untouched:
+            db.delete(deposit_record)
+            deposit_note = " Its deposit record was removed (nothing had been done with it)."
+        else:
+            deposit_record.notes = (
+                (deposit_record.notes or "")
+                + f" [Payment reversed: rental_payment_obligation {obligation.id} is {obligation.status} -- review this deposit.]"
+            )[:2000]
+            deposit_note = " Its deposit record was already in use and was kept -- flagged for review."
+    db.flush()
+    db.expire(legacy_obligation, ["deposit_record"])
+
+    log_audit_event(
+        db, None, "rental_payment.legacy_obligation_unsynced", "obligation", str(legacy_obligation.id),
+        reason=f"rental_payment_obligation {obligation.id} went {obligation.status} after being paid.{deposit_note}",
+    )
+    emit_event(
+        db, "rental_payment.legacy_obligation_unsynced", "rental_payment_obligation", str(obligation.id),
+        {"legacyObligationId": legacy_obligation.id, "status": obligation.status}, new_state="PENDING",
+    )
 
 
 def _recompute_single_or_joint_status(db: Session, obligation: RentalPaymentObligation) -> None:
@@ -291,6 +419,14 @@ def _recompute_single_or_joint_status(db: Session, obligation: RentalPaymentObli
 
     if latest_record.status == "PAYER_RECORDED":
         obligation.status = "RECIPIENT_CONFIRMATION_PENDING"
+    elif latest_record.status == "REVERSED":
+        # The latest payment went back, but an earlier one may still stand
+        # (e.g. a card top-up refunded on top of a confirmed bank transfer)
+        # -- then it's partly paid, not wholly owed again.
+        db.expire(obligation, ["records"])
+        obligation.status = (
+            "PARTIALLY_PAID" if obligation.outstanding_amount < round(float(obligation.amount), 2) else "REVERSED"
+        )
     else:
         # CONFIRMED / PARTIALLY_PAID / DISPUTED / REVERSED all mirror the
         # record's own state directly -- each is already the exact display
@@ -552,14 +688,21 @@ def recipient_holds_payment_receipt_authority(db: Session, obligation: RentalPay
     recorded before authority is verified), but that fallback never lets
     anyone see instructions or confirm receipt."""
     from app.core.config import settings
-    from app.crud.payment_recipient_authority import get_valid_payment_recipient_authority_for_room
+    from app.crud.authority import get_valid_authority_for_room
 
     if not settings.payment_receipt_authority_required:
         return True
     room = obligation.room
     if room is None:
         return False
-    authority = get_valid_payment_recipient_authority_for_room(db, room.id)
+    # A sublease/lodger's rent is the original renter's to receive -- their
+    # entitlement is the host's approval of that sublet, not a listing authority.
+    sublet_payee = sublet_payee_party_id(db, _agreement_id_for_obligation(obligation))
+    if sublet_payee is not None:
+        return sublet_payee == party_id
+    # Otherwise the room's admin-verified listing authority is what makes a
+    # party the one entitled to receive its rent.
+    authority = get_valid_authority_for_room(db, room.id)
     return authority is not None and authority.party_id == party_id
 
 
@@ -567,7 +710,7 @@ def assert_recipient_holds_payment_receipt_authority(db: Session, obligation: Re
     if not recipient_holds_payment_receipt_authority(db, obligation, party_id):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "The recipient's authority to receive payments for this rental hasn't been verified yet",
+            "The host's authority for this room hasn't been verified yet",
         )
 
 
@@ -802,6 +945,89 @@ def confirm_receipt(
     return record
 
 
+# An obligation the recipient can record money against directly -- still
+# owed in full or in part, and nothing already waiting on them to confirm.
+RECORD_RECEIPT_OBLIGATION_STATUSES = ("UPCOMING", "DUE", "OVERDUE", "REVERSED", "PARTIALLY_PAID")
+
+
+def record_receipt_as_recipient(
+    db: Session, party: Party, obligation: RentalPaymentObligation, *, amount: float | None, received_date: date,
+    payment_method_category: str, external_reference: str = "", note: str = "", correlation_id: str = "",
+) -> RentalPaymentRecord:
+    """Zoiko Rooms Payment Model: rent is paid straight to the host outside
+    Zoiko, and recording it is optional -- so the host may simply mark money
+    as received without the renter declaring it first. The same authority
+    rule as confirm_receipt applies (only the verified recipient), and the
+    record is RECIPIENT_CONFIRMATION provenance, exactly what a confirmed
+    declaration ends up as. For the booking's deposit and first rent this is
+    what confirms the booking and unlocks move-in (via
+    recompute_obligation_status's legacy sync). `amount` defaults to
+    everything still outstanding; less than that records a part payment."""
+    assert_party_is_recipient(obligation, party.id)
+    assert_recipient_holds_payment_receipt_authority(db, obligation, party.id)
+    if obligation.status not in RECORD_RECEIPT_OBLIGATION_STATUSES:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "There's a payment on this obligation waiting for your review -- confirm it instead"
+            if obligation.status in ("PAYER_RECORDED", "RECIPIENT_CONFIRMATION_PENDING")
+            else f"This obligation can't take a payment right now (status: {obligation.status})",
+        )
+    if obligation.payer_allocations:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This rent is split between several tenants -- confirm each tenant's own recorded payment instead",
+        )
+    if payment_method_category not in RENTAL_PAYMENT_METHOD_CATEGORIES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"paymentMethodCategory must be one of {RENTAL_PAYMENT_METHOD_CATEGORIES}")
+
+    db.expire(obligation, ["records"])
+    outstanding = obligation.outstanding_amount
+    received = _round2(amount) if amount is not None else outstanding
+    if received <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Amount received must be greater than zero")
+    if received > outstanding:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Amount received can't be more than what's still owed ({obligation.currency} {outstanding:.2f})",
+        )
+    new_status = "CONFIRMED" if received >= outstanding else "PARTIALLY_PAID"
+    now = datetime.now(timezone.utc)
+    record = RentalPaymentRecord(
+        obligation_id=obligation.id, status=new_status, provenance="RECIPIENT_CONFIRMATION",
+        declared_amount=received, declared_currency=obligation.currency, declared_date=received_date,
+        payment_method_category=payment_method_category, external_reference=external_reference.strip(),
+        declared_by_guest_id=obligation.tenant_guest_id, confirmed_by_party_id=party.id,
+        confirmed_amount=received, confirmed_at=now,
+    )
+    db.add(record)
+    db.flush()
+    recompute_obligation_status(db, obligation)
+    db.commit()
+    db.refresh(record)
+
+    log_audit_event(
+        db, None, "rental_payment.receipt_recorded_by_recipient", "rental_payment_record", str(record.id),
+        correlation_id, reason=note,
+    )
+    emit_event(
+        db, "rental_payment.receipt_confirmed", "rental_payment_record", str(record.id),
+        {"obligationId": obligation.id, "confirmedAmount": received, "recordedByRecipient": True},
+        correlation_id=correlation_id, actor_kind="party", actor_id=str(party.id), new_state=new_status,
+    )
+    db.commit()
+
+    notif_crud.notify_user_by_guest(
+        db, obligation.tenant, title="Payment received",
+        message=(
+            f"Your host confirmed receiving {obligation.currency} {received:.2f} for your {obligation.display_label}."
+            + ("" if new_status == "CONFIRMED" else f" {obligation.currency} {obligation.outstanding_amount:.2f} is still due.")
+        ),
+        notification_type="rental_payment.receipt_confirmed",
+        related_entity_type="rental_payment_record", related_entity_id=str(record.id),
+    )
+    return record
+
+
 def admin_confirm_receipt(
     db: Session, admin: AdminUser, record: RentalPaymentRecord, *, reason: str, correlation_id: str = "",
 ) -> RentalPaymentRecord:
@@ -909,11 +1135,59 @@ def confirm_receipt_as_provider(
     return record
 
 
+# What resolving a payment dispute does to the payment itself.
+DISPUTE_OUTCOMES = ("CLOSE_ONLY", "PAYMENT_STANDS", "PAYMENT_NOT_RECEIVED")
+
+
+def list_disputes(db: Session, *, status_filter: str | None = DISPUTE_OPEN_STATUS) -> list[RentalPaymentDispute]:
+    """Admin queue of rent payment disputes, oldest first."""
+    query = select(RentalPaymentDispute).order_by(RentalPaymentDispute.reported_at)
+    if status_filter:
+        query = query.where(RentalPaymentDispute.status == status_filter)
+    return list(db.scalars(query))
+
+
+def _apply_dispute_outcome(
+    db: Session, admin: AdminUser, record: RentalPaymentRecord, outcome: str, notes: str,
+) -> None:
+    """PAYMENT_STANDS confirms the disputed payment; PAYMENT_NOT_RECEIVED
+    marks it REVERSED (the money isn't with the host, so the rent is owed
+    again); CLOSE_ONLY leaves the payment as it is. Each change is an
+    append-only RentalPaymentCorrection, same as every other admin override
+    in this module."""
+    if outcome == "PAYMENT_STANDS" and record.status in RECORD_CONFIRMABLE_STATUSES:
+        db.add(RentalPaymentCorrection(
+            record_id=record.id, field_name="status", previous_value=record.status, new_value="CONFIRMED",
+            reason=notes or "Dispute resolved: payment stands", actor_admin_id=admin.id,
+        ))
+        record.status = "CONFIRMED"
+        record.provenance = "ADMIN_CORRECTION"
+        if record.confirmed_amount is None:
+            record.confirmed_amount = record.declared_amount
+        record.confirmed_at = datetime.now(timezone.utc)
+    elif outcome == "PAYMENT_NOT_RECEIVED" and record.status in ("PAYER_RECORDED", "DISPUTED", "CONFIRMED", "PARTIALLY_PAID"):
+        db.add(RentalPaymentCorrection(
+            record_id=record.id, field_name="status", previous_value=record.status, new_value="REVERSED",
+            reason=notes or "Dispute resolved: payment not received", actor_admin_id=admin.id,
+        ))
+        record.status = "REVERSED"
+    else:
+        return
+    db.flush()
+    recompute_obligation_status(db, record.obligation)
+
+
 def resolve_dispute(
     db: Session, admin: AdminUser, dispute: RentalPaymentDispute, *, resolution_notes: str, correlation_id: str = "",
+    outcome: str = "CLOSE_ONLY",
 ) -> RentalPaymentDispute:
     if dispute.status == DISPUTE_RESOLVED_STATUS:
         raise HTTPException(status.HTTP_409_CONFLICT, "This dispute is already resolved")
+    if outcome not in DISPUTE_OUTCOMES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"outcome must be one of {DISPUTE_OUTCOMES}")
+    if outcome != "CLOSE_ONLY" and not resolution_notes.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Explain the decision in the resolution notes")
+    _apply_dispute_outcome(db, admin, dispute.record, outcome, resolution_notes.strip())
     dispute.status = DISPUTE_RESOLVED_STATUS
     dispute.resolved_by_admin_id = admin.id
     dispute.resolved_at = datetime.now(timezone.utc)
@@ -926,10 +1200,34 @@ def resolve_dispute(
         reason=resolution_notes,
     )
     emit_event(
-        db, "rental_payment.dispute_resolved", "rental_payment_dispute", str(dispute.id), {},
+        db, "rental_payment.dispute_resolved", "rental_payment_dispute", str(dispute.id), {"outcome": outcome},
         correlation_id=correlation_id, new_state="RESOLVED",
     )
     db.commit()
+
+    record = dispute.record
+    obligation = record.obligation
+    summary = {
+        "PAYMENT_STANDS": "The payment was confirmed.",
+        "PAYMENT_NOT_RECEIVED": "The payment was found not received, so this amount is owed again.",
+        "CLOSE_ONLY": "The dispute was closed.",
+    }[outcome]
+    message = f"Zoiko Rooms support resolved the problem reported on a {obligation.display_label} payment. {summary}"
+    if resolution_notes.strip():
+        message += f" Notes: {resolution_notes.strip()}"
+    for notify in (
+        lambda: notif_crud.notify_user_by_guest(
+            db, obligation.tenant, title="Payment dispute resolved", message=message[:2000],
+            notification_type="rental_payment.dispute_resolved",
+            related_entity_type="rental_payment_record", related_entity_id=str(record.id),
+        ),
+        lambda: notif_crud.notify_user_by_party(
+            db, obligation.recipient_party_id, title="Payment dispute resolved", message=message[:2000],
+            notification_type="rental_payment.dispute_resolved",
+            related_entity_type="rental_payment_record", related_entity_id=str(record.id),
+        ),
+    ):
+        notify()
     return dispute
 
 
@@ -1272,8 +1570,8 @@ def submit_rental_payment_instruction(
     account_identifier_last4 (derived from the schema's primary field) and
     a one-way fingerprint of the whole dict are ever exposed/compared in
     the clear."""
-    if method not in RENTAL_PAYMENT_METHOD_CATEGORIES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"method must be one of {RENTAL_PAYMENT_METHOD_CATEGORIES}")
+    if method not in RENTAL_PAYMENT_INSTRUCTION_METHODS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"method must be one of {RENTAL_PAYMENT_INSTRUCTION_METHODS}")
     recipient_name = recipient_name.strip()
     if not recipient_name:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Recipient name is required")
@@ -1287,9 +1585,12 @@ def submit_rental_payment_instruction(
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
     schema = resolve_bank_field_schema(country_code, method)
-    primary_value = bank_details[schema.primary_field_key]
+    # Only the schema's own fields are stored -- nothing else the form sent.
+    bank_details = {field.key: bank_details[field.key] for field in schema.fields}
+    # Cash has no account at all, so nothing to mask.
+    primary_value = bank_details.get(schema.primary_field_key, "") if schema.primary_field_key else ""
     # Country only means anything alongside real bank routing fields
-    # (BANK_TRANSFER) -- persisting it for CASH/CARD/OTHER would just be a
+    # (BANK_TRANSFER) -- persisting it for UPI/CASH/CARD/OTHER would just be a
     # confusing leftover from whatever the form happened to have selected.
     if method != "BANK_TRANSFER":
         country_code = ""

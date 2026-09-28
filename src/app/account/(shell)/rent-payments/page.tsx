@@ -6,7 +6,7 @@ export default function RentPaymentsPage() {
       <div>
         <h1 className="font-heading text-2xl font-extrabold text-primary-900 dark:text-white">Rent &amp; deposit payments</h1>
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          Obligations, payment instructions and records for your rentals. Zoiko Rooms never receives or holds these payments.
+          Your rent is paid directly to your host/property owner using the payment method agreed with them. Zoiko does not collect or process your rent payment.
         </p>
       </div>
       <RentalPaymentsManager />

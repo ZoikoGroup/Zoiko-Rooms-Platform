@@ -9,12 +9,16 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.crud import payment_provider as payment_provider_crud
 from app.models.authority_record import AuthorityRecord
-from app.models.finance import LedgerAccount, LedgerEntry, Obligation, PayoutBeneficiary, RefundRequest
+from app.models.finance import (
+    LedgerAccount, LedgerEntry, Obligation, PayoutBeneficiary, ProcessorTransaction, RefundRequest, SimulatedPayment,
+)
 from app.models.guest import Guest
 from app.models.leasing import Agreement, Application, Offer
 from app.models.listing import Listing
@@ -353,6 +357,62 @@ class TestDecideRefundPostsReversingEntry:
         assert debit.account_type == "HOST_PAYABLE"
         assert debit.party_id == party_id
         assert credit.account_type == "PLATFORM_CLEARING"
+
+
+class TestRenterPayRetryAfterFailure:
+    """A renter's card payment that FAILED must not lock them out of paying
+    that obligation forever -- but a double-click while one attempt is still
+    in flight must never dispatch a second, parallel charge."""
+
+    def _stay_pending(self, monkeypatch):
+        # With real Stripe keys a dispatch waits for the webhook instead of
+        # completing synchronously -- that's the state a failure can happen in.
+        from itertools import count
+
+        ids = count(1)
+        monkeypatch.setattr(payment_provider_crud.stripe_client, "is_configured", lambda: True)
+        monkeypatch.setattr(
+            payment_provider_crud.stripe_client, "create_payment_intent", lambda **_kw: f"pi_test_retry_{next(ids)}",
+        )
+
+    def test_a_failed_payment_can_be_retried(self, db_session: Session, monkeypatch):
+        from app.core.config import settings
+
+        self._stay_pending(monkeypatch)
+        obligation, _admin, guest, _party_id = _make_provider_rent_obligation(db_session, suffix="retry1", amount=500.0)
+        system_admin = _make_admin(db_session, email=settings.seed_admin_email, role="super_admin")
+
+        first = payment_provider_crud.renter_pay_obligation(db_session, guest, obligation, method_class="CARD")
+        assert first.status == "PENDING"
+        first_txn = db_session.query(ProcessorTransaction).filter_by(payment_id=first.id).one()
+        payment_provider_crud.ingest_provider_callback(
+            db_session, system_admin, provider_event_id="evt_retry_fail_1",
+            provider_transaction_id=first_txn.provider_transaction_id, event_type="PAYMENT_FAILED",
+        )
+        db_session.refresh(first)
+        assert first.status == "FAILED"
+
+        second = payment_provider_crud.renter_pay_obligation(db_session, guest, obligation, method_class="CARD")
+
+        assert second.id != first.id
+        assert second.idempotency_key == f"renter-pay-obligation-{obligation.id}-retry-1"
+        assert db_session.query(ProcessorTransaction).filter_by(payment_id=second.id, status="PENDING").count() == 1
+
+    def test_a_double_click_while_a_payment_is_in_flight_is_refused(self, db_session: Session, monkeypatch):
+        from app.core.config import settings
+
+        self._stay_pending(monkeypatch)
+        obligation, _admin, guest, _party_id = _make_provider_rent_obligation(db_session, suffix="retry2", amount=500.0)
+        _make_admin(db_session, email=settings.seed_admin_email, role="super_admin")
+
+        payment_provider_crud.renter_pay_obligation(db_session, guest, obligation, method_class="CARD")
+        with pytest.raises(HTTPException) as exc:
+            payment_provider_crud.renter_pay_obligation(db_session, guest, obligation, method_class="CARD")
+
+        assert exc.value.status_code == 409
+        assert db_session.query(ProcessorTransaction).join(
+            SimulatedPayment, SimulatedPayment.id == ProcessorTransaction.payment_id,
+        ).filter(SimulatedPayment.guest_id == guest.id).count() == 1
 
 
 class TestDecideRefundReversesRealPspTransaction:

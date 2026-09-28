@@ -696,6 +696,9 @@ export interface PaymentCapabilities {
   escrow_enabled: boolean;
   wallet_enabled: boolean;
   split_settlement_enabled: boolean;
+  /** Off by default: rent is paid directly to the host, so there's no
+   *  Zoiko rent checkout and no Stripe account needed for rent. */
+  rent_card_checkout_enabled: boolean;
   platform_fee_rate: null;
   host_commission_enabled: false;
 }
@@ -781,6 +784,8 @@ export interface ListingFeeRefund {
   failureMessage: string;
   createdAt: string;
   completedAt: string | null;
+  /** Set once the refund is confirmed -- the credit note reversing the receipt. */
+  creditNoteNumber: string | null;
 }
 
 // --- Rental payment records (ZR-PAY-002 Section 4-11) ---
@@ -818,7 +823,7 @@ export type RentalPaymentProvenance =
   | "ADMIN_CORRECTION"
   | "SYSTEM_DERIVATION";
 
-export type RentalPaymentMethodCategory = "BANK_TRANSFER" | "CASH" | "CARD" | "OTHER";
+export type RentalPaymentMethodCategory = "BANK_TRANSFER" | "UPI" | "CASH" | "CARD" | "OTHER";
 
 export interface RentalPaymentRecord {
   id: number;
@@ -838,6 +843,16 @@ export interface RentalPaymentRecord {
   /** Set only when provenance is PROVIDER_CONFIRMATION -- the external
    *  provider's own transaction/reconciliation reference. */
   providerReference: string;
+  /** Set once a card payment was refunded -- straight from the host's own
+   *  Stripe account, never through Zoiko Rooms (e.g. a booking cancelled
+   *  before move-in). */
+  refundedAmount: number | null;
+  providerRefundId: string;
+  /** A card chargeback the tenant raised with their bank, as reported by
+   *  Stripe -- blank if none. Status is Stripe's own (needs_response,
+   *  under_review, won, lost...). */
+  providerDisputeId: string;
+  providerDisputeStatus: string;
   confirmedAt: string | null;
   createdAt: string;
   /** ZR-PAY-LINK-003 Section 19/Wireframe PAY-18 -- previously only ever
@@ -868,6 +883,8 @@ export interface RentalPaymentObligation {
   tenantGuestId: string;
   recipientPartyId: number;
   amount: number;
+  /** amount less what has already been received -- what "pay online" charges. */
+  outstandingAmount: number;
   currency: string;
   dueDate: string;
   status: RentalPaymentStatus;
@@ -910,6 +927,97 @@ export interface RentalPaymentDispute {
   resolvedByAdminId: number | null;
   resolvedAt: string | null;
   resolutionNotes: string;
+}
+
+// --- Admin Payments page (/api/finance/payments-overview) ---
+export interface CurrencyTotal {
+  currency: string;
+  amount: number;
+}
+
+export interface ListingFeeRevenue {
+  collected: CurrencyTotal[];
+  refunded: CurrencyTotal[];
+  paidCount: number;
+  pendingCount: number;
+  failedCount: number;
+}
+
+export type RentRecordBucket = "confirmed" | "awaiting_host" | "overdue" | "disputed" | "due";
+
+export interface RentRecordRow {
+  obligationId: number;
+  obligationLabel: string;
+  status: string;
+  bucket: RentRecordBucket | "";
+  amount: number;
+  outstandingAmount: number;
+  currency: string;
+  dueDate: string;
+  renterName: string;
+  hostName: string;
+  listingName: string;
+}
+
+export interface RentRecords {
+  summary: Record<RentRecordBucket, { count: number; totals: CurrencyTotal[] }>;
+  rows: RentRecordRow[];
+}
+
+export type RentalPaymentReturnKind = "DEPOSIT_RETURN" | "CANCELLATION_RETURN";
+export type RentalPaymentReturnMethod = "BANK_TRANSFER" | "UPI" | "CASH" | "OTHER";
+
+/** Money the host sent back to the renter directly (deposit at move-out, or
+ *  payments on a cancelled booking) -- Zoiko only records it. */
+export interface RentalPaymentReturn {
+  id: number;
+  occupancyId: number;
+  kind: RentalPaymentReturnKind;
+  status: "RECORDED" | "CONFIRMED" | "DISPUTED";
+  tenantGuestId: string;
+  recipientPartyId: number;
+  amount: number;
+  currency: string;
+  deductionsAmount: number;
+  deductionsReason: string;
+  paymentMethodCategory: RentalPaymentReturnMethod;
+  externalReference: string;
+  returnedDate: string;
+  note: string;
+  tenantRespondedAt: string | null;
+  tenantDisputeDetails: string;
+  createdAt: string;
+}
+
+export interface RentalPaymentReturnCandidate {
+  occupancyId: number;
+  kind: RentalPaymentReturnKind;
+  listingName: string;
+  occupancyStatus: string;
+  currency: string;
+  paid: number;
+  settled: number;
+  remaining: number;
+  endedOn: string | null;
+}
+
+export type RentalPaymentDisputeOutcome = "PAYMENT_STANDS" | "PAYMENT_NOT_RECEIVED" | "CLOSE_ONLY";
+
+/** Admin view of a dispute, with the payment it's about. */
+export interface RentalPaymentDisputeAdmin extends RentalPaymentDispute {
+  recordStatus: string;
+  declaredAmount: number;
+  declaredCurrency: string;
+  declaredDate: string;
+  paymentMethodCategory: string;
+  externalReference: string;
+  obligationId: number;
+  obligationLabel: string;
+  obligationAmount: number;
+  obligationStatus: string;
+  tenantGuestId: string;
+  recipientPartyId: number;
+  reportedBy: "tenant" | "host";
 }
 
 export interface RentalPaymentCorrection {
@@ -972,6 +1080,9 @@ export interface RentalPaymentProviderAccount {
   highRiskReason: string;
   createdAt: string;
   updatedAt: string;
+  /** True only while the backend has no real Stripe key -- the dev-only
+   *  "simulate onboarding complete" action is refused otherwise. */
+  canSimulateOnboarding: boolean;
 }
 
 export interface RentalPaymentProviderAccountConnectResult {
