@@ -15,6 +15,14 @@ class Property(Base):
     owner_party_id: Mapped[int] = mapped_column(ForeignKey("parties.id", ondelete="CASCADE"), nullable=False)
     address: Mapped[str] = mapped_column(String(500), nullable=False)
     city: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Optional -- crud/property_verification.py's OCR check uses this as a
+    # fallback signal only, when the formal address+owner-name match fails.
+    # A nearby landmark ("near XYZ Mall") isn't itself a real proof-of-
+    # address signal (see services/document_ocr.py's own docstring on why
+    # it's never the primary check), but some genuine local documents do
+    # print it alongside a less-formal address -- worth trying before
+    # falling back to a human, never instead of the real check.
+    landmark: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="active")
     # ZR-ENG-CLR-006 Section 6: 'The Termination Policy Resolver must select
     # an effective-dated market rule set using the property jurisdiction.'

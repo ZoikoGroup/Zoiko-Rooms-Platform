@@ -61,7 +61,6 @@ from app.crud.occupancy_eligibility import (
     get_valid_occupancy_eligibility_credential,
     list_pending_occupancy_eligibility_checks,
     open_occupancy_eligibility_check,
-    record_occupancy_eligibility_result,
 )
 from app.crud.payment_provider import get_system_admin
 from app.crud.property_verification import verify_property_verification
@@ -78,15 +77,26 @@ from app.services.verification_requirements import resolve_verification_requirem
 AUTO_ACCEPT_REASON = "DEV-ONLY auto_accept_agent.py: no real check performed, unconditional accept"
 
 
-def _auto_open_and_pass_missing_occupancy_checks(db, admin) -> int:
-    """Deciding an already-open OccupancyEligibilityCheck (below) isn't
-    enough by itself -- nothing in the live pipeline ever opens one in the
-    first place (that's normally a separate manual admin action), so an
-    ACCEPTED offer whose jurisdiction requires this gate stays stuck
-    forever with no check to accept. Only in this dev-only script: open one
-    and immediately pass it in the same step, for every ACCEPTED offer
-    that's missing a required, still-valid credential and has no
-    already-open check to decide instead."""
+def _auto_open_missing_occupancy_checks_for_admin_review(db, admin) -> int:
+    """Opening an OccupancyEligibilityCheck isn't enough by itself to get
+    it decided -- nothing in the live pipeline ever opens one in the first
+    place (that's normally a separate manual admin action), so an ACCEPTED
+    offer whose jurisdiction requires this gate would stay stuck forever
+    with no check for an admin to even see. Only in this dev-only script:
+    open one for every ACCEPTED offer that's missing a required,
+    still-valid credential and has no already-open check to decide
+    instead.
+
+    Deliberately does NOT auto-pass it (a prior version did). Every
+    jurisdiction resolve_verification_requirements returns this
+    requirement for genuinely requires it for real (today, only England --
+    MarketPolicyPack.occupancy_eligibility_required, the UK's actual
+    Right-to-Rent law) -- a real legal compliance check a landlord can be
+    fined over, not busywork. Auto-passing it with no real verification
+    behind it is a materially different kind of risk than the other
+    review-with-no-data-feed decisions this script blind-accepts, so it
+    stays open for a real admin to decide via Trust & Safety, same as it
+    would in production."""
     opened = 0
     accepted_offers = list(db.scalars(select(Offer).where(Offer.status == "ACCEPTED")))
     for offer in accepted_offers:
@@ -109,11 +119,8 @@ def _auto_open_and_pass_missing_occupancy_checks(db, admin) -> int:
             ]
             if existing:
                 continue
-            check = open_occupancy_eligibility_check(
+            open_occupancy_eligibility_check(
                 db, admin, party_id=party_id, jurisdiction_code=jurisdiction_code, method="MANUAL_DOCUMENT_CHECK",
-            )
-            record_occupancy_eligibility_result(
-                db, check, admin, result_status="PASS", reason_note=AUTO_ACCEPT_REASON,
             )
             opened += 1
     return opened
@@ -207,7 +214,7 @@ def run_once() -> None:
     try:
         admin = get_system_admin(db)
 
-        occupancy_opened = _auto_open_and_pass_missing_occupancy_checks(db, admin)
+        occupancy_opened = _auto_open_missing_occupancy_checks_for_admin_review(db, admin)
         authority_declared = _auto_declare_and_verify_missing_authority(db, admin)
         occupancy_classified = _auto_classify_missing_occupancy(db)
 
@@ -276,36 +283,65 @@ def run_once() -> None:
         if identity_pending:
             db.commit()
 
+        # No blind-pass sweep for occupancy-eligibility checks here (a prior
+        # version had one). Every check that exists in a non-terminal
+        # status represents a real, required legal check (today, only
+        # England's Right-to-Rent requirement ever opens one at all --
+        # see _auto_open_missing_occupancy_checks_for_admin_review above)
+        # -- a landlord can be fined over this one, so it always waits for
+        # a real admin decision via Trust & Safety, never an unconditional
+        # accept.
         occupancy_pending = list_pending_occupancy_eligibility_checks(db)
-        for check in occupancy_pending:
-            record_occupancy_eligibility_result(
-                db, check, admin, result_status="PASS", reason_note=AUTO_ACCEPT_REASON,
-            )
-        if occupancy_pending:
-            db.commit()
 
         # Same exclusion as identity_pending above, for the same reason:
-        # "additional_evidence_required" now means declare_property_verification's
-        # own real OCR address-match check (services/document_ocr.py) genuinely
-        # looked and didn't find this room's registered address in the
-        # document. Auto-verifying it anyway would silently erase that real
-        # rejection -- exactly what this script must never do. Only a
-        # genuinely fresh "pending" submission (OCR unavailable/inconclusive,
-        # fails open) should ever reach this step.
-        property_pending = list(
-            db.scalars(select(PropertyVerification).where(PropertyVerification.status == "pending"))
-        )
+        # "additional_evidence_required" now means
+        # _run_ocr_identity_cross_check's own real OCR check
+        # (services/document_ocr.py:check_identity_details_in_document)
+        # genuinely looked and found neither the owner's name nor their
+        # identity document's number. Auto-verifying it anyway would
+        # silently erase that real rejection -- exactly what this script
+        # must never do.
+        #
+        # ALSO skip any "pending" record whose owner doesn't yet have a
+        # valid identity credential (crud/identity_verification.py:
+        # get_valid_identity_credential) -- that's exactly why
+        # _run_ocr_identity_cross_check itself left it "pending" in the
+        # first place: the real check requires a verified identity to
+        # cross-check the name/number against, and deliberately doesn't
+        # run at all without one. Blindly verifying it here would bypass
+        # that precondition completely, which isn't a "fresh, uncheckable"
+        # pending case (like OCR being unavailable) -- it's the real
+        # check's own gate working
+        # as designed. Only genuinely fresh submissions where the owner
+        # already has a verified identity (and the real check simply
+        # hasn't run yet, or OCR is unavailable) should reach this step.
+        from app.crud.identity_verification import get_valid_identity_credential
+
+        property_pending = [
+            record for record in db.scalars(select(PropertyVerification).where(PropertyVerification.status == "pending"))
+            if get_valid_identity_credential(db, record.party_id) is not None
+        ]
         for record in property_pending:
             verify_property_verification(db, record, admin, notes=AUTO_ACCEPT_REASON)
         if property_pending:
             db.commit()
 
-        listings_pending = list(db.scalars(select(Listing).where(Listing.state == "REVIEW")))
-        for listing in listings_pending:
-            approve_listing(db, listing, admin)
-            publish_listing(db, listing, admin)
-        if listings_pending:
-            db.commit()
+        # publish_listing genuinely, correctly raises (409) once a listing
+        # fee is configured and unpaid -- a real business gate, not an
+        # infra failure, same as any other per-item exception this script
+        # already swallows below. Wrapped per-listing (not just the whole
+        # block) so one listing's real fee-payment block doesn't stop
+        # every other pending listing in the same run from being
+        # approved+published.
+        listings_published = 0
+        for listing in db.scalars(select(Listing).where(Listing.state == "REVIEW")):
+            try:
+                approve_listing(db, listing, admin)
+                publish_listing(db, listing, admin)
+                db.commit()
+                listings_published += 1
+            except Exception:
+                db.rollback()
 
         screening_pending = list_pending_screening_checks(db)
         for check in screening_pending:
@@ -379,7 +415,7 @@ def run_once() -> None:
             f"{occupancy_classified} room(s) classified, "
             f"{len(property_pending)} property verification(s), "
             f"{len(screening_pending)} screening check(s), "
-            f"{len(listings_pending)} listing(s) approved+published, "
+            f"{listings_published} listing(s) approved+published, "
             f"{moved_in} move-in(s) confirmed, "
             f"{retried_agreements} agreement(s) unblocked and created"
         )

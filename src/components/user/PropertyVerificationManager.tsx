@@ -43,9 +43,9 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
   return (
     <div className="space-y-4">
       <p className="text-xs text-slate-500 dark:text-slate-400">
-        Upload evidence that this property/address is real -- a lease, utility bill, title deed, or similar document
-        showing the property&apos;s address. An automated scan checks it against this room&apos;s registered address
-        and verifies it immediately when it matches; otherwise a Zoiko admin reviews it.
+        Upload evidence that this property is real -- a lease, utility bill, title deed, or similar document showing
+        your own name or the number from your verified identity document. An automated scan checks for either one
+        and verifies it immediately when found; otherwise a Zoiko admin reviews it.
       </p>
 
       {current && !showForm && (
@@ -109,7 +109,7 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
             setShowForm(false);
             showToast(
               record.status === "verified"
-                ? "Verified automatically -- the document matched this property's registered address."
+                ? "Verified automatically -- the document matched your name or your identity document's number."
                 : record.status === "additional_evidence_required"
                   ? "Automated scan couldn't confirm this document -- see the note below."
                   : "Submitted for admin verification."
@@ -202,8 +202,8 @@ function DeclareForm({
       </div>
 
       <p className="flex items-start gap-1.5 text-xs text-slate-400">
-        <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" /> Document should clearly show the
-        property&apos;s address.
+        <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" /> Document should clearly show your
+        own name or your identity document's number.
       </p>
 
       <div className="flex justify-end gap-2 pt-1">

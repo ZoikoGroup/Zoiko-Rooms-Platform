@@ -35,7 +35,7 @@ const STEPS = ["Property", "Room", "Listing", "Photos", "Review"] as const;
 
 type PropertyChoice =
   | { mode: "existing"; propertyId: number }
-  | { mode: "new"; address: string; city: string; jurisdictionCode: string };
+  | { mode: "new"; address: string; city: string; landmark: string; jurisdictionCode: string };
 type RoomChoice = { mode: "existing"; roomId: number } | { mode: "new"; size: string; hasEnsuite: boolean };
 
 interface ListingDetailsForm {
@@ -113,6 +113,7 @@ export function ListARoomWizard({
     mode: "new",
     address: "",
     city: "",
+    landmark: "",
     jurisdictionCode: "",
   });
   const [roomChoice, setRoomChoice] = useState<RoomChoice>({ mode: "new", size: "", hasEnsuite: false });
@@ -147,7 +148,7 @@ export function ListARoomWizard({
         setPropertyChoice(
           owned.length > 0
             ? { mode: "existing", propertyId: owned[0].id }
-            : { mode: "new", address: "", city: "", jurisdictionCode: defaultRegion(openRegions) }
+            : { mode: "new", address: "", city: "", landmark: "", jurisdictionCode: defaultRegion(openRegions) }
         );
       })
       .finally(() => setLoadingContext(false));
@@ -247,6 +248,7 @@ export function ListARoomWizard({
         const created = await createHostedProperty({
           address: propertyChoice.address.trim(),
           city: propertyChoice.city.trim(),
+          landmark: propertyChoice.landmark.trim() || undefined,
           jurisdictionCode: propertyChoice.jurisdictionCode,
         });
         propertyId = created.id;
@@ -388,7 +390,7 @@ export function ListARoomWizard({
                     name="property-choice"
                     checked={propertyChoice.mode === "new"}
                     onChange={() =>
-                      setPropertyChoice({ mode: "new", address: "", city: "", jurisdictionCode: defaultRegion(regions) })
+                      setPropertyChoice({ mode: "new", address: "", city: "", landmark: "", jurisdictionCode: defaultRegion(regions) })
                     }
                   />
                   <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">
@@ -411,6 +413,17 @@ export function ListARoomWizard({
                         value={propertyChoice.city}
                         onChange={(e) => setPropertyChoice({ ...propertyChoice, city: e.target.value })}
                         placeholder="Mumbai"
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field
+                      label="Nearby landmark (optional)"
+                      hint="Only used as a backup if a property verification document doesn't clearly match the full address."
+                    >
+                      <input
+                        value={propertyChoice.landmark}
+                        onChange={(e) => setPropertyChoice({ ...propertyChoice, landmark: e.target.value })}
+                        placeholder="Near Bandra Bandstand"
                         className={inputClass}
                       />
                     </Field>

@@ -39,6 +39,11 @@ class MarketReleasePolicyUpdate(CamelModel):
 class PropertyCreate(CamelModel):
     address: str
     city: str
+    # Optional -- crud/property_verification.py's OCR check uses this only
+    # as a fallback signal when the formal address+owner-name match fails
+    # (services/document_ocr.py's own docstring explains why it's never the
+    # primary check). Never required to create/update a property.
+    landmark: str | None = None
     # ZR-ENG-CLR-006 Section 6: which market pack the Termination Policy
     # Resolver (and every other jurisdiction-aware engine) uses for this
     # property. Required, with no default region -- the host picks it from
@@ -52,6 +57,7 @@ class PropertyRead(CamelModel):
     owner_party_id: int
     address: str
     city: str
+    landmark: str | None = None
     status: str
     jurisdiction_code: str
     created_at: datetime
