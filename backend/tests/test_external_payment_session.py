@@ -14,7 +14,6 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.crud import external_payment_session as eps_crud
-from app.crud import payment_recipient_authority as pra_crud
 from app.crud import rental_payment as rp_crud
 from app.crud import rental_payment_provider_account as rpa_crud
 from app.models.external_payment_session import ExternalPaymentSession
@@ -24,6 +23,17 @@ from tests.conftest import _make_admin, _make_user, auth_user_cookie
 from tests.test_rental_payment_records import _make_guest, _make_party
 from tests.test_rental_transaction_record import _make_rental
 
+
+
+def _set_room_listing_authority(db: Session, room, party_id: int, status: str) -> None:
+    """Who receives rent is decided by the room's listing authority -- revoke
+    every existing one, then leave a single record in `status`."""
+    from app.models.authority_record import AuthorityRecord
+
+    for existing in db.query(AuthorityRecord).filter(AuthorityRecord.room_id == room.id):
+        existing.status = "revoked"
+    db.add(AuthorityRecord(party_id=party_id, room_id=room.id, authority_type="owner", relationship_type="OWNER", status=status))
+    db.commit()
 
 def _make_obligation_with_charge_ready_recipient(db: Session, *, guest_id: str = "G-EPS-1"):
     tenant = _make_guest(db, guest_id=guest_id)
@@ -78,6 +88,115 @@ class TestCreateSession:
         assert exc.value.status_code == 403
 
 
+class _FakeStripeCheckout:
+    """Stands in for real Stripe Checkout so a session can stay STARTED (the
+    simulated fallback completes every session synchronously, which hides
+    the double-click case entirely). `remote` is what Stripe would report
+    for each checkout session id on retrieve."""
+
+    def __init__(self, monkeypatch):
+        self.created: list[str] = []  # idempotency keys, one per Stripe create call
+        self.expired: list[str] = []
+        self.remote: dict[str, dict] = {}
+        monkeypatch.setattr(eps_crud.stripe_client, "is_configured", lambda: True)
+        monkeypatch.setattr(eps_crud.stripe_client, "create_rent_payment_checkout_session", self._create)
+        monkeypatch.setattr(eps_crud.stripe_client, "retrieve_rent_payment_checkout_session", self._retrieve)
+        monkeypatch.setattr(eps_crud.stripe_client, "expire_rent_payment_checkout_session", self._expire)
+
+    def _create(self, *, idempotency_key, **_kwargs):
+        self.created.append(idempotency_key)
+        session_id = f"cs_test_{len(self.created)}"
+        self.remote[session_id] = {
+            "payment_status": "unpaid", "payment_intent_id": None, "status": "open",
+            "url": f"https://checkout.stripe.test/{session_id}",
+        }
+        return session_id, self.remote[session_id]["url"]
+
+    def _retrieve(self, *, checkout_session_id, connected_account_id):
+        return self.remote[checkout_session_id]
+
+    def _expire(self, *, checkout_session_id, connected_account_id):
+        self.expired.append(checkout_session_id)
+        self.remote[checkout_session_id]["status"] = "expired"
+
+
+def _start(db: Session, tenant, obligation):
+    return eps_crud.create_session(
+        db, tenant, obligation, success_url="https://app.test/return", cancel_url="https://app.test/return",
+    )
+
+
+class TestNoDoubleCharge:
+    def test_double_click_reuses_the_open_checkout_instead_of_opening_a_second(self, db_session: Session, monkeypatch):
+        obligation, tenant, _recipient, _account = _make_obligation_with_charge_ready_recipient(db_session, guest_id="G-EPS-DBL")
+        stripe = _FakeStripeCheckout(monkeypatch)
+
+        first, first_url = _start(db_session, tenant, obligation)
+        second, second_url = _start(db_session, tenant, obligation)
+
+        assert second.id == first.id
+        assert second_url == first_url
+        assert len(stripe.created) == 1
+        assert db_session.query(ExternalPaymentSession).filter_by(obligation_id=obligation.id).count() == 1
+
+    def test_an_already_paid_obligation_cannot_be_paid_again(self, db_session: Session):
+        obligation, tenant, _recipient, _account = _make_obligation_with_charge_ready_recipient(db_session, guest_id="G-EPS-PAID")
+        _start(db_session, tenant, obligation)  # simulated path -- completes, obligation CONFIRMED
+
+        with pytest.raises(HTTPException) as exc:
+            _start(db_session, tenant, obligation)
+        assert exc.value.status_code == 409
+        assert "already paid" in exc.value.detail
+        assert db_session.query(RentalPaymentRecord).filter_by(obligation_id=obligation.id).count() == 1
+
+    def test_paid_at_stripe_before_the_webhook_arrived_is_recorded_not_charged_again(self, db_session: Session, monkeypatch):
+        obligation, tenant, _recipient, _account = _make_obligation_with_charge_ready_recipient(db_session, guest_id="G-EPS-LATE")
+        stripe = _FakeStripeCheckout(monkeypatch)
+        first, _url = _start(db_session, tenant, obligation)
+        stripe.remote[first.provider_checkout_session_id].update(
+            payment_status="paid", payment_intent_id="pi_test_late", status="complete",
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            _start(db_session, tenant, obligation)
+        assert exc.value.status_code == 409
+        assert len(stripe.created) == 1
+        db_session.refresh(first)
+        assert first.status == "SUCCEEDED"
+        db_session.refresh(obligation)
+        assert obligation.status == "CONFIRMED"
+
+    def test_an_expired_checkout_is_replaced_by_a_fresh_attempt(self, db_session: Session, monkeypatch):
+        obligation, tenant, _recipient, _account = _make_obligation_with_charge_ready_recipient(db_session, guest_id="G-EPS-EXP")
+        stripe = _FakeStripeCheckout(monkeypatch)
+        first, _url = _start(db_session, tenant, obligation)
+        stripe.remote[first.provider_checkout_session_id]["status"] = "expired"
+
+        second, second_url = _start(db_session, tenant, obligation)
+
+        assert second.id != first.id
+        assert second_url.endswith(second.provider_checkout_session_id)
+        assert len(stripe.created) == 2
+        assert stripe.created[0] != stripe.created[1]  # a new attempt gets a new Stripe idempotency key
+        db_session.refresh(first)
+        assert first.status == "FAILED"
+        assert stripe.expired == []  # already expired at Stripe -- nothing to close
+
+    def test_an_amended_amount_closes_the_old_checkout_at_stripe(self, db_session: Session, monkeypatch):
+        obligation, tenant, _recipient, _account = _make_obligation_with_charge_ready_recipient(db_session, guest_id="G-EPS-AMD")
+        stripe = _FakeStripeCheckout(monkeypatch)
+        first, _url = _start(db_session, tenant, obligation)
+        obligation.amount = 900
+        db_session.commit()
+
+        second, _url = _start(db_session, tenant, obligation)
+
+        assert second.id != first.id
+        assert float(second.amount) == 900.0
+        # The old 850 checkout must not stay payable at Stripe.
+        assert stripe.expired == [first.provider_checkout_session_id]
+
+
 def _make_obligation_with_real_room(db: Session, *, suffix: str):
     """Unlike _make_obligation_with_charge_ready_recipient above (no
     agreement/occupancy, so RentalPaymentObligation.room is always None),
@@ -97,13 +216,7 @@ class TestSuspendedConnectionBlocksSession:
         obligation, rental = _make_obligation_with_real_room(db_session, suffix="revoked")
         host_party, room, guest = rental["host_party"], rental["room"], rental["guest"]
 
-        record, _raw = pra_crud.declare_payment_recipient_authority(
-            db_session, rental["host_user"], room, recipient_party_id=host_party.id, relationship_type="OWNER",
-            evidence_ref="id.pdf",
-        )
-        admin = _make_admin(db_session, email="eps-suspend-admin@test.com", role="super_admin")
-        pra_crud.verify_payment_recipient_authority(db_session, record, admin)
-        pra_crud.revoke_payment_recipient_authority(db_session, record, admin)
+        _set_room_listing_authority(db_session, room, host_party.id, "revoked")
 
         account = rpa_crud.create_connected_account(db_session, host_party, country="GB", email="recipient@test.com")
         rpa_crud.simulate_onboarding_complete(db_session, account)
@@ -350,13 +463,7 @@ class TestObligationConnectionRoute:
     def test_reflects_suspended_state(self, client, db_session: Session):
         obligation, rental = _make_obligation_with_real_room(db_session, suffix="conn-suspended")
         host_party, room = rental["host_party"], rental["room"]
-        record, _raw = pra_crud.declare_payment_recipient_authority(
-            db_session, rental["host_user"], room, recipient_party_id=host_party.id, relationship_type="OWNER",
-            evidence_ref="id.pdf",
-        )
-        admin = _make_admin(db_session, email="eps-conn-route-admin@test.com", role="super_admin")
-        pra_crud.verify_payment_recipient_authority(db_session, record, admin)
-        pra_crud.revoke_payment_recipient_authority(db_session, record, admin)
+        _set_room_listing_authority(db_session, room, host_party.id, "revoked")
 
         r = client.get(
             f"/api/users/rental-payments/obligations/{obligation.id}/connection",

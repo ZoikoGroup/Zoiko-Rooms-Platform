@@ -178,6 +178,34 @@ def list_own_listing_fee_refunds(payment_id: int, user: UserAccount = Depends(ge
     return listing_fee_crud.list_listing_fee_refunds_for_payment(db, payment.id)
 
 
+def _credit_note_response(db: Session, refund) -> Response:
+    if refund.status not in ("PARTIALLY_REFUNDED", "REFUNDED"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "A credit note exists only once the refund is confirmed")
+    refund = listing_fee_crud.issue_credit_note(db, refund)
+    pdf_bytes = resolve_listing_fee_receipt_document_path(refund.credit_note_storage_ref).read_bytes()
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{refund.credit_note_number}.pdf"'},
+    )
+
+
+def _get_refund_or_404(db: Session, refund_id: int):
+    from app.models.listing_fee import ListingFeeRefund
+
+    refund = db.get(ListingFeeRefund, refund_id)
+    if refund is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Refund not found")
+    return refund
+
+
+@router.get("/refunds/{refund_id}/credit-note")
+def download_own_listing_fee_credit_note(refund_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The credit note for a confirmed refund of the host's own Listing Fee."""
+    refund = _get_refund_or_404(db, refund_id)
+    _assert_own_payment(db, refund.payment_id, user)
+    return _credit_note_response(db, refund)
+
+
 @router.get("/payments/{payment_id}/receipt")
 def download_own_listing_fee_receipt(payment_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     """ZR-PAY-002 Section 8.3/8.5 [View receipt]."""
@@ -269,6 +297,20 @@ def put_update_billing_entity(
     )
 
 
+@admin_router.get("/payments", response_model=list[ListingFeePaymentRead], dependencies=[Depends(require_super_admin)])
+def list_listing_fee_payments(listing_id: str | None = None, limit: int = 100, db: Session = Depends(get_db)):
+    """Recent Listing Fee payments, newest first (optionally for one listing)
+    -- what support looks a payment up from before issuing a refund."""
+    from sqlalchemy import select
+
+    from app.models.listing_fee import ListingFeePayment
+
+    query = select(ListingFeePayment).order_by(ListingFeePayment.id.desc()).limit(max(1, min(limit, 500)))
+    if listing_id:
+        query = query.where(ListingFeePayment.listing_id == listing_id)
+    return [_to_payment_read(db, payment) for payment in db.scalars(query)]
+
+
 @admin_router.get("/payments/{payment_id}", response_model=ListingFeePaymentRead)
 def get_listing_fee_payment(payment_id: int, db: Session = Depends(get_db)):
     return _to_payment_read(db, listing_fee_crud.get_payment_or_404(db, payment_id))
@@ -291,6 +333,20 @@ def post_request_listing_fee_refund(
     action."""
     payment = listing_fee_crud.get_payment_or_404(db, payment_id)
     return listing_fee_crud.request_refund(db, admin, payment, payload, correlation_id=get_correlation_id(request))
+
+
+@admin_router.get(
+    "/payments/{payment_id}/refunds", response_model=list[ListingFeeRefundRead], dependencies=[Depends(require_super_admin)],
+)
+def list_listing_fee_payment_refunds(payment_id: int, db: Session = Depends(get_db)):
+    """A payment's refund history -- requested, processing, refunded, failed."""
+    listing_fee_crud.get_payment_or_404(db, payment_id)
+    return listing_fee_crud.list_listing_fee_refunds_for_payment(db, payment_id)
+
+
+@admin_router.get("/refunds/{refund_id}/credit-note", dependencies=[Depends(require_super_admin)])
+def download_listing_fee_credit_note(refund_id: int, db: Session = Depends(get_db)):
+    return _credit_note_response(db, _get_refund_or_404(db, refund_id))
 
 
 @webhook_router.post("/listing-fees/stripe/webhook")

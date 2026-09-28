@@ -112,9 +112,13 @@ from app.models.rental_payment import (
     RentalPaymentRecord,
 )
 from app.models.rental_payment_provider_account import RentalPaymentProviderAccount
+from app.models.rental_payment_return import RentalPaymentReturn
+from app.models.document_sequence import DocumentSequence
 from app.models.external_payment_session import ExternalPaymentSession, RentalPaymentProviderEvent
 
 __all__ = [
+    "DocumentSequence",
+    "RentalPaymentReturn",
     "BillingEntity",
     "AdminUser",
     "AdminSettings",

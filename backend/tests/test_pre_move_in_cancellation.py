@@ -145,6 +145,31 @@ class TestHostCancelsBeforeMoveIn:
         assert r.status_code == 200, r.text
         assert r.json()["occupancy"]["status"] == "CANCELLED"
 
+    def test_host_cancelling_outside_the_free_window_charges_the_renter_no_fee(self, client, db_session: Session):
+        """The cancellation fee is the renter's penalty for pulling out late
+        -- a host cancelling must never cost the renter part of their refund,
+        even where the same timing would charge the renter a fee."""
+        agreement_id, _admin_cookies, _renter = _signed_agreement_before_move_in(
+            client, db_session, email_suffix="pmc5b", start_date=date.today() + timedelta(days=10),
+        )
+        occupancy = _occupancy_for_agreement(db_session, agreement_id)
+        occupancy.created_at = datetime.now(timezone.utc) - timedelta(hours=48)
+        policy = db_session.query(MarketPolicyPack).filter_by(jurisdiction_code="England").one()
+        policy.pre_move_in_free_cancellation_hours = 24
+        policy.pre_move_in_cancellation_fee_rent_multiple = 0.5
+        db_session.commit()
+        host = _make_host_user_for_listing(db_session, agreement_id, email="pmc5b-host@test.com")
+        _seed_system_admin(db_session)
+
+        r = client.post(
+            f"/api/users/hosting/occupancies/{occupancy.id}/cancel-before-move-in",
+            json={"reason": "selling the property"}, cookies=auth_user_cookie(host),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["feeAmount"] == 0.0
+        assert body["refundedAmount"] == 1000.0  # 500 rent + 500 deposit, all of it back
+
     def test_a_host_cannot_cancel_a_different_propertys_booking(self, client, db_session: Session):
         agreement_id, _admin_cookies, _renter = _signed_agreement_before_move_in(
             client, db_session, email_suffix="pmc6", start_date=date.today() + timedelta(days=10),

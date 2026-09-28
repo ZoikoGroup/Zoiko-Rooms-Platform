@@ -53,10 +53,11 @@ class TestBankFieldSchemas:
             validate_bank_details("ZZ", {"account_identifier": "abc"})  # too short
 
     def test_non_bank_transfer_methods_always_get_the_generic_fallback(self):
-        """A UK sort code makes no sense for a CASH/CARD/OTHER instruction
-        -- country-specific structured fields only apply to BANK_TRANSFER,
-        regardless of what country_code happens to be set."""
-        for method in ("CASH", "CARD", "OTHER"):
+        """A UK sort code makes no sense for a CARD/OTHER instruction --
+        country-specific structured fields only apply to BANK_TRANSFER,
+        regardless of what country_code happens to be set. (UPI and CASH have
+        their own schemas -- see the tests below.)"""
+        for method in ("CARD", "OTHER"):
             schema = resolve_bank_field_schema("GB", method)
             assert schema.primary_field_key == "account_identifier"
             validate_bank_details("GB", {"account_identifier": "cash-payment-ref-1"}, method)
@@ -94,33 +95,65 @@ class TestSubmitWithStructuredBankDetails:
         decrypted = decrypt_json(instruction.encrypted_bank_details)
         assert decrypted == {"sort_code": "12-34-56", "account_number": "87654321"}
 
-    def test_cash_instruction_uses_the_generic_field_and_clears_country(self, db_session: Session):
+    def test_cash_instruction_needs_no_account_details_and_clears_country(self, db_session: Session):
+        """Cash is paid in person -- there's no account to collect. Anything
+        bank-shaped the form still sent is dropped, never stored."""
         _obligation, _tenant, recipient = _make_obligation(db_session)
         instruction, _code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="CASH", recipient_name="Example Property Ltd",
-            country_code="GB", bank_details={"account_identifier": "cash-handoff-ref-1"},
-            authorized_recipient_confirmed=True,
+            country_code="GB", bank_details={"sort_code": "12-34-56", "account_number": "87654321"},
+            authorized_recipient_confirmed=True, additional_instructions="Pay at the front desk, 9am-5pm.",
         )
         # country_code is only meaningful alongside real bank routing
         # fields -- persisting whatever the form happened to have selected
         # for a CASH instruction would be a confusing leftover.
         assert instruction.country_code == ""
-        assert instruction.account_identifier_last4 == "cash-handoff-ref-1"[-4:]
-        decrypted = decrypt_json(instruction.encrypted_bank_details)
-        assert decrypted == {"account_identifier": "cash-handoff-ref-1"}
+        assert instruction.account_identifier_last4 == ""
+        assert decrypt_json(instruction.encrypted_bank_details) == {}
 
-    def test_cash_instruction_rejects_bank_shaped_fields_without_the_generic_one(self, db_session: Session):
-        """A GB sort code + account number pair alone doesn't satisfy a
-        CASH instruction -- the generic account_identifier field is what's
-        actually required for a non-bank-transfer method."""
+    def test_upi_instruction_stores_the_upi_id(self, db_session: Session):
+        _obligation, _tenant, recipient = _make_obligation(db_session)
+        instruction, _code = rp_crud.submit_rental_payment_instruction(
+            db_session, recipient, method="UPI", recipient_name="Example Property Ltd",
+            country_code="IN", bank_details={"upi_id": "host.name@okhdfcbank"},
+            authorized_recipient_confirmed=True,
+        )
+        assert instruction.method == "UPI"
+        assert instruction.country_code == ""
+        assert instruction.account_identifier_last4 == "bank"
+        assert decrypt_json(instruction.encrypted_bank_details) == {"upi_id": "host.name@okhdfcbank"}
+
+    def test_upi_instruction_rejects_a_malformed_upi_id(self, db_session: Session):
         _obligation, _tenant, recipient = _make_obligation(db_session)
         with pytest.raises(HTTPException) as exc:
             rp_crud.submit_rental_payment_instruction(
-                db_session, recipient, method="CASH", recipient_name="Example Property Ltd",
-                country_code="GB", bank_details={"sort_code": "12-34-56", "account_number": "87654321"},
-                authorized_recipient_confirmed=True,
+                db_session, recipient, method="UPI", recipient_name="Example Property Ltd",
+                country_code="IN", bank_details={"upi_id": "not-a-upi-id"}, authorized_recipient_confirmed=True,
             )
         assert exc.value.status_code == 400
+
+    def test_indian_bank_transfer_uses_ifsc_and_account_number(self, db_session: Session):
+        _obligation, _tenant, recipient = _make_obligation(db_session)
+        instruction, _code = rp_crud.submit_rental_payment_instruction(
+            db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
+            country_code="IN", bank_details={"ifsc": "HDFC0001234", "account_number": "50100012345678"},
+            authorized_recipient_confirmed=True,
+        )
+        assert instruction.country_code == "IN"
+        assert instruction.account_identifier_last4 == "5678"
+
+    def test_card_and_other_can_no_longer_be_offered_as_instructions(self, db_session: Session):
+        """Rent is paid directly by bank transfer, UPI or cash -- a card
+        instruction would imply Zoiko processing the payment."""
+        _obligation, _tenant, recipient = _make_obligation(db_session)
+        for method in ("CARD", "OTHER"):
+            with pytest.raises(HTTPException) as exc:
+                rp_crud.submit_rental_payment_instruction(
+                    db_session, recipient, method=method, recipient_name="Example Property Ltd",
+                    country_code="GB", bank_details={"account_identifier": "ref-12345"},
+                    authorized_recipient_confirmed=True,
+                )
+            assert exc.value.status_code == 400
 
     def test_rejects_when_authorized_recipient_confirmed_is_false(self, db_session: Session):
         _obligation, _tenant, recipient = _make_obligation(db_session)

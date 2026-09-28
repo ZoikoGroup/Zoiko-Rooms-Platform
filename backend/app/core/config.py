@@ -37,7 +37,12 @@ class Settings(BaseSettings):
         env_file=str(BACKEND_DIR / ".env"), env_file_encoding="utf-8", extra="ignore"
     )
 
-    environment: str = "development"
+    # Fail closed: a deployment that forgets to set ENVIRONMENT gets every
+    # production safety check below (real Stripe key, real encryption key,
+    # secure cookies...) instead of silently running in development mode --
+    # where payments complete as simulated "paid" with no money moving.
+    # Local dev and tests must say ENVIRONMENT=development explicitly.
+    environment: str = "production"
     database_url: str = "postgresql+psycopg://zoiko:zoiko@localhost:5432/zoiko_rooms"
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"
@@ -222,6 +227,21 @@ class Settings(BaseSettings):
     # the initial rent+deposit obligations before the checkout session expires
     # (see services/booking_expiry.py). Spec default is 30 minutes.
     payment_checkout_lock_minutes: int = 30
+    # Rent is paid to the host directly (bank transfer/UPI/cash), which can
+    # take days -- so once both sides sign, the room stays held this long for
+    # the host to mark the deposit and first rent received, instead of the
+    # 30-minute card-checkout lock above (which only applies while the card
+    # rent rail, rent_card_checkout_enabled, is on).
+    direct_payment_confirmation_hold_days: int = 7
+    # The in-process scheduler (app/main.py -> services/scheduled_jobs.py):
+    # monthly rent creation, due/overdue status and reminders, booking
+    # expiry. Safe with several servers (a Postgres advisory lock lets one
+    # run at a time). Tests turn it off.
+    scheduler_enabled: bool = True
+    scheduler_interval_minutes: int = 60
+    # Days a renter-recorded payment can wait before the host is reminded
+    # to confirm (or question) it.
+    payment_confirmation_reminder_days: int = 3
     # Anonymous public assistant. Shared Postgres-backed bucket keyed by hashed
     # client IP, fixed window (requests per IP per window).
     public_assistant_rate_limit_max: int = 10
@@ -241,6 +261,14 @@ class Settings(BaseSettings):
     escrow_enabled: bool = False
     wallet_enabled: bool = False
     split_settlement_enabled: bool = False
+    # Zoiko Rooms Payment Model: renters pay rent straight to the host by the
+    # method the host lists (bank transfer, UPI, cash) -- Zoiko does not
+    # create a rent checkout, needs no Stripe Connect account for rent, and
+    # never treats a Stripe webhook as evidence of rent. This turns back on
+    # the Stripe Connect direct-charge rail (a rent checkout on the host's own
+    # Stripe account); off by default, and every route into it is refused
+    # while it is off (services/payment_boundary.py).
+    rent_card_checkout_enabled: bool = False
     # Fail-closed rules for the Listing Fee (no approved ACTIVE price = no
     # publication) and for payment instructions (no verified PAYMENT_RECEIPT
     # authority = no instructions). On everywhere by default; only the legacy
@@ -267,12 +295,19 @@ class Settings(BaseSettings):
         gaps: list[str] = []
         if not (self.stripe_listing_fee_webhook_secret or self.stripe_webhook_secret):
             gaps.append("STRIPE_LISTING_FEE_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET) must be set when STRIPE_SECRET_KEY is")
-        if not (self.stripe_rental_payment_webhook_secret or self.stripe_webhook_secret):
-            gaps.append("STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET) must be set when STRIPE_SECRET_KEY is")
-        for name in ("stripe_connect_refresh_url", "stripe_connect_return_url"):
-            url = getattr(self, name).strip().lower()
-            if not url.startswith("https://") or "localhost" in url or "127.0.0.1" in url:
-                gaps.append(f"{name.upper()} must be a public https:// URL in production")
+        # The rent webhook and Stripe Connect onboarding only exist for the
+        # card rent rail -- with rent paid directly to hosts (the default),
+        # neither is used, so neither is required.
+        if self.rent_card_checkout_enabled:
+            if not (self.stripe_rental_payment_webhook_secret or self.stripe_webhook_secret):
+                gaps.append(
+                    "STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET) must be set when "
+                    "RENT_CARD_CHECKOUT_ENABLED is on"
+                )
+            for name in ("stripe_connect_refresh_url", "stripe_connect_return_url"):
+                url = getattr(self, name).strip().lower()
+                if not url.startswith("https://") or "localhost" in url or "127.0.0.1" in url:
+                    gaps.append(f"{name.upper()} must be a public https:// URL in production")
 
         if self.stripe_secret_key.startswith(("sk_live_", "rk_live_")):
             return gaps

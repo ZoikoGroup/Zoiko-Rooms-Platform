@@ -28,9 +28,9 @@ import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } 
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { ListingFeeCheckout } from "@/components/user/ListingFeeCheckout";
-import { PaymentRecipientSetup } from "@/components/user/PaymentRecipientSetup";
 import { PropertyVerificationManager } from "@/components/user/PropertyVerificationManager";
 import { AuthorityRecordManager } from "@/components/user/AuthorityRecordManager";
+import { RentPaymentReadiness } from "@/components/user/RentPaymentReadiness";
 
 const MAX_LISTING_IMAGES = 10;
 
@@ -111,7 +111,6 @@ export function HostingListingsManager() {
   const [busyListingId, setBusyListingId] = useState<string | null>(null);
   const [payingFeeListingId, setPayingFeeListingId] = useState<string | null>(null);
   const [returningCheckoutSessionId, setReturningCheckoutSessionId] = useState<string | null>(null);
-  const [paymentRecipientRoomId, setPaymentRecipientRoomId] = useState<number | null>(null);
   const [propertyVerificationRoomId, setPropertyVerificationRoomId] = useState<number | null>(null);
   const [authorityRecordRoomId, setAuthorityRecordRoomId] = useState<number | null>(null);
 
@@ -298,6 +297,7 @@ export function HostingListingsManager() {
                       <Badge tone={listingStateTone[listing.state] ?? "neutral"}>
                         {listingStateLabel[listing.state] ?? listing.state}
                       </Badge>
+                      {listing.roomId !== null && <RentPaymentReadiness roomId={listing.roomId} />}
                     </div>
                     <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
                       <span className="flex items-center gap-1">
@@ -314,11 +314,6 @@ export function HostingListingsManager() {
                     <Button size="sm" variant="ghost" onClick={() => openEdit(listing)}>
                       <Pencil className="h-3.5 w-3.5" /> Edit
                     </Button>
-                    {listing.roomId !== null && (
-                      <Button size="sm" variant="outline" onClick={() => setPaymentRecipientRoomId(listing.roomId)}>
-                        <ShieldCheck className="h-3.5 w-3.5" /> Payment recipient
-                      </Button>
-                    )}
                     {listing.roomId !== null && (
                       <Button size="sm" variant="outline" onClick={() => setPropertyVerificationRoomId(listing.roomId)}>
                         <ShieldCheck className="h-3.5 w-3.5" /> Property verification
@@ -641,14 +636,6 @@ export function HostingListingsManager() {
             returningCheckoutSessionId={returningCheckoutSessionId ?? undefined}
           />
         )}
-      </Modal>
-
-      <Modal
-        open={paymentRecipientRoomId !== null}
-        onClose={() => setPaymentRecipientRoomId(null)}
-        title="Payment recipient"
-      >
-        {paymentRecipientRoomId !== null && <PaymentRecipientSetup roomId={paymentRecipientRoomId} />}
       </Modal>
 
       <Modal

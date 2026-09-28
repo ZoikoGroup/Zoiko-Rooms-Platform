@@ -1,6 +1,9 @@
 """Stripe webhook production readiness: an endpoint with no signing secret
 rejects every delivery, and production refuses to boot with real Stripe on
-but a webhook secret missing or Connect URLs still pointing at localhost."""
+but the Listing Fee webhook secret missing. The rent webhook secret and the
+Connect URLs are only required with the card rent rail on
+(RENT_CARD_CHECKOUT_ENABLED) -- rent is otherwise paid to hosts directly and
+neither is used."""
 
 from __future__ import annotations
 
@@ -65,17 +68,29 @@ def test_production_boots_with_complete_stripe_config():
     assert "booted" in p.stdout, p.stderr
 
 
-@pytest.mark.parametrize(
-    "overrides, expected",
-    [
-        ({"STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET": ""}, "STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET"),
-        ({"STRIPE_LISTING_FEE_WEBHOOK_SECRET": ""}, "STRIPE_LISTING_FEE_WEBHOOK_SECRET"),
-        ({"STRIPE_CONNECT_RETURN_URL": "http://localhost:3000/account/host/payments"}, "STRIPE_CONNECT_RETURN_URL"),
-        ({"STRIPE_CONNECT_REFRESH_URL": "http://app.zoikorooms.com/account/host/payments"}, "STRIPE_CONNECT_REFRESH_URL"),
-    ],
-)
-def test_production_refuses_to_boot_with_incomplete_stripe_config(overrides, expected):
+def test_production_refuses_to_boot_without_the_listing_fee_webhook_secret():
+    p = _boot_production(STRIPE_LISTING_FEE_WEBHOOK_SECRET="")
+    assert p.returncode != 0
+    assert "Refusing to boot in production" in p.stderr
+    assert "STRIPE_LISTING_FEE_WEBHOOK_SECRET" in p.stderr
+
+
+RENT_ONLY_GAPS = [
+    ({"STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET": ""}, "STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET"),
+    ({"STRIPE_CONNECT_RETURN_URL": "http://localhost:3000/account/host/payments"}, "STRIPE_CONNECT_RETURN_URL"),
+    ({"STRIPE_CONNECT_REFRESH_URL": "http://app.zoikorooms.com/account/host/payments"}, "STRIPE_CONNECT_REFRESH_URL"),
+]
+
+
+@pytest.mark.parametrize("overrides, expected", RENT_ONLY_GAPS)
+def test_rent_only_stripe_settings_are_not_required_while_rent_is_paid_directly(overrides, expected):
     p = _boot_production(**overrides)
+    assert "booted" in p.stdout, p.stderr
+
+
+@pytest.mark.parametrize("overrides, expected", RENT_ONLY_GAPS)
+def test_rent_only_stripe_settings_are_required_with_the_card_rent_rail_on(overrides, expected):
+    p = _boot_production(RENT_CARD_CHECKOUT_ENABLED="true", **overrides)
     assert p.returncode != 0
     assert "Refusing to boot in production" in p.stderr
     assert expected in p.stderr
@@ -113,4 +128,4 @@ def test_test_mode_key_boots_with_gaps_logged_not_enforced():
     )
     assert "booted" in p.stdout, p.stderr
     assert "test-mode key" in p.stderr
-    assert "STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET" in p.stderr
+    assert "STRIPE_LISTING_FEE_WEBHOOK_SECRET" in p.stderr

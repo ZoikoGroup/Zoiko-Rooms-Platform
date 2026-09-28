@@ -642,13 +642,18 @@ export function ApplicationsManager() {
                 </Button>
               </div>
             )}
-            {offer.agreement?.signedByRenterAt && offer.agreement.status !== "SIGNED" && (
+            {offer.agreement?.signedByRenterAt && !offer.agreement.signedByProviderAt && offer.agreement.status !== "SIGNED" && (
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 You&apos;ve signed — waiting on the host to countersign.
               </p>
             )}
 
-            {["PAYMENT_IN_PROGRESS", "PAYMENT_PENDING"].includes(offer.agreement?.status ?? "") && (
+            {/* Also SENT once both have signed: the checkout-expiry sweep resets an
+                unpaid PAYMENT_IN_PROGRESS agreement back to SENT after its deadline,
+                but the payment is still due and the backend still accepts it
+                (crud/leasing.py:confirm_agreement_payment). */}
+            {(["PAYMENT_IN_PROGRESS", "PAYMENT_PENDING"].includes(offer.agreement?.status ?? "") ||
+              (offer.agreement?.status === "SENT" && !!offer.agreement.signedByRenterAt && !!offer.agreement.signedByProviderAt)) && (
               <div className="space-y-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
                   Payment due

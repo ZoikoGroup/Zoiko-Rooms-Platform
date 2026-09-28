@@ -9,7 +9,11 @@ import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { RentalPaymentEvidenceList } from "@/components/user/RentalPaymentEvidenceList";
+import { CardPaymentOutcome, CardPaymentOutcomeTag } from "@/components/user/CardPaymentOutcome";
 import { resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
+import { DIRECT_RENT_PAYMENT_WORDING, usePaymentCapabilities } from "@/components/user/DirectPaymentNotice";
+import { TenantReturnsSection } from "@/components/user/RentalPaymentReturns";
+import { RentalPaymentTimeline } from "@/components/user/RentalPaymentTimeline";
 import {
   RentalPaymentDiscrepancyReason,
   RentalPaymentInstruction,
@@ -21,6 +25,7 @@ import {
 import { rentalPaymentStatusLabel, rentalPaymentStatusTone } from "@/lib/status";
 import { formatDate, formatDateTime, formatMoney } from "@/lib/utils";
 import {
+  correctOwnRentalPaymentRecord,
   errorMessage,
   getMyRentalPaymentInstructions,
   getRentalPaymentObligationConnection,
@@ -34,10 +39,14 @@ import {
 
 const METHOD_OPTIONS: { value: RentalPaymentMethodCategory; label: string }[] = [
   { value: "BANK_TRANSFER", label: "Bank transfer" },
+  { value: "UPI", label: "UPI" },
   { value: "CASH", label: "Cash" },
-  { value: "CARD", label: "Card" },
   { value: "OTHER", label: "Other" },
 ];
+
+const METHOD_LABELS: Record<string, string> = {
+  BANK_TRANSFER: "Bank transfer", UPI: "UPI", CASH: "Cash", CARD: "Card", OTHER: "Other",
+};
 
 const DISCREPANCY_OPTIONS: { value: RentalPaymentDiscrepancyReason; label: string }[] = [
   { value: "NOT_ARRIVED", label: "Payment has not arrived" },
@@ -60,7 +69,10 @@ type Tab = "overview" | "upcoming" | "records" | "instructions";
 // in flight stays visible here rather than disappearing mid-payment --
 // canMarkPaid below still only fires for UPCOMING/DUE/OVERDUE, so it won't
 // offer a second, conflicting payment action while one is already underway.
-const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "PAYMENT_SESSION_STARTED"]);
+// REVERSED too: the earlier payment went back (e.g. a card dispute the bank
+// decided for the tenant), so this rent is owed again. PARTIALLY_PAID: the
+// remainder is still owed (and payable online).
+const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "PAYMENT_SESSION_STARTED", "REVERSED", "PARTIALLY_PAID"]);
 
 // GET /obligations is now paginated (ZR-PAY-LINK-003 Section 19/G11 -- an
 // unbounded list doesn't scale to a years-long tenancy). This view's
@@ -147,10 +159,14 @@ export function RentalPaymentsManager() {
   useEffect(() => {
     const checkoutSessionId = searchParams.get("checkoutSessionId");
     if (!checkoutSessionId) return;
+    // cancel_url adds cancelled=1 -- the tenant left Stripe's page without paying.
+    const cancelledCheckout = searchParams.get("cancelled") === "1";
     resolveRentalPaymentCheckoutSession(checkoutSessionId)
       .then((session) => {
         if (session.status === "SUCCEEDED") {
           showToast("Payment confirmed.");
+        } else if (cancelledCheckout) {
+          showToast("Payment cancelled -- nothing was charged. You can pay again whenever you're ready.");
         } else if (session.status === "FAILED") {
           showToast(session.failureMessage || "Your payment did not go through.", "error");
         } else {
@@ -214,6 +230,7 @@ export function RentalPaymentsManager() {
 
       {tab === "overview" && (
         <div className="space-y-4">
+          <TenantReturnsSection />
           <SectionHeading title="Next obligation" />
           {nextObligation ? (
             <ObligationCard
@@ -302,6 +319,7 @@ export function RentalPaymentsManager() {
                         <td className="px-5 py-3 capitalize text-slate-600 dark:text-slate-300">{obligation.displayLabel}</td>
                         <td className="px-5 py-3 font-semibold text-primary-900 dark:text-white">
                           {formatMoney(record.declaredAmount, record.declaredCurrency)}
+                          <CardPaymentOutcomeTag record={record} />
                         </td>
                         <td className="px-5 py-3">
                           <Badge tone={rentalPaymentStatusTone[record.status] ?? "neutral"}>
@@ -384,7 +402,15 @@ export function RentalPaymentsManager() {
         }}
       />
       <InstructionsModal obligation={instructionsObligation} onClose={() => setInstructionsObligation(null)} />
-      <RecordDetailModal record={viewingRecord} onClose={() => setViewingRecord(null)} />
+      <RecordDetailModal
+        record={viewingRecord}
+        onClose={() => setViewingRecord(null)}
+        onCorrected={(message) => {
+          setViewingRecord(null);
+          showToast(message);
+          load();
+        }}
+      />
       <ReportDiscrepancyModal
         record={disputingRecord}
         onClose={() => setDisputingRecord(null)}
@@ -413,7 +439,25 @@ function ObligationCard({
   onPaySecurely: () => void;
   payingSecurely: boolean;
 }) {
-  const canMarkPaid = obligation.status === "UPCOMING" || obligation.status === "DUE" || obligation.status === "OVERDUE";
+  // Owed in full or in part -- the renter can record a direct payment they made.
+  const canMarkPaid = ["UPCOMING", "DUE", "OVERDUE", "REVERSED", "PARTIALLY_PAID"].includes(obligation.status);
+  // Rent is paid directly to the host -- a Zoiko card checkout only exists
+  // where the backend has that rail switched on (off by default).
+  const capabilities = usePaymentCapabilities();
+  const cardCheckoutEnabled = capabilities?.rent_card_checkout_enabled === true;
+  // A tenant who closed the Stripe tab mid-checkout must be able to get back
+  // to it -- the backend hands back the same open checkout (never a second
+  // one), or replaces it if it expired.
+  const sessionInProgress = obligation.status === "PAYMENT_SESSION_STARTED";
+  // Owed again after the earlier payment went back -- payable online (the
+  // backend accepts REVERSED); mark-paid stays limited to canMarkPaid.
+  const dueAgain = obligation.status === "REVERSED";
+  // Part of it was received (or part of a card payment refunded) -- only the
+  // remainder is charged online. A shared (joint) obligation's remainder is
+  // settled per payer, so the backend refuses it and it isn't offered here.
+  const partlyPaid = obligation.status === "PARTIALLY_PAID";
+  const canPayRemainder = partlyPaid && obligation.payerAllocations.length === 0;
+  const showRemaining = obligation.outstandingAmount > 0 && obligation.outstandingAmount < obligation.amount;
 
   // ZR-PAY-LINK-003 Section 3.1: self-contained per-card fetch, same shape
   // as InstructionsModal's own per-obligation load below -- lets a tenant
@@ -452,6 +496,14 @@ function ObligationCard({
               <dt className="text-xs text-slate-400">Amount due</dt>
               <dd className="font-semibold text-primary-900 dark:text-white">{formatMoney(obligation.amount, obligation.currency)}</dd>
             </div>
+            {showRemaining && (
+              <div>
+                <dt className="text-xs text-slate-400">Remaining</dt>
+                <dd className="font-semibold text-primary-900 dark:text-white">
+                  {formatMoney(obligation.outstandingAmount, obligation.currency)}
+                </dd>
+              </div>
+            )}
             <div>
               <dt className="text-xs text-slate-400">Due date</dt>
               <dd className="flex items-center gap-1 text-slate-600 dark:text-slate-300">
@@ -464,9 +516,9 @@ function ObligationCard({
           <Button size="sm" variant="outline" onClick={onViewInstructions}>
             View payment instructions
           </Button>
-          {canMarkPaid && (
+          {cardCheckoutEnabled && (canMarkPaid || sessionInProgress || dueAgain || canPayRemainder) && (
             <Button size="sm" variant="outline" loading={payingSecurely} disabled={suspended} onClick={onPaySecurely}>
-              Continue to secure payment
+              {sessionInProgress ? "Resume secure payment" : canPayRemainder ? "Pay the remainder securely" : "Continue to secure payment"}
             </Button>
           )}
           {canMarkPaid && (
@@ -483,7 +535,7 @@ function ObligationCard({
           contact your landlord or agent before sending money.
         </p>
       )}
-      <p className="mt-3 text-xs text-slate-400">Zoiko Rooms does not receive or hold this payment.</p>
+      <p className="mt-3 text-xs text-slate-400">{DIRECT_RENT_PAYMENT_WORDING}</p>
     </Card>
   );
 }
@@ -638,8 +690,12 @@ function InstructionsModal({ obligation, onClose }: { obligation: RentalPaymentO
       ) : instruction ? (
         <div className="space-y-3 text-sm">
           <Row label="Recipient" value={instruction.recipientName} />
-          <Row label="Method" value={instruction.method.replace(/_/g, " ").toLowerCase()} />
-          <Row label="Account / payment ID" value={instruction.accountIdentifierMasked} />
+          <Row label="Method" value={METHOD_LABELS[instruction.method] ?? instruction.method} />
+          {instruction.method === "CASH" && (
+            <p className="rounded-xl bg-slate-50 px-4 py-2.5 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+              Pay your host in person -- see the notes below for where and when.
+            </p>
+          )}
           {instruction.referenceFormat && (
             <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-4 py-2.5 dark:bg-slate-800">
               <div>
@@ -723,14 +779,28 @@ function PayObligationModal({
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (obligation) {
-      setAmount(String(obligation.amount));
-      setDate(new Date().toISOString().slice(0, 10));
-      setMethod("BANK_TRANSFER");
-      setReference("");
-      setFile(null);
-      setError("");
-    }
+    if (!obligation) return;
+    let cancelled = false;
+    // What's still owed (a part payment may already be recorded), paid by the
+    // method the host listed -- both just defaults the renter can change.
+    setAmount(String(obligation.outstandingAmount > 0 ? obligation.outstandingAmount : obligation.amount));
+    setDate(new Date().toISOString().slice(0, 10));
+    setMethod("BANK_TRANSFER");
+    setReference("");
+    setFile(null);
+    setError("");
+    getMyRentalPaymentInstructions(obligation.id)
+      .then((instruction) => {
+        if (!cancelled && METHOD_OPTIONS.some((m) => m.value === instruction.method)) {
+          setMethod(instruction.method as RentalPaymentMethodCategory);
+        }
+      })
+      .catch(() => {
+        // No instructions available yet -- keep the default.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [obligation]);
 
   async function handleSubmit(e: FormEvent) {
@@ -789,7 +859,7 @@ function PayObligationModal({
               </select>
             </Field>
           </div>
-          <Field label="External reference" hint="Optional">
+          <Field label="Transaction reference" hint="Optional -- e.g. the bank UTR or UPI reference, so your host can match it">
             <input value={reference} onChange={(e) => setReference(e.target.value)} className={inputClass} />
           </Field>
           <Field label="Proof of payment" hint="Optional -- PDF, JPG or PNG">
@@ -812,22 +882,137 @@ function PayObligationModal({
   );
 }
 
-function RecordDetailModal({ record, onClose }: { record: RentalPaymentRecord | null; onClose: () => void }) {
+function RecordDetailModal({
+  record,
+  onClose,
+  onCorrected,
+}: {
+  record: RentalPaymentRecord | null;
+  onClose: () => void;
+  onCorrected: (message: string) => void;
+}) {
+  const [evidenceKey, setEvidenceKey] = useState(0);
+  const [uploading, setUploading] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [reference, setReference] = useState("");
+  const [method, setMethod] = useState<RentalPaymentMethodCategory>("BANK_TRANSFER");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    setEditing(false);
+    setError("");
+    setNotice("");
+    if (record) {
+      setReference(record.externalReference);
+      setMethod(record.paymentMethodCategory);
+    }
+  }, [record]);
+
   if (!record) return null;
+  // Only while the host hasn't acted on it yet -- after that only support can correct it.
+  const canCorrect = record.status === "PAYER_RECORDED";
+
+  async function handleUpload(file: File | undefined) {
+    if (!file || !record) return;
+    setUploading(true);
+    setError("");
+    setNotice("");
+    try {
+      await uploadRentalPaymentEvidence(record.id, file);
+      setEvidenceKey((k) => k + 1);
+      setNotice("Proof added -- your host can see it now.");
+    } catch (err) {
+      setError(errorMessage(err, "Could not upload this file."));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleSave(e: FormEvent) {
+    e.preventDefault();
+    if (!record) return;
+    const changes: { fieldName: "external_reference" | "payment_method_category"; newValue: string }[] = [];
+    if (reference.trim() !== record.externalReference) changes.push({ fieldName: "external_reference", newValue: reference.trim() });
+    if (method !== record.paymentMethodCategory) changes.push({ fieldName: "payment_method_category", newValue: method });
+    if (changes.length === 0) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      for (const change of changes) {
+        await correctOwnRentalPaymentRecord(record.id, { ...change, reason: "Corrected by the renter" });
+      }
+      onCorrected("Payment details updated -- your host will see the corrected details.");
+    } catch (err) {
+      setError(errorMessage(err, "Could not update this payment."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <Modal open={Boolean(record)} onClose={onClose} title="Payment record">
       <div className="space-y-3 text-sm">
+        {error && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">{error}</p>}
+        {notice && <p className="rounded-xl bg-emerald-50 px-4 py-2.5 text-sm text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">{notice}</p>}
         <Row label="Status" value={rentalPaymentStatusLabel[record.status] ?? record.status} />
         <Row label="Confirmation source" value={record.provenance.replace(/_/g, " ").toLowerCase()} />
         <Row label="Amount declared" value={formatMoney(record.declaredAmount, record.declaredCurrency)} />
         <Row label="Date paid" value={formatDate(record.declaredDate)} />
-        <Row label="Payment method" value={record.paymentMethodCategory.replace(/_/g, " ").toLowerCase()} />
-        {record.externalReference && <Row label="External reference" value={record.externalReference} />}
+        {!editing ? (
+          <>
+            <Row label="Payment method" value={METHOD_LABELS[record.paymentMethodCategory] ?? record.paymentMethodCategory} />
+            <Row label="Transaction reference" value={record.externalReference || "--"} />
+            {canCorrect && (
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                className="text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300"
+              >
+                Fix the method or reference
+              </button>
+            )}
+          </>
+        ) : (
+          <form onSubmit={handleSave} className="space-y-3 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
+            <Field label="Payment method">
+              <select value={method} onChange={(e) => setMethod(e.target.value as RentalPaymentMethodCategory)} className={inputClass}>
+                {METHOD_OPTIONS.map((m) => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Transaction reference" hint="e.g. the bank UTR or UPI reference">
+              <input value={reference} onChange={(e) => setReference(e.target.value)} className={inputClass} />
+            </Field>
+            <div className="flex justify-end gap-2">
+              <Button type="button" size="sm" variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
+              <Button type="submit" size="sm" loading={saving}>Save</Button>
+            </div>
+          </form>
+        )}
         <Row label="Marked paid at" value={formatDateTime(record.createdAt)} />
         {record.confirmedAt && <Row label="Confirmed at" value={formatDateTime(record.confirmedAt)} />}
+        <CardPaymentOutcome record={record} viewer="tenant" />
+        <RentalPaymentTimeline recordId={record.id} />
         <div>
-          <span className="mb-1 block text-xs text-slate-400">Evidence</span>
-          <RentalPaymentEvidenceList recordId={record.id} />
+          <span className="mb-1 block text-xs text-slate-400">Proof of payment</span>
+          <RentalPaymentEvidenceList key={evidenceKey} recordId={record.id} />
+          <label className="mt-2 inline-flex cursor-pointer items-center gap-1.5 text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300">
+            <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+            <input
+              type="file" accept=".pdf,.jpg,.jpeg,.png" className="sr-only" disabled={uploading}
+              onChange={(e) => {
+                handleUpload(e.target.files?.[0]);
+                e.target.value = "";
+              }}
+            />
+            {uploading ? "Uploading..." : "Add proof (PDF, JPG or PNG)"}
+          </label>
         </div>
       </div>
     </Modal>
