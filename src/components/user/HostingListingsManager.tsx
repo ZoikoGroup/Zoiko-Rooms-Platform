@@ -336,9 +336,15 @@ export function HostingListingsManager() {
                         <ShieldCheck className="h-3.5 w-3.5" /> Authority to list
                       </Button>
                     )}
-                    {listing.state === "APPROVED" && (
+                    {/* Available from draft onwards, not only once approved: an
+                        admin can't publish until the fee is paid, so the host
+                        must be able to pay it while the listing is in review too.
+                        The server still refuses payment until every other
+                        requirement is met. On a published listing it shows the
+                        payment and receipt. */}
+                    {listing.state !== "REJECTED" && listing.roomId !== null && (
                       <Button size="sm" variant="outline" onClick={() => setPayingFeeListingId(listing.id)}>
-                        <Receipt className="h-3.5 w-3.5" /> Listing fee
+                        <Receipt className="h-3.5 w-3.5" aria-hidden="true" /> Listing fee
                       </Button>
                     )}
                     {(listing.state === "DRAFT" || listing.state === "REJECTED") && (
@@ -354,6 +360,7 @@ export function HostingListingsManager() {
                     <p className="flex items-center gap-1.5 font-semibold">
                       <AlertTriangle className="h-3.5 w-3.5" /> Awaiting review by a Zoiko admin.
                     </p>
+                    <p className="mt-1">You can pay the Listing Fee now -- the listing can&apos;t be published until it&apos;s paid.</p>
                   </div>
                 )}
 
