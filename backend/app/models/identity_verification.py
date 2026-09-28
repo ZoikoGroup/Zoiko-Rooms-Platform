@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -96,6 +96,24 @@ class IdentityVerification(Base):
     # didn't run (Tesseract not installed) or found no confident match.
     ocr_extracted_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # services/document_ocr.py:check_name_in_document -- whether the
+    # submitting user's OWN registered account name (UserAccount.full_name)
+    # was found in this document's OCR text. Not a name EXTRACTED from the
+    # document (unstructured OCR text has no reliable "this is the name
+    # field" signal without real document-layout parsing, which this build
+    # doesn't have) -- a cross-match of a KNOWN claimed name against the
+    # document, same shape every real proof-of-address/KYC vendor uses.
+    # Null whenever OCR didn't run.
+    ocr_name_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # services/document_ocr.py:extract_name_from_mrz -- a REAL name parsed
+    # off a passport's own machine-readable zone (ICAO 9303, a genuinely
+    # standardized, reliably parseable format -- not a heuristic guess).
+    # Only ever populated for passports whose MRZ line read cleanly; null
+    # for every other document type or a passport where it didn't parse.
+    # Property verification (crud/property_verification.py) prefers this
+    # over the account's typed full_name when checking for a name match,
+    # since this came from the real document itself.
+    extracted_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

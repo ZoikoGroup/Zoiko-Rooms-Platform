@@ -106,6 +106,8 @@ export interface Property {
   ownerPartyId: number;
   address: string;
   city: string;
+  /** Optional -- used only as an OCR fallback signal for property verification when the formal address doesn't match. */
+  landmark: string | null;
   status: "active" | "inactive";
   /** The region whose market policy, market release and agreement clauses apply to this property. */
   jurisdictionCode: string;
