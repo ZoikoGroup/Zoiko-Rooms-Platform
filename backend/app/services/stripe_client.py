@@ -25,6 +25,15 @@ logger = logging.getLogger(__name__)
 
 # Listing Fee hosted checkout lifetime -- see create_checkout_session.
 CHECKOUT_SESSION_TTL_SECONDS = 31 * 60
+# Rent checkout lifetime -- long enough to finish a card payment (3-D Secure
+# included), short enough that an abandoned page stops being payable well
+# before Stripe's own 24-hour default. Above Stripe's 30-minute minimum.
+RENT_CHECKOUT_SESSION_TTL_SECONDS = 60 * 60
+
+# Dispute statuses Stripe treats as final -- once one of these is seen, a
+# later-delivered event carrying an earlier status must not reopen it
+# (Stripe doesn't guarantee webhook order).
+FINAL_DISPUTE_STATUSES = ("won", "lost", "warning_closed", "charge_refunded", "prevented")
 
 # https://docs.stripe.com/currencies#zero-decimal -- currencies Stripe expects
 # as a whole-unit integer rather than its usual smallest-unit convention.
@@ -69,15 +78,18 @@ def stripe_client_v2():
     return stripe.StripeClient(settings.stripe_secret_key)
 
 
-def create_payment_intent(*, amount: float, currency: str, metadata: dict) -> str:
+def create_payment_intent(*, amount: float, currency: str, metadata: dict, idempotency_key: str | None = None) -> str:
     """Returns the provider transaction id -- a real Stripe PaymentIntent id
     (pi_...) when configured, otherwise the same PAYTXN-... id the simulated
-    path always generated."""
+    path always generated. idempotency_key makes a retried request (network
+    blip after Stripe already created the intent) return that same intent
+    rather than a second one."""
     if not is_configured():
         return new_id("PAYTXN")
     stripe = _client()
     intent = stripe.PaymentIntent.create(
         amount=to_minor_units(amount, currency), currency=currency.lower(), metadata=metadata,
+        idempotency_key=idempotency_key,
         # confirm=False (default): we only create the intent server-side here;
         # the client confirms it with a payment method, which is what
         # actually triggers the payment_intent.succeeded webhook this
@@ -182,6 +194,7 @@ def create_rent_payment_checkout_session(
         success_url=success_url,
         cancel_url=cancel_url,
         metadata=metadata,
+        expires_at=int(time.time()) + RENT_CHECKOUT_SESSION_TTL_SECONDS,
         idempotency_key=idempotency_key,
         stripe_account=connected_account_id,
     )
@@ -226,7 +239,91 @@ def retrieve_rent_payment_checkout_session(*, checkout_session_id: str, connecte
         return None
     stripe = _client()
     session = stripe.checkout.Session.retrieve(checkout_session_id, stripe_account=connected_account_id)
-    return {"payment_status": session.payment_status, "payment_intent_id": session.payment_intent}
+    # status ("open"/"complete"/"expired") and url let create_session hand a
+    # double-clicking tenant back the checkout page they already have open,
+    # instead of starting a second, separately payable one.
+    return {
+        "payment_status": session.payment_status, "payment_intent_id": session.payment_intent,
+        "status": session.status, "url": session.url or "",
+    }
+
+
+def find_rent_checkout_session_id_for_payment_intent(*, payment_intent_id: str, connected_account_id: str) -> str | None:
+    """Which rent Checkout Session produced this PaymentIntent -- for a
+    refund/dispute event that reaches us before the payment itself was
+    recorded (webhooks arrive in no guaranteed order). None when not
+    configured or Stripe has no such session on that account."""
+    if not is_configured():
+        return None
+    stripe = _client()
+    sessions = stripe.checkout.Session.list(payment_intent=payment_intent_id, limit=1, stripe_account=connected_account_id)
+    data = list(sessions.data or [])
+    return data[0].id if data else None
+
+
+def retrieve_rent_charge_refund_state(*, payment_intent_id: str, connected_account_id: str) -> dict | None:
+    """The authoritative refund total for a rent direct charge, read from
+    the host's connected account: {amount_refunded, latest_refund_id}, in
+    major units. Read rather than trusted from the webhook payload, so an
+    out-of-order or failed refund (Stripe lowers amount_refunded again when
+    a refund fails) always lands on Stripe's current figure. None when not
+    configured."""
+    if not is_configured():
+        return None
+    stripe = _client()
+    intent = stripe.PaymentIntent.retrieve(
+        payment_intent_id, expand=["latest_charge.refunds"], stripe_account=connected_account_id,
+    )
+    charge = intent.latest_charge
+    if charge is None or isinstance(charge, str):
+        return {"amount_refunded": 0.0, "latest_refund_id": ""}
+    refunds = list(getattr(charge.refunds, "data", None) or []) if getattr(charge, "refunds", None) else []
+    succeeded = [r for r in refunds if r.status in ("succeeded", "pending", "requires_action")]
+    return {
+        "amount_refunded": from_minor_units(int(charge.amount_refunded or 0), charge.currency),
+        "latest_refund_id": succeeded[0].id if succeeded else "",
+    }
+
+
+def retrieve_rent_dispute(*, dispute_id: str, connected_account_id: str) -> dict | None:
+    """A rent chargeback's current status straight from Stripe -- same
+    'read, don't trust delivery order' role as
+    retrieve_rent_charge_refund_state. None when not configured."""
+    if not is_configured():
+        return None
+    stripe = _client()
+    dispute = stripe.Dispute.retrieve(dispute_id, stripe_account=connected_account_id)
+    return {"id": dispute.id, "status": dispute.status, "payment_intent": dispute.payment_intent}
+
+
+def create_rent_payment_refund(
+    *, payment_intent_id: str, amount: float, currency: str, connected_account_id: str, metadata: dict,
+    idempotency_key: str,
+) -> str:
+    """Refunds a create_rent_payment_checkout_session direct charge. The
+    charge lives on the HOST's connected account, so the refund must be
+    issued there too (`stripe_account`) -- it comes out of the host's own
+    Stripe balance, the same place the rent went, and never touches Zoiko
+    Rooms' platform balance. create_refund above cannot do this: it refunds
+    on the platform account, where Stripe has no such PaymentIntent."""
+    if not is_configured():
+        return new_id("RE")
+    stripe = _client()
+    refund = stripe.Refund.create(
+        payment_intent=payment_intent_id, amount=to_minor_units(amount, currency), metadata=metadata,
+        idempotency_key=idempotency_key, stripe_account=connected_account_id,
+    )
+    return refund.id
+
+
+def expire_rent_payment_checkout_session(*, checkout_session_id: str, connected_account_id: str) -> None:
+    """Closes an open rent Checkout Session so it can no longer be paid --
+    used when create_session replaces it with a fresh one. Same
+    `stripe_account` request option as the session was created with."""
+    if not is_configured():
+        return
+    stripe = _client()
+    stripe.checkout.Session.expire(checkout_session_id, stripe_account=connected_account_id)
 
 
 def create_refund(
@@ -278,11 +375,17 @@ def create_connected_account(
       RECEIVES a Transfer from Zoiko's own balance -- needs the
       'recipient' configuration's stripe_balance.stripe_transfers
       capability instead.
-    dashboard='express' preserves today's Express-dashboard host
-    experience; per Stripe's own validation
-    (account_controller_express_dash_without_application_losses_or_fees),
-    that requires fees_collector/losses_collector both be 'application' --
-    not a free choice, the only combination Express dashboards accept.
+    Who carries Stripe's fees and losses differs by caller, too:
+    - 'merchant' (rent): rent is strictly between tenant and host, so the
+      HOST's own account carries its card fees and any chargeback loss --
+      fees_collector/losses_collector='stripe'. Stripe only allows that with
+      the full Stripe Dashboard, so this account gets dashboard='full'
+      (the host manages their own payments, refunds and disputes there).
+      Zoiko Rooms' platform balance is never charged for a rent payment.
+    - 'recipient' (legacy payout rail, money that starts in Zoiko's own
+      balance anyway): keeps dashboard='express', which per Stripe's own
+      validation (account_controller_express_dash_without_application_
+      losses_or_fees) requires fees_collector/losses_collector='application'.
     stripe_version is left to the installed SDK's own default
     (stripe._api_version._ApiVersion.CURRENT) rather than hardcoded here,
     so a future stripe-python upgrade tracks Stripe's own version
@@ -304,12 +407,13 @@ def create_connected_account(
             "recipient": {"capabilities": {"stripe_balance": {"stripe_transfers": {"requested": True}}}},
         }
     )
+    collector = "stripe" if configuration == "merchant" else "application"
     account = client.v2.core.accounts.create(params={
         "contact_email": email,
-        "dashboard": "express",
+        "dashboard": "full" if configuration == "merchant" else "express",
         "identity": {"country": country},
         "configuration": configuration_params,
-        "defaults": {"responsibilities": {"fees_collector": "application", "losses_collector": "application"}},
+        "defaults": {"responsibilities": {"fees_collector": collector, "losses_collector": collector}},
         "metadata": metadata,
     })
     return account.id

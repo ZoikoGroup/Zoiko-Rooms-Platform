@@ -373,10 +373,17 @@ export function RentalsManager() {
     try {
       const result = await cancelOwnBookingBeforeMoveIn(cancelFor.id, cancelReason.trim());
       setCancelFor(null);
+      // Card payments are refunded by the host's own Stripe account straight
+      // back to the card -- the bank, not us, decides when it shows up.
+      const cardNote = " Card refunds usually take 5–10 business days to appear.";
       showToast(
-        result.feeAmount > 0
-          ? `Booking cancelled. ${formatCurrency(result.refundedAmount, cancelFor.currency)} refunded (a ${formatCurrency(result.feeAmount, cancelFor.currency)} cancellation fee applied).`
-          : `Booking cancelled. ${formatCurrency(result.refundedAmount, cancelFor.currency)} refunded in full.`,
+        result.refundedAmount <= 0
+          ? result.feeAmount > 0
+            ? `Booking cancelled. A ${formatCurrency(result.feeAmount, cancelFor.currency)} cancellation fee applied, so there was nothing to refund.`
+            : "Booking cancelled. Nothing had been paid, so there's nothing to refund."
+          : result.feeAmount > 0
+            ? `Booking cancelled. ${formatCurrency(result.refundedAmount, cancelFor.currency)} refunded (a ${formatCurrency(result.feeAmount, cancelFor.currency)} cancellation fee applied).${cardNote}`
+            : `Booking cancelled. ${formatCurrency(result.refundedAmount, cancelFor.currency)} refunded in full.${cardNote}`,
       );
       await load();
     } catch (err) {

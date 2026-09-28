@@ -905,5 +905,12 @@ async def post_rental_payment_stripe_webhook(request: Request, db: Session = Dep
         )
         return {"received": True}
 
-    eps_crud.ingest_stripe_webhook_event(db, event, correlation_id=get_correlation_id(request))
+    try:
+        eps_crud.ingest_stripe_webhook_event(db, event, correlation_id=get_correlation_id(request))
+    except eps_crud.ProviderEventNotReady:
+        # A charge/dispute event that beat its own payment here -- nothing was
+        # recorded (not even the dedup row), so a non-2xx makes Stripe
+        # redeliver it once the payment is in.
+        db.rollback()
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Payment not recorded yet -- retry later")
     return {"received": True}

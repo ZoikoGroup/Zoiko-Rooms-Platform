@@ -8,6 +8,7 @@ import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { RentalPaymentEvidenceList } from "@/components/user/RentalPaymentEvidenceList";
+import { CardPaymentOutcome, CardPaymentOutcomeTag } from "@/components/user/CardPaymentOutcome";
 import { COUNTRY_OPTIONS, resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
 import {
   ListingFeePayment,
@@ -74,7 +75,11 @@ const TYPE_FILTERS: { value: RentalPaymentObligationType | "ALL"; label: string 
 ];
 
 type Tab = "overview" | "amounts-due" | "records" | "instructions" | "listing-fees";
-const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "RECIPIENT_CONFIRMATION_PENDING", "PAYER_RECORDED", "DISPUTED"]);
+// REVERSED (a refund or lost chargeback sent the money back) and
+// PARTIALLY_PAID (a remainder is still owed) are money the host is still due.
+const OPEN_STATUSES = new Set([
+  "UPCOMING", "DUE", "OVERDUE", "RECIPIENT_CONFIRMATION_PENDING", "PAYER_RECORDED", "DISPUTED", "REVERSED", "PARTIALLY_PAID",
+]);
 
 // See RentalPaymentsManager.tsx's own OBLIGATIONS_PAGE_LIMIT docstring --
 // same reasoning: the Amounts due/Overview tabs need every open obligation
@@ -220,7 +225,11 @@ export function RecipientRentalPaymentsManager() {
                         <Badge tone={rentalPaymentStatusTone[o.status] ?? "neutral"}>{rentalPaymentStatusLabel[o.status] ?? o.status}</Badge>
                       </div>
                       <p className="mt-1 text-xs text-slate-400">
-                        {formatMoney(o.amount, o.currency)} &middot; Due {formatDate(o.dueDate)}
+                        {formatMoney(o.amount, o.currency)}
+                        {o.outstandingAmount > 0 && o.outstandingAmount < o.amount && (
+                          <> ({formatMoney(o.outstandingAmount, o.currency)} remaining)</>
+                        )}{" "}
+                        &middot; Due {formatDate(o.dueDate)}
                       </p>
                     </div>
                     {(o.status === "RECIPIENT_CONFIRMATION_PENDING" || o.status === "PAYER_RECORDED" || o.status === "DISPUTED") && (
@@ -281,6 +290,7 @@ export function RecipientRentalPaymentsManager() {
                         <td className="px-5 py-3 capitalize text-slate-600 dark:text-slate-300">{obligation.displayLabel}</td>
                         <td className="px-5 py-3 font-semibold text-primary-900 dark:text-white">
                           {formatMoney(record.declaredAmount, record.declaredCurrency)}
+                          <CardPaymentOutcomeTag record={record} />
                         </td>
                         <td className="px-5 py-3">
                           <Badge tone={rentalPaymentStatusTone[record.status] ?? "neutral"}>
@@ -489,6 +499,7 @@ function ReviewModal({
           <Row label="Tenant marked paid" value={formatDateTime(record.createdAt)} />
           <Row label="Payment method" value={record.paymentMethodCategory.replace(/_/g, " ").toLowerCase()} />
           {record.externalReference && <Row label="External reference" value={record.externalReference} />}
+          <CardPaymentOutcome record={record} viewer="host" />
           <div>
             <span className="mb-1 block text-xs text-slate-400">Evidence</span>
             <RentalPaymentEvidenceList recordId={record.id} />
@@ -664,6 +675,14 @@ function ProviderAccountManager() {
   return (
     <Card>
       <SectionHeading title="Secure online payment" subtitle="Connect a Stripe account so tenants can pay you directly online." />
+      <ul className="mt-3 space-y-1 rounded-xl bg-slate-50 px-4 py-3 text-xs text-slate-600 dark:bg-white/5 dark:text-slate-300">
+        <li>Tenants&apos; card payments go straight into your own Stripe account -- Zoiko Rooms never holds your rent.</li>
+        <li>Stripe&apos;s card processing fees are deducted from each payment by Stripe.</li>
+        <li>
+          Refunds (for example, when a booking is cancelled before move-in) come back out of your Stripe balance, and any
+          card dispute a tenant raises is yours to answer in your Stripe Dashboard.
+        </li>
+      </ul>
       {!account ? (
         <div className="mt-3 space-y-3">
           <Field label="Country">
@@ -693,7 +712,7 @@ function ProviderAccountManager() {
                 Resume onboarding
               </Button>
             )}
-            {account.status !== "COMPLETE" && (
+            {account.status !== "COMPLETE" && account.canSimulateOnboarding && process.env.NODE_ENV !== "production" && (
               <Button size="sm" variant="ghost" loading={simulating} onClick={handleSimulate}>
                 Simulate onboarding complete (dev)
               </Button>

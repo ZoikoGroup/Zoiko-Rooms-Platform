@@ -54,6 +54,13 @@ class RentalPaymentRecordRead(CamelModel):
     confirmed_by_party_id: int | None
     confirmed_amount: float | None
     provider_reference: str
+    # A card payment refunded from the host's own Stripe account, and a
+    # tenant's card chargeback on it as reported by Stripe -- see
+    # models/rental_payment.py:RentalPaymentRecord.
+    refunded_amount: float | None = None
+    provider_refund_id: str = ""
+    provider_dispute_id: str = ""
+    provider_dispute_status: str = ""
     confirmed_at: datetime | None
     created_at: datetime
     disputes: list[RentalPaymentDisputeRead] = []
@@ -84,6 +91,8 @@ class RentalPaymentObligationRead(CamelModel):
     tenant_guest_id: str
     recipient_party_id: int
     amount: float
+    # amount less what has already been received -- what "pay online" charges.
+    outstanding_amount: float
     currency: str
     due_date: date
     status: str

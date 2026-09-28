@@ -37,7 +37,12 @@ class Settings(BaseSettings):
         env_file=str(BACKEND_DIR / ".env"), env_file_encoding="utf-8", extra="ignore"
     )
 
-    environment: str = "development"
+    # Fail closed: a deployment that forgets to set ENVIRONMENT gets every
+    # production safety check below (real Stripe key, real encryption key,
+    # secure cookies...) instead of silently running in development mode --
+    # where payments complete as simulated "paid" with no money moving.
+    # Local dev and tests must say ENVIRONMENT=development explicitly.
+    environment: str = "production"
     database_url: str = "postgresql+psycopg://zoiko:zoiko@localhost:5432/zoiko_rooms"
     jwt_secret: str = "dev-secret-change-me"
     jwt_algorithm: str = "HS256"

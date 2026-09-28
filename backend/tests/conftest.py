@@ -14,6 +14,9 @@ import typing
 # Force the file mailer before app settings load, so a developer's .env with
 # EMAIL_PROVIDER=smtp never makes the suite send real email.
 os.environ["EMAIL_PROVIDER"] = "file"
+# The app now assumes production unless told otherwise (core/config.py) --
+# the suite is explicitly a development environment.
+os.environ["ENVIRONMENT"] = "development"
 
 import pytest
 from fastapi.testclient import TestClient

@@ -28,6 +28,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -108,6 +109,7 @@ def dispatch_payment_to_provider(
     provider_transaction_id = stripe_client.create_payment_intent(
         amount=float(payment.amount), currency=payment.currency,
         metadata={"payment_id": str(payment.id), "idempotency_key": payment.idempotency_key},
+        idempotency_key=f"simulated-payment-intent:{payment.idempotency_key}",
     )
 
     now = datetime.now(timezone.utc)
@@ -190,7 +192,7 @@ def renter_pay_obligation(db: Session, guest, obligation, *, method_class: str =
 
     payment = finance_crud.create_payment_intent(db, SimulatedPaymentCreate(
         guest_id=guest.id, amount=float(obligation.amount), currency=obligation.currency,
-        idempotency_key=f"renter-pay-obligation-{obligation.id}",
+        idempotency_key=_renter_payment_idempotency_key(db, obligation),
     ))
     if payment.status == "SUCCEEDED":
         return payment
@@ -206,6 +208,42 @@ def renter_pay_obligation(db: Session, guest, obligation, *, method_class: str =
         )
         db.refresh(payment)
     return payment
+
+
+def _renter_payment_idempotency_key(db: Session, obligation) -> str:
+    """One key per payment *attempt*, not per obligation. A double-click
+    still lands on the same key as the attempt in flight (so it can never
+    create a second charge), but once that attempt has FAILED -- or the
+    obligation's amount was amended since an attempt that never reached the
+    provider -- the renter gets a fresh key, so they can actually pay again
+    instead of hitting a 409 forever. The first attempt keeps the original
+    unsuffixed key, so payments made before this change still resolve."""
+    base_key = f"renter-pay-obligation-{obligation.id}"
+    attempts = (
+        db.query(SimulatedPayment)
+        .filter(or_(
+            SimulatedPayment.idempotency_key == base_key,
+            SimulatedPayment.idempotency_key.like(f"{base_key}-retry-%"),
+        ))
+        .order_by(SimulatedPayment.id.desc())
+        .all()
+    )
+    if not attempts:
+        return base_key
+
+    latest = attempts[0]
+    if latest.status == "SUCCEEDED":
+        return latest.idempotency_key
+    if latest.status == "PENDING":
+        dispatched = db.query(ProcessorTransaction).filter(
+            ProcessorTransaction.payment_id == latest.id, ProcessorTransaction.status == "PENDING",
+        ).first()
+        if dispatched is not None or round(float(latest.amount), 2) == round(float(obligation.amount), 2):
+            # A dispatch already in flight is surfaced by
+            # dispatch_payment_to_provider's own "already pending" 409 --
+            # never paved over with a second, parallel charge.
+            return latest.idempotency_key
+    return f"{base_key}-retry-{len(attempts)}"
 
 
 def ingest_provider_callback(

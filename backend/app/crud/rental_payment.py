@@ -256,6 +256,72 @@ def recompute_obligation_status(db: Session, obligation: RentalPaymentObligation
     # the old domain.
     if obligation.status == "CONFIRMED" and (obligation.agreement_id is not None or obligation.occupancy_id is not None):
         _sync_legacy_obligation_from_confirmation(db, obligation)
+    elif obligation.status in ("REVERSED", "PARTIALLY_PAID") and (
+        obligation.agreement_id is not None or obligation.occupancy_id is not None
+    ):
+        _unsync_legacy_obligation_after_reversal(db, obligation)
+
+
+def _find_synced_legacy_obligation(db: Session, obligation: RentalPaymentObligation):
+    """The legacy Obligation _sync_legacy_obligation_from_confirmation pairs
+    with this one -- the earliest of the same type in the same scope."""
+    from app.models.finance import Obligation as LegacyObligation
+
+    scope_column = LegacyObligation.agreement_id if obligation.agreement_id is not None else LegacyObligation.occupancy_id
+    scope_value = obligation.agreement_id if obligation.agreement_id is not None else obligation.occupancy_id
+    return db.scalar(
+        select(LegacyObligation)
+        .where(scope_column == scope_value, LegacyObligation.obligation_type == obligation.obligation_type)
+        .order_by(LegacyObligation.id)
+        .limit(1)
+    )
+
+
+def _unsync_legacy_obligation_after_reversal(db: Session, obligation: RentalPaymentObligation) -> None:
+    """The reverse of _sync_legacy_obligation_from_confirmation: the money
+    that made this obligation CONFIRMED went back to the tenant (a lost
+    chargeback, or a refund), so the legacy Obligation that sync marked PAID
+    must stop saying so -- otherwise move-in eligibility
+    (crud/activation_gate.py) would keep treating an unpaid deposit/first
+    rent as paid. Only ever undoes the sync's own work: a legacy Obligation
+    actually paid through the legacy rail (it has a real allocation) is left
+    alone. Its DepositRecord, created by the sync, is removed only while
+    nothing has happened to it yet (HELD, nothing released, no claims);
+    otherwise it is kept and flagged for staff instead of silently
+    rewritten. Re-syncs normally once the obligation is paid again."""
+    legacy_obligation = _find_synced_legacy_obligation(db, obligation)
+    if legacy_obligation is None or legacy_obligation.status != "PAID":
+        return
+    if any(float(a.amount_allocated or 0) > 0 for a in legacy_obligation.allocations):
+        return
+
+    legacy_obligation.status = "PENDING"
+    deposit_record = legacy_obligation.deposit_record
+    deposit_note = ""
+    if deposit_record is not None:
+        untouched = (
+            deposit_record.status == "HELD" and float(deposit_record.released_amount or 0) == 0 and not deposit_record.claims
+        )
+        if untouched:
+            db.delete(deposit_record)
+            deposit_note = " Its deposit record was removed (nothing had been done with it)."
+        else:
+            deposit_record.notes = (
+                (deposit_record.notes or "")
+                + f" [Payment reversed: rental_payment_obligation {obligation.id} is {obligation.status} -- review this deposit.]"
+            )[:2000]
+            deposit_note = " Its deposit record was already in use and was kept -- flagged for review."
+    db.flush()
+    db.expire(legacy_obligation, ["deposit_record"])
+
+    log_audit_event(
+        db, None, "rental_payment.legacy_obligation_unsynced", "obligation", str(legacy_obligation.id),
+        reason=f"rental_payment_obligation {obligation.id} went {obligation.status} after being paid.{deposit_note}",
+    )
+    emit_event(
+        db, "rental_payment.legacy_obligation_unsynced", "rental_payment_obligation", str(obligation.id),
+        {"legacyObligationId": legacy_obligation.id, "status": obligation.status}, new_state="PENDING",
+    )
 
 
 def _recompute_single_or_joint_status(db: Session, obligation: RentalPaymentObligation) -> None:
@@ -291,6 +357,14 @@ def _recompute_single_or_joint_status(db: Session, obligation: RentalPaymentObli
 
     if latest_record.status == "PAYER_RECORDED":
         obligation.status = "RECIPIENT_CONFIRMATION_PENDING"
+    elif latest_record.status == "REVERSED":
+        # The latest payment went back, but an earlier one may still stand
+        # (e.g. a card top-up refunded on top of a confirmed bank transfer)
+        # -- then it's partly paid, not wholly owed again.
+        db.expire(obligation, ["records"])
+        obligation.status = (
+            "PARTIALLY_PAID" if obligation.outstanding_amount < round(float(obligation.amount), 2) else "REVERSED"
+        )
     else:
         # CONFIRMED / PARTIALLY_PAID / DISPUTED / REVERSED all mirror the
         # record's own state directly -- each is already the exact display

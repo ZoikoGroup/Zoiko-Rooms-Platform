@@ -9,6 +9,7 @@ import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { RentalPaymentEvidenceList } from "@/components/user/RentalPaymentEvidenceList";
+import { CardPaymentOutcome, CardPaymentOutcomeTag } from "@/components/user/CardPaymentOutcome";
 import { resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
 import {
   RentalPaymentDiscrepancyReason,
@@ -60,7 +61,10 @@ type Tab = "overview" | "upcoming" | "records" | "instructions";
 // in flight stays visible here rather than disappearing mid-payment --
 // canMarkPaid below still only fires for UPCOMING/DUE/OVERDUE, so it won't
 // offer a second, conflicting payment action while one is already underway.
-const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "PAYMENT_SESSION_STARTED"]);
+// REVERSED too: the earlier payment went back (e.g. a card dispute the bank
+// decided for the tenant), so this rent is owed again. PARTIALLY_PAID: the
+// remainder is still owed (and payable online).
+const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "PAYMENT_SESSION_STARTED", "REVERSED", "PARTIALLY_PAID"]);
 
 // GET /obligations is now paginated (ZR-PAY-LINK-003 Section 19/G11 -- an
 // unbounded list doesn't scale to a years-long tenancy). This view's
@@ -147,10 +151,14 @@ export function RentalPaymentsManager() {
   useEffect(() => {
     const checkoutSessionId = searchParams.get("checkoutSessionId");
     if (!checkoutSessionId) return;
+    // cancel_url adds cancelled=1 -- the tenant left Stripe's page without paying.
+    const cancelledCheckout = searchParams.get("cancelled") === "1";
     resolveRentalPaymentCheckoutSession(checkoutSessionId)
       .then((session) => {
         if (session.status === "SUCCEEDED") {
           showToast("Payment confirmed.");
+        } else if (cancelledCheckout) {
+          showToast("Payment cancelled -- nothing was charged. You can pay again whenever you're ready.");
         } else if (session.status === "FAILED") {
           showToast(session.failureMessage || "Your payment did not go through.", "error");
         } else {
@@ -302,6 +310,7 @@ export function RentalPaymentsManager() {
                         <td className="px-5 py-3 capitalize text-slate-600 dark:text-slate-300">{obligation.displayLabel}</td>
                         <td className="px-5 py-3 font-semibold text-primary-900 dark:text-white">
                           {formatMoney(record.declaredAmount, record.declaredCurrency)}
+                          <CardPaymentOutcomeTag record={record} />
                         </td>
                         <td className="px-5 py-3">
                           <Badge tone={rentalPaymentStatusTone[record.status] ?? "neutral"}>
@@ -414,6 +423,19 @@ function ObligationCard({
   payingSecurely: boolean;
 }) {
   const canMarkPaid = obligation.status === "UPCOMING" || obligation.status === "DUE" || obligation.status === "OVERDUE";
+  // A tenant who closed the Stripe tab mid-checkout must be able to get back
+  // to it -- the backend hands back the same open checkout (never a second
+  // one), or replaces it if it expired.
+  const sessionInProgress = obligation.status === "PAYMENT_SESSION_STARTED";
+  // Owed again after the earlier payment went back -- payable online (the
+  // backend accepts REVERSED); mark-paid stays limited to canMarkPaid.
+  const dueAgain = obligation.status === "REVERSED";
+  // Part of it was received (or part of a card payment refunded) -- only the
+  // remainder is charged online. A shared (joint) obligation's remainder is
+  // settled per payer, so the backend refuses it and it isn't offered here.
+  const partlyPaid = obligation.status === "PARTIALLY_PAID";
+  const canPayRemainder = partlyPaid && obligation.payerAllocations.length === 0;
+  const showRemaining = obligation.outstandingAmount > 0 && obligation.outstandingAmount < obligation.amount;
 
   // ZR-PAY-LINK-003 Section 3.1: self-contained per-card fetch, same shape
   // as InstructionsModal's own per-obligation load below -- lets a tenant
@@ -452,6 +474,14 @@ function ObligationCard({
               <dt className="text-xs text-slate-400">Amount due</dt>
               <dd className="font-semibold text-primary-900 dark:text-white">{formatMoney(obligation.amount, obligation.currency)}</dd>
             </div>
+            {showRemaining && (
+              <div>
+                <dt className="text-xs text-slate-400">Remaining</dt>
+                <dd className="font-semibold text-primary-900 dark:text-white">
+                  {formatMoney(obligation.outstandingAmount, obligation.currency)}
+                </dd>
+              </div>
+            )}
             <div>
               <dt className="text-xs text-slate-400">Due date</dt>
               <dd className="flex items-center gap-1 text-slate-600 dark:text-slate-300">
@@ -464,9 +494,9 @@ function ObligationCard({
           <Button size="sm" variant="outline" onClick={onViewInstructions}>
             View payment instructions
           </Button>
-          {canMarkPaid && (
+          {(canMarkPaid || sessionInProgress || dueAgain || canPayRemainder) && (
             <Button size="sm" variant="outline" loading={payingSecurely} disabled={suspended} onClick={onPaySecurely}>
-              Continue to secure payment
+              {sessionInProgress ? "Resume secure payment" : canPayRemainder ? "Pay the remainder securely" : "Continue to secure payment"}
             </Button>
           )}
           {canMarkPaid && (
@@ -825,6 +855,7 @@ function RecordDetailModal({ record, onClose }: { record: RentalPaymentRecord | 
         {record.externalReference && <Row label="External reference" value={record.externalReference} />}
         <Row label="Marked paid at" value={formatDateTime(record.createdAt)} />
         {record.confirmedAt && <Row label="Confirmed at" value={formatDateTime(record.confirmedAt)} />}
+        <CardPaymentOutcome record={record} viewer="tenant" />
         <div>
           <span className="mb-1 block text-xs text-slate-400">Evidence</span>
           <RentalPaymentEvidenceList recordId={record.id} />

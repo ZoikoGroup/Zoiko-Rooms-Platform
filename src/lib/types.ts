@@ -836,6 +836,16 @@ export interface RentalPaymentRecord {
   /** Set only when provenance is PROVIDER_CONFIRMATION -- the external
    *  provider's own transaction/reconciliation reference. */
   providerReference: string;
+  /** Set once a card payment was refunded -- straight from the host's own
+   *  Stripe account, never through Zoiko Rooms (e.g. a booking cancelled
+   *  before move-in). */
+  refundedAmount: number | null;
+  providerRefundId: string;
+  /** A card chargeback the tenant raised with their bank, as reported by
+   *  Stripe -- blank if none. Status is Stripe's own (needs_response,
+   *  under_review, won, lost...). */
+  providerDisputeId: string;
+  providerDisputeStatus: string;
   confirmedAt: string | null;
   createdAt: string;
   /** ZR-PAY-LINK-003 Section 19/Wireframe PAY-18 -- previously only ever
@@ -866,6 +876,8 @@ export interface RentalPaymentObligation {
   tenantGuestId: string;
   recipientPartyId: number;
   amount: number;
+  /** amount less what has already been received -- what "pay online" charges. */
+  outstandingAmount: number;
   currency: string;
   dueDate: string;
   status: RentalPaymentStatus;
@@ -970,6 +982,9 @@ export interface RentalPaymentProviderAccount {
   highRiskReason: string;
   createdAt: string;
   updatedAt: string;
+  /** True only while the backend has no real Stripe key -- the dev-only
+   *  "simulate onboarding complete" action is refused otherwise. */
+  canSimulateOnboarding: boolean;
 }
 
 export interface RentalPaymentProviderAccountConnectResult {
