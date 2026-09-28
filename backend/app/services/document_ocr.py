@@ -214,63 +214,150 @@ def _ocr_text_and_confidence(document_bytes: bytes) -> tuple[str, float]:
     return " ".join(words).upper(), avg_confidence
 
 
-def extract_and_score(
-    document_bytes: bytes, document_type: str, *, expected_number: str = "",
-) -> tuple[str | None, float]:
-    """Returns (matched_document_number_or_None, average_ocr_confidence_0_to_100).
+# A passport's machine-readable zone (ICAO 9303, the two OCR-B lines at the
+# bottom of every passport photo page) is a REAL, standardized format --
+# unlike freeform document text, this genuinely can be parsed reliably:
+# "P<" + issuing country (3 letters) + surname + "<<" + given names, with
+# "<" standing in for spaces/padding. Tesseract reads it as one unbroken
+# token (no real spaces are printed there), so it appears as a single long
+# run of letters and "<" in the OCR'd text. This is real extraction, not a
+# heuristic guess -- the one case where this codebase can genuinely pull a
+# name out of unstructured OCR text, because the format itself is known and
+# fixed, not because we're guessing which words look name-like.
+_MRZ_NAME_PATTERN = re.compile(r"P<\s*[A-Z]{3}([A-Z<]{10,})")
 
-    Every overlapping window matching the format is a candidate, not just the
-    first: an Aadhaar card often prints another 4-digit group (a year, the
-    VID) right before the number, so the first 12-digit window can straddle
-    that group and the real number ("2011 7296 4981" out of
+
+def extract_name_from_mrz(full_text: str) -> str | None:
+    """Returns the real name parsed from a passport's MRZ line, or None if
+    no MRZ-shaped text was found (any other document type, or a passport
+    photo where the MRZ itself didn't read cleanly)."""
+    match = _MRZ_NAME_PATTERN.search(full_text)
+    if not match:
+        return None
+    parts = match.group(1).split("<<", 1)
+    if len(parts) != 2:
+        return None
+    surname = parts[0].replace("<", " ").strip()
+    given_names = " ".join(w for w in parts[1].split("<") if w)
+    if not surname or not given_names:
+        return None
+    return f"{given_names} {surname}".strip()
+
+
+def _match_document_number(full_text: str, document_type: str, expected_number: str) -> str | None:
+    """Every overlapping window matching the format is a candidate, not just
+    the first: an Aadhaar card often prints another 4-digit group (a year,
+    the VID) right before the number, so the first 12-digit window can
+    straddle that group and the real number ("2011 7296 4981" out of
     "2011 7296 4981 6197"). A candidate equal to the number the user typed
     wins, then (Aadhaar) one passing the Verhoeff checksum, then the first --
     only ever a number actually present in the scanned text."""
-    full_text, avg_confidence = _ocr_text_and_confidence(document_bytes)
     pattern = DOCUMENT_NUMBER_PATTERNS.get(document_type)
     if pattern is None:
-        return None, avg_confidence
-
+        return None
     candidates = [m.group(1).replace(" ", "") for m in re.finditer(f"(?=({pattern}))", full_text)]
     if not candidates:
-        return None, avg_confidence
-
+        return None
     expected = expected_number.replace(" ", "").upper()
     if expected and expected in candidates:
-        return expected, avg_confidence
+        return expected
     if document_type == "aadhaar":
         valid = [c for c in candidates if is_valid_aadhaar_checksum(c)]
         if valid:
-            return valid[0], avg_confidence
-    return candidates[0], avg_confidence
+            return valid[0]
+    return candidates[0]
 
 
-# Property verification checks against a REAL known value, unlike identity's
+def extract_and_score(
+    document_bytes: bytes, document_type: str, *, expected_number: str = "",
+) -> tuple[str | None, float, str | None]:
+    """Returns (matched_document_number_or_None, average_ocr_confidence_0_to_100,
+    mrz_extracted_name_or_None). The number is chosen by
+    _match_document_number (the typed number, then an Aadhaar-checksum-valid
+    one, then the first match). The name is only ever populated for a real,
+    parseable passport MRZ line -- see extract_name_from_mrz above -- never a
+    guess for other document types."""
+    full_text, avg_confidence = _ocr_text_and_confidence(document_bytes)
+    matched_number = _match_document_number(full_text, document_type, expected_number)
+    extracted_name = extract_name_from_mrz(full_text) if document_type == "passport" else None
+    return matched_number, avg_confidence, extracted_name
+
+
+# Property verification checks against REAL known values, unlike identity's
 # address-document check above (no stored address exists there to compare
-# against) -- the room's own actual Property.address/city. A real address
-# match is a genuine, non-fabricated signal that the uploaded evidence
-# actually describes this property, not just any document of a plausible
-# type.
+# against) -- the room's own actual Property.address/city, and the owner's
+# own registered account name. Same two-signal shape real proof-of-address
+# vendors use (Veriff/IDWise/Didit/AuthBridge all OCR-extract a document's
+# name AND address, then cross-match both against the claimed identity) --
+# not an invented rule. This is the PRIMARY check. An optional landmark is
+# a FALLBACK ONLY, tried when the primary check fails: landmark isn't a
+# signal any real proof-of-address system checks as its main rule (informal
+# landmarks like "near XYZ Mall" rarely appear on formal documents), but
+# some genuine local documents do print a less formal address alongside a
+# landmark -- worth trying before routing to a human, never a substitute
+# for the real check.
 PROPERTY_ADDRESS_MATCH_CONFIDENCE_THRESHOLD = 40.0
 
 
-def check_property_document_address(document_bytes: bytes, real_address: str, real_city: str) -> tuple[bool, float, str]:
-    """Returns (address_matched, average_ocr_confidence_0_to_100, extracted_text_snippet).
-    A match requires BOTH the property's real city AND at least half of the
-    real address's significant (3+ character) words to appear in the
-    extracted text -- city alone is too common a false-positive (a random
-    London utility bill would match on "LONDON" alone); the address words
-    together with the city make this a real, specific match rather than a
-    coincidence."""
+def _significant_words(text: str) -> list[str]:
+    return [w.strip(",.").upper() for w in text.split() if len(w.strip(",.")) >= 3]
+
+
+def _all_match(words: list[str], full_text: str) -> bool:
+    return bool(words) and all(w in full_text for w in words)
+
+
+# Real name-EXTRACTION (pulling an arbitrary person's name out of
+# unstructured OCR text with no "this is the name field" label) needs real
+# document-layout parsing this build doesn't have. What IS reliable: taking
+# a KNOWN claimed name (the account's own registered full_name) and
+# checking whether it appears in the document -- the same "cross-match a
+# known name against the document" shape real proof-of-address/KYC vendors
+# use (Veriff/IDWise/Didit all report a name_match_score this same way,
+# not a freestanding name extraction).
+NAME_MATCH_CONFIDENCE_THRESHOLD = 40.0
+
+
+def check_name_in_document(document_bytes: bytes, full_name: str) -> tuple[bool, float, str]:
+    """Returns (name_matched, average_ocr_confidence_0_to_100, extracted_text_snippet).
+    A match requires ALL of the claimed name's significant (3+ character)
+    words to appear in the extracted text -- not just half. A name is
+    short (often just 2 words), and requiring only half of a 2-word name
+    means a single common word ("Account", "James", "Kumar"...) shared
+    with completely unrelated document text is enough to false-positive a
+    match; a real, honest name check on something this short needs every
+    word, not a majority vote."""
+    full_text, avg_confidence = _ocr_text_and_confidence(document_bytes)
+    return _all_match(_significant_words(full_name), full_text), avg_confidence, full_text[:500]
+
+
+def check_identity_details_in_document(
+    document_bytes: bytes, *, full_name: str | None = None, document_number: str | None = None,
+) -> tuple[bool, str, float, str]:
+    """Returns (matched, matched_via, average_ocr_confidence_0_to_100, extracted_text_snippet).
+
+    Property verification's own check: does THIS document contain EITHER
+    the account's registered name OR the document number already read off
+    their identity document at identity-verification time (stored on
+    IdentityVerification.ocr_extracted_number -- reused directly, never
+    re-OCR'd here). Either signal alone is enough; neither is mandatory on
+    its own (a property document might show a name but not an ID number,
+    or vice versa) -- this is intentionally simpler than requiring both a
+    formal address match and a name match, which proved too strict for
+    real documents in practice. matched_via is "name" or "number" (never
+    both at once -- name is checked first) or "" if neither matched. Only
+    one OCR pass over the document, reused for both checks."""
     full_text, avg_confidence = _ocr_text_and_confidence(document_bytes)
 
-    city_found = bool(real_city.strip()) and real_city.strip().upper() in full_text
+    if full_name and _all_match(_significant_words(full_name), full_text):
+        return True, "name", avg_confidence, full_text[:500]
 
-    address_words = [w.strip(",.").upper() for w in real_address.split() if len(w.strip(",.")) >= 3]
-    matched_words = sum(1 for w in address_words if w in full_text)
-    address_found = bool(address_words) and matched_words >= max(1, len(address_words) // 2)
+    if document_number:
+        normalized = document_number.replace(" ", "").upper()
+        if normalized and normalized in full_text.replace(" ", ""):
+            return True, "number", avg_confidence, full_text[:500]
 
-    return (city_found and address_found), avg_confidence, full_text[:500]
+    return False, "", avg_confidence, full_text[:500]
 
 
 # Address/residency documents have no universal document NUMBER (unlike

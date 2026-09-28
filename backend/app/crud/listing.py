@@ -336,6 +336,24 @@ def to_public_listing_read(listing: Listing) -> PublicListingRead:
     )
 
 
+def _unique_slug(db: Session, name: str) -> str:
+    """slugify(name) alone collides whenever two listings share a name (or
+    both get the "" -> slugify's own new_id fallback) -- listings.slug has
+    a real UNIQUE constraint, so an uncaught collision previously reached
+    the host as a raw IntegrityError 500 (surfaced to them as a confusing
+    "server disconnected" error, not a real disconnect). A host has no way
+    to know this internal field even exists, so this must never be a
+    validation error asking them to rename their listing -- just silently
+    make it unique."""
+    base = slugify(name)
+    slug = base
+    suffix = 2
+    while db.scalar(select(Listing.id).where(Listing.slug == slug)) is not None:
+        slug = f"{base}-{suffix}"
+        suffix += 1
+    return slug
+
+
 def create_listing(db: Session, data: ListingCreate, owner: AdminUser) -> Listing:
     if data.min_stay_nights < 30:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Minimum stay must be at least 30 nights")
@@ -346,7 +364,7 @@ def create_listing(db: Session, data: ListingCreate, owner: AdminUser) -> Listin
     payload.update(_canonical_location(db, data.room_id))
     listing = Listing(
         id=new_id("L"),
-        slug=slugify(data.name),
+        slug=_unique_slug(db, data.name),
         rating=4.5,
         review_count=0,
         owner_id=owner.id,
@@ -376,7 +394,7 @@ def create_listing_for_party(db: Session, data: ListingCreate, party_id: int) ->
     payload = data.model_dump()
     payload.update(_canonical_location(db, data.room_id))
     listing = Listing(
-        id=new_id("L"), slug=slugify(data.name), rating=4.5, review_count=0,
+        id=new_id("L"), slug=_unique_slug(db, data.name), rating=4.5, review_count=0,
         owner_id=None, party_id=party_id, state="DRAFT",
         market_release_id=_resolve_market_release_id_for_room(db, data.room_id),
         **payload,

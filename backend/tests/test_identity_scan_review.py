@@ -23,9 +23,10 @@ def uploads(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "identity_upload_dir", str(tmp_path))
 
 
-def _fake_scan(monkeypatch, *, number: str | None, confidence: float):
+def _fake_scan(monkeypatch, *, number: str | None, confidence: float, name_matched: bool = True):
     monkeypatch.setattr(document_ocr, "is_available", lambda: True)
-    monkeypatch.setattr(document_ocr, "extract_and_score", lambda _bytes, _type, **_kwargs: (number, confidence))
+    monkeypatch.setattr(document_ocr, "extract_and_score", lambda _bytes, _type, **_kwargs: (number, confidence, None))
+    monkeypatch.setattr(document_ocr, "check_name_in_document", lambda _bytes, _name: (name_matched, confidence, ""))
 
 
 def _make_renter(db: Session, email: str):
@@ -145,6 +146,40 @@ class TestRepeatedScanFailures:
 
         _fake_scan(monkeypatch, number=_PASSPORT_NUMBER, confidence=90.0)
         assert _submit(client, renter, b"%PDF-1.4c")["status"] == "verified"
+
+
+class TestNameCrossCheck:
+    """crud/identity_verification.py's own name check: the number/document
+    can be perfectly genuine, but if the submitting account's own
+    registered name isn't found on it, that's a distinct, real rejection
+    reason -- never folded into or masked by the number-match message."""
+
+    def test_document_number_matches_but_name_does_not_reroutes_with_name_specific_reason(
+        self, client, db_session: Session, uploads, monkeypatch,
+    ):
+        renter = _make_renter(db_session, "name-mismatch@test.com")
+        _fake_scan(monkeypatch, number=_PASSPORT_NUMBER, confidence=95.0, name_matched=False)
+
+        body = _submit(client, renter)
+        assert body["status"] == "additional_evidence_required"
+
+        record = db_session.get(IdentityVerification, body["id"])
+        assert "wasn't found on this document" in record.verifier_notes
+        assert renter.full_name in record.verifier_notes
+        assert record.ocr_name_matched is False
+
+    def test_document_number_and_name_both_match_auto_verifies(
+        self, client, db_session: Session, uploads, monkeypatch,
+    ):
+        _super_admin(db_session)
+        renter = _make_renter(db_session, "name-match@test.com")
+        _fake_scan(monkeypatch, number=_PASSPORT_NUMBER, confidence=95.0, name_matched=True)
+
+        body = _submit(client, renter)
+        assert body["status"] == "verified"
+
+        record = db_session.get(IdentityVerification, body["id"])
+        assert record.ocr_name_matched is True
 
 
 class TestDuplicateDocument:
