@@ -463,9 +463,6 @@ def update_user_listing(
     listing = _get_user_listing_or_404(db, listing_id, user)
     if payload.room_id is not None:
         listing_crud.assert_party_owns_room(db, payload.room_id, user.party_id)
-        from app.crud.listing_fee import assert_room_change_allowed
-
-        assert_room_change_allowed(db, listing, payload.room_id)
     updated = listing_crud.update_listing(db, listing, payload)
     log_audit_event(db, None, "user_listing.update", "listing", listing_id, get_correlation_id(request), reason=f"user:{user.id}")
     db.commit()

@@ -29,9 +29,6 @@ from app.schemas.listing_fee import (
     BillingEntityUpdate,
     ListingFeeCheckoutSessionCreate,
     ListingFeeCheckoutSessionRead,
-    ListingFeeDuplicateFlagRead,
-    ListingFeeFunnelRead,
-    ListingFeeListingStatusRead,
     ListingFeePaymentRead,
     ListingFeePolicyCreate,
     ListingFeePolicyRead,
@@ -93,25 +90,7 @@ def post_create_listing_fee_quote(
     """ZR-PAY-002 Section 8.1 POST /listing-fees/quotes."""
     listing = _get_own_listing_or_404(db, listing_id, user)
     party = _get_own_party_or_400(db, user)
-    quote = listing_fee_crud.create_quote(db, listing, party, correlation_id=get_correlation_id(request))
-    listing_fee_crud.flag_possible_duplicate_listing(db, listing, party, correlation_id=get_correlation_id(request))
-    return quote
-
-
-@router.get("/listings/{listing_id}/status", response_model=ListingFeeListingStatusRead)
-def get_listing_fee_status(listing_id: str, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
-    """ZR-LF-001 Screens A-D: the listing, the requirements still open before
-    the fee can be paid, and the latest fee payment (with its receipt number
-    and any refund) -- one call for the whole fee flow."""
-    listing = _get_own_listing_or_404(db, listing_id, user)
-    payment = listing_fee_crud.latest_listing_fee_payment(db, listing.id)
-    return ListingFeeListingStatusRead(
-        listing_id=listing.id, listing_name=listing.name, listing_address=listing.location or listing.city or "",
-        market=listing_fee_crud.listing_jurisdiction_code(listing) or listing_fee_crud.DEFAULT_JURISDICTION,
-        fee_paid=listing_fee_crud.listing_fee_is_paid(db, listing.id),
-        checkout_blockers=listing_fee_crud.listing_fee_checkout_blockers(db, listing),
-        latest_payment=_to_payment_read(db, payment, ensure_receipt=True) if payment else None,
-    )
+    return listing_fee_crud.create_quote(db, listing, party, correlation_id=get_correlation_id(request))
 
 
 @router.post("/checkout-sessions", response_model=ListingFeeCheckoutSessionRead, status_code=status.HTTP_201_CREATED)
@@ -129,14 +108,6 @@ def post_create_listing_fee_checkout_session(
     party = _get_own_party_or_400(db, user)
     if quote.party_id != party.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This quote does not belong to you")
-    # ZR-LF-001: the fee is paid last, once every other publish requirement
-    # is met -- never taken for a listing that can't be published yet.
-    blockers = listing_fee_crud.listing_fee_checkout_blockers(db, quote.listing)
-    if blockers:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "Finish these before paying the Listing Fee: " + "; ".join(blockers),
-        )
     payment, checkout_url = listing_fee_crud.create_checkout(
         db, quote, party, idempotency_key=payload.idempotency_key, billing_country=payload.billing_country,
         frontend_origin=_resolve_frontend_origin(request), correlation_id=get_correlation_id(request),
@@ -160,21 +131,7 @@ def get_resolve_checkout_session(
     party = _get_own_party_or_400(db, user)
     if payment.party_id != party.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This payment does not belong to you")
-    return _to_payment_read(db, payment, ensure_receipt=True)
-
-
-@router.post("/checkout-sessions/{checkout_session_id}/cancelled", status_code=status.HTTP_204_NO_CONTENT)
-def post_checkout_session_cancelled(
-    checkout_session_id: str, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
-):
-    """The lister came back via Stripe's cancel_url -- records the funnel
-    drop-off. Nothing was charged, and nothing changes on the payment."""
-    payment = listing_fee_crud.get_payment_by_checkout_session_id(db, checkout_session_id)
-    party = _get_own_party_or_400(db, user)
-    if payment.party_id != party.id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "This payment does not belong to you")
-    listing_fee_crud.record_checkout_cancelled(db, payment, correlation_id=get_correlation_id(request))
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return _to_payment_read(db, payment)
 
 
 def _assert_own_payment(db: Session, payment_id: int, user: UserAccount):
@@ -185,33 +142,18 @@ def _assert_own_payment(db: Session, payment_id: int, user: UserAccount):
     return payment
 
 
-def _to_payment_read(db: Session, payment, *, ensure_receipt: bool = False) -> ListingFeePaymentRead:
+def _to_payment_read(db: Session, payment) -> ListingFeePaymentRead:
     """refund_eligible is computed per-request (Section 8.4) -- never an ORM
     attribute response_model's from_attributes could pick up on its own, so
     every route returning a payment builds it through here rather than
     handing the raw ORM object straight to response_model (which would
     silently serialize refund_eligible as its schema default, False, for
-    every payment regardless of actual eligibility).
-
-    ensure_receipt issues the receipt now if it wasn't (its render failed at
-    payment time), so the success screen can show the receipt number."""
-    receipt = payment.receipt
-    if ensure_receipt and receipt is None and payment.status == "SUCCEEDED":
-        try:
-            receipt = listing_fee_crud.get_or_create_listing_fee_receipt(db, payment)
-            db.commit()
-        except Exception:
-            db.rollback()
-            receipt = None
-    quote = payment.quote
+    every payment regardless of actual eligibility)."""
     return ListingFeePaymentRead(
         id=payment.id, quote_id=payment.quote_id, listing_id=payment.listing_id, amount=float(payment.amount),
         currency=payment.currency, status=payment.status, billing_country=payment.billing_country,
         failure_message=payment.failure_message, created_at=payment.created_at, paid_at=payment.paid_at,
         failed_at=payment.failed_at, refund_eligible=listing_fee_crud.is_listing_fee_payment_refund_eligible(db, payment),
-        fee_amount=float(quote.amount) if quote else None, tax_amount=float(quote.tax_amount) if quote else None,
-        receipt_number=receipt.receipt_number if receipt else None, dispute_status=payment.dispute_status,
-        **listing_fee_crud.payment_refund_summary(payment),
     )
 
 
@@ -225,7 +167,7 @@ def list_my_listing_fee_payments(user: UserAccount = Depends(get_current_user), 
 
 @router.get("/payments/{payment_id}", response_model=ListingFeePaymentRead)
 def get_own_listing_fee_payment(payment_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
-    return _to_payment_read(db, _assert_own_payment(db, payment_id, user), ensure_receipt=True)
+    return _to_payment_read(db, _assert_own_payment(db, payment_id, user))
 
 
 @router.get("/payments/{payment_id}/refunds", response_model=list[ListingFeeRefundRead])
@@ -367,20 +309,6 @@ def list_listing_fee_payments(listing_id: str | None = None, limit: int = 100, d
     if listing_id:
         query = query.where(ListingFeePayment.listing_id == listing_id)
     return [_to_payment_read(db, payment) for payment in db.scalars(query)]
-
-
-@admin_router.get("/funnel", response_model=ListingFeeFunnelRead, dependencies=[Depends(require_super_admin)])
-def get_listing_fee_funnel(days: int = 30, db: Session = Depends(get_db)):
-    """ZR-LF-001 funnel: listings that viewed the fee, started, completed,
-    cancelled or failed checkout in the last `days` days."""
-    return listing_fee_crud.listing_fee_funnel(db, days=max(1, min(days, 365)))
-
-
-@admin_router.get("/duplicate-flags", response_model=list[ListingFeeDuplicateFlagRead], dependencies=[Depends(require_super_admin)])
-def get_listing_fee_duplicate_flags(limit: int = 100, db: Session = Depends(get_db)):
-    """Listings for a room whose other listing already has a paid fee --
-    for review, never blocked automatically."""
-    return listing_fee_crud.list_duplicate_listing_flags(db, limit=limit)
 
 
 @admin_router.get("/payments/{payment_id}", response_model=ListingFeePaymentRead)

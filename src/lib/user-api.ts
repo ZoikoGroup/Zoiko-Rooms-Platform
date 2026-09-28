@@ -30,7 +30,6 @@ import {
   IdentityDocumentType,
   IdentityVerificationRecord,
   ListingFeeCheckoutSession,
-  ListingFeeListingStatus,
   ListingFeePayment,
   ListingFeeQuote,
   ListingFeeRefund,
@@ -863,19 +862,6 @@ export function listMyListingFeePayments(): Promise<ListingFeePayment[]> {
  *  their payment -- issuing one stays admin-restricted. */
 export function listListingFeeRefundsForPayment(paymentId: number): Promise<ListingFeeRefund[]> {
   return apiClientFetch<ListingFeeRefund[]>(`/api/users/listing-fees/payments/${paymentId}/refunds`);
-}
-
-/** The listing, what's still open before its fee can be paid, and the
- *  latest fee payment (receipt number, refunds) -- one call for the flow. */
-export function getListingFeeStatus(listingId: string): Promise<ListingFeeListingStatus> {
-  return apiClientFetch<ListingFeeListingStatus>(`/api/users/listing-fees/listings/${listingId}/status`);
-}
-
-/** Records that the host came back from Stripe without paying. */
-export function reportListingFeeCheckoutCancelled(checkoutSessionId: string): Promise<void> {
-  return apiClientFetch<void>(`/api/users/listing-fees/checkout-sessions/${checkoutSessionId}/cancelled`, {
-    method: "POST",
-  });
 }
 
 export function getListingFeePayment(paymentId: number): Promise<ListingFeePayment> {

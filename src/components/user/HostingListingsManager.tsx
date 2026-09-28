@@ -27,7 +27,7 @@ import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
-import { ListingFeeCheckout, StripeReturn } from "@/components/user/ListingFeeCheckout";
+import { ListingFeeCheckout } from "@/components/user/ListingFeeCheckout";
 import { PropertyVerificationManager } from "@/components/user/PropertyVerificationManager";
 import { AuthorityRecordManager } from "@/components/user/AuthorityRecordManager";
 import { RentPaymentReadiness } from "@/components/user/RentPaymentReadiness";
@@ -111,26 +111,21 @@ export function HostingListingsManager() {
   const [busyListingId, setBusyListingId] = useState<string | null>(null);
   const [payingFeeListingId, setPayingFeeListingId] = useState<string | null>(null);
   const [returningCheckoutSessionId, setReturningCheckoutSessionId] = useState<string | null>(null);
-  const [stripeReturn, setStripeReturn] = useState<StripeReturn | undefined>(undefined);
   const [propertyVerificationRoomId, setPropertyVerificationRoomId] = useState<number | null>(null);
   const [authorityRecordRoomId, setAuthorityRecordRoomId] = useState<number | null>(null);
 
   // Landed back here from Stripe's own hosted checkout page (see
   // ListingFeeCheckout.tsx's real redirect, and crud/listing_fee.py's
   // success_url/cancel_url) -- resolve which listing/payment that was and
-  // reopen the fee modal where the host left off, rather than making them
-  // find the right listing and click "Listing fee" again themselves.
-  // stripeCheckout=cancel means they left Stripe without paying -- shown as
-  // "Payment not completed", never as a payment still being confirmed.
+  // reopen the fee modal in its "confirming" state, rather than making the
+  // host find the right listing and click "Listing fee" again themselves.
   useEffect(() => {
     const checkoutSessionId = searchParams.get("checkoutSessionId");
     if (!checkoutSessionId) return;
-    const returnedVia = searchParams.get("stripeCheckout");
     resolveListingFeeCheckoutSession(checkoutSessionId)
       .then((payment) => {
         setPayingFeeListingId(payment.listingId);
         setReturningCheckoutSessionId(checkoutSessionId);
-        setStripeReturn(returnedVia === "cancel" ? "cancel" : "success");
       })
       .catch(() => showToast("Could not confirm your Listing Fee payment. Please try again from your listing.", "error"))
       .finally(() => router.replace("/account/host/listings"));
@@ -169,13 +164,6 @@ export function HostingListingsManager() {
       ),
     [properties, roomsByProperty]
   );
-
-  function closeListingFee() {
-    setPayingFeeListingId(null);
-    setReturningCheckoutSessionId(null);
-    setStripeReturn(undefined);
-    load();
-  }
 
   function openEdit(listing: HostedListing) {
     setError("");
@@ -336,15 +324,9 @@ export function HostingListingsManager() {
                         <ShieldCheck className="h-3.5 w-3.5" /> Authority to list
                       </Button>
                     )}
-                    {/* Available from draft onwards, not only once approved: an
-                        admin can't publish until the fee is paid, so the host
-                        must be able to pay it while the listing is in review too.
-                        The server still refuses payment until every other
-                        requirement is met. On a published listing it shows the
-                        payment and receipt. */}
-                    {listing.state !== "REJECTED" && listing.roomId !== null && (
+                    {listing.state === "APPROVED" && (
                       <Button size="sm" variant="outline" onClick={() => setPayingFeeListingId(listing.id)}>
-                        <Receipt className="h-3.5 w-3.5" aria-hidden="true" /> Listing fee
+                        <Receipt className="h-3.5 w-3.5" /> Listing fee
                       </Button>
                     )}
                     {(listing.state === "DRAFT" || listing.state === "REJECTED") && (
@@ -360,7 +342,6 @@ export function HostingListingsManager() {
                     <p className="flex items-center gap-1.5 font-semibold">
                       <AlertTriangle className="h-3.5 w-3.5" /> Awaiting review by a Zoiko admin.
                     </p>
-                    <p className="mt-1">You can pay the Listing Fee now -- the listing can&apos;t be published until it&apos;s paid.</p>
                   </div>
                 )}
 
@@ -642,15 +623,17 @@ export function HostingListingsManager() {
 
       <Modal
         open={Boolean(payingFeeListingId)}
-        onClose={closeListingFee}
+        onClose={() => {
+          setPayingFeeListingId(null);
+          setReturningCheckoutSessionId(null);
+          load();
+        }}
         title="Listing fee"
       >
         {payingFeeListingId && (
           <ListingFeeCheckout
             listingId={payingFeeListingId}
             returningCheckoutSessionId={returningCheckoutSessionId ?? undefined}
-            stripeReturn={stripeReturn}
-            onDone={closeListingFee}
           />
         )}
       </Modal>

@@ -29,7 +29,6 @@ from app.crud.events import emit_event
 from app.crud.ids import new_id
 from app.crud import notification as notif_crud
 from app.models.admin_user import AdminUser
-from app.models.domain_event import DomainEvent
 from app.models.listing import Listing
 from app.models.listing_fee import (
     LISTING_FEE_QUOTE_TTL_SECONDS,
@@ -65,41 +64,6 @@ def listing_jurisdiction_code(listing: Listing) -> str | None:
 # ZR-PAY-CFG-001 Section 2.2: the exact copy the listing flow shows when a
 # market has no chargeable price.
 LISTING_FEE_UNAVAILABLE_MESSAGE = "Listing fee currently unavailable in this market."
-
-
-def is_listing_fee_reason(reason: str) -> bool:
-    """True for the publish-eligibility lines that are about the fee itself
-    ("Listing Fee has not been paid" / LISTING_FEE_UNAVAILABLE_MESSAGE)."""
-    return "listing fee" in reason.lower()
-
-
-def listing_fee_checkout_blockers(db: Session, listing: Listing) -> list[str]:
-    """ZR-LF-001: the fee is the last step before publishing -- checkout is
-    only offered once identity, property, authority and compliance are all
-    done. Returns every publish-eligibility reason except the fee's own."""
-    from app.crud.listing import check_publish_eligibility
-
-    return [r for r in check_publish_eligibility(db, listing) if not is_listing_fee_reason(r)]
-
-
-# ZR-LF-001 funnel: fee_viewed -> checkout_started -> checkout_completed,
-# with checkout_cancelled / checkout_failed as the drop-off exits.
-LISTING_FEE_FUNNEL_EVENTS = ("fee_viewed", "checkout_started", "checkout_completed", "checkout_cancelled", "checkout_failed")
-
-
-def record_funnel_event(
-    db: Session, name: str, listing_id: str, *, party_id: int | None = None, payment_id: int | None = None,
-    payload: dict | None = None, correlation_id: str = "",
-) -> None:
-    """One `listing_fee.funnel.<name>` domain event. Written in the caller's
-    transaction; the caller commits."""
-    assert name in LISTING_FEE_FUNNEL_EVENTS, name
-    emit_event(
-        db, f"listing_fee.funnel.{name}", "listing", listing_id,
-        {"listingId": listing_id, "paymentId": payment_id, **(payload or {})},
-        correlation_id=correlation_id,
-        actor_kind="party" if party_id else "", actor_id=str(party_id) if party_id else "",
-    )
 
 
 def _current_environment() -> str:
@@ -418,11 +382,6 @@ def create_quote(db: Session, listing: Listing, party: Party, *, correlation_id:
         {"listingId": listing.id, "amount": amount, "currency": policy.currency},
         correlation_id=correlation_id, actor_kind="party", actor_id=str(party.id),
     )
-    record_funnel_event(
-        db, "fee_viewed", listing.id, party_id=party.id,
-        payload={"quoteId": quote.id, "market": jurisdiction_code, "currency": policy.currency},
-        correlation_id=correlation_id,
-    )
     db.commit()
     return quote
 
@@ -522,62 +481,6 @@ def list_listing_fee_refunds_for_payment(db: Session, payment_id: int) -> list[L
             .order_by(ListingFeeRefund.created_at.desc())
         )
     )
-
-
-def assert_room_change_allowed(db: Session, listing: Listing, new_room_id: int | None) -> None:
-    """ZR-LF-001: the fee is for one listing of one room. Once it is paid,
-    pointing the listing at a different room would let a single fee cover
-    another property -- refused (a new listing, with its own fee, is the way
-    to list the other room)."""
-    if new_room_id is None or new_room_id == listing.room_id or listing.room_id is None:
-        return
-    if listing_fee_is_paid(db, listing.id):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "This listing's fee is already paid for its current room. Create a new listing to list a different room.",
-        )
-
-
-def flag_possible_duplicate_listing(db: Session, listing: Listing, party: Party, *, correlation_id: str = "") -> bool:
-    """Informational: another listing by the same host for the same room
-    already has a paid fee. Audited and shown to super admins so a listing
-    recreated to reset or dodge the fee can be reviewed. Never blocks."""
-    if listing.room_id is None:
-        return False
-    other_ids = db.scalars(
-        select(Listing.id).where(Listing.room_id == listing.room_id, Listing.id != listing.id, Listing.party_id == party.id)
-    ).all()
-    paid_other = next((other for other in other_ids if listing_fee_is_paid(db, other)), None)
-    if paid_other is None:
-        return False
-    already = db.scalar(
-        select(DomainEvent.id).where(
-            DomainEvent.event_type == "listing_fee.duplicate_listing_suspected", DomainEvent.resource_id == listing.id,
-        ).limit(1)
-    )
-    if already is not None:
-        return True
-    log_audit_event(
-        db, None, "listing_fee.duplicate_listing_suspected", "listing", listing.id, correlation_id,
-        reason=f"room {listing.room_id} already has paid listing {paid_other}",
-    )
-    emit_event(
-        db, "listing_fee.duplicate_listing_suspected", "listing", listing.id,
-        {"listingId": listing.id, "roomId": listing.room_id, "paidListingId": paid_other},
-        correlation_id=correlation_id, actor_kind="party", actor_id=str(party.id),
-    )
-    notif_crud.notify_all_super_admins(
-        db,
-        title="Possible duplicate listing",
-        message=(
-            f"Listing {listing.id} is for the same room as listing {paid_other}, whose Listing Fee is already paid. "
-            "Check it is not a copy made to avoid or reset the fee."
-        ),
-        notification_type="listing_fee.duplicate_listing_suspected",
-        related_entity_type="listing", related_entity_id=listing.id,
-    )
-    db.commit()
-    return True
 
 
 def listing_fee_is_paid(db: Session, listing_id: str) -> bool:
@@ -727,10 +630,7 @@ def create_checkout(
     try:
         checkout_session_id, checkout_url = stripe_client.create_checkout_session(
             amount=float(quote.total_amount), currency=quote.currency,
-            metadata={
-                "domain": "listing_fee", "quote_id": str(quote.id), "listing_id": quote.listing_id,
-                "market": str((quote.policy_snapshot or {}).get("market") or ""), "currency": quote.currency,
-            },
+            metadata={"domain": "listing_fee", "quote_id": str(quote.id), "listing_id": quote.listing_id},
             success_url=success_url, cancel_url=cancel_url,
             idempotency_key=f"listing_fee_checkout:{idempotency_key}",
         )
@@ -778,10 +678,6 @@ def create_checkout(
         {"listingId": quote.listing_id, "amount": float(quote.total_amount), "currency": quote.currency},
         correlation_id=correlation_id, actor_kind="party", actor_id=str(party.id),
     )
-    record_funnel_event(
-        db, "checkout_started", quote.listing_id, party_id=party.id, payment_id=payment.id,
-        payload={"amount": float(quote.total_amount), "currency": quote.currency}, correlation_id=correlation_id,
-    )
     db.commit()
 
     # Same "no real webhook will ever arrive without real Stripe keys
@@ -792,106 +688,6 @@ def create_checkout(
         db.refresh(payment)
 
     return payment, checkout_url
-
-
-def listing_fee_funnel(db: Session, *, days: int = 30, now: datetime | None = None) -> dict:
-    """ZR-LF-001 funnel for the admin report: how many listings reached each
-    stage in the window (distinct listings, so a host re-opening the fee
-    screen five times counts once), plus the view -> paid conversion."""
-    from sqlalchemy import func
-
-    since = (now or datetime.now(timezone.utc)) - timedelta(days=days)
-    rows = db.execute(
-        select(DomainEvent.event_type, func.count(func.distinct(DomainEvent.resource_id)))
-        .where(DomainEvent.event_type.like("listing_fee.funnel.%"), DomainEvent.occurred_at >= since)
-        .group_by(DomainEvent.event_type)
-    ).all()
-    counts = {name: 0 for name in LISTING_FEE_FUNNEL_EVENTS}
-    for event_type, count in rows:
-        counts[event_type.removeprefix("listing_fee.funnel.")] = count
-    viewed = counts["fee_viewed"]
-    return {
-        "days": days,
-        "since": since,
-        "stages": [{"name": name, "listings": counts[name]} for name in LISTING_FEE_FUNNEL_EVENTS],
-        "conversion_rate": round(counts["checkout_completed"] / viewed, 4) if viewed else None,
-    }
-
-
-def list_duplicate_listing_flags(db: Session, *, limit: int = 100) -> list[dict]:
-    """Listings flagged by flag_possible_duplicate_listing, newest first,
-    with each listing's current state so an admin can see what's live."""
-    events = db.scalars(
-        select(DomainEvent)
-        .where(DomainEvent.event_type == "listing_fee.duplicate_listing_suspected")
-        .order_by(DomainEvent.occurred_at.desc(), DomainEvent.id.desc())
-        .limit(max(1, min(limit, 500)))
-    ).all()
-    flags = []
-    for event in events:
-        payload = event.payload or {}
-        listing = db.get(Listing, event.resource_id)
-        paid = db.get(Listing, payload.get("paidListingId")) if payload.get("paidListingId") else None
-        flags.append({
-            "listing_id": event.resource_id,
-            "listing_name": listing.name if listing else "",
-            "listing_state": listing.state if listing else "DELETED",
-            "room_id": payload.get("roomId"),
-            "paid_listing_id": payload.get("paidListingId") or "",
-            "paid_listing_name": paid.name if paid else "",
-            "paid_listing_state": paid.state if paid else "DELETED",
-            "party_id": int(event.actor_id) if event.actor_id.isdigit() else None,
-            "flagged_at": event.occurred_at,
-        })
-    return flags
-
-
-def record_checkout_cancelled(db: Session, payment: ListingFeePayment, *, correlation_id: str = "") -> None:
-    """The lister came back from Stripe's cancel_url. Nothing was charged:
-    the payment stays PENDING (Stripe expires the session on its own, and
-    create_checkout hands the same live session back on a retry), so this
-    only records the funnel drop-off."""
-    if payment.status != "PENDING":
-        return
-    record_funnel_event(
-        db, "checkout_cancelled", payment.listing_id, party_id=payment.party_id, payment_id=payment.id,
-        correlation_id=correlation_id,
-    )
-    db.commit()
-
-
-def payment_refund_summary(payment: ListingFeePayment) -> dict:
-    """What the host sees about refunds on their fee: the confirmed refunded
-    amount, whether the whole fee came back, and the latest refund's state."""
-    refunds = sorted(payment.refunds, key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc))
-    refunded = _round2(sum(float(r.amount) for r in refunds if r.status in ("PARTIALLY_REFUNDED", "REFUNDED")))
-    fully_refunded = any(r.status == "REFUNDED" for r in refunds) or (
-        payment.status == "SUCCEEDED" and refunded >= _round2(float(payment.amount)) > 0
-    )
-    latest = refunds[-1] if refunds else None
-    credit_notes = [r.credit_note_number for r in refunds if r.credit_note_number]
-    return {
-        "refunded_amount": refunded,
-        "fully_refunded": fully_refunded,
-        "refund_status": latest.status if latest else None,
-        "refund_id": latest.id if latest else None,
-        "refunded_at": latest.completed_at if latest else None,
-        "credit_note_number": credit_notes[-1] if credit_notes else None,
-    }
-
-
-def latest_listing_fee_payment(db: Session, listing_id: str) -> ListingFeePayment | None:
-    """The payment that decides what the fee screen shows: a live paid one
-    wins, otherwise the most recent attempt of any status."""
-    payments = db.scalars(
-        select(ListingFeePayment)
-        .where(ListingFeePayment.listing_id == listing_id)
-        .order_by(ListingFeePayment.created_at.desc(), ListingFeePayment.id.desc())
-    ).all()
-    for payment in payments:
-        if payment.status == "SUCCEEDED" and not payment_refund_summary(payment)["fully_refunded"]:
-            return payment
-    return payments[0] if payments else None
 
 
 def _complete_payment_success(db: Session, payment: ListingFeePayment, *, correlation_id: str = "") -> None:
@@ -906,10 +702,6 @@ def _complete_payment_success(db: Session, payment: ListingFeePayment, *, correl
         db, "listing_fee.paid", "listing_fee_payment", str(payment.id),
         {"listingId": payment.listing_id, "amount": float(payment.amount), "currency": payment.currency},
         correlation_id=correlation_id, previous_state="PENDING", new_state="SUCCEEDED",
-    )
-    record_funnel_event(
-        db, "checkout_completed", payment.listing_id, party_id=payment.party_id, payment_id=payment.id,
-        payload={"amount": float(payment.amount), "currency": payment.currency}, correlation_id=correlation_id,
     )
     db.commit()
 
@@ -960,10 +752,6 @@ def _complete_payment_failure(
     emit_event(
         db, "listing_fee.payment_failed", "listing_fee_payment", str(payment.id),
         {"listingId": payment.listing_id}, correlation_id=correlation_id, previous_state="PENDING", new_state="FAILED",
-    )
-    record_funnel_event(
-        db, "checkout_failed", payment.listing_id, party_id=payment.party_id, payment_id=payment.id,
-        payload={"reason": message}, correlation_id=correlation_id,
     )
     db.commit()
 
