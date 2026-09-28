@@ -189,6 +189,58 @@ class ListingFeePaymentRead(CamelModel):
     # a stored column on the payment itself), so routes construct this
     # explicitly rather than relying on from_attributes auto-population.
     refund_eligible: bool = False
+    # ZR-LF-001 Screen D: the breakdown and receipt shown on success.
+    fee_amount: float | None = None
+    tax_amount: float | None = None
+    receipt_number: str | None = None
+    # Refunds against this payment (ZR-LF-001: a refunded fee is shown as
+    # refunded, never silently replaced by a new charge request).
+    refunded_amount: float = 0.0
+    fully_refunded: bool = False
+    refund_status: str | None = None
+    refund_id: int | None = None
+    refunded_at: datetime | None = None
+    credit_note_number: str | None = None
+    dispute_status: str | None = None
+
+
+class ListingFeeFunnelStage(CamelModel):
+    name: str
+    listings: int
+
+
+class ListingFeeFunnelRead(CamelModel):
+    days: int
+    since: datetime
+    stages: list[ListingFeeFunnelStage]
+    # checkout_completed / fee_viewed over the window; None with no views.
+    conversion_rate: float | None = None
+
+
+class ListingFeeDuplicateFlagRead(CamelModel):
+    listing_id: str
+    listing_name: str
+    listing_state: str
+    room_id: int | None = None
+    paid_listing_id: str
+    paid_listing_name: str
+    paid_listing_state: str
+    party_id: int | None = None
+    flagged_at: datetime
+
+
+class ListingFeeListingStatusRead(CamelModel):
+    """Everything the fee screens need for one listing, in one call."""
+
+    listing_id: str
+    listing_name: str
+    listing_address: str
+    market: str | None = None
+    fee_paid: bool
+    # Publish requirements still open, other than the fee itself. Checkout
+    # is refused while this is non-empty.
+    checkout_blockers: list[str]
+    latest_payment: ListingFeePaymentRead | None = None
 
 
 class ListingFeeReceiptRead(CamelModel):
