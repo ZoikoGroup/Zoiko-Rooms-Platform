@@ -503,7 +503,7 @@ export function listHostedProperties(): Promise<Property[]> {
   return apiClientFetch<Property[]>("/api/users/hosting/properties");
 }
 
-export type HostedPropertyInput = { address: string; city: string; jurisdictionCode: string };
+export type HostedPropertyInput = { address: string; city: string; landmark?: string; jurisdictionCode: string };
 
 export function listOpenJurisdictions(): Promise<OpenJurisdiction[]> {
   return apiClientFetch<OpenJurisdiction[]>("/api/users/hosting/jurisdictions");

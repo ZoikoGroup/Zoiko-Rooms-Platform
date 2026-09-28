@@ -296,6 +296,7 @@ def create_user_property(
         owner_party_id=user.party_id,
         address=payload.address,
         city=payload.city,
+        landmark=payload.landmark,
         status="active",
         jurisdiction_code=jurisdiction_service.require_open_jurisdiction(db, payload.jurisdiction_code),
     )
@@ -327,6 +328,7 @@ def update_user_property(
     jurisdiction_service.apply_property_jurisdiction_change(db, prop, payload.jurisdiction_code)
     prop.address = payload.address
     prop.city = payload.city
+    prop.landmark = payload.landmark
     db.commit()
     db.refresh(prop)
 

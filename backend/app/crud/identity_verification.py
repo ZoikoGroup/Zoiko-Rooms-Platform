@@ -375,23 +375,34 @@ def _reroute_to_additional_evidence(db: Session, record: IdentityVerification, n
 def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_ocr, *, allow_reroute: bool = True) -> str | None:
     """A genuine match at or above that document type's own confidence
     threshold (document_ocr.confidence_threshold_for) -- plus, for Aadhaar,
-    a genuinely valid Verhoeff checksum, and no conflict with whatever
-    number the user typed themselves -- auto-verifies for real, using the
-    same real crud path (and same real IDENTITY VerificationCredential) a
-    human admin's approval click produces: this is a real check actually
-    succeeding, not a blind accept, so completing it automatically is
-    honest. Any of those failing reroutes to re-upload."""
+    a genuinely valid Verhoeff checksum, no conflict with whatever number
+    the user typed themselves, AND the submitting user's own registered
+    account name (UserAccount.full_name) actually appearing on the
+    document (document_ocr.check_name_in_document) -- auto-verifies for
+    real, using the same real crud path (and same real IDENTITY
+    VerificationCredential) a human admin's approval click produces: this
+    is a real check actually succeeding, not a blind accept, so completing
+    it automatically is honest. Any of those failing reroutes to
+    re-upload, with a specific reason naming exactly what didn't match."""
     from app.core.identity_uploads import resolve_identity_document_path
     from app.crud.payment_provider import get_system_admin
 
+    user = _user_for_party(db, record.party_id)
+
     try:
         file_path = resolve_identity_document_path(record.document_file_path)
-        matched_number, confidence = document_ocr.extract_and_score(file_path.read_bytes(), record.document_type)
+        document_bytes = file_path.read_bytes()
+        matched_number, confidence, mrz_name = document_ocr.extract_and_score(document_bytes, record.document_type)
+        name_matched, _name_confidence, _name_snippet = (
+            document_ocr.check_name_in_document(document_bytes, user.full_name) if user else (None, 0.0, "")
+        )
     except Exception:
         return None
 
     record.ocr_extracted_number = matched_number
     record.ocr_confidence = confidence
+    record.ocr_name_matched = name_matched
+    record.extracted_name = mrz_name
     db.flush()
 
     doc_label = record.document_type.replace('_', ' ')
@@ -414,11 +425,21 @@ def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_
             f"The number you entered ({record.encrypted_reference}) doesn't match the number read from the "
             f"photo ({matched_number})."
         )
+    elif name_matched is False:
+        # Specific, distinct failure reason -- never folded into the number
+        # message, so the user (or a reviewing admin) knows exactly which
+        # signal failed: the document number was fine, but this doesn't
+        # look like the same person's document.
+        reject_reason = (
+            f"The name on your account ({user.full_name}) wasn't found on this document. "
+            f"Please upload your own {doc_label}."
+        )
 
     if reject_reason is None:
         note = (
             f"Auto-verified: automated scan read a {doc_label} number ({matched_number}) matching the "
-            f"required format, at {confidence:.0f}% OCR confidence (minimum {threshold:.0f}%)."
+            f"required format, and found your registered name on the document, at {confidence:.0f}% OCR "
+            f"confidence (minimum {threshold:.0f}%)."
         )
         verify_identity_verification(db, record, get_system_admin(db), notes=note)
         return "verified"
@@ -429,36 +450,47 @@ def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_
 def _run_address_ocr_check(db: Session, record: IdentityVerification, document_ocr, *, allow_reroute: bool = True) -> str | None:
     """No document NUMBER and nothing stored anywhere in this platform to
     check a claimed address against (see document_ocr.py's own docstring),
-    so the only genuine signal is "does the content plausibly match the
-    claimed document type." A plausible match auto-verifies for real, using
-    the same real crud path a human admin's approval click produces --
-    otherwise reroutes to re-upload with the actual reason."""
+    so the two genuine signals are "does the content plausibly match the
+    claimed document type" AND "does the submitting user's own registered
+    account name appear on it" (document_ocr.check_name_in_document). Both
+    passing auto-verifies for real, using the same real crud path a human
+    admin's approval click produces -- otherwise reroutes to re-upload
+    with the specific reason, never a combined/ambiguous one."""
     from app.core.identity_uploads import resolve_identity_document_path
     from app.crud.payment_provider import get_system_admin
 
+    user = _user_for_party(db, record.party_id)
+
     try:
         file_path = resolve_identity_document_path(record.document_file_path)
-        plausible, confidence = document_ocr.check_address_document_plausibility(
-            file_path.read_bytes(), record.document_type,
+        document_bytes = file_path.read_bytes()
+        plausible, confidence = document_ocr.check_address_document_plausibility(document_bytes, record.document_type)
+        name_matched, _name_confidence, _name_snippet = (
+            document_ocr.check_name_in_document(document_bytes, user.full_name) if user else (None, 0.0, "")
         )
     except Exception:
         return None
 
     record.ocr_confidence = confidence
+    record.ocr_name_matched = name_matched
     db.flush()
 
     doc_label = record.document_type.replace('_', ' ')
     threshold = document_ocr.ADDRESS_OCR_CONFIDENCE_THRESHOLD
 
-    if plausible and confidence >= threshold:
+    if plausible and confidence >= threshold and name_matched is not False:
         note = (
-            f"Auto-verified: automated scan found content consistent with document type '{doc_label}', "
-            f"at {confidence:.0f}% OCR confidence (minimum {threshold:.0f}%)."
+            f"Auto-verified: automated scan found content consistent with document type '{doc_label}' and "
+            f"your registered name, at {confidence:.0f}% OCR confidence (minimum {threshold:.0f}%)."
         )
         verify_identity_verification(db, record, get_system_admin(db), notes=note)
         return "verified"
 
-    if not plausible:
+    if name_matched is False:
+        # Distinct failure reason -- the document type/quality was fine,
+        # but this doesn't look like the same person's document.
+        reason = f"The name on your account ({user.full_name}) wasn't found on this document. Please upload your own {doc_label}."
+    elif not plausible:
         reason = f"Automated scan couldn't find content matching document type '{doc_label}' in this document."
     else:
         reason = (

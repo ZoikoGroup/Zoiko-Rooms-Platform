@@ -36,6 +36,7 @@ type PropertyForm = {
   id: number | null;
   address: string;
   city: string;
+  landmark: string;
   jurisdictionCode: string;
   /** The saved region when editing -- stays selectable even if that market has since closed. */
   savedJurisdictionCode?: string;
@@ -106,6 +107,7 @@ export function HostingPropertiesManager() {
       const payload = {
         address: propertyForm.address.trim(),
         city: propertyForm.city.trim(),
+        landmark: propertyForm.landmark.trim() || undefined,
         jurisdictionCode: propertyForm.jurisdictionCode,
       };
       if (propertyForm.id === null) {
@@ -212,6 +214,7 @@ export function HostingPropertiesManager() {
                 id: null,
                 address: "",
                 city: "",
+                landmark: "",
                 jurisdictionCode: regions.length === 1 ? regions[0].code : "",
                 regionLocked: false,
               })
@@ -263,6 +266,7 @@ export function HostingPropertiesManager() {
                           id: property.id,
                           address: property.address,
                           city: property.city,
+                          landmark: property.landmark ?? "",
                           jurisdictionCode: property.jurisdictionCode,
                           savedJurisdictionCode: property.jurisdictionCode,
                           regionLocked: property.regionLocked,
@@ -416,6 +420,17 @@ export function HostingPropertiesManager() {
               value={propertyForm?.city ?? ""}
               onChange={(e) => setPropertyForm((f) => (f ? { ...f, city: e.target.value } : f))}
               placeholder="Mumbai"
+              className={inputClass}
+            />
+          </Field>
+          <Field
+            label="Nearby landmark (optional)"
+            hint="Only used as a backup if a property verification document doesn't clearly match the full address."
+          >
+            <input
+              value={propertyForm?.landmark ?? ""}
+              onChange={(e) => setPropertyForm((f) => (f ? { ...f, landmark: e.target.value } : f))}
+              placeholder="Near Bandra Bandstand"
               className={inputClass}
             />
           </Field>
