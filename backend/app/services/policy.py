@@ -26,11 +26,13 @@ from app.models.market_release import MarketRelease
 _DEFAULTS: dict[str, Any] = {
     "booking.acceptance_hold_duration_hours": lambda: settings.offer_acceptance_confirmation_hours,
     "payment.checkout_lock_duration_minutes": lambda: settings.payment_checkout_lock_minutes,
-    # Not yet consulted by any state transition -- England always requires
-    # approval (Rule 3), and there is no second launch market to exercise a
-    # False value against yet. Kept here, readable and settable, so a future
-    # low-risk-market approval mode has a config key ready without a fork.
-    "publication.requires_approval": lambda: True,
+    # Rule 3: England always requires approval -- set as an explicit override
+    # on England's own MarketRelease, not via this default. Every other
+    # market defaults to auto-approve+publish (goes through the exact same
+    # audited ListingApproval/PUBLISHED transition as a human decision would
+    # -- see _auto_approve_and_publish_low_risk_market -- just
+    # system-attributed instead of admin-attributed).
+    "publication.requires_approval": lambda: False,
     # Same status: readable/settable, not yet consulted -- no call site in
     # this codebase currently branches public-visibility behavior on a
     # failed jurisdiction gate beyond "not bookable" (Rule 1's own
