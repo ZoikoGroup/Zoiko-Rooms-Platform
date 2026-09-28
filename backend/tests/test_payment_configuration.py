@@ -22,7 +22,6 @@ from app.models.listing import Listing
 from app.models.listing_fee import LISTING_FEE_QUOTE_TTL_SECONDS, ListingFeePolicy
 from app.models.market_release import MarketRelease
 from app.models.party import Party
-from app.models.payment_recipient_authority import PaymentRecipientAuthority
 from app.models.property import Property
 from app.models.room import Room
 from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
@@ -32,6 +31,17 @@ boundary = pytest.mark.payment_boundary
 
 
 # ---------------------------------------------------------------- helpers
+
+
+def _set_room_listing_authority(db: Session, room, party_id: int, status: str) -> None:
+    """Who receives rent is decided by the room's listing authority -- revoke
+    every existing one, then leave a single record in `status`."""
+    from app.models.authority_record import AuthorityRecord
+
+    for existing in db.query(AuthorityRecord).filter(AuthorityRecord.room_id == room.id):
+        existing.status = "revoked"
+    db.add(AuthorityRecord(party_id=party_id, room_id=room.id, authority_type="owner", relationship_type="OWNER", status=status))
+    db.commit()
 
 def _market(db: Session, code: str = "England") -> MarketRelease:
     release = db.query(MarketRelease).filter_by(jurisdiction=code).first()
@@ -337,6 +347,7 @@ class TestPaymentReceiptAuthority:
 
     def test_instructions_hidden_without_verified_authority(self, client, db_session: Session, monkeypatch):
         user, rent = self._signed_agreement_obligation(client, db_session, "auth1")
+        _set_room_listing_authority(db_session, rent.room, rent.recipient_party_id, "pending")
         monkeypatch.setattr(settings, "payment_receipt_authority_required", True)
         r = client.get(
             f"/api/users/rental-payments/obligations/{rent.id}/instructions", cookies=auth_user_cookie(user),
@@ -352,15 +363,15 @@ class TestPaymentReceiptAuthority:
             db_session, guest, rent, amount=float(rent.amount), currency=rent.currency,
             declared_date=date.today(), payment_method_category="BANK_TRANSFER",
         )
+        _set_room_listing_authority(db_session, rent.room, recipient.id, "pending")
         monkeypatch.setattr(settings, "payment_receipt_authority_required", True)
         with pytest.raises(HTTPException) as exc:
             rp_crud.confirm_receipt(db_session, recipient, record)
         assert exc.value.status_code == 409
 
-        db_session.add(PaymentRecipientAuthority(
-            party_id=recipient.id, room_id=rent.room.id, relationship_type="OWNER", status="verified",
-        ))
-        db_session.commit()
+        # Once the admin verifies the room's listing authority, the same host
+        # may receive -- and confirm -- rent. No separate recipient step.
+        _set_room_listing_authority(db_session, rent.room, recipient.id, "verified")
         confirmed = rp_crud.confirm_receipt(db_session, recipient, record)
         assert confirmed.status == "CONFIRMED"
 

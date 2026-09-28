@@ -22,6 +22,7 @@ from app.crud.audit import log_audit_event
 from app.crud.guest import get_guest_for_user
 from app.db.session import get_db
 from app.services import stripe_client
+from app.services.payment_boundary import capability_enabled, require_capability
 from app.services.rental_payment_due_soon import sweep_rental_payment_due_soon
 from app.models.admin_user import AdminUser
 from app.models.evidence_artifact import EvidenceArtifact
@@ -35,10 +36,12 @@ from app.schemas.rental_payment import (
     EvidenceArtifactRead,
     RentalPaymentAllocationsCreate,
     RentalPaymentConfirmReceiptRequest,
+    RentalPaymentRecordReceiptRequest,
     RentalPaymentCorrectionCreate,
     RentalPaymentCorrectionRead,
     RentalPaymentDisputeCreate,
     RentalPaymentDisputeRead,
+    RentalPaymentDisputeAdminRead,
     RentalPaymentDisputeResolve,
     RentalPaymentDisputeUpdate,
     RentalPaymentEvidenceHoldCreate,
@@ -103,7 +106,9 @@ def _to_instruction_read(instruction, *, include_bank_details: bool = False) -> 
     return RentalPaymentInstructionRead(
         id=instruction.id, party_id=instruction.party_id, status=instruction.status, method=instruction.method,
         recipient_name=instruction.recipient_name, country_code=instruction.country_code,
-        account_identifier_masked=f"******{instruction.account_identifier_last4}", bank_details=bank_details,
+        account_identifier_masked=(
+            f"******{instruction.account_identifier_last4}" if instruction.account_identifier_last4 else ""
+        ), bank_details=bank_details,
         reference_format=instruction.reference_format, additional_instructions=instruction.additional_instructions,
         verified_at=instruction.verified_at, created_at=instruction.created_at,
         is_high_risk=instruction.is_high_risk, high_risk_reason=instruction.high_risk_reason,
@@ -191,7 +196,7 @@ def _resolve_frontend_origin(request: Request) -> str:
 
 @router.post(
     "/obligations/{obligation_id}/payment-session", response_model=ExternalPaymentSessionCreateResult,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_capability("rent_card_checkout_enabled"))],
 )
 def post_start_rental_payment_session(
     obligation_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
@@ -340,6 +345,28 @@ def _get_recipient_record_or_403(db: Session, record_id: int, party: Party):
     return record
 
 
+@recipient_router.post(
+    "/obligations/{obligation_id}/record-receipt", response_model=RentalPaymentObligationRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_record_receipt_as_recipient(
+    obligation_id: int, payload: RentalPaymentRecordReceiptRequest, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The host marks rent/deposit as received -- paid to them directly,
+    outside Zoiko -- without waiting for the renter to record it first.
+    Returns the obligation with its new status."""
+    party = _get_own_party_or_400(db, user)
+    obligation = rp_crud.get_obligation_or_404(db, obligation_id)
+    rp_crud.record_receipt_as_recipient(
+        db, party, obligation, amount=payload.amount, received_date=payload.received_date,
+        payment_method_category=payload.payment_method_category, external_reference=payload.external_reference,
+        note=payload.note, correlation_id=get_correlation_id(request),
+    )
+    db.refresh(obligation)
+    return obligation
+
+
 @recipient_router.post("/records/{record_id}/confirm-receipt", response_model=RentalPaymentObligationRead)
 def post_confirm_receipt(
     record_id: int, payload: RentalPaymentConfirmReceiptRequest, request: Request,
@@ -478,6 +505,7 @@ def get_recipient_rental_payment_provider_account(user: UserAccount = Depends(ge
 
 @recipient_router.post(
     "/provider-account", response_model=RentalPaymentProviderAccountConnectResult, status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_capability("rent_card_checkout_enabled"))],
 )
 def post_connect_rental_payment_provider_account(
     payload: RentalPaymentProviderAccountCreate, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
@@ -492,7 +520,10 @@ def post_connect_rental_payment_provider_account(
     return RentalPaymentProviderAccountConnectResult(account=account, onboarding_url=onboarding_url)
 
 
-@recipient_router.post("/provider-account/refresh", response_model=RentalPaymentProviderAccountRead)
+@recipient_router.post(
+    "/provider-account/refresh", response_model=RentalPaymentProviderAccountRead,
+    dependencies=[Depends(require_capability("rent_card_checkout_enabled"))],
+)
 def post_refresh_rental_payment_provider_account(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     party = _get_own_party_or_400(db, user)
     account = rpa_crud.get_for_party(db, party.id)
@@ -501,7 +532,10 @@ def post_refresh_rental_payment_provider_account(user: UserAccount = Depends(get
     return rpa_crud.refresh_account_status(db, account)
 
 
-@recipient_router.post("/provider-account/resume-onboarding", response_model=RentalPaymentProviderAccountConnectResult)
+@recipient_router.post(
+    "/provider-account/resume-onboarding", response_model=RentalPaymentProviderAccountConnectResult,
+    dependencies=[Depends(require_capability("rent_card_checkout_enabled"))],
+)
 def post_resume_rental_payment_provider_account_onboarding(
     user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
@@ -520,7 +554,10 @@ def post_resume_rental_payment_provider_account_onboarding(
     return RentalPaymentProviderAccountConnectResult(account=account, onboarding_url=onboarding_url)
 
 
-@recipient_router.post("/provider-account/simulate-onboarding-complete", response_model=RentalPaymentProviderAccountRead)
+@recipient_router.post(
+    "/provider-account/simulate-onboarding-complete", response_model=RentalPaymentProviderAccountRead,
+    dependencies=[Depends(require_capability("rent_card_checkout_enabled"))],
+)
 def post_simulate_rental_payment_provider_account_onboarding_complete(
     user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
@@ -534,7 +571,10 @@ def post_simulate_rental_payment_provider_account_onboarding_complete(
     return rpa_crud.simulate_onboarding_complete(db, account)
 
 
-@recipient_router.post("/provider-account/request-change", response_model=RentalPaymentProviderAccountChangeRequestResult)
+@recipient_router.post(
+    "/provider-account/request-change", response_model=RentalPaymentProviderAccountChangeRequestResult,
+    dependencies=[Depends(require_capability("rent_card_checkout_enabled"))],
+)
 def post_request_rental_payment_provider_account_change(
     user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
@@ -550,7 +590,10 @@ def post_request_rental_payment_provider_account_change(
     return RentalPaymentProviderAccountChangeRequestResult()
 
 
-@recipient_router.post("/provider-account/resend-change-code", response_model=RentalPaymentProviderAccountChangeRequestResult)
+@recipient_router.post(
+    "/provider-account/resend-change-code", response_model=RentalPaymentProviderAccountChangeRequestResult,
+    dependencies=[Depends(require_capability("rent_card_checkout_enabled"))],
+)
 def post_resend_rental_payment_provider_account_change_code(
     user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
@@ -562,7 +605,10 @@ def post_resend_rental_payment_provider_account_change_code(
     return RentalPaymentProviderAccountChangeRequestResult()
 
 
-@recipient_router.post("/provider-account/confirm-change", response_model=RentalPaymentProviderAccountConnectResult)
+@recipient_router.post(
+    "/provider-account/confirm-change", response_model=RentalPaymentProviderAccountConnectResult,
+    dependencies=[Depends(require_capability("rent_card_checkout_enabled"))],
+)
 def post_confirm_rental_payment_provider_account_change(
     payload: RentalPaymentProviderAccountConfirmChange, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
@@ -696,16 +742,48 @@ def post_cancel_rental_payment_obligation(
     return rp_crud.cancel_obligation(db, admin, obligation, reason=payload.reason, correlation_id=get_correlation_id(request))
 
 
-@admin_router.post("/disputes/{dispute_id}/resolve", response_model=RentalPaymentDisputeRead)
+def _to_dispute_admin_read(dispute: RentalPaymentDispute) -> RentalPaymentDisputeAdminRead:
+    record = dispute.record
+    obligation = record.obligation
+    return RentalPaymentDisputeAdminRead(
+        **RentalPaymentDisputeRead.model_validate(dispute).model_dump(),
+        record_status=record.status, declared_amount=float(record.declared_amount),
+        declared_currency=record.declared_currency, declared_date=record.declared_date,
+        payment_method_category=record.payment_method_category, external_reference=record.external_reference,
+        obligation_id=obligation.id, obligation_label=obligation.display_label, obligation_amount=float(obligation.amount),
+        obligation_status=obligation.status, tenant_guest_id=obligation.tenant_guest_id,
+        recipient_party_id=obligation.recipient_party_id,
+        reported_by="host" if dispute.reported_by_party_id is not None else "tenant",
+    )
+
+
+@admin_router.get(
+    "/disputes", response_model=list[RentalPaymentDisputeAdminRead],
+    dependencies=[Depends(require_super_admin_or_payment_staff)],
+)
+def get_rental_payment_disputes(dispute_status: str | None = Query(default="OPEN", alias="status"), db: Session = Depends(get_db)):
+    """Admin queue of rent payment disputes (status=OPEN by default; pass
+    status= empty for all), with the payment each one is about."""
+    return [_to_dispute_admin_read(d) for d in rp_crud.list_disputes(db, status_filter=dispute_status or None)]
+
+
+@admin_router.post(
+    "/disputes/{dispute_id}/resolve", response_model=RentalPaymentDisputeRead,
+    dependencies=[Depends(require_super_admin_or_payment_staff)],
+)
 def post_resolve_rental_payment_dispute(
     dispute_id: int, payload: RentalPaymentDisputeResolve, request: Request,
-    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_super_admin_or_payment_staff), db: Session = Depends(get_db),
 ):
+    """Closes a dispute and, per payload.outcome, decides the payment:
+    PAYMENT_STANDS confirms it, PAYMENT_NOT_RECEIVED makes it owed again,
+    CLOSE_ONLY leaves it as it is. Both sides are notified."""
     dispute = db.get(RentalPaymentDispute, dispute_id)
     if not dispute:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Dispute not found")
     return rp_crud.resolve_dispute(
-        db, admin, dispute, resolution_notes=payload.resolution_notes, correlation_id=get_correlation_id(request),
+        db, admin, dispute, resolution_notes=payload.resolution_notes, outcome=payload.outcome,
+        correlation_id=get_correlation_id(request),
     )
 
 
@@ -754,6 +832,16 @@ def post_confirm_rental_payment_record_as_provider(
         db, admin, record, provider_reference=payload.provider_reference, reason=payload.reason,
         correlation_id=get_correlation_id(request),
     )
+
+
+@admin_router.post("/scheduled-jobs/run", dependencies=[Depends(require_super_admin)])
+def post_run_scheduled_jobs(db: Session = Depends(get_db)):
+    """Runs the hourly jobs now (monthly rent creation, due/overdue status
+    and reminders, booking expiry) -- same work the in-process scheduler
+    does, for a super admin who doesn't want to wait for the next tick."""
+    from app.services.scheduled_jobs import run_scheduled_jobs
+
+    return run_scheduled_jobs(db)
 
 
 @admin_router.get(
@@ -829,6 +917,38 @@ def post_append_rental_payment_correction(
     )
 
 
+@admin_router.get(
+    "/records/{record_id}/evidence", response_model=list[EvidenceArtifactRead],
+    dependencies=[Depends(require_super_admin_or_payment_staff)],
+)
+def get_admin_rental_payment_evidence(record_id: int, db: Session = Depends(get_db)):
+    """Support's view of the proof attached to a payment -- what a dispute
+    decision or a legal hold is made on."""
+    rp_crud.get_record_or_404(db, record_id)
+    return rp_crud.list_payment_evidence_for_record(db, record_id)
+
+
+@admin_router.get(
+    "/records/{record_id}/evidence/{artifact_id}", dependencies=[Depends(require_super_admin_or_payment_staff)],
+)
+def download_admin_rental_payment_evidence(
+    record_id: int, artifact_id: int, request: Request,
+    admin: AdminUser = Depends(require_super_admin_or_payment_staff), db: Session = Depends(get_db),
+):
+    """Same file the tenant/host can open -- every support access is logged."""
+    rp_crud.get_record_or_404(db, record_id)
+    artifact = db.get(EvidenceArtifact, artifact_id)
+    if not artifact or artifact.related_entity_type != "rental_payment_record" or artifact.related_entity_id != str(record_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Evidence not found")
+    if artifact.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This evidence has been deleted")
+    rp_crud.log_evidence_access(
+        db, artifact, actor_kind="admin", actor_id=str(admin.id), correlation_id=get_correlation_id(request),
+    )
+    file_bytes = resolve_dispute_evidence_path(artifact.stored_filename).read_bytes()
+    return Response(content=file_bytes, media_type=artifact.content_type or "application/octet-stream")
+
+
 @admin_router.post(
     "/evidence/{artifact_id}/hold", response_model=RentalPaymentEvidenceHoldRead, status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_super_admin)],
@@ -879,6 +999,10 @@ async def post_rental_payment_stripe_webhook(request: Request, db: Session = Dep
     is a no-op. Without this, onboarding status only ever updates from a
     host manually clicking 'Refresh status' on a page they'd have to think
     to reopen -- see rpa_crud.apply_account_updated_event's own docstring."""
+    if not capability_enabled("rent_card_checkout_enabled"):
+        # Rent is paid directly to the host -- no Stripe event is ever taken as
+        # evidence of rent. Acknowledged (so Stripe stops retrying) and ignored.
+        return {"received": True, "ignored": True}
     payload = await request.body()
     signature_header = request.headers.get("stripe-signature", "")
     try:

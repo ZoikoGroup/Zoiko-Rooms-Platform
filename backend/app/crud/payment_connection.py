@@ -17,7 +17,9 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.crud.payment_recipient_authority import get_latest_payment_recipient_authority_for_room
+from sqlalchemy import select
+
+from app.models.authority_record import AuthorityRecord
 from app.crud.rental_payment_provider_account import get_charge_ready_provider_account_for_party
 from app.models.room import Room
 from app.models.user_account import UserAccount
@@ -33,7 +35,12 @@ def get_payment_connection_for_room(db: Session, room: Room) -> PaymentConnectio
     from app.crud.rental_payment import get_active_rental_payment_instruction, list_rental_payment_instructions_for_party
     from app.crud.rental_payment import resolve_rent_recipient_party_id
 
-    authority = get_latest_payment_recipient_authority_for_room(db, room.id)
+    # Who receives rent is decided by the room's listing authority (the
+    # admin-verified right to list it) -- there is no separate
+    # payment-recipient step.
+    authority = db.scalar(
+        select(AuthorityRecord).where(AuthorityRecord.room_id == room.id).order_by(AuthorityRecord.id.desc())
+    )
     recipient_party_id = resolve_rent_recipient_party_id(db, room)
 
     # ZR-PAY-LINK-003 Section 22/AC-12: a charge-ready provider account only
@@ -45,7 +52,14 @@ def get_payment_connection_for_room(db: Session, room: Room) -> PaymentConnectio
     # the connection VIEW honest about it too, rather than showing ACTIVE
     # for a rail that would then 409 the moment a tenant tried to use it.
     jurisdiction_code = (room.property.jurisdiction_code if room.property else None) or DEFAULT_JURISDICTION
-    online_rail_permitted = "CARD" in resolve_available_payment_methods(db, jurisdiction_code)
+    # Rent is paid directly to the host unless the card rent rail is switched
+    # on (settings.rent_card_checkout_enabled) -- a Stripe account alone must
+    # never make a room look payment-ready while that rail is off.
+    from app.services.payment_boundary import capability_enabled
+
+    online_rail_permitted = capability_enabled("rent_card_checkout_enabled") and (
+        "CARD" in resolve_available_payment_methods(db, jurisdiction_code)
+    )
 
     # ZR-PAY-LINK-003 Section 6: a charge-ready online provider account is
     # checked FIRST and, when present, wins over the direct-instruction
@@ -105,15 +119,16 @@ def get_payment_connection_for_room_owned_by(db: Session, user: UserAccount, roo
 def _derive_state(authority, provider_account, destination) -> str:
     if authority is None:
         return "DRAFT"
-    # ZR-PAY-LINK-003 Section 14.1: a change still awaiting the submitter's
-    # own step-up code confirmation is no more usable than a plain pending
-    # admin-verification row -- same bucket.
-    if authority.status in ("pending", "pending_step_up"):
+    # Listing authority still being checked by an admin.
+    if authority.status in ("not_started", "pending", "review_required", "conflict"):
         return "PENDING_VERIFICATION"
-    if authority.status in ("failed", "revoked"):
+    if authority.status in ("failed", "revoked", "expired"):
         return "SUSPENDED"
-    # authority.status == "verified" from here on.
-    if authority.expires_at is not None and authority.expires_at <= datetime.now(timezone.utc):
+    # "verified" (or "expiring" -- still valid) from here on.
+    expires_at = authority.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at is not None and expires_at <= datetime.now(timezone.utc):
         return "SUSPENDED"
     if provider_account is not None:
         return "ACTIVE"

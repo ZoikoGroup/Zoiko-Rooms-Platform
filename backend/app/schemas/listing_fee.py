@@ -222,3 +222,5 @@ class ListingFeeRefundRead(CamelModel):
     failure_message: str
     created_at: datetime
     completed_at: datetime | None
+    # Set once the refund is confirmed -- the credit note reversing the receipt.
+    credit_note_number: str | None = None

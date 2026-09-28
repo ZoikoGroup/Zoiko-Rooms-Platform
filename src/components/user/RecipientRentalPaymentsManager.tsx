@@ -10,6 +10,9 @@ import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } 
 import { RentalPaymentEvidenceList } from "@/components/user/RentalPaymentEvidenceList";
 import { CardPaymentOutcome, CardPaymentOutcomeTag } from "@/components/user/CardPaymentOutcome";
 import { COUNTRY_OPTIONS, resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
+import { usePaymentCapabilities } from "@/components/user/DirectPaymentNotice";
+import { HostReturnsManager } from "@/components/user/RentalPaymentReturns";
+import { RentalPaymentTimeline } from "@/components/user/RentalPaymentTimeline";
 import {
   ListingFeePayment,
   ListingFeeRefund,
@@ -34,6 +37,7 @@ import {
   confirmRentalPaymentProviderAccountChange,
   confirmRentalPaymentReceipt,
   connectRentalPaymentProviderAccount,
+  downloadListingFeeCreditNote,
   downloadListingFeeReceipt,
   errorMessage,
   getRentalPaymentProviderAccount,
@@ -41,6 +45,9 @@ import {
   listMyListingFeePayments,
   listMyRentalPaymentInstructions,
   listRecipientRentalPaymentObligations,
+  recordRentalPaymentReceiptAsRecipient,
+  updateOwnOpenRentalPaymentDispute,
+  uploadRentalPaymentEvidenceAsRecipient,
   refreshRentalPaymentProviderAccount,
   resumeRentalPaymentProviderAccountOnboarding,
   reportRentalPaymentDiscrepancyAsRecipient,
@@ -52,12 +59,19 @@ import {
 } from "@/lib/user-api";
 import { ApiError } from "@/lib/api-client";
 
+// Rent is paid straight to the host: bank transfer, UPI or cash.
 const METHOD_OPTIONS: { value: RentalPaymentMethodCategory; label: string }[] = [
   { value: "BANK_TRANSFER", label: "Bank transfer" },
+  { value: "UPI", label: "UPI" },
   { value: "CASH", label: "Cash" },
-  { value: "CARD", label: "Card" },
-  { value: "OTHER", label: "Other" },
 ];
+
+const METHOD_LABELS: Record<string, string> = {
+  BANK_TRANSFER: "Bank transfer", UPI: "UPI", CASH: "Cash", CARD: "Card", OTHER: "Other",
+};
+
+// Owed in full or in part, with nothing already waiting on the host to review.
+const MARK_RECEIVED_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "REVERSED", "PARTIALLY_PAID"]);
 
 const DISCREPANCY_OPTIONS: { value: RentalPaymentDiscrepancyReason; label: string }[] = [
   { value: "NOT_ARRIVED", label: "Payment has not arrived" },
@@ -74,7 +88,7 @@ const TYPE_FILTERS: { value: RentalPaymentObligationType | "ALL"; label: string 
   { value: "OTHER", label: "Other" },
 ];
 
-type Tab = "overview" | "amounts-due" | "records" | "instructions" | "listing-fees";
+type Tab = "overview" | "amounts-due" | "records" | "returns" | "instructions" | "listing-fees";
 // REVERSED (a refund or lost chargeback sent the money back) and
 // PARTIALLY_PAID (a remainder is still owed) are money the host is still due.
 const OPEN_STATUSES = new Set([
@@ -89,6 +103,8 @@ const OBLIGATIONS_PAGE_LIMIT = 100;
 
 export function RecipientRentalPaymentsManager() {
   const { toast, showToast } = useToast();
+  const capabilities = usePaymentCapabilities();
+  const [markingReceived, setMarkingReceived] = useState<RentalPaymentObligation | null>(null);
   const [obligations, setObligations] = useState<RentalPaymentObligation[]>([]);
   const [obligationsTotal, setObligationsTotal] = useState(0);
   const [hasMoreObligations, setHasMoreObligations] = useState(false);
@@ -160,7 +176,7 @@ export function RecipientRentalPaymentsManager() {
   return (
     <div className="space-y-5">
       <div role="tablist" aria-label="Payments" className="flex flex-wrap gap-2 border-b border-slate-100 pb-3 dark:border-white/10">
-        {(["overview", "amounts-due", "records", "instructions", "listing-fees"] as Tab[]).map((t) => (
+        {(["overview", "amounts-due", "records", "returns", "instructions", "listing-fees"] as Tab[]).map((t) => (
           <button
             key={t}
             role="tab"
@@ -176,6 +192,7 @@ export function RecipientRentalPaymentsManager() {
               overview: "Overview",
               "amounts-due": "Amounts due",
               records: "Payment records",
+              returns: "Returns",
               instructions: "Instructions",
               "listing-fees": "Listing fees",
             }[t]}
@@ -235,6 +252,11 @@ export function RecipientRentalPaymentsManager() {
                     {(o.status === "RECIPIENT_CONFIRMATION_PENDING" || o.status === "PAYER_RECORDED" || o.status === "DISPUTED") && (
                       <Button size="sm" onClick={() => openReview(o)}>
                         Review
+                      </Button>
+                    )}
+                    {MARK_RECEIVED_STATUSES.has(o.status) && o.payerAllocations.length === 0 && (
+                      <Button size="sm" onClick={() => setMarkingReceived(o)}>
+                        Mark as received
                       </Button>
                     )}
                   </div>
@@ -319,12 +341,28 @@ export function RecipientRentalPaymentsManager() {
         </div>
       )}
 
+      {tab === "returns" && <HostReturnsManager />}
+
       {tab === "instructions" && (
         <div className="space-y-6">
-          <ProviderAccountManager />
+          {capabilities?.rent_card_checkout_enabled && <ProviderAccountManager />}
           <InstructionsManager instructions={instructions} onChanged={load} />
         </div>
       )}
+
+      <MarkReceivedModal
+        obligation={markingReceived}
+        onClose={() => setMarkingReceived(null)}
+        onRecorded={(updated) => {
+          setMarkingReceived(null);
+          showToast(
+            updated.status === "CONFIRMED"
+              ? "Marked as received. The renter has been notified."
+              : `Part payment recorded -- ${formatMoney(updated.outstandingAmount, updated.currency)} is still due.`,
+          );
+          load();
+        }}
+      />
 
       {tab === "listing-fees" && (
         <div className="space-y-4">
@@ -409,12 +447,34 @@ function ListingFeePaymentRow({ payment }: { payment: ListingFeePayment }) {
       {refunds.length > 0 && (
         <div className="mt-3 space-y-1.5 border-t border-slate-100 pt-3 dark:border-white/10">
           {refunds.map((r) => (
-            <div key={r.id} className="flex items-center justify-between text-xs">
+            <div key={r.id} className="flex items-center justify-between gap-2 text-xs">
               <span className="text-slate-500 dark:text-slate-400">
                 Refund {formatMoney(r.amount, r.currency)}
-                {r.status === "FAILED" ? " -- retained internally, contact support" : ""}
+                {r.status === "FAILED" ? " -- didn't go through; Zoiko will retry it" : ""}
               </span>
-              <Badge tone={listingFeeRefundStatusTone[r.status] ?? "neutral"}>{r.status.replace(/_/g, " ")}</Badge>
+              <span className="flex items-center gap-2">
+                {(r.status === "REFUNDED" || r.status === "PARTIALLY_REFUNDED") && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const url = URL.createObjectURL(await downloadListingFeeCreditNote(r.id));
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `${r.creditNoteNumber ?? `credit-note-${r.id}`}.pdf`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                      } catch (err) {
+                        showToast(errorMessage(err, "Could not download the credit note."), "error");
+                      }
+                    }}
+                    className="font-semibold text-primary-700 hover:underline dark:text-primary-300"
+                  >
+                    Credit note
+                  </button>
+                )}
+                <Badge tone={listingFeeRefundStatusTone[r.status] ?? "neutral"}>{r.status.replace(/_/g, " ")}</Badge>
+              </span>
             </div>
           ))}
         </div>
@@ -440,8 +500,13 @@ function ReviewModal({
   const [reason, setReason] = useState<RentalPaymentDiscrepancyReason>("NOT_ARRIVED");
   const [details, setDetails] = useState("");
   const [error, setError] = useState("");
+  // Proof the host attaches to this record, and editing the host's own open report.
+  const [evidenceKey, setEvidenceKey] = useState(0);
+  const [uploading, setUploading] = useState(false);
+  const [editingDispute, setEditingDispute] = useState(false);
 
   useEffect(() => {
+    setEditingDispute(false);
     setDisputing(false);
     setPartialAmount(false);
     setConfirmAmount(entry ? String(entry.record.declaredAmount) : "");
@@ -453,6 +518,37 @@ function ReviewModal({
   if (!entry) return null;
   const { record, obligation } = entry;
   const canAct = record.status === "PAYER_RECORDED" || record.status === "DISPUTED";
+  // The host's own still-open report on this payment -- editable until support resolves it.
+  const ownOpenDispute = record.disputes.find((d) => d.status === "OPEN" && d.reportedByPartyId !== null) ?? null;
+
+  async function handleUploadProof(file: File | undefined) {
+    if (!file) return;
+    setUploading(true);
+    setError("");
+    try {
+      await uploadRentalPaymentEvidenceAsRecipient(record.id, file);
+      setEvidenceKey((k) => k + 1);
+    } catch (err) {
+      setError(errorMessage(err, "Could not upload this file."));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleUpdateDispute(e: FormEvent) {
+    e.preventDefault();
+    if (!ownOpenDispute) return;
+    setConfirming(true);
+    setError("");
+    try {
+      await updateOwnOpenRentalPaymentDispute(ownOpenDispute.id, { reasonCode: reason, details });
+      onDone("Your report was updated.");
+    } catch (err) {
+      setError(errorMessage(err, "Could not update your report."));
+    } finally {
+      setConfirming(false);
+    }
+  }
 
   async function handleConfirm() {
     setConfirming(true);
@@ -498,12 +594,64 @@ function ReviewModal({
           <Row label="Amount declared" value={formatMoney(record.declaredAmount, record.declaredCurrency)} />
           <Row label="Tenant marked paid" value={formatDateTime(record.createdAt)} />
           <Row label="Payment method" value={record.paymentMethodCategory.replace(/_/g, " ").toLowerCase()} />
-          {record.externalReference && <Row label="External reference" value={record.externalReference} />}
+          {record.externalReference && <Row label="Transaction reference" value={record.externalReference} />}
           <CardPaymentOutcome record={record} viewer="host" />
+          <RentalPaymentTimeline recordId={record.id} />
           <div>
             <span className="mb-1 block text-xs text-slate-400">Evidence</span>
-            <RentalPaymentEvidenceList recordId={record.id} />
+            <RentalPaymentEvidenceList key={evidenceKey} recordId={record.id} />
+            <label className="mt-2 inline-flex cursor-pointer items-center gap-1.5 text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300">
+              <input
+                type="file" className="sr-only" disabled={uploading}
+                accept="image/*,application/pdf"
+                onChange={(e) => {
+                  handleUploadProof(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
+              {uploading ? "Uploading..." : "Add proof (e.g. bank statement screenshot)"}
+            </label>
           </div>
+
+          {ownOpenDispute && (
+            <div className="rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">
+              <p className="font-semibold">Your report is open with support</p>
+              <p className="mt-0.5">
+                {DISCREPANCY_OPTIONS.find((o) => o.value === ownOpenDispute.reasonCode)?.label ?? ownOpenDispute.reasonCode}
+                {ownOpenDispute.details ? ` -- ${ownOpenDispute.details}` : ""}
+              </p>
+              {!editingDispute ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReason(ownOpenDispute.reasonCode);
+                    setDetails(ownOpenDispute.details);
+                    setEditingDispute(true);
+                  }}
+                  className="mt-1 font-semibold text-primary-700 hover:underline dark:text-primary-300"
+                >
+                  Edit report
+                </button>
+              ) : (
+                <form onSubmit={handleUpdateDispute} className="mt-2 space-y-2">
+                  <select
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value as RentalPaymentDiscrepancyReason)}
+                    className={inputClass}
+                  >
+                    {DISCREPANCY_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                  <textarea value={details} onChange={(e) => setDetails(e.target.value)} rows={2} className={inputClass} />
+                  <div className="flex justify-end gap-2">
+                    <Button type="button" size="sm" variant="ghost" onClick={() => setEditingDispute(false)}>Cancel</Button>
+                    <Button type="submit" size="sm" loading={confirming}>Save</Button>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
 
           <p className="flex items-start gap-1.5 pt-1 text-xs text-slate-400">
             <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" /> Confirmation means only that you confirm receipt of the
@@ -867,6 +1015,101 @@ function ProviderAccountChangeForm({
   );
 }
 
+/** The host records rent/deposit they received directly (bank transfer, UPI,
+ *  cash) -- no renter declaration needed first. For the booking's deposit
+ *  and first rent, this is what confirms the booking and unlocks move-in. */
+function MarkReceivedModal({
+  obligation,
+  onClose,
+  onRecorded,
+}: {
+  obligation: RentalPaymentObligation | null;
+  onClose: () => void;
+  onRecorded: (updated: RentalPaymentObligation) => void;
+}) {
+  const [amount, setAmount] = useState("");
+  const [receivedDate, setReceivedDate] = useState("");
+  const [method, setMethod] = useState<RentalPaymentMethodCategory>("BANK_TRANSFER");
+  const [reference, setReference] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!obligation) return;
+    setAmount(String(obligation.outstandingAmount));
+    setReceivedDate(new Date().toISOString().slice(0, 10));
+    setMethod("BANK_TRANSFER");
+    setReference("");
+    setError("");
+  }, [obligation]);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!obligation) return;
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value <= 0) {
+      setError("Enter the amount you received.");
+      return;
+    }
+    if (value > obligation.outstandingAmount) {
+      setError(`That's more than what's still owed (${formatMoney(obligation.outstandingAmount, obligation.currency)}).`);
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+    try {
+      const updated = await recordRentalPaymentReceiptAsRecipient(obligation.id, {
+        amount: value, receivedDate, paymentMethodCategory: method, externalReference: reference,
+      });
+      onRecorded(updated);
+    } catch (err) {
+      setError(errorMessage(err, "Could not record this payment."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal open={Boolean(obligation)} onClose={onClose} title="Mark as received">
+      {obligation && (
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <p className="text-sm text-slate-600 dark:text-slate-300">
+            Record the <span className="font-semibold capitalize">{obligation.displayLabel}</span> the renter paid you
+            directly. Still owed: {formatMoney(obligation.outstandingAmount, obligation.currency)}.
+          </p>
+          {error && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">{error}</p>}
+          <Field label={`Amount received (${obligation.currency}) *`} hint="Less than what's owed records a part payment.">
+            <input
+              required type="number" min="0.01" step="0.01" max={obligation.outstandingAmount}
+              value={amount} onChange={(e) => setAmount(e.target.value)} className={inputClass}
+            />
+          </Field>
+          <Field label="Date received *">
+            <input required type="date" value={receivedDate} onChange={(e) => setReceivedDate(e.target.value)} className={inputClass} />
+          </Field>
+          <Field label="Paid by *">
+            <select value={method} onChange={(e) => setMethod(e.target.value as RentalPaymentMethodCategory)} className={inputClass}>
+              {METHOD_OPTIONS.map((m) => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Reference" hint="Optional -- e.g. the bank or UPI transaction reference.">
+            <input value={reference} onChange={(e) => setReference(e.target.value)} className={inputClass} />
+          </Field>
+          <p className="text-xs text-slate-400">
+            Zoiko only records this -- the money was paid to you directly and never passed through Zoiko.
+          </p>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button type="submit" loading={submitting}>Mark as received</Button>
+          </div>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
 function InstructionsManager({ instructions, onChanged }: { instructions: RentalPaymentInstruction[]; onChanged: () => void }) {
   const { toast, showToast } = useToast();
   const [formOpen, setFormOpen] = useState(false);
@@ -971,7 +1214,7 @@ function InstructionsManager({ instructions, onChanged }: { instructions: Rental
                   <Badge tone={rentalPaymentInstructionStatusTone[i.status] ?? "neutral"}>{i.status.replace(/_/g, " ")}</Badge>
                 </div>
                 <p className="mt-0.5 text-xs text-slate-400">
-                  {i.method.replace(/_/g, " ").toLowerCase()} &middot; {i.countryCode || "—"} &middot; {i.accountIdentifierMasked}
+                  {[METHOD_LABELS[i.method] ?? i.method, i.countryCode, i.accountIdentifierMasked].filter(Boolean).join(" · ")}
                 </p>
                 {i.status === "PENDING_REVIEW" && (
                   <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">

@@ -14,7 +14,6 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.crud import external_payment_session as eps_crud
-from app.crud import payment_recipient_authority as pra_crud
 from app.crud import rental_payment as rp_crud
 from app.crud import rental_payment_provider_account as rpa_crud
 from app.models.external_payment_session import ExternalPaymentSession
@@ -24,6 +23,17 @@ from tests.conftest import _make_admin, _make_user, auth_user_cookie
 from tests.test_rental_payment_records import _make_guest, _make_party
 from tests.test_rental_transaction_record import _make_rental
 
+
+
+def _set_room_listing_authority(db: Session, room, party_id: int, status: str) -> None:
+    """Who receives rent is decided by the room's listing authority -- revoke
+    every existing one, then leave a single record in `status`."""
+    from app.models.authority_record import AuthorityRecord
+
+    for existing in db.query(AuthorityRecord).filter(AuthorityRecord.room_id == room.id):
+        existing.status = "revoked"
+    db.add(AuthorityRecord(party_id=party_id, room_id=room.id, authority_type="owner", relationship_type="OWNER", status=status))
+    db.commit()
 
 def _make_obligation_with_charge_ready_recipient(db: Session, *, guest_id: str = "G-EPS-1"):
     tenant = _make_guest(db, guest_id=guest_id)
@@ -206,13 +216,7 @@ class TestSuspendedConnectionBlocksSession:
         obligation, rental = _make_obligation_with_real_room(db_session, suffix="revoked")
         host_party, room, guest = rental["host_party"], rental["room"], rental["guest"]
 
-        record, _raw = pra_crud.declare_payment_recipient_authority(
-            db_session, rental["host_user"], room, recipient_party_id=host_party.id, relationship_type="OWNER",
-            evidence_ref="id.pdf",
-        )
-        admin = _make_admin(db_session, email="eps-suspend-admin@test.com", role="super_admin")
-        pra_crud.verify_payment_recipient_authority(db_session, record, admin)
-        pra_crud.revoke_payment_recipient_authority(db_session, record, admin)
+        _set_room_listing_authority(db_session, room, host_party.id, "revoked")
 
         account = rpa_crud.create_connected_account(db_session, host_party, country="GB", email="recipient@test.com")
         rpa_crud.simulate_onboarding_complete(db_session, account)
@@ -459,13 +463,7 @@ class TestObligationConnectionRoute:
     def test_reflects_suspended_state(self, client, db_session: Session):
         obligation, rental = _make_obligation_with_real_room(db_session, suffix="conn-suspended")
         host_party, room = rental["host_party"], rental["room"]
-        record, _raw = pra_crud.declare_payment_recipient_authority(
-            db_session, rental["host_user"], room, recipient_party_id=host_party.id, relationship_type="OWNER",
-            evidence_ref="id.pdf",
-        )
-        admin = _make_admin(db_session, email="eps-conn-route-admin@test.com", role="super_admin")
-        pra_crud.verify_payment_recipient_authority(db_session, record, admin)
-        pra_crud.revoke_payment_recipient_authority(db_session, record, admin)
+        _set_room_listing_authority(db_session, room, host_party.id, "revoked")
 
         r = client.get(
             f"/api/users/rental-payments/obligations/{obligation.id}/connection",

@@ -18,7 +18,7 @@ from app.models.party import Party
 from app.models.payment_recipient_authority import PaymentRecipientAuthority
 from app.services.rental_payment_due_soon import sweep_rental_payment_due_soon
 from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
-from tests.test_payment_recipient_authority import _make_room_owned_by
+from tests.conftest import _make_room_owned_by
 
 
 def _make_party(db: Session, *, party_type: str = "provider") -> Party:

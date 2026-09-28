@@ -361,7 +361,7 @@ class TestAccountChangeGovernance:
         see the identical rental_payment.py test for the direct-instructions
         rail."""
         from app.models.payment_recipient_authority import PaymentRecipientAuthority
-        from tests.test_payment_recipient_authority import _make_room_owned_by
+        from tests.conftest import _make_room_owned_by
 
         user, party, account = self._make_complete_account(db_session, email="change-authority-timing@test.com")
         room = _make_room_owned_by(db_session, party)

@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from pathlib import Path
 
 from fastapi import FastAPI, Request, status
@@ -31,10 +33,11 @@ from app.api.routes import (
     occupancy_classification,
     party,
     payments,
-    payment_recipient_authority,
+    payments_overview,
     properties,
     public,
     public_assistant,
+    rental_payment_returns,
     rental_payments,
     reviews,
     room_passport,
@@ -65,7 +68,37 @@ if settings.llm_provider == "groq" and not settings.groq_api_key:
         "configuration error until you add it to backend/.env and restart."
     )
 
-app = FastAPI(title="Zoiko Rooms API")
+async def _scheduler_loop() -> None:
+    """Hourly (settings.scheduler_interval_minutes) run of
+    services/scheduled_jobs.py. Runs in a worker thread so the blocking DB
+    work never stalls request handling; a failed tick is logged and the loop
+    carries on."""
+    from app.services.scheduled_jobs import run_scheduled_jobs_once
+
+    await asyncio.sleep(30)  # let the app finish starting up first
+    while True:
+        try:
+            results = await asyncio.to_thread(run_scheduled_jobs_once)
+            if results:
+                logger.info("scheduled jobs: %s", results)
+        except Exception:
+            logger.exception("scheduled jobs: tick failed")
+        await asyncio.sleep(max(settings.scheduler_interval_minutes, 1) * 60)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(_scheduler_loop()) if settings.scheduler_enabled else None
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+app = FastAPI(title="Zoiko Rooms API", lifespan=lifespan)
 
 app.middleware("http")(correlation_id_middleware)
 
@@ -119,6 +152,7 @@ app.include_router(listings.router)
 app.include_router(listing_fees.router)
 app.include_router(listing_fees.admin_router)
 app.include_router(listing_fees.webhook_router)
+app.include_router(rental_payment_returns.router)
 app.include_router(rental_payments.router)
 app.include_router(rental_payments.recipient_router)
 app.include_router(rental_payments.admin_router)
@@ -127,6 +161,7 @@ app.include_router(knowledge.router)
 app.include_router(bookings.router)
 app.include_router(guests.router)
 app.include_router(payments.router)
+app.include_router(payments_overview.router)
 app.include_router(reviews.router)
 app.include_router(analytics.router)
 app.include_router(settings_routes.router)
@@ -140,7 +175,6 @@ app.include_router(market_policy.router)
 app.include_router(properties.router)
 app.include_router(party.router)
 app.include_router(authority.router)
-app.include_router(payment_recipient_authority.router)
 app.include_router(identity_verification.router)
 app.include_router(room_passport.router)
 app.include_router(occupancy_classification.router)

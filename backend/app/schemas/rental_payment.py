@@ -149,6 +149,17 @@ class RentalPaymentConfirmReceiptRequest(CamelModel):
     note: str = ""
 
 
+class RentalPaymentRecordReceiptRequest(CamelModel):
+    """The host marking money as received directly (no renter declaration
+    first). amount omitted = everything still outstanding."""
+
+    amount: float | None = Field(default=None, gt=0, le=MAX_MONEY_AMOUNT)
+    received_date: date
+    payment_method_category: str
+    external_reference: str = ""
+    note: str = ""
+
+
 class RentalPaymentProviderConfirmRequest(CamelModel):
     provider_reference: str
     reason: str
@@ -161,6 +172,27 @@ class RentalPaymentDisputeCreate(CamelModel):
 
 class RentalPaymentDisputeResolve(CamelModel):
     resolution_notes: str
+    # CLOSE_ONLY (default) | PAYMENT_STANDS | PAYMENT_NOT_RECEIVED -- see
+    # crud/rental_payment.py:_apply_dispute_outcome.
+    outcome: str = "CLOSE_ONLY"
+
+
+class RentalPaymentDisputeAdminRead(RentalPaymentDisputeRead):
+    """A dispute with the payment context an admin needs to decide it."""
+
+    record_status: str
+    declared_amount: float
+    declared_currency: str
+    declared_date: date
+    payment_method_category: str
+    external_reference: str
+    obligation_id: int
+    obligation_label: str
+    obligation_amount: float
+    obligation_status: str
+    tenant_guest_id: str
+    recipient_party_id: int
+    reported_by: str  # "tenant" | "host"
 
 
 class RentalPaymentReverseRequest(CamelModel):

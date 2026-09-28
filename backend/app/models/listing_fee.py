@@ -287,6 +287,13 @@ class ListingFeeRefund(Base):
     failure_message: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The credit note issued once the refund is confirmed -- the tax document
+    # that reverses (part of) the fee's receipt. Numbered from its own
+    # gap-free series (crud/document_sequence.py). Null until issued.
+    credit_note_number: Mapped[str | None] = mapped_column(String(30), unique=True, nullable=True)
+    credit_note_storage_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    credit_note_content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    credit_note_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     payment: Mapped["ListingFeePayment"] = relationship(back_populates="refunds")
 

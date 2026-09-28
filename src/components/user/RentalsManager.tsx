@@ -378,9 +378,11 @@ export function RentalsManager() {
       const cardNote = " Card refunds usually take 5–10 business days to appear.";
       showToast(
         result.refundedAmount <= 0
-          ? result.feeAmount > 0
-            ? `Booking cancelled. A ${formatCurrency(result.feeAmount, cancelFor.currency)} cancellation fee applied, so there was nothing to refund.`
-            : "Booking cancelled. Nothing had been paid, so there's nothing to refund."
+          ? // Rent and deposit are paid to the host directly, so any refund
+            // comes from the host directly too -- Zoiko never holds it.
+            result.feeAmount > 0
+            ? `Booking cancelled. A ${formatCurrency(result.feeAmount, cancelFor.currency)} cancellation fee applies. If you've paid your host directly, they'll return the rest to you directly.`
+            : "Booking cancelled. If you've paid your host directly, they'll return that money to you directly -- Zoiko doesn't hold or refund rent."
           : result.feeAmount > 0
             ? `Booking cancelled. ${formatCurrency(result.refundedAmount, cancelFor.currency)} refunded (a ${formatCurrency(result.feeAmount, cancelFor.currency)} cancellation fee applied).${cardNote}`
             : `Booking cancelled. ${formatCurrency(result.refundedAmount, cancelFor.currency)} refunded in full.${cardNote}`,

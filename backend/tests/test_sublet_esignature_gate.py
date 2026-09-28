@@ -58,7 +58,9 @@ class TestESignatureGateOptIn:
         assert r.status_code == 200, r.text
         new_agreement_id = r.json()["newAgreementId"]
         agreement = db_session.get(Agreement, new_agreement_id)
-        assert agreement.status == "SIGNED"
+        # Both signatures are applied on approval (no e-signature step), and it
+        # waits for its deposit and first rent before becoming SIGNED.
+        assert agreement.status == "PAYMENT_IN_PROGRESS"
         assert agreement.signed_by_provider_at is not None
         assert agreement.signed_by_renter_at is not None
 

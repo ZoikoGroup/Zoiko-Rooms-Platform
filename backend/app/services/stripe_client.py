@@ -352,6 +352,17 @@ def create_refund(
     return refund.id
 
 
+def retrieve_refund(*, refund_id: str) -> dict | None:
+    """A platform refund's current status ({status, failure_reason}) -- used
+    to settle a Listing Fee refund whose webhook never arrived. None when not
+    configured."""
+    if not is_configured():
+        return None
+    stripe = _client()
+    refund = stripe.Refund.retrieve(refund_id)
+    return {"status": refund.status, "failure_reason": getattr(refund, "failure_reason", None) or ""}
+
+
 def create_connected_account(
     *, country: str, email: str, metadata: dict, configuration: Literal["merchant", "recipient"],
 ) -> str:

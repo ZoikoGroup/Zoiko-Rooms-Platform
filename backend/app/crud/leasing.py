@@ -1,5 +1,5 @@
 import secrets
-from datetime import date as date_, datetime, timezone
+from datetime import date as date_, datetime, timedelta, timezone
 from io import BytesIO
 
 from fastapi import HTTPException, status
@@ -1307,6 +1307,31 @@ def user_acknowledge_disclosure(
     return disclosure
 
 
+def _payment_deadline_after_signing(agreement: Agreement, now: datetime) -> datetime:
+    """How long a fully signed booking waits for its deposit and first rent.
+    Paid directly to the host (the default), that's
+    settings.direct_payment_confirmation_hold_days -- and the offer's own
+    confirmation window, which is what keeps the room hold alive
+    (services/booking_expiry.py:expire_offer_if_overdue), is stretched to
+    match, so the room isn't released while the host is still confirming a
+    bank transfer. With the card rent rail on, it stays the short
+    card-checkout lock."""
+    from app.core.config import settings
+    from app.services.payment_boundary import capability_enabled
+
+    if capability_enabled("rent_card_checkout_enabled"):
+        return compute_checkout_deadline(now, agreement.offer.listing.market_release)
+    deadline = now + timedelta(days=settings.direct_payment_confirmation_hold_days)
+    offer = agreement.offer
+    if offer is not None:
+        current = offer.confirmation_expires_at
+        if current is not None and current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        if current is None or current < deadline:
+            offer.confirmation_expires_at = deadline
+    return deadline
+
+
 def _all_initial_obligations_paid(agreement: Agreement) -> bool:
     """Same clearance test as check_move_in_eligibility's own unpaid-obligations
     check -- kept in one place so 'fully paid' can't drift between the two."""
@@ -1521,7 +1546,7 @@ def _apply_signature(
             _ensure_pending_move_in_occupancy(db, agreement)
         else:
             agreement.status = "PAYMENT_IN_PROGRESS"
-            agreement.payment_session_expires_at = compute_checkout_deadline(now, agreement.offer.listing.market_release)
+            agreement.payment_session_expires_at = _payment_deadline_after_signing(agreement, now)
     elif agreement.status in ("SENT", "AMENDMENT_PENDING"):
         # ZR-ENG-CLR-004 AC-12: exactly one required signature recorded --
         # a distinct, visible state from "not yet signed at all", never

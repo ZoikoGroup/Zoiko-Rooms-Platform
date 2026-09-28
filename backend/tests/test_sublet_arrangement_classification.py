@@ -359,8 +359,22 @@ class TestPayeeModelResolution:
 
         r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
         assert r.status_code == 200, r.text
-        # Before the fix this incorrectly came back HOST_OR_LANDLORD_PAYEE --
-        # the assignment field's default, not the sublease field's own.
+        # A co-tenant is the host's own joint tenant -- they pay the host, not
+        # the renter who brought them in.
+        assert r.json()["payeeModel"] == "HOST_OR_LANDLORD_PAYEE"
+
+    def test_a_sublease_uses_the_markets_sublease_payee_model(self, client, db_session: Session):
+        tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="payeesub2")
+        occupancy = db_session.get(Occupancy, occupancy_id)
+        occupancy.room.max_occupants = 2
+        db_session.commit()
+
+        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "SUBLEASE_PARTIAL")
+        super_admin = _make_admin(db_session, email="payeesub2-admin@test.com", role="super_admin")
+        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        assert r.status_code == 200, r.text
+        # Before the fix this came back HOST_OR_LANDLORD_PAYEE -- the
+        # assignment field's default, not the sublease field's own.
         assert r.json()["payeeModel"] == "ORIGINAL_RENTER_PAYEE"  # MarketPolicyPack's sublet_sublease_payee_model default
 
 
@@ -429,7 +443,10 @@ class TestCoTenancyCreatesRealSeparateAgreement:
         assert occupancy.offer_id == original_offer_id
 
         new_agreement = db_session.get(Agreement, body["newAgreementId"])
-        assert new_agreement.status == "SIGNED"
+        # Signed by both on approval, but only SIGNED once its deposit and
+        # first rent are paid -- same as every other tenancy.
+        assert new_agreement.status == "PAYMENT_IN_PROGRESS"
+        assert new_agreement.signed_by_provider_at is not None and new_agreement.signed_by_renter_at is not None
         assert new_agreement.offer_id != original_offer_id
 
         obligations = db_session.scalars(

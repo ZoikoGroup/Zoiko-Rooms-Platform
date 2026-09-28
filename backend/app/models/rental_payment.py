@@ -60,7 +60,12 @@ RENTAL_PAYMENT_STATUSES = (
 RENTAL_PAYMENT_PROVENANCE = (
     "TENANT_DECLARATION", "RECIPIENT_CONFIRMATION", "PROVIDER_CONFIRMATION", "ADMIN_CORRECTION", "SYSTEM_DERIVATION",
 )
-RENTAL_PAYMENT_METHOD_CATEGORIES = ("BANK_TRANSFER", "CASH", "CARD", "OTHER")
+RENTAL_PAYMENT_METHOD_CATEGORIES = ("BANK_TRANSFER", "UPI", "CASH", "CARD", "OTHER")
+# The direct methods a host may offer renters in new payment instructions
+# (Zoiko Rooms Payment Model: rent is paid straight to the host -- bank
+# transfer, UPI or cash). CARD/OTHER instructions saved before this stay
+# valid; they just can't be created any more.
+RENTAL_PAYMENT_INSTRUCTION_METHODS = ("BANK_TRANSFER", "UPI", "CASH")
 RENTAL_PAYMENT_DISCREPANCY_REASONS = ("NOT_ARRIVED", "AMOUNT_DIFFERENT", "REFERENCE_MISMATCH", "RETURNED_OR_REVERSED", "OTHER")
 RENTAL_PAYMENT_DISPUTE_STATUSES = ("OPEN", "RESOLVED")
 # ZR-PAY-002 Section 9.1: same create-then-confirm shape as

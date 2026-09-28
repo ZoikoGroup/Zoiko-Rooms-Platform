@@ -790,6 +790,11 @@ STRIPE_EVENT_TYPE_MAP = {
     # Bank chargebacks against a paid fee.
     "charge.dispute.created": "DISPUTE_OPENED",
     "charge.dispute.closed": "DISPUTE_CLOSED",
+    # A refund can fail after Stripe accepted it (e.g. the card was closed) --
+    # without these it stayed PROCESSING forever and blocked a retry.
+    "charge.refund.updated": "REFUND_UPDATED",
+    "refund.updated": "REFUND_UPDATED",
+    "refund.failed": "REFUND_UPDATED",
 }
 
 
@@ -845,6 +850,14 @@ def ingest_stripe_webhook_event(db: Session, event, *, correlation_id: str = "")
         _apply_refund_confirmation(db, payment, refunded_total, correlation_id=correlation_id)
         _record_refund_issued_outside_the_app(
             db, payment, refunded_total, provider_event_id=provider_event_id, correlation_id=correlation_id,
+        )
+        return
+
+    if event_type == "REFUND_UPDATED":
+        # stripe_object is the Refund itself (re_...).
+        apply_refund_status_from_provider(
+            db, stripe_object.get("id") or "", str(stripe_object.get("status") or ""),
+            failure_reason=str(stripe_object.get("failure_reason") or ""), correlation_id=correlation_id,
         )
         return
 
@@ -947,6 +960,10 @@ def _apply_dispute_event(
         new_status = "LOST" if dispute.get("status") == "lost" else "WON"
     if payment.dispute_status == new_status and payment.provider_dispute_id == dispute.get("id"):
         return
+    # Stripe doesn't guarantee delivery order: a "created" arriving after this
+    # same dispute already closed must not reopen it.
+    if opened and payment.provider_dispute_id == dispute.get("id") and payment.dispute_status in ("WON", "LOST"):
+        return
 
     previous_status = payment.dispute_status
     payment.dispute_status = new_status
@@ -966,6 +983,31 @@ def _apply_dispute_event(
     )
     db.commit()
 
+    # Zoiko is the merchant for the Listing Fee: a chargeback is Zoiko's to
+    # answer in the Stripe Dashboard before the bank's deadline, or it's lost
+    # by default -- so every super admin is told the moment it opens.
+    amount = f"{payment.currency} {float(payment.amount):.2f}"
+    if new_status == "OPEN":
+        due_by = ""
+        evidence_details = dispute.get("evidence_details") or {}
+        if evidence_details.get("due_by"):
+            due_by = " Respond by " + datetime.fromtimestamp(int(evidence_details["due_by"]), tz=timezone.utc).strftime("%d %b %Y") + "."
+        title, message = "Listing Fee chargeback opened", (
+            f"A host's bank disputed the {amount} Listing Fee for listing {payment.listing_id} "
+            f"(reason: {dispute.get('reason') or 'not given'}). Respond with evidence in the Stripe Dashboard "
+            f"(dispute {dispute.get('id') or ''}).{due_by}"
+        )
+    else:
+        title, message = f"Listing Fee chargeback {new_status.lower()}", (
+            f"The dispute on the {amount} Listing Fee for listing {payment.listing_id} closed -- "
+            + ("the bank returned the money to the host; the fee no longer counts as paid." if new_status == "LOST"
+               else "the payment stands.")
+        )
+    notif_crud.notify_all_super_admins(
+        db, title=title, message=message[:2000], notification_type=f"listing_fee.dispute_{new_status.lower()}",
+        related_entity_type="listing_fee_payment", related_entity_id=str(payment.id),
+    )
+
 
 def get_or_create_listing_fee_receipt(db: Session, payment: ListingFeePayment) -> ListingFeeReceipt:
     """Idempotent, render-once-then-persist -- same discipline as
@@ -974,19 +1016,25 @@ def get_or_create_listing_fee_receipt(db: Session, payment: ListingFeePayment) -
     if payment.receipt is not None:
         return payment.receipt
 
+    from app.crud.document_sequence import next_document_number
+
     quote = payment.quote
     snapshot = quote.policy_snapshot or {}
     tax_rate = float(snapshot.get("tax_rate", 0.0))
-    receipt_number = f"LF-RCPT-{payment.id:08d}"
-    pdf_bytes = _generate_listing_fee_receipt_pdf(
-        payment, receipt_number, legal_entity_name=snapshot.get("legal_entity_name", "Zoiko Rooms"),
-        tax_registration_number=snapshot.get("tax_registration_number", ""),
-        billing_entity=snapshot.get("billing_entity"),
-    )
-    storage_ref, content_hash = save_listing_fee_receipt_document(pdf_bytes)
 
     try:
         with db.begin_nested():
+            # Taken from the gap-free receipt series in this same savepoint, so
+            # a number is only ever consumed by a receipt that's actually saved.
+            # (Receipts issued before this series existed keep their LF-RCPT-
+            # numbers -- a document's number never changes.)
+            receipt_number = f"ZR-LF-{next_document_number(db, 'listing_fee_receipt'):08d}"
+            pdf_bytes = _generate_listing_fee_receipt_pdf(
+                payment, receipt_number, legal_entity_name=snapshot.get("legal_entity_name", "Zoiko Rooms"),
+                tax_registration_number=snapshot.get("tax_registration_number", ""),
+                billing_entity=snapshot.get("billing_entity"),
+            )
+            storage_ref, content_hash = save_listing_fee_receipt_document(pdf_bytes)
             receipt = ListingFeeReceipt(
                 payment_id=payment.id, receipt_number=receipt_number,
                 legal_entity_name=snapshot.get("legal_entity_name", "Zoiko Rooms"),
@@ -1205,6 +1253,15 @@ def _apply_refund_confirmation(
         )
         db.commit()
 
+        # The tax document reversing (part of) the receipt. Best-effort, same
+        # posture as the receipt itself: the refund is already confirmed, and a
+        # missing credit note is created on first download instead.
+        try:
+            issue_credit_note(db, target)
+        except Exception:
+            db.rollback()
+            logger.exception("listing_fee: credit note generation failed (refund_id=%s)", target.id)
+
         notif_crud.notify_user_by_party(
             db, payment.party_id,
             title="Listing Fee refunded",
@@ -1212,3 +1269,175 @@ def _apply_refund_confirmation(
             notification_type="listing_fee.refunded",
             related_entity_type="listing_fee_refund", related_entity_id=str(target.id),
         )
+
+
+def issue_credit_note(db: Session, refund: ListingFeeRefund) -> ListingFeeRefund:
+    """The credit note for a confirmed refund -- idempotent. Numbered from the
+    gap-free credit note series; references the original receipt and splits
+    the refunded amount into fee and tax in the same proportion the receipt
+    charged them (the fee total already includes any tax)."""
+    from app.core.listing_fee_receipt_documents import save_listing_fee_receipt_document
+    from app.crud.document_sequence import next_document_number
+
+    if refund.credit_note_number:
+        return refund
+    if refund.status not in ("PARTIALLY_REFUNDED", "REFUNDED"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "A credit note is only issued for a confirmed refund")
+    payment = refund.payment
+    receipt = get_or_create_listing_fee_receipt(db, payment)
+    quote = payment.quote
+    total = _round2(float(quote.total_amount))
+    refunded = _round2(float(refund.amount))
+    tax_part = _round2(refunded * float(quote.tax_amount) / total) if total else 0.0
+
+    with db.begin_nested():
+        number = f"ZR-CN-{next_document_number(db, 'listing_fee_credit_note'):08d}"
+        pdf_bytes = _generate_listing_fee_credit_note_pdf(
+            refund, number, receipt_number=receipt.receipt_number, net_amount=_round2(refunded - tax_part),
+            tax_amount=tax_part,
+        )
+        storage_ref, content_hash = save_listing_fee_receipt_document(pdf_bytes)
+        refund.credit_note_number = number
+        refund.credit_note_storage_ref = storage_ref
+        refund.credit_note_content_hash = content_hash
+        refund.credit_note_issued_at = datetime.now(timezone.utc)
+        db.flush()
+    db.commit()
+    db.refresh(refund)
+    return refund
+
+
+def _generate_listing_fee_credit_note_pdf(
+    refund: ListingFeeRefund, number: str, *, receipt_number: str, net_amount: float, tax_amount: float,
+) -> bytes:
+    payment = refund.payment
+    snapshot = payment.quote.policy_snapshot or {}
+    legal_entity_name = snapshot.get("legal_entity_name", "Zoiko Rooms")
+    billing_entity = snapshot.get("billing_entity") or {}
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    _, height = A4
+    x = 20 * mm
+    y = height - 25 * mm
+
+    def write(text: str, size: float = 10, bold: bool = False, gap: float = 7 * mm) -> None:
+        nonlocal y
+        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+        pdf.drawString(x, y, text)
+        y -= gap
+
+    write(f"{legal_entity_name} -- Credit Note", size=16, bold=True, gap=10 * mm)
+    write(f"Credit note {number}", size=10)
+    write(f"Against receipt {receipt_number}  |  Listing {payment.listing_id}  |  Payment #{payment.id}", size=10)
+    if billing_entity.get("registered_address"):
+        write(f"Registered address: {billing_entity['registered_address']}", size=8, gap=5 * mm)
+    if billing_entity.get("company_registration_number"):
+        write(f"Company registration: {billing_entity['company_registration_number']}", size=8, gap=5 * mm)
+    if snapshot.get("tax_registration_number"):
+        write(f"Tax registration: {snapshot['tax_registration_number']}", size=9, gap=10 * mm)
+    issued = refund.completed_at or datetime.now(timezone.utc)
+    write(f"Issued {issued.strftime('%Y-%m-%d %H:%M UTC')}", size=9, gap=10 * mm)
+
+    write("Credited", size=12, bold=True)
+    write(f"Listing Fee: {payment.currency} {net_amount:.2f}", size=9, gap=6 * mm)
+    tax_rate = float(snapshot.get("tax_rate", 0.0))
+    write(f"Tax at {tax_rate * 100:.2f}%: {payment.currency} {tax_amount:.2f}", size=9, gap=6 * mm)
+    write(f"Total credited: {payment.currency} {float(refund.amount):.2f}", size=9, gap=10 * mm)
+    if refund.reason:
+        write(f"Reason: {refund.reason[:120]}", size=8, gap=6 * mm)
+    write("This credit note reverses the amount above of the Listing Fee receipt it references.", size=8, gap=6 * mm)
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+def apply_refund_status_from_provider(
+    db: Session, provider_refund_id: str, provider_status: str, *, failure_reason: str = "", correlation_id: str = "",
+) -> ListingFeeRefund | None:
+    """A refund Stripe reports as failed or canceled -- sometimes days after
+    accepting it. It becomes FAILED (so it no longer counts as refunded and
+    can be retried), and super admins are told; if the host had already been
+    told it was refunded, so are they. Other statuses need nothing here:
+    charge.refunded confirms a successful one."""
+    if not provider_refund_id or provider_status not in ("failed", "canceled"):
+        return None
+    refund = db.scalar(select(ListingFeeRefund).where(ListingFeeRefund.provider_refund_id == provider_refund_id))
+    if refund is None or refund.status == "FAILED":
+        return refund
+    previous = refund.status
+    refund.status = "FAILED"
+    refund.failure_message = (failure_reason or f"The refund was {provider_status} by the bank")[:500]
+    db.commit()
+    db.refresh(refund)
+
+    log_audit_event(
+        db, None, "listing_fee.refund_failed", "listing_fee_refund", str(refund.id), correlation_id,
+        reason=refund.failure_message, before_state=previous, after_state="FAILED",
+    )
+    emit_event(
+        db, "listing_fee.refund_failed", "listing_fee_refund", str(refund.id),
+        {"paymentId": refund.payment_id, "providerStatus": provider_status}, correlation_id=correlation_id,
+        previous_state=previous, new_state="FAILED",
+    )
+    db.commit()
+
+    payment = refund.payment
+    amount = f"{refund.currency} {float(refund.amount):.2f}"
+    notif_crud.notify_all_super_admins(
+        db, title="Listing Fee refund failed",
+        message=(
+            f"The {amount} refund on the Listing Fee for listing {payment.listing_id} failed at the bank "
+            f"({refund.failure_message}). It can be issued again from Payments."
+            + (f" A credit note ({refund.credit_note_number}) was already issued for it -- correct it with Finance."
+               if refund.credit_note_number else "")
+        )[:2000],
+        notification_type="listing_fee.refund_failed",
+        related_entity_type="listing_fee_refund", related_entity_id=str(refund.id),
+    )
+    if previous in ("PARTIALLY_REFUNDED", "REFUNDED"):
+        notif_crud.notify_user_by_party(
+            db, payment.party_id, title="Listing Fee refund failed",
+            message=f"The {amount} refund of your Listing Fee didn't go through at your bank. Zoiko will retry it.",
+            notification_type="listing_fee.refund_failed",
+            related_entity_type="listing_fee_refund", related_entity_id=str(refund.id),
+        )
+    return refund
+
+
+# A refund still PROCESSING this long after it was sent is checked with
+# Stripe directly -- in case its webhook never arrived.
+REFUND_RECONCILE_AFTER = timedelta(hours=1)
+
+
+def reconcile_processing_refunds(db: Session, *, now: datetime | None = None) -> int:
+    """Hourly job (services/scheduled_jobs.py): settles every refund stuck in
+    PROCESSING against what Stripe says -- succeeded confirms it (and issues
+    its credit note), failed/canceled marks it FAILED. Returns how many
+    changed."""
+    if not stripe_client.is_configured():
+        return 0
+    now = now or datetime.now(timezone.utc)
+    stuck = db.scalars(
+        select(ListingFeeRefund).where(
+            ListingFeeRefund.status == "PROCESSING",
+            ListingFeeRefund.provider_refund_id.is_not(None),
+            ListingFeeRefund.created_at <= now - REFUND_RECONCILE_AFTER,
+        )
+    ).all()
+    changed = 0
+    for refund in stuck:
+        state = stripe_client.retrieve_refund(refund_id=refund.provider_refund_id)
+        if state is None:
+            continue
+        if state["status"] == "succeeded":
+            payment = refund.payment
+            _apply_refund_confirmation(
+                db, payment, _confirmed_refund_total(payment) + _round2(float(refund.amount)), refund=refund,
+            )
+            changed += 1
+        elif state["status"] in ("failed", "canceled"):
+            apply_refund_status_from_provider(
+                db, refund.provider_refund_id, state["status"], failure_reason=state.get("failure_reason") or "",
+            )
+            changed += 1
+    return changed

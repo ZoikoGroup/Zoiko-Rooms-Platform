@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.crud import payment_connection as crud
 from app.models.party import Party
-from app.models.payment_recipient_authority import PaymentRecipientAuthority
+from app.models.authority_record import AuthorityRecord
 from app.models.property import Property
 from app.models.rental_payment import RentalPaymentInstruction
 from app.models.room import Room
@@ -60,7 +60,7 @@ class TestGetPaymentConnectionForRoom:
 
     def test_pending_authority_is_pending_verification(self, db_session: Session):
         user, room, party = _make_host_with_room(db_session, email="pending@test.com")
-        db_session.add(PaymentRecipientAuthority(party_id=party.id, room_id=room.id, relationship_type="OWNER", status="pending"))
+        db_session.add(AuthorityRecord(authority_type="owner", party_id=party.id, room_id=room.id, relationship_type="OWNER", status="pending"))
         db_session.commit()
 
         connection = crud.get_payment_connection_for_room(db_session, room)
@@ -69,7 +69,7 @@ class TestGetPaymentConnectionForRoom:
     def test_verified_authority_with_no_destination_requires_recipient_setup(self, db_session: Session):
         user, room, party = _make_host_with_room(db_session, email="verified-no-dest@test.com")
         db_session.add(
-            PaymentRecipientAuthority(
+            AuthorityRecord(authority_type="owner", 
                 party_id=party.id, room_id=room.id, relationship_type="OWNER", status="verified",
                 expires_at=datetime.now(timezone.utc) + timedelta(days=1),
             )
@@ -83,7 +83,7 @@ class TestGetPaymentConnectionForRoom:
     def test_verified_authority_with_active_destination_is_active(self, db_session: Session):
         user, room, party = _make_host_with_room(db_session, email="active@test.com")
         db_session.add(
-            PaymentRecipientAuthority(
+            AuthorityRecord(authority_type="owner", 
                 party_id=party.id, room_id=room.id, relationship_type="OWNER", status="verified",
                 expires_at=datetime.now(timezone.utc) + timedelta(days=1),
             )
@@ -97,7 +97,7 @@ class TestGetPaymentConnectionForRoom:
 
     def test_revoked_authority_is_suspended(self, db_session: Session):
         user, room, party = _make_host_with_room(db_session, email="revoked@test.com")
-        db_session.add(PaymentRecipientAuthority(party_id=party.id, room_id=room.id, relationship_type="OWNER", status="revoked"))
+        db_session.add(AuthorityRecord(authority_type="owner", party_id=party.id, room_id=room.id, relationship_type="OWNER", status="revoked"))
         db_session.commit()
 
         connection = crud.get_payment_connection_for_room(db_session, room)
@@ -106,7 +106,7 @@ class TestGetPaymentConnectionForRoom:
     def test_expired_verified_authority_is_suspended(self, db_session: Session):
         user, room, party = _make_host_with_room(db_session, email="expired@test.com")
         db_session.add(
-            PaymentRecipientAuthority(
+            AuthorityRecord(authority_type="owner", 
                 party_id=party.id, room_id=room.id, relationship_type="OWNER", status="verified",
                 expires_at=datetime.now(timezone.utc) - timedelta(days=1),
             )
@@ -119,7 +119,7 @@ class TestGetPaymentConnectionForRoom:
     def test_destination_pending_review_is_pending_verification(self, db_session: Session):
         user, room, party = _make_host_with_room(db_session, email="dest-review@test.com")
         db_session.add(
-            PaymentRecipientAuthority(
+            AuthorityRecord(authority_type="owner", 
                 party_id=party.id, room_id=room.id, relationship_type="OWNER", status="verified",
                 expires_at=datetime.now(timezone.utc) + timedelta(days=1),
             )
@@ -133,7 +133,7 @@ class TestGetPaymentConnectionForRoom:
     def test_rejected_destination_is_suspended(self, db_session: Session):
         user, room, party = _make_host_with_room(db_session, email="dest-rejected@test.com")
         db_session.add(
-            PaymentRecipientAuthority(
+            AuthorityRecord(authority_type="owner", 
                 party_id=party.id, room_id=room.id, relationship_type="OWNER", status="verified",
                 expires_at=datetime.now(timezone.utc) + timedelta(days=1),
             )

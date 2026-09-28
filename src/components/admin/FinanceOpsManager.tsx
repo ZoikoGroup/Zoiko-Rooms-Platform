@@ -17,6 +17,9 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ListingFeePriceBookManager } from "@/components/admin/ListingFeePriceBookManager";
+import { RentalPaymentDisputesManager } from "@/components/admin/RentalPaymentDisputesManager";
+import { RentalPaymentSupportManager } from "@/components/admin/RentalPaymentSupportManager";
+import { ListingFeePaymentsAdmin } from "@/components/admin/ListingFeePaymentsAdmin";
 import { apiClientFetch } from "@/lib/api-client";
 import { getCurrentAdmin } from "@/lib/auth";
 import {
@@ -350,7 +353,13 @@ export function FinanceOpsManager() {
         </section>
       )}
 
+      <RentalPaymentDisputesManager showToast={showToast} />
+
+      <RentalPaymentSupportManager showToast={showToast} />
+
       {role === "super_admin" && <ListingFeePriceBookManager showToast={showToast} />}
+
+      {role === "super_admin" && <ListingFeePaymentsAdmin showToast={showToast} />}
 
       {role === "super_admin" && (
         <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
