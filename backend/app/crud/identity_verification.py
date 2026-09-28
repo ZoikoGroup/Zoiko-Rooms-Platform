@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
@@ -17,6 +18,8 @@ from app.models.party import Party
 from app.models.user_account import UserAccount
 from app.models.verification_credential import VerificationCredential
 from app.schemas.marketplace import IdentityVerificationCreate
+
+logger = logging.getLogger("uvicorn.error")
 
 IDENTITY_VERIFICATION_VALIDITY_DAYS = 365
 
@@ -268,6 +271,12 @@ def submit_identity_verification_for_user(
             db.commit()
             db.refresh(record)
             return record
+    else:
+        logger.info(
+            "identity_verification #%s: duplicate of #%s -- skipping automated OCR check, "
+            "leaving in 'pending' for manual review",
+            record.id, duplicate_of_verification_id,
+        )
 
     message = f"{user_account.full_name} submitted a {document_type.replace('_', ' ')} for review."
     if duplicate_of_verification_id is not None:
@@ -325,6 +334,10 @@ def _run_ocr_check(db: Session, record: IdentityVerification, *, allow_reroute: 
     if record.document_category not in ("identity", "address"):
         return None
     if not document_ocr.is_available():
+        logger.warning(
+            "identity_verification #%s: OCR unavailable (tesseract not found) -- "
+            "leaving record in 'pending' for manual review", record.id,
+        )
         return None
 
     if record.document_category == "identity":
@@ -397,6 +410,10 @@ def _run_identity_ocr_check(db: Session, record: IdentityVerification, document_
             document_ocr.check_name_in_document(document_bytes, user.full_name) if user else (None, 0.0, "")
         )
     except Exception:
+        logger.exception(
+            "identity_verification #%s: OCR check raised -- leaving record in 'pending' for manual review",
+            record.id,
+        )
         return None
 
     record.ocr_extracted_number = matched_number
@@ -469,6 +486,10 @@ def _run_address_ocr_check(db: Session, record: IdentityVerification, document_o
             document_ocr.check_name_in_document(document_bytes, user.full_name) if user else (None, 0.0, "")
         )
     except Exception:
+        logger.exception(
+            "identity_verification #%s: OCR check raised -- leaving record in 'pending' for manual review",
+            record.id,
+        )
         return None
 
     record.ocr_confidence = confidence
