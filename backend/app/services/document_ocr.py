@@ -244,41 +244,18 @@ def extract_name_from_mrz(full_text: str) -> str | None:
     return f"{given_names} {surname}".strip()
 
 
-def _match_document_number(full_text: str, document_type: str, expected_number: str) -> str | None:
-    """Every overlapping window matching the format is a candidate, not just
-    the first: an Aadhaar card often prints another 4-digit group (a year,
-    the VID) right before the number, so the first 12-digit window can
-    straddle that group and the real number ("2011 7296 4981" out of
-    "2011 7296 4981 6197"). A candidate equal to the number the user typed
-    wins, then (Aadhaar) one passing the Verhoeff checksum, then the first --
-    only ever a number actually present in the scanned text."""
-    pattern = DOCUMENT_NUMBER_PATTERNS.get(document_type)
-    if pattern is None:
-        return None
-    candidates = [m.group(1).replace(" ", "") for m in re.finditer(f"(?=({pattern}))", full_text)]
-    if not candidates:
-        return None
-    expected = expected_number.replace(" ", "").upper()
-    if expected and expected in candidates:
-        return expected
-    if document_type == "aadhaar":
-        valid = [c for c in candidates if is_valid_aadhaar_checksum(c)]
-        if valid:
-            return valid[0]
-    return candidates[0]
-
-
-def extract_and_score(
-    document_bytes: bytes, document_type: str, *, expected_number: str = "",
-) -> tuple[str | None, float, str | None]:
+def extract_and_score(document_bytes: bytes, document_type: str) -> tuple[str | None, float, str | None]:
     """Returns (matched_document_number_or_None, average_ocr_confidence_0_to_100,
-    mrz_extracted_name_or_None). The number is chosen by
-    _match_document_number (the typed number, then an Aadhaar-checksum-valid
-    one, then the first match). The name is only ever populated for a real,
+    mrz_extracted_name_or_None). The name is only ever populated for a real,
     parseable passport MRZ line -- see extract_name_from_mrz above -- never a
     guess for other document types."""
     full_text, avg_confidence = _ocr_text_and_confidence(document_bytes)
-    matched_number = _match_document_number(full_text, document_type, expected_number)
+    pattern = DOCUMENT_NUMBER_PATTERNS.get(document_type)
+    matched_number = None
+    if pattern is not None:
+        match = re.search(pattern, full_text)
+        matched_number = match.group(0).replace(" ", "") if match else None
+
     extracted_name = extract_name_from_mrz(full_text) if document_type == "passport" else None
     return matched_number, avg_confidence, extracted_name
 
