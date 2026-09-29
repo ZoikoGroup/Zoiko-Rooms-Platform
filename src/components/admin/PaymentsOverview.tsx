@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Clock, Home, RefreshCcw, Search, Wallet } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
+import { ListingFeeInsights } from "@/components/admin/ListingFeeInsights";
 import { ListingFeePaymentsAdmin } from "@/components/admin/ListingFeePaymentsAdmin";
 import { apiClientFetch } from "@/lib/api-client";
 import { CurrencyTotal, ListingFeeRevenue, RentRecordBucket, RentRecords } from "@/lib/types";
@@ -94,6 +95,7 @@ export function PaymentsOverview() {
           <Tile label="Not completed" icon={Clock} value={revenue ? String(revenue.pendingCount + revenue.failedCount) : "…"}
             sub={revenue ? `${revenue.pendingCount} pending · ${revenue.failedCount} failed` : undefined} />
         </div>
+        <ListingFeeInsights />
         <ListingFeePaymentsAdmin showToast={showToast} />
       </section>
 

@@ -755,6 +755,51 @@ export interface ListingFeePayment {
   paidAt: string | null;
   failedAt: string | null;
   refundEligible: boolean;
+  /** Fee and tax from the quote this payment was for; `amount` is the total. */
+  feeAmount: number | null;
+  taxAmount: number | null;
+  receiptNumber: string | null;
+  refundedAmount: number;
+  fullyRefunded: boolean;
+  refundStatus: string | null;
+  refundId: number | null;
+  refundedAt: string | null;
+  creditNoteNumber: string | null;
+  disputeStatus: string | null;
+}
+
+/** ZR-LF-001 funnel: distinct listings reaching each stage in the window. */
+export interface ListingFeeFunnel {
+  days: number;
+  since: string;
+  stages: { name: string; listings: number }[];
+  conversionRate: number | null;
+}
+
+/** A listing for a room whose other listing already paid the fee. */
+export interface ListingFeeDuplicateFlag {
+  listingId: string;
+  listingName: string;
+  listingState: string;
+  roomId: number | null;
+  paidListingId: string;
+  paidListingName: string;
+  paidListingState: string;
+  partyId: number | null;
+  flaggedAt: string;
+}
+
+/** Everything the Listing Fee screens need for one listing. */
+export interface ListingFeeListingStatus {
+  listingId: string;
+  listingName: string;
+  listingAddress: string;
+  market: string | null;
+  feePaid: boolean;
+  /** Publish requirements still open, other than the fee. Checkout is
+   *  refused by the server while this isn't empty. */
+  checkoutBlockers: string[];
+  latestPayment: ListingFeePayment | null;
 }
 
 export interface ListingFeeReceipt {
