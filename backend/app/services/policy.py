@@ -39,19 +39,26 @@ _DEFAULTS: dict[str, Any] = {
     # PUBLICATION_ELIGIBLE/JURISDICTION_GATES_PASS clauses already prevent
     # booking either way).
     "visibility.failed_gate_behavior": lambda: "hide",
-    # Same shape/precedent as publication.requires_approval above: default
-    # True preserves today's fully-manual behavior everywhere until an admin
-    # opts a market release in. When False, crud/leasing.py auto-creates and
-    # sends an offer (using the listing's own default terms) the moment a
-    # host/admin approves an application -- never bypasses
-    # check_offer_eligibility, just skips the human "click to proceed."
-    "offer.requires_manual_creation": lambda: True,
+    # When False, crud/leasing.py:submit_application auto-approves the
+    # application the moment it's submitted (system-attributed, same real
+    # ApplicationDecision row and notifications a host's own approve click
+    # produces -- see decide_application's own docstring on this being a
+    # trust & safety decision, now delegated to policy instead of always
+    # requiring a human). Approving still only starts the offer/agreement
+    # chain below if those are also opted in; it never itself bypasses
+    # check_offer_eligibility/check_agreement_eligibility.
+    "application.requires_manual_decision": lambda: False,
+    # Default False: crud/leasing.py auto-creates and sends an offer (using
+    # the listing's own default terms) the moment an application is
+    # approved -- never bypasses check_offer_eligibility, just skips the
+    # human "click to proceed." A market release can override it to True.
+    "offer.requires_manual_creation": lambda: False,
     # Same as above, for the offer-accepted -> agreement step. When False,
     # crud/leasing.py auto-creates the agreement the moment an offer is
     # accepted -- create_agreement still enforces check_agreement_eligibility
     # itself, so this never bypasses any compliance gate; it only removes the
     # manual "Create Agreement" click once every gate already passes.
-    "agreement.requires_manual_creation": lambda: True,
+    "agreement.requires_manual_creation": lambda: False,
     # ZR-PAY-CFG-001 Sections 5.1/9: "external_payment_handoff_enabled =
     # MARKET_APPROVED_ONLY". Renters may be sent to the recipient's own
     # payment provider (a direct charge on the recipient's connected
