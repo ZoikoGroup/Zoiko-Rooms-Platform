@@ -360,11 +360,25 @@ export function HostSubletRequestsManager() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Approval expires (optional)
-            </label>
+            <div className="mb-1 flex items-center justify-between">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                Approval expires (optional)
+              </label>
+              {approveExpiresAt && (
+                <button
+                  type="button"
+                  onClick={() => setApproveExpiresAt("")}
+                  className="text-xs font-semibold text-primary-700 hover:text-accent-600 dark:text-primary-300"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            {/* The backend requires a future expiry, and a date-only value means
+                midnight at the start of that day -- so the earliest valid pick is tomorrow. */}
             <input
               type="date"
+              min={new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10)}
               value={approveExpiresAt}
               onChange={(e) => setApproveExpiresAt(e.target.value)}
               className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
