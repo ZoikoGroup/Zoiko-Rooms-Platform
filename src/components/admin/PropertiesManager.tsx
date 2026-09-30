@@ -231,16 +231,19 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
     if (!reviewListing) return;
     setReviewBusy(true);
     try {
-      // Two explicit steps -- REVIEW -> APPROVED -> PUBLISHED -- so the approval
-      // decision is recorded independently of publication (a later pause/republish
-      // never has to re-approve). One click for the reviewer, two real transitions.
-      await apiClientFetch<Listing>(`/api/listings/${reviewListing.id}/approve`, { method: "POST" });
-      const updated = await apiClientFetch<Listing>(`/api/listings/${reviewListing.id}/publish`, { method: "POST" });
+      // Approve only. The host then pays the Listing Fee and the listing
+      // publishes automatically; if no fee applies, the backend publishes it
+      // straight away (crud/listing.py:approve_listing).
+      const updated = await apiClientFetch<Listing>(`/api/listings/${reviewListing.id}/approve`, { method: "POST" });
       setItems((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
-      showToast(`"${updated.name}" approved and published`);
+      showToast(
+        updated.state === "PUBLISHED"
+          ? `"${updated.name}" approved and published`
+          : `"${updated.name}" approved -- it goes live once the host pays the Listing Fee`
+      );
       closeReview();
     } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "Failed to approve and publish this listing");
+      showToast(err instanceof ApiError ? err.message : "Failed to approve this listing");
     } finally {
       setReviewBusy(false);
     }
@@ -1023,7 +1026,7 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
                 <XCircle className="h-4 w-4" /> Reject
               </Button>
               <Button type="button" variant="primary" loading={reviewBusy} onClick={approveAndPublish}>
-                <CheckCircle2 className="h-4 w-4" /> Approve &amp; Publish
+                <CheckCircle2 className="h-4 w-4" /> Approve
               </Button>
             </div>
           </div>

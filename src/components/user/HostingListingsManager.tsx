@@ -275,7 +275,7 @@ export function HostingListingsManager() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SectionHeading
           title="Your listings"
-          subtitle="Use “List a Room” to create a new listing. Submit it for review when it's ready, then it publishes once a Zoiko admin approves it."
+          subtitle="Use “List a Room” to create a new listing and submit it for review. Once a Zoiko admin approves it, pay the Listing Fee and it goes live automatically."
         />
         <Button size="sm" onClick={() => setWizardOpen(true)}>
           <Plus className="h-4 w-4" /> List a Room
@@ -362,7 +362,7 @@ export function HostingListingsManager() {
                     <p className="flex items-center gap-1.5 font-semibold">
                       <Receipt className="h-3.5 w-3.5" /> Approved -- pay the Listing Fee
                     </p>
-                    <p className="mt-1">A Zoiko admin has approved this listing. Paying the Listing Fee clears the last publication requirement, but a Zoiko admin still needs to publish it.</p>
+                    <p className="mt-1">A Zoiko admin has approved this listing. Pay the Listing Fee and it will be published automatically for renters to see.</p>
                   </div>
                 )}
 

@@ -135,7 +135,9 @@ class TestApproveAndPublish:
 
         r = client.post(f"/api/listings/{listing_id}/approve", cookies=admin_cookies)
         assert r.status_code == 200, r.text
-        assert r.json()["state"] == "APPROVED"
+        # No Listing Fee is owed in this test market, so approval publishes
+        # straight away (crud/listing.py:approve_listing).
+        assert r.json()["state"] == "PUBLISHED"
 
         r = client.post(f"/api/listings/{listing_id}/publish", cookies=admin_cookies)
         assert r.status_code == 200, r.text
@@ -148,7 +150,9 @@ class TestApproveAndPublish:
 
         r = client.post(f"/api/listings/{listing_id}/approve", cookies=cookies)
         assert r.status_code == 200, r.text
-        assert r.json()["state"] == "APPROVED"
+        # No Listing Fee is owed in this test market, so approval publishes
+        # straight away (crud/listing.py:approve_listing).
+        assert r.json()["state"] == "PUBLISHED"
 
         r = client.post(f"/api/listings/{listing_id}/publish", cookies=cookies)
         assert r.status_code == 200, r.text

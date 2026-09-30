@@ -61,6 +61,8 @@ class TestCheckoutRequiresEveryOtherRequirement:
     def test_checkout_is_allowed_once_only_the_fee_is_left(self, client, db_session: Session, monkeypatch):
         _only_fee_outstanding(monkeypatch)
         user, party, listing = _host_listing(db_session, "ready")
+        listing.state = "APPROVED"
+        db_session.commit()
         quote = lf_crud.create_quote(db_session, listing, party)
         r = client.post(
             "/api/users/listing-fees/checkout-sessions",
@@ -68,6 +70,51 @@ class TestCheckoutRequiresEveryOtherRequirement:
             cookies=auth_user_cookie(user),
         )
         assert r.status_code == 201, r.text
+
+    def test_checkout_is_refused_before_admin_approval(self, client, db_session: Session, monkeypatch):
+        _only_fee_outstanding(monkeypatch)
+        user, party, listing = _host_listing(db_session, "unapproved")
+        quote = lf_crud.create_quote(db_session, listing, party)
+        r = client.post(
+            "/api/users/listing-fees/checkout-sessions",
+            json={"quoteId": quote.id, "idempotencyKey": "lf001-unapproved", "billingCountry": "GB"},
+            cookies=auth_user_cookie(user),
+        )
+        assert r.status_code == 409, r.text
+        assert "approved" in r.json()["detail"]
+        assert not lf_crud.listing_fee_is_paid(db_session, listing.id)
+
+    def test_paying_the_fee_publishes_the_approved_listing(self, client, db_session: Session, monkeypatch):
+        """No Stripe key in tests -> checkout completes synchronously, which runs
+        the same _complete_payment_success path the webhook/return uses."""
+        from app.core.config import settings
+        from tests.conftest import _make_admin
+
+        from app.models.property import Property
+        from app.models.room import Room
+
+        _make_admin(db_session, email=settings.seed_admin_email, role="super_admin")
+        _only_fee_outstanding(monkeypatch)
+        user, party, listing = _host_listing(db_session, "autopublish")
+        prop = Property(owner_party_id=party.id, address="1 Fee Way", city="London", status="active")
+        db_session.add(prop)
+        db_session.flush()
+        room = Room(property_id=prop.id, room_type="private_room", size=100, has_ensuite=True, status="active")
+        db_session.add(room)
+        db_session.flush()
+        listing.room_id = room.id
+        listing.state = "APPROVED"
+        db_session.commit()
+        quote = lf_crud.create_quote(db_session, listing, party)
+        r = client.post(
+            "/api/users/listing-fees/checkout-sessions",
+            json={"quoteId": quote.id, "idempotencyKey": "lf001-autopublish", "billingCountry": "GB"},
+            cookies=auth_user_cookie(user),
+        )
+        assert r.status_code == 201, r.text
+        db_session.refresh(listing)
+        assert lf_crud.listing_fee_is_paid(db_session, listing.id)
+        assert listing.state == "PUBLISHED"
 
     def test_blockers_never_include_the_fee_itself(self, db_session: Session, monkeypatch):
         monkeypatch.setattr(

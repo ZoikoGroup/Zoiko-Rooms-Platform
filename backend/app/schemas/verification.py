@@ -118,6 +118,12 @@ class PropertyVerificationRead(CamelModel):
     expires_at: datetime | None = None
     created_at: datetime
     sharing_scope: str = PROPERTY_VERIFICATION_SHARING_SCOPE
+    # Regex-extracted details and match results (crud/property_verification.py).
+    extracted_owner_name: str | None = None
+    extracted_address: str | None = None
+    extracted_document_number: str | None = None
+    name_matched: bool | None = None
+    address_matched: bool | None = None
 
 
 class ScreeningCheckCreate(CamelModel):

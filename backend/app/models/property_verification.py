@@ -50,6 +50,19 @@ class PropertyVerification(Base):
     ocr_address_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     ocr_name_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
+    # Regex-only (no OCR) details grabbed from the upload -- the PDF text
+    # layer plus the typed evidence_ref (services/document_regex.py) -- and
+    # how they compare against the host's name and this room's property
+    # address. None = nothing readable to compare (e.g. a photo).
+    extracted_owner_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    extracted_address: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    extracted_document_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    name_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    address_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # sha256 of the uploaded file, so the same document reused for another
+    # host's room is caught and sent to a reviewer instead of auto-verified.
+    document_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
     status: Mapped[str] = mapped_column(String(30), default="pending")
     verifier_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     verifier_notes: Mapped[str] = mapped_column(String(1000), default="")

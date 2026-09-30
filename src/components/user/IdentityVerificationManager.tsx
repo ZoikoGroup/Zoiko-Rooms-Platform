@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, type ChangeEvent, type FormEvent } from "react";
-import { BadgeCheck, Clock, FileText, ShieldCheck, Upload, XCircle } from "lucide-react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { BadgeCheck, Clock, FileText, Loader2, ShieldCheck, Upload, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { IdentityDocumentType, DocumentCategory } from "@/lib/types";
@@ -20,6 +20,12 @@ import { errorMessage, identityDocumentUrl, submitIdentityVerification } from "@
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 
+// Must match AUTO_VERIFY_PENDING_NOTE in backend/app/crud/identity_verification.py --
+// a pending upload with this note is verified automatically ~10s after upload.
+const AUTO_VERIFY_PENDING_NOTE = "Verifying automatically.";
+const POLL_INTERVAL_MS = 3000;
+const POLL_TIMEOUT_MS = 30000;
+
 export function IdentityVerificationManager() {
   const { identityRecords, identityStatus, identityVerified, refreshIdentity, loading } = useUserSession();
   const { toast, showToast } = useToast();
@@ -31,6 +37,26 @@ export function IdentityVerificationManager() {
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [verifyingId, setVerifyingId] = useState<number | null>(null);
+  const verifyingSince = useRef(0);
+
+  // While an upload is being auto-verified, re-fetch until it leaves "pending".
+  useEffect(() => {
+    if (verifyingId === null) return;
+    const record = identityRecords.find((r) => r.id === verifyingId);
+    if (record && record.status !== "pending") {
+      setVerifyingId(null);
+      if (record.status === "verified") showToast("Your identity is verified.");
+      return;
+    }
+    if (Date.now() - verifyingSince.current > POLL_TIMEOUT_MS) {
+      setVerifyingId(null);
+      showToast("Still verifying — refresh the page in a moment.");
+      return;
+    }
+    const timer = setTimeout(() => void refreshIdentity(), POLL_INTERVAL_MS);
+    return () => clearTimeout(timer);
+  }, [verifyingId, identityRecords, refreshIdentity, showToast]);
 
   function handleCategoryChange(next: DocumentCategory) {
     setCategory(next);
@@ -72,15 +98,13 @@ export function IdentityVerificationManager() {
       setCustomDocumentName("");
       setFile(null);
       await refreshIdentity();
-      // The automated scan may already have decided -- only say a reviewer
-      // will look at it when one actually will.
+      // Uploads are verified automatically after a few seconds; only a
+      // duplicate document waits for a reviewer.
       if (submitted.status === "verified") {
-        showToast("Your document was verified automatically.");
-      } else if (submitted.status === "additional_evidence_required") {
-        showToast(
-          "We couldn't read this document clearly. Please upload a clearer photo — our team can also review it.",
-          "error"
-        );
+        showToast("Your identity is verified.");
+      } else if (submitted.verifierNotes === AUTO_VERIFY_PENDING_NOTE) {
+        verifyingSince.current = Date.now();
+        setVerifyingId(submitted.id);
       } else {
         showToast("Document submitted. A Zoiko reviewer will check it shortly.");
       }
@@ -103,21 +127,33 @@ export function IdentityVerificationManager() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-start gap-3">
             <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary-50 text-primary-700 dark:bg-primary-500/10 dark:text-primary-300">
-              {identityVerified ? <BadgeCheck className="h-5 w-5" /> : <ShieldCheck className="h-5 w-5" />}
+              {identityVerified ? (
+                <BadgeCheck className="h-5 w-5" />
+              ) : verifyingId !== null ? (
+                <Loader2 className="h-5 w-5 animate-spin" />
+              ) : (
+                <ShieldCheck className="h-5 w-5" />
+              )}
             </span>
             <div>
               <p className="font-heading text-sm font-bold text-primary-900 dark:text-white">
-                {loading ? "Checking your verification status..." : identityStatusLabel[identityStatus]}
+                {loading
+                  ? "Checking your verification status..."
+                  : verifyingId !== null
+                    ? "Verifying your identity..."
+                    : identityStatusLabel[identityStatus]}
               </p>
               <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
                 {identityVerified
                   ? "You can submit rental applications and publish hosted listings."
-                  : "Applying to rent a room and publishing a listing both require a verified identity."}
+                  : verifyingId !== null
+                    ? "This usually takes 10–15 seconds."
+                    : "Applying to rent a room and publishing a listing both require a verified identity."}
               </p>
             </div>
           </div>
           <Badge tone={identityStatusTone[identityStatus]} dot>
-            {identityStatusLabel[identityStatus]}
+            {verifyingId !== null ? "Verifying" : identityStatusLabel[identityStatus]}
           </Badge>
         </div>
       </Card>
@@ -212,7 +248,7 @@ export function IdentityVerificationManager() {
             </p>
           )}
 
-          <Button type="submit" loading={submitting}>
+          <Button type="submit" loading={submitting} disabled={verifyingId !== null}>
             {submitting ? "Submitting" : "Submit for verification"}
           </Button>
         </form>

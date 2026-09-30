@@ -31,10 +31,12 @@ from app.models.listing import Listing
 from app.models.market_release import MarketRelease
 from app.models.room import Room
 
-# The one jurisdiction whose placeholder clause registry is seeded
-# automatically. Other jurisdictions are supported too, but their registry is
-# never invented by code -- an admin creates it (copy_default_clauses_to_
-# jurisdiction gives them England's placeholders as DRAFTs to review).
+# The jurisdiction the placeholder clause catalog (DEFAULT_CLAUSES) was
+# written for. Every jurisdiction -- England and every other open region --
+# now gets that catalog seeded automatically as APPROVED rows the first time
+# its registry is read (ensure_default_clause_registry), so no region needs
+# manual clause setup before agreements can be generated. Admins can still
+# add, replace or roll back any region's clauses through crud/agreement_clauses.py.
 SUPPORTED_JURISDICTION = "England"
 # Deliberately neutral -- NOT "tenancy" or "licence". Which legal label
 # applies is exactly the kind of classification this document's own LEGAL
@@ -132,18 +134,18 @@ class AgreementProfile:
     jurisdiction: str = SUPPORTED_JURISDICTION
 
 
-def ensure_default_clause_registry(db: Session) -> None:
-    """Lazily seeds the placeholder clause rows the first time anything
-    touches the registry -- no scheduler/seed-script dependency required,
-    matching this codebase's existing self-healing patterns (e.g.
-    services/booking_expiry.py's lazy expiry). Idempotent: skips any
-    clause_id that already has at least one row (of any version/status),
-    since a real version-2+ row for a default clause is created only through
-    crud/agreement_clauses.py's admin workflow from here on, never by
-    reseeding."""
+def ensure_default_clause_registry(db: Session, jurisdiction: str = SUPPORTED_JURISDICTION) -> None:
+    """Lazily seeds the placeholder clause rows for this jurisdiction the
+    first time anything touches its registry -- no scheduler/seed-script
+    dependency required, matching this codebase's existing self-healing
+    patterns (e.g. services/booking_expiry.py's lazy expiry). Idempotent:
+    skips any clause_id that already has at least one row (of any
+    version/status), since a real version-2+ row for a default clause is
+    created only through crud/agreement_clauses.py's admin workflow from here
+    on, never by reseeding."""
     existing = {
         c.clause_id for c in db.query(ClauseDefinition).filter(
-            ClauseDefinition.jurisdiction_scope == SUPPORTED_JURISDICTION,
+            ClauseDefinition.jurisdiction_scope == jurisdiction,
             ClauseDefinition.agreement_class == AGREEMENT_CLASS,
         )
     }
@@ -154,7 +156,7 @@ def ensure_default_clause_registry(db: Session) -> None:
             continue
         db.add(ClauseDefinition(
             clause_id=clause_id,
-            jurisdiction_scope=SUPPORTED_JURISDICTION,
+            jurisdiction_scope=jurisdiction,
             agreement_class=AGREEMENT_CLASS,
             mandatory_level=mandatory_level,
             status="APPROVED",
@@ -205,8 +207,7 @@ def _approved_clause_rows(db: Session, jurisdiction: str, *, today: date) -> lis
     """Every currently-effective, non-PROHIBITED clause row for this
     jurisdiction/class -- including clauses created purely through the admin
     governance workflow (crud/agreement_clauses.py), not just DEFAULT_CLAUSES."""
-    if jurisdiction == SUPPORTED_JURISDICTION:
-        ensure_default_clause_registry(db)
+    ensure_default_clause_registry(db, jurisdiction)
     candidate_clause_ids = {
         row[0] for row in db.execute(
             select(ClauseDefinition.clause_id).where(

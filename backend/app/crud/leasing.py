@@ -1,3 +1,4 @@
+import logging
 import secrets
 from datetime import date as date_, datetime, timedelta, timezone
 from io import BytesIO
@@ -58,6 +59,8 @@ from app.services.booking_expiry import (
     expire_checkout_if_overdue,
     expire_offer_if_overdue,
 )
+
+logger = logging.getLogger("uvicorn.error")
 
 
 def to_application_read(application: Application) -> ApplicationRead:
@@ -142,6 +145,17 @@ def submit_application(db: Session, data: ApplicationCreate) -> Application:
     db.add(application)
     db.commit()
     db.refresh(application)
+
+    market_release = resolve_market_release(db, listing)
+    if not get_policy(market_release, "application.requires_manual_decision"):
+        from app.schemas.leasing import ApplicationDecide
+
+        decide_application(
+            db, application, _get_system_actor(db),
+            ApplicationDecide(decision="APPROVED", reason_code="auto_approved_low_risk_market"),
+        )
+        db.refresh(application)
+
     return application
 
 
@@ -358,24 +372,48 @@ def _auto_create_offer_if_enabled(db: Session, application: Application, actor: 
         return
     if get_policy(resolve_market_release(db, listing), "offer.requires_manual_creation"):
         return
-    if listing.default_monthly_rent is None or listing.default_deposit_amount is None or listing.default_term_months is None:
-        return
 
     try:
+        monthly_rent, deposit_amount, term_months = _default_offer_terms(db, listing)
         offer = create_offer(db, application, actor)
         add_offer_terms(
             db, offer, actor,
             OfferTermsCreate(
-                monthly_rent=listing.default_monthly_rent,
-                deposit_amount=listing.default_deposit_amount,
+                monthly_rent=monthly_rent,
+                deposit_amount=deposit_amount,
                 start_date=application.desired_move_in or date_.today(),
-                term_months=listing.default_term_months,
+                term_months=term_months,
                 cadence=listing.default_cadence or "MONTHLY",
             ),
         )
         set_offer_status(db, offer, actor, "SENT")
     except Exception:
-        pass
+        logger.exception("auto offer creation failed for application %s", application.id)
+
+
+# Used when a host hasn't set a listing's default term length.
+DEFAULT_OFFER_TERM_MONTHS = 12
+
+
+def _default_offer_terms(db: Session, listing: Listing) -> tuple[float, float, int]:
+    """(monthly_rent, deposit_amount, term_months) for an auto-created offer.
+    The listing's own defaults win; anything the host left blank falls back
+    to rent = price_per_night x 30, deposit = one month's rent kept within the
+    market's deposit rules, and DEFAULT_OFFER_TERM_MONTHS."""
+    monthly_rent = listing.default_monthly_rent
+    if monthly_rent is None:
+        monthly_rent = round(listing.price_per_night * 30, 2)
+
+    deposit_amount = listing.default_deposit_amount
+    if deposit_amount is None:
+        policy = resolve_market_policy(db, listing.room.property.jurisdiction_code)
+        if policy.deposit_instrument_allowed == "PROHIBITED":
+            deposit_amount = 0.0
+        else:
+            deposit_amount = round(monthly_rent * min(1.0, float(policy.deposit_max_rent_multiple)), 2)
+
+    term_months = listing.default_term_months or DEFAULT_OFFER_TERM_MONTHS
+    return monthly_rent, deposit_amount, term_months
 
 
 def decide_application(db: Session, application: Application, admin: AdminUser, data: ApplicationDecide) -> ApplicationDecision:
@@ -1126,9 +1164,19 @@ def _auto_create_agreement_if_enabled(db: Session, offer: Offer) -> None:
     touch the offer-acceptance state that already succeeded."""
     if get_policy(resolve_market_release(db, offer.listing), "agreement.requires_manual_creation"):
         return
+    # Rooms created before classifications were automatic may have none --
+    # fill in the default so it never holds up the agreement.
+    from app.crud.occupancy_classification import ensure_default_classification
+
+    if offer.listing.room is not None:
+        ensure_default_classification(db, offer.listing.room)
     try:
         agreement = create_agreement(db, offer, _get_system_actor(db), auto=True)
+    except HTTPException as exc:
+        logger.info("auto agreement creation skipped for offer %s: %s", offer.id, exc.detail)
+        return
     except Exception:
+        logger.exception("auto agreement creation failed for offer %s", offer.id)
         return
     # A fully-automatic pipeline that stops at DRAFT defeats the point --
     # nothing else ever moves this agreement to SENT on its own, so it
@@ -1143,6 +1191,25 @@ def _auto_create_agreement_if_enabled(db: Session, offer: Offer) -> None:
         send_agreement(db, agreement, _get_system_actor(db))
     except Exception:
         pass
+
+
+def retry_pending_auto_agreements(db: Session) -> None:
+    """Re-runs _auto_create_agreement_if_enabled for every accepted offer that
+    still has no agreement. Offer acceptance only tries once, so an offer
+    accepted while a gate was unmet (authority record, occupancy
+    classification, agreement clauses) would otherwise wait for a manual
+    click forever. Called after an admin action that can clear one of those
+    gates; never raises, so it can't undo the admin action that triggered it."""
+    try:
+        offers = list(db.scalars(
+            select(Offer).outerjoin(Agreement, Agreement.offer_id == Offer.id)
+            .where(Offer.status == "ACCEPTED", Agreement.id.is_(None))
+        ))
+        for offer in offers:
+            _auto_create_agreement_if_enabled(db, offer)
+    except Exception:
+        logger.exception("retrying pending auto agreements failed")
+        db.rollback()
 
 
 def get_agreement_or_404(db: Session, agreement_id: int, correlation_id: str = "") -> Agreement:

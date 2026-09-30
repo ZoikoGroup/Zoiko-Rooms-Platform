@@ -38,6 +38,13 @@ def _same_clause(row: ClauseDefinition):
 def list_clause_versions(
     db: Session, clause_id: str | None = None, jurisdiction_scope: str | None = None,
 ) -> list[ClauseDefinition]:
+    if jurisdiction_scope:
+        # Every region gets the default clauses automatically -- seed them so
+        # the admin registry view shows what agreements will actually use.
+        from app.services.agreement_profile import ensure_default_clause_registry
+
+        ensure_default_clause_registry(db, jurisdiction_scope)
+        db.commit()
     query = select(ClauseDefinition).order_by(
         ClauseDefinition.jurisdiction_scope, ClauseDefinition.clause_id, ClauseDefinition.version,
     )
@@ -107,12 +114,12 @@ def _add_clause_draft(
 
 
 def copy_default_clauses_to_jurisdiction(db: Session, admin: AdminUser, jurisdiction_scope: str) -> list[ClauseDefinition]:
-    """Gives a newly opened region a starting clause registry: one DRAFT row
-    per default clause (England's placeholder catalog) that this region
-    doesn't already have. Nothing becomes effective until an admin reviews
-    and approves each draft -- code never makes another region's legal
-    content live on its own. Returns the drafts created (empty if the
-    region already has every default clause)."""
+    """One DRAFT row per default clause (England's placeholder catalog) that
+    this region doesn't already have. Every region now gets the defaults
+    seeded as APPROVED automatically (services/agreement_profile.py:
+    ensure_default_clause_registry), so this normally returns an empty list;
+    it only fills in defaults an admin has deleted. Returns the drafts
+    created."""
     from app.services.agreement_profile import AGREEMENT_CLASS, DEFAULT_CLAUSES, SUPPORTED_JURISDICTION
 
     jurisdiction_scope = jurisdiction_scope.strip()
@@ -173,6 +180,12 @@ def approve_clause_version(db: Session, admin: AdminUser, row: ClauseDefinition)
     row.effective_from = today
     row.effective_to = None
     db.commit()
+    db.refresh(row)
+
+    # Approving the last mandatory clause can be the last gate an accepted offer was waiting on.
+    from app.crud.leasing import retry_pending_auto_agreements
+
+    retry_pending_auto_agreements(db)
     db.refresh(row)
     return row
 

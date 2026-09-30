@@ -48,4 +48,8 @@ def create_room(db: Session, prop: Property, data: RoomCreate) -> Room:
     db.add(room)
     db.commit()
     db.refresh(room)
+
+    from app.crud.occupancy_classification import ensure_default_classification
+
+    ensure_default_classification(db, room)
     return room

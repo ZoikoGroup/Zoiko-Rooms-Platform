@@ -58,7 +58,9 @@ async def submit_identity_verification(
     # ZR-ENG-CLR-012 Section 18: checked before the new record/artifact exist,
     # so a match here is necessarily a *prior* submission, never the one
     # being created right now.
-    duplicate_artifact = evidence_vault_crud.find_duplicate_by_hash(db, sha256_hash)
+    duplicate_artifact = evidence_vault_crud.find_duplicate_by_hash(
+        db, sha256_hash, exclude_uploaded_by_user_id=user.id,
+    )
     duplicate_of_verification_id = (
         int(duplicate_artifact.related_entity_id)
         if duplicate_artifact and duplicate_artifact.related_entity_type == "identity_verification"
@@ -112,6 +114,8 @@ def get_identity_verification(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Identity verification not found")
     if record.party_id != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own identity verifications")
+    crud.verify_due_submissions_for_party(db, record.party_id)
+    db.refresh(record)
 
     return _to_user_read(record)
 

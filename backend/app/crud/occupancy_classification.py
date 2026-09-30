@@ -12,6 +12,30 @@ def get_classification_for_room(db: Session, room_id: int) -> OccupancyClassific
     return db.scalar(select(OccupancyClassification).where(OccupancyClassification.room_id == room_id))
 
 
+# Every room gets this classification automatically, so a missing one never
+# blocks the agreement pipeline. A super admin can still change it any time
+# through set_classification (Trust & Safety -> Occupancy Classification).
+DEFAULT_CLASSIFICATION = "shared_residential_room"
+
+
+def ensure_default_classification(db: Session, room: Room) -> OccupancyClassification:
+    """The room's classification, creating the default APPROVED one if it has
+    none yet. Never overwrites an existing (admin-set) classification."""
+    record = get_classification_for_room(db, room.id)
+    if record is not None:
+        return record
+    record = OccupancyClassification(
+        room_id=room.id, rule_version=1, classification=DEFAULT_CLASSIFICATION,
+        confidence=1.0, evidence_ref="auto-default", review_state="APPROVED",
+        jurisdiction=room.property.jurisdiction_code or room.property.owner_party.jurisdiction,
+        updated_at=datetime.now(timezone.utc),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
 def set_classification(db: Session, room: Room, data: OccupancyClassificationSet) -> OccupancyClassification:
     record = get_classification_for_room(db, room.id)
     if not record:
@@ -28,5 +52,11 @@ def set_classification(db: Session, room: Room, data: OccupancyClassificationSet
     record.jurisdiction = room.property.owner_party.jurisdiction
     record.updated_at = datetime.now(timezone.utc)
     db.commit()
+    db.refresh(record)
+
+    # A resolved classification can be the last gate an accepted offer was waiting on.
+    from app.crud.leasing import retry_pending_auto_agreements
+
+    retry_pending_auto_agreements(db)
     db.refresh(record)
     return record
