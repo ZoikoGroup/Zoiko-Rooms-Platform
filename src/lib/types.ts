@@ -2040,6 +2040,11 @@ export interface PropertyVerification {
   verifiedAt: string | null;
   expiresAt: string | null;
   createdAt: string;
+  extractedOwnerName?: string | null;
+  extractedAddress?: string | null;
+  extractedDocumentNumber?: string | null;
+  nameMatched?: boolean | null;
+  addressMatched?: boolean | null;
 }
 
 export type ScreeningDecisionStatus = "AUTHORIZED" | "PASS" | "FAIL" | "INCONCLUSIVE" | "DISPUTED_SOURCE";

@@ -438,7 +438,7 @@ export function ListingFeeCheckout({
           There is no recurring charge for this listing.
         </p>
         <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
-          Paying the fee doesn&apos;t publish the listing by itself -- it still goes through Zoiko&apos;s review.
+          Your listing is now live -- renters can find it in Find a Room.
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           <Button size="sm" variant="outline" loading={downloading} onClick={handleDownloadReceipt}>

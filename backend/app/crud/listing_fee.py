@@ -926,22 +926,44 @@ def _complete_payment_success(db: Session, payment: ListingFeePayment, *, correl
     notif_crud.notify_user_by_party(
         db, payment.party_id,
         title="Listing Fee paid",
-        message=(
-            f"We received your Listing Fee payment of {payment.currency} {payment.amount:.2f}. "
-            "Your listing can proceed once every other publication requirement is complete."
-        ),
+        message=f"We received your Listing Fee payment of {payment.currency} {payment.amount:.2f}.",
         notification_type="listing_fee.paid",
         related_entity_type="listing_fee_payment", related_entity_id=str(payment.id),
     )
+    db.commit()
 
-    # ZR-PAY-002 Section 2.1/8.3, Acceptance Gate A7: "Automatic publication
-    # of a listing merely because its Listing Fee has been paid" is
-    # explicitly out of scope -- paying the fee only ever satisfies the
-    # "Listing fee" line of the publish-eligibility checklist
-    # (crud/listing.py:check_publish_eligibility). An admin's own explicit
-    # publish action (or the existing publication.requires_approval=False
-    # auto-approve path, neither of which is triggered from here) remains
-    # the only way a listing actually goes live.
+    _publish_approved_listing_after_fee(db, payment, correlation_id=correlation_id)
+
+
+def _publish_approved_listing_after_fee(db: Session, payment: ListingFeePayment, *, correlation_id: str = "") -> None:
+    """The fee is the last step: an admin/super admin has already reviewed and
+    approved the listing, so once it's paid the listing goes live on its own
+    (system-attributed, same publish_listing path an admin's click uses).
+    Only fires for an APPROVED listing -- never lifts a suspension/quarantine,
+    and is a no-op if it's already published. A failure here never undoes the
+    payment that already succeeded; an admin can still publish manually."""
+    from app.crud.leasing import _get_system_actor
+    from app.crud.listing import publish_listing
+    from app.models.listing import Listing
+
+    listing = db.get(Listing, payment.listing_id)
+    if listing is None or listing.state != "APPROVED":
+        return
+    try:
+        # "Zoiko Automation" -- self-healing system actor, always available.
+        publish_listing(db, listing, _get_system_actor(db))
+    except HTTPException as exc:
+        logger.warning("listing_fee: auto-publish after payment skipped (listing_id=%s): %s", listing.id, exc.detail)
+        return
+    log_audit_event(
+        db, None, "listing.publish", "listing", listing.id, correlation_id, reason="listing_fee_paid",
+        before_state="APPROVED", after_state=listing.state,
+    )
+    emit_event(
+        db, "listing.published", "listing", listing.id, {"listing_version_id": listing.current_public_version_id},
+        correlation_id=correlation_id, idempotency_key=f"listing.published:{listing.id}:fee:{payment.id}",
+    )
+    db.commit()
 
 
 def _complete_payment_failure(

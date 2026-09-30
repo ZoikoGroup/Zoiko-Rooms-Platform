@@ -1,7 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
-import { CheckCircle2, ShieldCheck, Upload, XCircle } from "lucide-react";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { CheckCircle2, Loader2, ShieldCheck, Upload, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Card, Field, Toast, inputClass, useToast } from "@/components/user/ui";
@@ -9,6 +9,12 @@ import { ACCEPTED_DOCUMENT_EXTENSIONS, MAX_DOCUMENT_SIZE_MB } from "@/lib/identi
 import { PropertyVerification } from "@/lib/types";
 import { formatDate } from "@/lib/utils";
 import { declareHostedPropertyVerification, errorMessage, listHostedRoomPropertyVerifications } from "@/lib/user-api";
+
+// Must match AUTO_VERIFY_PENDING_NOTE in backend/app/crud/property_verification.py --
+// a pending upload with this note is verified automatically ~10s after upload.
+const AUTO_VERIFY_PENDING_NOTE = "Verifying automatically.";
+const POLL_INTERVAL_MS = 3000;
+const POLL_TIMEOUT_MS = 30000;
 
 /** "Is the property/address itself real and evidenced" -- a separate claim
  *  from identity verification (who the lister is) and payment recipient
@@ -22,9 +28,11 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
   const [loading, setLoading] = useState(true);
   const [records, setRecords] = useState<PropertyVerification[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [verifyingId, setVerifyingId] = useState<number | null>(null);
+  const verifyingSince = useRef(0);
 
-  function load() {
-    setLoading(true);
+  function load(quiet = false) {
+    if (!quiet) setLoading(true);
     listHostedRoomPropertyVerifications(roomId)
       .then(setRecords)
       .catch((err) => showToast(errorMessage(err, "Could not load property verification status."), "error"))
@@ -33,19 +41,38 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
 
   useEffect(load, [roomId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // While an upload is being auto-verified, re-fetch until it leaves "pending".
+  useEffect(() => {
+    if (verifyingId === null) return;
+    const record = records.find((r) => r.id === verifyingId);
+    if (record && record.status !== "pending") {
+      setVerifyingId(null);
+      if (record.status === "verified") showToast("Your property is verified.");
+      return;
+    }
+    if (Date.now() - verifyingSince.current > POLL_TIMEOUT_MS) {
+      setVerifyingId(null);
+      showToast("Still verifying — check back in a moment.");
+      return;
+    }
+    const timer = setTimeout(() => load(true), POLL_INTERVAL_MS);
+    return () => clearTimeout(timer);
+  }, [verifyingId, records]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (loading) return <Loader label="Loading property verification status" />;
 
   const current = [...records].sort((a, b) => b.id - a.id)[0] ?? null;
   const now = Date.now();
   const currentIsLiveVerified =
     current?.status === "verified" && (!current.expiresAt || new Date(current.expiresAt).getTime() > now);
+  const currentIsVerifying = current?.status === "pending" && current.verifierNotes === AUTO_VERIFY_PENDING_NOTE;
 
   return (
     <div className="space-y-4">
       <p className="text-xs text-slate-500 dark:text-slate-400">
-        Upload evidence that this property is real -- a lease, utility bill, title deed, or similar document showing
-        your own name or the number from your verified identity document. An automated scan checks for either one
-        and verifies it immediately when found; otherwise a Zoiko admin reviews it.
+        Upload evidence that this property is yours -- a title deed, sale deed, property tax receipt, utility bill or
+        similar document showing the owner&apos;s name and the property address. It&apos;s verified automatically in a
+        few seconds.
       </p>
 
       {current && !showForm && (
@@ -61,14 +88,18 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
           <div className="flex items-center gap-2">
             {currentIsLiveVerified ? (
               <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-300" aria-hidden="true" />
+            ) : currentIsVerifying ? (
+              <Loader2 className="h-4 w-4 animate-spin text-amber-700 dark:text-amber-300" aria-hidden="true" />
             ) : (
               <XCircle className="h-4 w-4 text-amber-700 dark:text-amber-300" aria-hidden="true" />
             )}
             <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
               {currentIsLiveVerified
                 ? "Property verified"
-                : current.status === "pending"
-                  ? "Awaiting admin verification"
+                : currentIsVerifying
+                  ? "Verifying your property... (usually 10–15 seconds)"
+                  : current.status === "pending"
+                  ? "Under review by the Zoiko team"
                   : current.status === "additional_evidence_required"
                     ? "More evidence needed"
                     : current.status === "revoked"
@@ -78,7 +109,7 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
                         : "Verification expired"}
             </p>
           </div>
-          {current.verifierNotes && (
+          {current.verifierNotes && !currentIsVerifying && (
             <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">{current.verifierNotes}</p>
           )}
           <dl className="mt-3 space-y-1.5 text-sm">
@@ -86,6 +117,14 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
               <dt className="text-slate-500 dark:text-slate-400">Evidence reference</dt>
               <dd className="font-semibold text-slate-700 dark:text-slate-200">{current.evidenceRef || "--"}</dd>
             </div>
+            <DetailRow label="Owner name on document" value={current.extractedOwnerName} matched={current.nameMatched} />
+            <DetailRow label="Address on document" value={current.extractedAddress} matched={current.addressMatched} />
+            {current.extractedDocumentNumber && (
+              <div className="flex justify-between">
+                <dt className="text-slate-500 dark:text-slate-400">Document number</dt>
+                <dd className="font-semibold text-slate-700 dark:text-slate-200">{current.extractedDocumentNumber}</dd>
+              </div>
+            )}
             {current.expiresAt && (
               <div className="flex justify-between">
                 <dt className="text-slate-500 dark:text-slate-400">{currentIsLiveVerified ? "Valid until" : "Expired"}</dt>
@@ -107,19 +146,34 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
           onCancel={current ? () => setShowForm(false) : undefined}
           onSubmitted={(record) => {
             setShowForm(false);
-            showToast(
-              record.status === "verified"
-                ? "Verified automatically -- the document matched your name or your identity document's number."
-                : record.status === "additional_evidence_required"
-                  ? "Automated scan couldn't confirm this document -- see the note below."
-                  : "Submitted for admin verification."
-            );
+            if (record.status === "verified") {
+              showToast("Your property is verified.");
+            } else if (record.verifierNotes === AUTO_VERIFY_PENDING_NOTE) {
+              verifyingSince.current = Date.now();
+              setVerifyingId(record.id);
+            } else {
+              showToast("Submitted. The Zoiko team will review this document.");
+            }
             load();
           }}
         />
       )}
 
       <Toast toast={toast} />
+    </div>
+  );
+}
+
+function DetailRow({ label, value, matched }: { label: string; value?: string | null; matched?: boolean | null }) {
+  if (!value && matched == null) return null;
+  return (
+    <div className="flex justify-between gap-3">
+      <dt className="text-slate-500 dark:text-slate-400">{label}</dt>
+      <dd className="text-right font-semibold text-slate-700 dark:text-slate-200">
+        {value || "--"}
+        {matched === true && <span className="ml-2 text-xs font-medium text-emerald-600">matches</span>}
+        {matched === false && <span className="ml-2 text-xs font-medium text-amber-600">doesn&apos;t match</span>}
+      </dd>
     </div>
   );
 }
@@ -202,8 +256,8 @@ function DeclareForm({
       </div>
 
       <p className="flex items-start gap-1.5 text-xs text-slate-400">
-        <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" /> Document should clearly show your
-        own name or your identity document's number.
+        <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" /> Document should show the owner&apos;s
+        name and this property&apos;s address. A text PDF works best.
       </p>
 
       <div className="flex justify-end gap-2 pt-1">

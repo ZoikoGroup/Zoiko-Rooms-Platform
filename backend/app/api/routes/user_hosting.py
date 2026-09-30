@@ -368,6 +368,10 @@ def create_user_room(
     db.commit()
     db.refresh(room)
 
+    from app.crud.occupancy_classification import ensure_default_classification
+
+    ensure_default_classification(db, room)
+
     log_audit_event(db, None, "user_room.create", "room", str(room.id), get_correlation_id(request), reason=f"user:{user.id}")
     db.commit()
     return room
@@ -962,11 +966,11 @@ async def declare_hosted_property_verification(
     room = get_room(db, room_id)
     if not room:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
-    stored_filename, original_filename, content_type, file_size, _sha256_hash = await save_property_verification_document(file)
+    stored_filename, original_filename, content_type, file_size, sha256_hash = await save_property_verification_document(file)
     record = property_verification_crud.declare_property_verification(
         db, user, room, evidence_ref=evidence_ref,
         stored_filename=stored_filename, original_filename=original_filename,
-        content_type=content_type, file_size=file_size,
+        content_type=content_type, file_size=file_size, sha256_hash=sha256_hash,
     )
     emit_event(
         db, "property_verification.declared", "property_verification", str(record.id),

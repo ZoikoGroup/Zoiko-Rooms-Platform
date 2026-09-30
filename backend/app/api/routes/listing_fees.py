@@ -137,6 +137,13 @@ def post_create_listing_fee_checkout_session(
             status.HTTP_409_CONFLICT,
             "Finish these before paying the Listing Fee: " + "; ".join(blockers),
         )
+    # The fee is paid only after an admin/super admin has approved the
+    # listing -- paying it then publishes the listing automatically.
+    if quote.listing.state != "APPROVED":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "The Listing Fee can be paid once a Zoiko admin has approved this listing.",
+        )
     payment, checkout_url = listing_fee_crud.create_checkout(
         db, quote, party, idempotency_key=payload.idempotency_key, billing_country=payload.billing_country,
         frontend_origin=_resolve_frontend_origin(request), correlation_id=get_correlation_id(request),

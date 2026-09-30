@@ -45,8 +45,23 @@ def list_evidence_artifacts_for_entity(db: Session, related_entity_type: str, re
     )
 
 
-def find_duplicate_by_hash(db: Session, sha256_hash: str) -> EvidenceArtifact | None:
+def find_duplicate_by_hash(
+    db: Session, sha256_hash: str, *, exclude_uploaded_by_user_id: int | None = None,
+) -> EvidenceArtifact | None:
     """A prior upload with the exact same content already exists -- useful
     ops/fraud signal (Section 18: 'duplicate/fraud-pattern detection'),
-    though this deliberately only flags the fact, not a verdict."""
-    return db.scalar(select(EvidenceArtifact).where(EvidenceArtifact.sha256_hash == sha256_hash))
+    though this deliberately only flags the fact, not a verdict.
+
+    exclude_uploaded_by_user_id scopes this to cross-account reuse: the same
+    user re-uploading their own already-submitted document (e.g. resubmitting
+    after being asked to, or just retrying) is normal and must not itself be
+    treated as a fraud signal -- only a match against a *different* account's
+    upload is. Passed as an exclusion (not a party-scoped lookup) so a match
+    against another user still gets caught even when this user has never
+    uploaded anything before."""
+    query = select(EvidenceArtifact).where(EvidenceArtifact.sha256_hash == sha256_hash)
+    if exclude_uploaded_by_user_id is not None:
+        query = query.where(
+            EvidenceArtifact.uploaded_by_user_id.is_distinct_from(exclude_uploaded_by_user_id)
+        )
+    return db.scalar(query)

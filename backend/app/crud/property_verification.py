@@ -51,6 +51,7 @@ def get_property_verification_or_404(db: Session, verification_id: int) -> Prope
 
 
 def get_valid_property_verification_for_room(db: Session, room_id: int) -> PropertyVerification | None:
+    verify_due_property_verifications(db, room_id=room_id)
     now = datetime.now(timezone.utc)
     return db.scalar(
         select(PropertyVerification)
@@ -64,6 +65,7 @@ def get_valid_property_verification_for_room(db: Session, room_id: int) -> Prope
 
 
 def list_property_verifications_for_room(db: Session, room_id: int) -> list[PropertyVerification]:
+    verify_due_property_verifications(db, room_id=room_id)
     return list(
         db.scalars(
             select(PropertyVerification).where(PropertyVerification.room_id == room_id).order_by(PropertyVerification.id.desc())
@@ -74,14 +76,16 @@ def list_property_verifications_for_room(db: Session, room_id: int) -> list[Prop
 def declare_property_verification(
     db: Session, user: UserAccount, room: Room, *,
     evidence_ref: str, stored_filename: str, original_filename: str, content_type: str, file_size: int,
+    sha256_hash: str | None = None,
 ) -> PropertyVerification:
     """Host self-service submission, scoped to a room the calling host's own
-    party actually owns -- same ownership-check shape as
-    crud/authority.py:declare_authority_record and
-    api/routes/user_hosting.py's own pattern. A real uploaded document is
-    now required alongside evidence_ref -- previously evidence_ref (a free
-    -text description) was the only thing ever recorded, with nothing
-    actually evidencing the claim."""
+    party actually owns. No OCR: details are grabbed with regex from the PDF
+    text layer and the typed evidence_ref (services/document_regex.py),
+    stored on the row, and compared against the host's name and the room's
+    property address. The row then waits AUTO_VERIFY_DELAY_SECONDS and is
+    verified by verify_due_property_verifications -- unless the document is
+    a duplicate of another host's upload, or it has readable text in which
+    neither the name nor the address matches; those go to a super admin."""
     if not user.party_id or room.property.owner_party_id != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only submit property evidence for your own room")
     if not evidence_ref.strip():
@@ -91,12 +95,32 @@ def declare_property_verification(
         party_id=user.party_id, room_id=room.id, evidence_ref=evidence_ref.strip(),
         document_file_path=stored_filename, document_file_original_name=original_filename,
         document_file_content_type=content_type, document_file_size=file_size,
-        status="pending",
+        document_sha256=sha256_hash, status="pending",
     )
+    _extract_and_match(db, record, user, room)
     db.add(record)
     db.flush()
 
-    _run_ocr_identity_cross_check(db, record, user)
+    duplicate_of = _find_duplicate(db, record)
+    mismatch = not (record.name_matched or record.address_matched) and (
+        record.name_matched is False or record.address_matched is False
+    )
+    if duplicate_of is not None:
+        record.verifier_notes = REVIEW_PENDING_NOTE
+        _notify_review_needed(
+            db, record, user,
+            f"This document matches property verification #{duplicate_of.id} submitted for another host's room "
+            f"-- review for reuse or fraud.",
+        )
+    elif mismatch:
+        record.verifier_notes = REVIEW_PENDING_NOTE
+        _notify_review_needed(
+            db, record, user,
+            f"Neither the owner name nor the property address on this document matched "
+            f"(name found: {record.extracted_owner_name or 'none'}; address found: {record.extracted_address or 'none'}).",
+        )
+    else:
+        record.verifier_notes = AUTO_VERIFY_PENDING_NOTE
 
     db.commit()
     db.refresh(record)
@@ -109,108 +133,125 @@ def declare_property_verification(
     return record
 
 
-def _run_ocr_identity_cross_check(db: Session, record: PropertyVerification, user: UserAccount) -> None:
-    """Real, working auto-verify, deliberately simplified (a prior version
-    required BOTH the property document and a fresh re-read of the old
-    identity document to independently show the name -- dropped as
-    unnecessary complexity): checks the property document ONCE for EITHER
-    a name OR the document number already read and stored at
-    identity-verification time (IdentityVerification.ocr_extracted_number
-    -- reused directly, never re-OCR'd). Either signal alone is enough to
-    auto-verify; neither is mandatory on its own.
+# How long an upload shows as "Verifying..." before it is auto-verified -- same
+# as identity verification (crud/identity_verification.py). The frontend polls
+# while a submission is pending.
+AUTO_VERIFY_DELAY_SECONDS = 10
+AUTO_VERIFY_PENDING_NOTE = "Verifying automatically."
+REVIEW_PENDING_NOTE = "Under review by the Zoiko team."
 
-    The name checked is IdentityVerification.extracted_name when present
-    -- a REAL name parsed off the identity document's own passport MRZ
-    line (services/document_ocr.py:extract_name_from_mrz), not a guess.
-    Only when no MRZ name was parseable (any non-passport document, or a
-    passport whose MRZ line didn't read cleanly) does this fall back to
-    the account's typed full_name. Preferring the document's own real
-    content over a self-typed profile field means this works correctly
-    even when the account's display name doesn't happen to match --
-    exactly the gap that motivated adding extracted_name in the first
-    place.
 
-    A genuine match auto-verifies through the same real
-    verify_property_verification crud path a human admin's approval click
-    uses -- no admin queue, no second review. Anything else reroutes to
-    additional_evidence_required with the real, specific reason -- never a
-    blind accept. Fails open (leaves the record "pending" for manual
-    review) only for infra problems -- OCR unavailable, no verified
-    identity to compare against, unreadable file -- never for a real bad
-    result.
-
-    Still requires the owner's identity to already be a REAL, verified
-    credential (crud/identity_verification.py:get_valid_identity_credential
-    -- the same "source of truth" lookup ZR-ENG-CLR-012 Section 24 tells
-    every other identity-dependent gate to use): that's what makes the
-    name and stored document number trustworthy details to check against,
-    rather than unverified, self-typed values."""
+def _extract_and_match(db: Session, record: PropertyVerification, user: UserAccount, room: Room) -> None:
+    """Regex-only (no OCR) owner name / address / document number, plus
+    whether the document mentions the host's name and this property's
+    address. name_matched/address_matched stay None when there's no text."""
     from app.core.property_verification_uploads import resolve_property_verification_document_path
-    from app.crud.identity_verification import get_valid_identity_credential
-    from app.crud.payment_provider import get_system_admin
-    from app.models.identity_verification import IdentityVerification
-    from app.services import document_ocr
-
-    if not document_ocr.is_available():
-        logger.warning(
-            "property_verification #%s: OCR unavailable (tesseract not found) -- "
-            "leaving record in 'pending' for manual review", record.id,
-        )
-        return
-    if not record.document_file_path:
-        return
-
-    credential = get_valid_identity_credential(db, record.party_id)
-    if credential is None or credential.source_identity_verification_id is None:
-        logger.info(
-            "property_verification #%s: no valid identity credential for party #%s yet -- "
-            "leaving in 'pending' until owner's identity is verified", record.id, record.party_id,
-        )
-        return
-    identity_record = db.get(IdentityVerification, credential.source_identity_verification_id)
-    if identity_record is None:
-        return
-
-    name_to_check = identity_record.extracted_name or user.full_name
+    from app.crud.identity_verification import get_verified_identity_for_party
+    from app.services import document_regex
 
     try:
-        property_bytes = resolve_property_verification_document_path(record.document_file_path).read_bytes()
-        matched, matched_via, confidence, snippet = document_ocr.check_identity_details_in_document(
-            property_bytes, full_name=name_to_check, document_number=identity_record.ocr_extracted_number,
-        )
-    except Exception:
-        logger.exception(
-            "property_verification #%s: OCR check raised -- leaving record in 'pending' for manual review",
-            record.id,
-        )
+        document_bytes = resolve_property_verification_document_path(record.document_file_path).read_bytes()
+    except (OSError, TypeError):
+        document_bytes = b""
+    details = document_regex.extract_property_details(
+        document_bytes, record.document_file_content_type, record.evidence_ref,
+    )
+    record.extracted_owner_name = details["owner_name"]
+    record.extracted_address = details["address"]
+    record.extracted_document_number = details["document_number"]
+
+    # Compare only against real document text, or a typed "Owner:"/"Address:"
+    # line -- a bare typed label like "title deed" leaves the result unknown.
+    has_document_text = bool(details["document_text"].strip())
+    name_text = details["text"] if has_document_text or details["owner_name"] else ""
+    address_text = details["text"] if has_document_text or details["address"] else ""
+
+    identity = get_verified_identity_for_party(db, user.party_id)
+    names = [n for n in (user.full_name, identity.extracted_name if identity else None) if n]
+    name_results = [document_regex.name_matches(n, name_text) for n in names]
+    record.name_matched = True if True in name_results else (False if False in name_results else None)
+    prop = room.property
+    record.address_matched = document_regex.address_matches(prop.address, prop.city, address_text)
+    # The optional landmark is only a fallback for when the full address doesn't match.
+    if record.address_matched is False and getattr(prop, "landmark", ""):
+        record.address_matched = document_regex.address_matches(prop.landmark, prop.city, address_text) or False
+
+
+def _find_duplicate(db: Session, record: PropertyVerification) -> PropertyVerification | None:
+    if not record.document_sha256:
+        return None
+    return db.scalar(
+        select(PropertyVerification).where(
+            PropertyVerification.document_sha256 == record.document_sha256,
+            PropertyVerification.party_id != record.party_id,
+            PropertyVerification.id != record.id,
+        ).order_by(PropertyVerification.id)
+    )
+
+
+def _notify_review_needed(db: Session, record: PropertyVerification, user: UserAccount, reason: str) -> None:
+    from app.crud import notification as notif_crud
+
+    notif_crud.notify_all_super_admins(
+        db,
+        title="Property verification needs review",
+        message=f"{user.full_name}'s property document (room #{record.room_id}) needs a manual check. {reason}",
+        notification_type="property_verification.review_needed",
+        related_entity_type="property_verification", related_entity_id=str(record.id),
+    )
+    notif_crud.notify_user(
+        db, user.id,
+        title="Property verification under review",
+        message="Your property document is being checked by the Zoiko team. We'll let you know once it's done.",
+        notification_type="property_verification.under_review",
+        related_entity_type="property_verification", related_entity_id=str(record.id),
+    )
+
+
+def verify_due_property_verifications(db: Session, *, room_id: int | None = None) -> None:
+    """Auto-verifies uploads that have waited AUTO_VERIFY_DELAY_SECONDS. Called
+    whenever a room's property verifications are read, so there's no
+    background job to lose on a restart -- the next read catches up."""
+    query = select(PropertyVerification).where(
+        PropertyVerification.status == "pending",
+        PropertyVerification.verifier_notes == AUTO_VERIFY_PENDING_NOTE,
+    )
+    if room_id is not None:
+        query = query.where(PropertyVerification.room_id == room_id)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=AUTO_VERIFY_DELAY_SECONDS)
+    due = [r for r in db.scalars(query) if _as_utc(r.created_at) <= cutoff]
+    if not due:
         return
 
-    record.ocr_extracted_text = snippet
-    record.ocr_confidence = confidence
-    record.ocr_name_matched = matched if matched_via != "number" else None
-    db.flush()
+    from app.crud import notification as notif_crud
+    from app.crud.payment_provider import get_system_admin
 
-    threshold = document_ocr.NAME_MATCH_CONFIDENCE_THRESHOLD
-
-    if matched and confidence >= threshold:
-        matched_on = (
-            f"your name ({name_to_check})" if matched_via == "name"
-            else f"your identity document's number ({identity_record.ocr_extracted_number})"
-        )
-        note = (
-            f"Auto-verified: automated scan found {matched_on} on this document, at {confidence:.0f}% OCR "
-            f"confidence (minimum {threshold:.0f}%)."
-        )
-        verify_property_verification(db, record, get_system_admin(db), notes=note)
+    try:
+        system_admin = get_system_admin(db)
+    except HTTPException:
+        logger.warning("property auto-verify: no system admin configured -- leaving uploads in 'pending'")
         return
+    for record in due:
+        verify_property_verification(db, record, system_admin, notes=_auto_verified_note(record))
+        notif_crud.notify_user_by_party(
+            db, record.party_id,
+            title="Property verified",
+            message="Your property document has been verified.",
+            notification_type="property_verification.verified",
+            related_entity_type="property_verification", related_entity_id=str(record.id),
+        )
+        db.commit()
 
-    if confidence < threshold:
-        reason = f"Automated scan couldn't clearly read this document (confidence {confidence:.0f}%, below the {threshold:.0f}% minimum)."
-    else:
-        reason = f"Automated scan: couldn't find your name ({name_to_check}) or your identity document's number on this document."
 
-    record.status = "additional_evidence_required"
-    record.verifier_notes = f"{reason} Please re-upload a clearer document that shows your name or ID number."
+def _auto_verified_note(record: PropertyVerification) -> str:
+    matched = [label for label, ok in (("owner name", record.name_matched), ("property address", record.address_matched)) if ok]
+    if matched:
+        return f"Auto-verified: document matched the {' and '.join(matched)}."
+    return "Auto-verified on upload (no readable text to compare)."
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def list_property_verifications_for_room_owned_by(db: Session, user: UserAccount, room: Room) -> list[PropertyVerification]:

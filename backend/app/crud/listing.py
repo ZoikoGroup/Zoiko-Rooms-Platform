@@ -743,10 +743,9 @@ def submit_listing_for_review(db: Session, listing: Listing) -> Listing:
 
     # ZR-ENG-CLR-001 Rule 3/Section 14 policy key publication.requires_approval:
     # "Future low-risk automation may approve through the same auditable
-    # approval object." England's own MarketRelease never overrides this
-    # (the platform default is always True), so this branch is dead for
-    # England launch -- it only fires for a future market pack that
-    # explicitly sets the override to False.
+    # approval object." The platform default is True (every market goes to
+    # admin review), so this branch only fires for a market release that
+    # explicitly overrides it to False.
     if not get_policy(listing.market_release, "publication.requires_approval"):
         return _auto_approve_and_publish_low_risk_market(db, listing)
 
@@ -869,7 +868,27 @@ def approve_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
 
     db.commit()
     db.refresh(listing)
-    return listing
+
+    # Next step is the Listing Fee: the host pays it and the listing then
+    # publishes automatically (crud/listing_fee.py:_complete_payment_success).
+    # When no fee is owed (already paid, or none applies in this market)
+    # there's nothing to wait for, so publish now.
+    try:
+        _require_listing_fee_paid_if_applicable(db, listing)
+    except HTTPException:
+        user = get_user_by_party_id(db, listing.party_id)
+        if user:
+            notification_crud.notify_user(
+                db, user.id,
+                title="Listing approved -- pay the Listing Fee to go live",
+                message=f'Your listing "{listing.name}" was approved. Pay the Listing Fee from My Listings '
+                        f"and it will be published automatically.",
+                notification_type="listing.approved",
+                related_entity_type="listing", related_entity_id=listing.id,
+            )
+            db.commit()
+        return listing
+    return publish_listing(db, listing, admin)
 
 
 def publish_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:

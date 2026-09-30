@@ -304,3 +304,77 @@ class TestAuditEventsAreLoggedOnce:
             AuditEvent.action == "property_verification.verify", AuditEvent.resource_id == str(declared.id),
         ).count()
         assert count == 1
+
+
+class TestRegexAutoVerify:
+    """No OCR: details are grabbed with regex (document_regex.py) from the PDF
+    text layer + typed evidence_ref, stored on the row, and matched against
+    the host's name and the property address. Uploads auto-verify after
+    AUTO_VERIFY_DELAY_SECONDS unless they're a duplicate or clearly mismatch."""
+
+    @pytest.fixture(autouse=True)
+    def _system_admin(self, db_session: Session):
+        from app.core.config import settings
+
+        _make_admin(db_session, email=settings.seed_admin_email, role="super_admin")
+        db_session.commit()
+
+    @staticmethod
+    def _age(db: Session, record: PropertyVerification) -> None:
+        record.created_at = datetime.now(timezone.utc) - timedelta(seconds=crud.AUTO_VERIFY_DELAY_SECONDS + 1)
+        db.commit()
+
+    def test_upload_waits_then_auto_verifies(self, db_session: Session):
+        user, room = _make_host_with_room(db_session, email="pv-auto@test.com")
+        record = _declare(db_session, user, room, evidence_ref="title deed")
+        assert record.status == "pending"
+        assert record.verifier_notes == crud.AUTO_VERIFY_PENDING_NOTE
+
+        crud.list_property_verifications_for_room(db_session, room.id)
+        db_session.refresh(record)
+        assert record.status == "pending"  # not due yet
+
+        self._age(db_session, record)
+        crud.list_property_verifications_for_room(db_session, room.id)
+        db_session.refresh(record)
+        assert record.status == "verified"
+        assert record.expires_at is not None
+
+    def test_details_are_extracted_and_matched(self, db_session: Session):
+        user, room = _make_host_with_room(db_session, email="pv-match@test.com")
+        record = _declare(
+            db_session, user, room,
+            evidence_ref=f"Deed No: BLR/2024/991\nOwner Name: {user.full_name}\nProperty Address: 1 Verify Way, Bengaluru",
+        )
+        assert record.extracted_owner_name == user.full_name
+        assert record.extracted_address == "1 Verify Way, Bengaluru"
+        assert record.extracted_document_number == "BLR/2024/991"
+        assert record.name_matched is True
+        assert record.address_matched is True
+        assert record.verifier_notes == crud.AUTO_VERIFY_PENDING_NOTE
+
+    def test_name_and_address_mismatch_goes_to_review(self, db_session: Session):
+        user, room = _make_host_with_room(db_session, email="pv-mismatch@test.com")
+        record = _declare(
+            db_session, user, room,
+            evidence_ref="Owner Name: Somebody Else\nProperty Address: 77 Unrelated Street, Chennai",
+        )
+        assert record.name_matched is False
+        assert record.address_matched is False
+        assert record.verifier_notes == crud.REVIEW_PENDING_NOTE
+
+        self._age(db_session, record)
+        crud.list_property_verifications_for_room(db_session, room.id)
+        db_session.refresh(record)
+        assert record.status == "pending"  # never auto-verified
+
+    def test_duplicate_document_from_another_host_goes_to_review(self, db_session: Session):
+        first_user, first_room = _make_host_with_room(db_session, email="pv-dup1@test.com")
+        second_user, second_room = _make_host_with_room(db_session, email="pv-dup2@test.com")
+        common = dict(
+            evidence_ref="title deed", stored_filename="test-stored.pdf", original_filename="deed.pdf",
+            content_type="application/pdf", file_size=len(_PDF_BYTES), sha256_hash="a" * 64,
+        )
+        crud.declare_property_verification(db_session, first_user, first_room, **common)
+        duplicate = crud.declare_property_verification(db_session, second_user, second_room, **common)
+        assert duplicate.verifier_notes == crud.REVIEW_PENDING_NOTE

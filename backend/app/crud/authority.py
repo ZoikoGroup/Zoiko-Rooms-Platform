@@ -71,10 +71,10 @@ def declare_authority_record(
     room.property.owner_party_id) rather than assert_provider_access, which
     only ever recognizes an AdminUser's Membership.
 
-    Lands in the same 'pending' status submit_authority_record already
-    uses (no new status introduced) -- an admin still verifies/rejects it
-    through the existing, unchanged verify_authority_record/
-    reject_authority_record workflow."""
+    Saved as 'pending' and then verified automatically straight away
+    (the ownership check above already proves this host owns the room) --
+    a super admin can still reject or revoke it through the existing
+    reject_authority_record/revoke_authority_record workflow."""
     if not user.party_id or room.property.owner_party_id != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only submit authority evidence for your own room")
 
@@ -95,7 +95,14 @@ def declare_authority_record(
         reason=f"user:{user.id}; room={room.id}; relationship={relationship_type}",
     )
     db.commit()
-    return record
+
+    from app.crud.payment_provider import get_system_admin
+
+    try:
+        system_admin = get_system_admin(db)
+    except HTTPException:
+        return record  # no system admin configured -- stays pending for a super admin
+    return verify_authority_record(db, record, system_admin)
 
 
 def list_authority_records_for_room_owned_by(db: Session, user: UserAccount, room: Room) -> list[AuthorityRecord]:
@@ -113,6 +120,12 @@ def verify_authority_record(db: Session, record: AuthorityRecord, verifier: Admi
     record.expires_at = now + timedelta(days=AUTHORITY_VALIDITY_DAYS)
     record.verifier_admin_id = verifier.id
     db.commit()
+    db.refresh(record)
+
+    # A verified authority record can be the last gate an accepted offer was waiting on.
+    from app.crud.leasing import retry_pending_auto_agreements
+
+    retry_pending_auto_agreements(db)
     db.refresh(record)
     return record
 
