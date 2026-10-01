@@ -155,6 +155,37 @@ def link_payment_disputes_to_cases(db: Session) -> int:
     return link_open_payment_disputes(db)
 
 
+def sweep_identity_reverification(db: Session) -> int:
+    """ZR-IDENTITY-001 Section 7.3: verified identities whose policy
+    renewal date has passed move to REVERIFICATION_REQUIRED."""
+    from app.services.identity.service import sweep_reverification_due
+
+    return sweep_reverification_due(db)
+
+
+def purge_identity_evidence(db: Session) -> int:
+    """ZR-IDENTITY-001 Section 9.2: delete raw identity evidence past the
+    country pack's retention period (the decision itself is kept)."""
+    from app.services.identity.service import purge_expired_evidence
+
+    return purge_expired_evidence(db)
+
+
+def reconcile_identity_sessions(db: Session) -> int:
+    """ZR-IDV-ADR-001 Section 8/13: hosted identity sessions with no decision
+    after the threshold are checked with the provider's decision API."""
+    from app.services.identity.service import reconcile_stale_sessions
+
+    return reconcile_stale_sessions(db)
+
+
+def process_identity_webhooks(db: Session) -> int:
+    """Retry identity provider webhook events accepted but not yet processed."""
+    from app.services.identity.service import process_pending_webhook_events
+
+    return process_pending_webhook_events(db)
+
+
 def reconcile_listing_fee_refunds(db: Session) -> int:
     """Listing Fee refunds stuck in PROCESSING are checked with Stripe (in case
     their webhook never arrived) -- succeeded ones confirmed, failed ones marked
@@ -204,6 +235,10 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("send_due_soon_reminders", send_due_soon_reminders),
     ("send_signature_reminders", send_signature_reminders),
     ("link_payment_disputes_to_cases", link_payment_disputes_to_cases),
+    ("sweep_identity_reverification", sweep_identity_reverification),
+    ("purge_identity_evidence", purge_identity_evidence),
+    ("process_identity_webhooks", process_identity_webhooks),
+    ("reconcile_identity_sessions", reconcile_identity_sessions),
     ("remind_hosts_of_unconfirmed_payments", remind_hosts_of_unconfirmed_payments),
     ("reconcile_listing_fee_refunds", reconcile_listing_fee_refunds),
 )

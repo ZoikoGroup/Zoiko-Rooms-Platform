@@ -1306,34 +1306,7 @@ export interface IdentityVerificationRecord {
   verifierNotes: string;
 }
 
-/** Admin-facing shape, returned by /api/identity-verifications -- field names
- *  mirror the backend's ORM-passthrough schema, which is why this differs
- *  slightly from IdentityVerificationRecord above (e.g. encryptedReference
- *  instead of documentNumber). */
-export interface AdminIdentityVerification {
-  id: number;
-  partyId: number;
-  documentType: IdentityDocumentType;
-  documentCategory: DocumentCategory;
-  customDocumentName: string;
-  encryptedReference: string | null;
-  evidenceRef: string;
-  verifiedAt: string | null;
-  expiresAt: string | null;
-  verifierAdminId: number | null;
-  verifierNotes: string;
-  status: IdentityVerificationStatus;
-  hasDocument: boolean;
-  documentFileOriginalName: string;
-  documentFileContentType: string;
-  /** What the automated scan read off the document, if it ran. */
-  ocrExtractedNumber: string | null;
-  ocrConfidence: number | null;
-  /** True when the automated scan (not an admin) sent this back for more evidence -- a super admin can overrule it. */
-  autoFlagged: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
+/* The admin identity queue/case shapes live in src/lib/identity.ts (ZR-IDENTITY-001). */
 
 export interface UserApplication {
   id: number;

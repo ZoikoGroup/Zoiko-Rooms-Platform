@@ -4,8 +4,12 @@ agreement profile, because check_agreement_eligibility never actually called
 resolve_agreement_profile -- only the real POST .../agreement call did, so
 the toast the admin saw right before that 409 was misleading. Confirms the
 pre-check now reports the same fail-closed reason the real creation call
-raises, using a real ORM Offer/OfferTerms (not the HTTP flow, which already
-routes every listing through the England-only agreement-profile helper)."""
+raises, using a real ORM Offer/OfferTerms (not the HTTP flow).
+
+Every region now gets the default clause registry seeded automatically
+(services/agreement_profile.py:ensure_default_clause_registry), so the
+fail-closed case used here is a market flagged manual-agreements-only --
+resolve_agreement_profile refuses it whatever clauses exist."""
 
 from __future__ import annotations
 
@@ -28,9 +32,9 @@ from tests.conftest import _make_admin, auth_admin_cookie
 
 def _accepted_offer_on_india_jurisdiction_listing(db: Session) -> tuple[Offer, object]:
     """India is real 'good standing' per jurisdiction_gates_pass (active
-    market release, verified authority, approved classification) -- but
-    services/agreement_profile.py's SUPPORTED_JURISDICTION is 'England' only,
-    so this offer is exactly the case the pre-check used to miss."""
+    market release, verified authority, approved classification) -- but its
+    market is manual-agreements-only, so no agreement profile resolves:
+    exactly the case the pre-check used to miss."""
     admin = _make_admin(db, email="precheck-admin@test.com")
     owner_party = get_or_create_default_party(db, admin)
     # Explicitly "IN" (not this platform's default jurisdiction, "England")
@@ -45,7 +49,7 @@ def _accepted_offer_on_india_jurisdiction_listing(db: Session) -> tuple[Offer, o
     room = Room(property_id=prop.id, room_type="private_room", size=100, has_ensuite=True, status="active")
     db.add(room)
     db.flush()
-    market_release = MarketRelease(jurisdiction="IN", status="active", min_stay_nights=30)
+    market_release = MarketRelease(jurisdiction="IN", status="active", min_stay_nights=30, manual_agreement_only=True)
     db.add(market_release)
     db.add(AuthorityRecord(party_id=owner_party.id, room_id=room.id, authority_type="lease", status="verified"))
     db.add(OccupancyClassification(room_id=room.id, classification="long_term_residential", review_state="APPROVED"))
@@ -83,7 +87,7 @@ class TestAgreementEligibilityPrecheckMatchesRealCreation:
     def test_jurisdiction_with_no_approved_profile_is_reported_as_ineligible(self, db_session: Session):
         offer, _admin = _accepted_offer_on_india_jurisdiction_listing(db_session)
         reasons = check_agreement_eligibility(db_session, offer)
-        assert any("No approved agreement profile" in r for r in reasons), reasons
+        assert any("No approved agreement profile" in r and "handled manually" in r for r in reasons), reasons
 
     def test_pre_check_endpoint_reports_ineligible_for_the_same_offer(self, client, db_session: Session):
         offer, admin = _accepted_offer_on_india_jurisdiction_listing(db_session)

@@ -55,6 +55,34 @@ class Settings(BaseSettings):
     # `python -c "from cryptography.fernet import Fernet;
     # print(Fernet.generate_key().decode())"` for any real deployment.
     field_encryption_key: str = DEV_FIELD_ENCRYPTION_KEY
+    # ZR-IDENTITY-001 Section 8.3: HMAC secret for an external identity
+    # provider's signed webhook (services/identity/providers.py:
+    # SignedWebhookProvider). Blank = no external provider enabled.
+    identity_webhook_secret: str = ""
+    # ZR-IDV-ADR-001: Veriff, the primary identity provider (Document + Selfie
+    # IDV). Credentials come only from the environment / secret store -- a
+    # separate integration per environment, rotated without code changes,
+    # never sent to a browser or app. Blank = Veriff not configured.
+    veriff_api_key: str = ""
+    veriff_shared_secret: str = ""
+    veriff_base_url: str = "https://stationapi.veriff.com"
+    # Non-secret label for which integration this is ("sandbox" / "production").
+    veriff_integration_id: str = "sandbox"
+    veriff_timeout_seconds: float = 10.0
+    # Hosted sessions with no decision after this long are reconciled against
+    # Veriff's decision API (Section 8 / 13).
+    veriff_reconcile_after_minutes: int = 60
+    # Which result webhook the contracted Veriff plan provides (ADR Section 2):
+    # "decision" (Plus / Premium -- Decision Webhook) or "full_auto" (Essential).
+    veriff_plan: str = "decision"
+    # (The webhook URLs on the readiness page are built from public_api_url.)
+    # Provider written into new country packs; packs are edited afterwards.
+    identity_default_provider: str = "zoiko_document_check"
+    # Whether the built-in document check (number format + name in a PDF --
+    # no authenticity or selfie check) may verify someone on its own. Unset
+    # = allowed outside production only; in production its "pass" goes to a
+    # reviewer. Setting it true in production is refused at startup.
+    identity_builtin_check_can_verify: bool | None = None
     # Comma-separated allow-list. Includes the authenticated platform frontend
     # and the public marketing site (local dev + deployed) so the anonymous
     # assistant widget can call /api/public/assistant cross-origin.
@@ -384,11 +412,41 @@ class Settings(BaseSettings):
             problems.append("LISTING_FEE_FAIL_CLOSED must be true in production")
         if not self.payment_receipt_authority_required:
             problems.append("PAYMENT_RECEIPT_AUTHORITY_REQUIRED must be true in production")
+        problems.extend(self._identity_production_problems())
         if problems:
             raise ValueError(
                 "Refusing to boot in production due to insecure configuration:\n- " + "\n- ".join(problems)
             )
         return self
+
+    @property
+    def builtin_check_can_verify(self) -> bool:
+        if self.identity_builtin_check_can_verify is None:
+            return not self.is_production
+        return self.identity_builtin_check_can_verify
+
+    def _identity_production_problems(self) -> list[str]:
+        """ZR-IDV-ADR-001 Sections 12 / 17: identity verification settings
+        that must be right before production traffic."""
+        problems = []
+        if self.identity_builtin_check_can_verify:
+            problems.append(
+                "IDENTITY_BUILTIN_CHECK_CAN_VERIFY must not be true in production -- the built-in check can't "
+                "confirm a document is genuine"
+            )
+        if self.veriff_plan not in ("decision", "full_auto"):
+            problems.append("VERIFF_PLAN must be 'decision' or 'full_auto'")
+        veriff_keys = bool(self.veriff_api_key) + bool(self.veriff_shared_secret)
+        if veriff_keys == 1:
+            problems.append("VERIFF_API_KEY and VERIFF_SHARED_SECRET must be set together")
+        if self.veriff_integration_id == "production" and veriff_keys != 2:
+            problems.append("VERIFF_INTEGRATION_ID=production needs VERIFF_API_KEY and VERIFF_SHARED_SECRET")
+        if veriff_keys == 2:
+            if not self.veriff_base_url.startswith("https://"):
+                problems.append("VERIFF_BASE_URL must be https")
+            if not self.public_api_url.startswith("https://"):
+                problems.append("PUBLIC_API_URL must be the public https URL Veriff sends webhooks to")
+        return problems
 
     @property
     def cors_origin_list(self) -> list[str]:

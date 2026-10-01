@@ -88,6 +88,8 @@ from app.models.room import Room
 from app.models.room_hold import RoomHold
 from app.models.room_passport import RoomPassportClaim, RoomPassportSnapshot
 from app.models.identity_verification import IdentityVerification
+from app.models.identity_profile import IdentityProfile, IdentityProviderEvent, IdentityRegulatoryPack
+from app.models.identity_provider_config import IdentityGoLiveGate, IdentityProviderCheck, IdentityProviderReasonMapping
 from app.models.break_glass_access import BreakGlassAccessGrant
 from app.models.evidence_artifact import EvidenceArtifact
 from app.models.occupancy_eligibility_check import OccupancyEligibilityCheck
@@ -216,6 +218,12 @@ __all__ = [
     "PaymentReceipt",
     "PaymentSchedule",
     "IdentityVerification",
+    "IdentityProfile",
+    "IdentityProviderEvent",
+    "IdentityRegulatoryPack",
+    "IdentityGoLiveGate",
+    "IdentityProviderCheck",
+    "IdentityProviderReasonMapping",
     "BreakGlassAccessGrant",
     "EvidenceArtifact",
     "OccupancyEligibilityCheck",
