@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import DateTime, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -19,6 +19,7 @@ EVIDENCE_SCAN_STATUSES = ("NOT_SCANNED", "CLEAN", "FLAGGED")
 
 class EvidenceArtifact(Base):
     __tablename__ = "evidence_artifacts"
+    __table_args__ = (Index("ix_evidence_artifacts_related_entity", "related_entity_type", "related_entity_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     # Generic (type, id) pointer -- same pattern as models/notification.py's
