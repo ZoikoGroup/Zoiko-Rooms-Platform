@@ -55,6 +55,7 @@ from app.schemas.leasing import (
     PremisesChangeRequestCreate,
     ShorteningRequestCreate,
     OfferAcceptRequest,
+    OfferCounterCreate,
     OfferRead,
     SubletRenterLookup,
     SubletRequestCreate,
@@ -381,6 +382,33 @@ def decline_own_offer(
     log_audit_event(db, None, "user_offer.decline", "offer", str(offer_id), correlation_id, reason=f"user:{user.id}")
     db.commit()
     return updated
+
+
+@router.post("/offers/{offer_id}/counter", response_model=OfferRead, status_code=status.HTTP_201_CREATED)
+def counter_own_offer(
+    offer_id: int,
+    payload: OfferCounterCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The renter's third option next to accept/decline: propose the rent and
+    deposit they can pay instead. The host answers it manually."""
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_or_404(db, offer_id, correlation_id=correlation_id)
+    counter = leasing_crud.user_counter_offer(db, user, offer, payload)
+    log_audit_event(
+        db, None, "user_offer.counter", "offer", str(offer_id), correlation_id,
+        reason=f"user:{user.id}; counter={counter.id}; rent={payload.monthly_rent}; deposit={payload.deposit_amount}",
+    )
+    emit_event(
+        db, "offer.countered", "offer", str(offer_id),
+        {"counterId": counter.id, "monthlyRent": payload.monthly_rent, "depositAmount": payload.deposit_amount},
+        correlation_id=correlation_id,
+    )
+    db.commit()
+    db.refresh(offer)
+    return offer
 
 
 @router.post("/agreements/{agreement_id}/sign", response_model=AgreementRead)

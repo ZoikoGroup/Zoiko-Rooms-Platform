@@ -53,4 +53,10 @@ def reset_password_with_token(db: Session, raw_token: str, new_password: str) ->
     user.password_changed_at = datetime.now(timezone.utc)
     record.used_at = datetime.now(timezone.utc)
     db.commit()
+
+    # ZR-IDENTITY-001 Section 7.3: account recovery can require identity
+    # re-verification where the country pack says so.
+    from app.services.identity.service import on_account_recovery
+
+    on_account_recovery(db, user)
     return True

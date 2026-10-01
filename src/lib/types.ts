@@ -59,13 +59,37 @@ export interface Listing {
   // moved in. Computed server-side (crud.listing.annotate_availability) --
   // never infer "is this actually live" from state alone.
   available: boolean;
-  // Reusable offer terms, consulted only when a market release has opted
-  // into automatic offer creation. Leaving these unset keeps this listing
-  // on the manual offer flow regardless of that setting.
+  // Legacy, unused: only ever fed automatic offer creation, which has been removed.
   defaultMonthlyRent: number | null;
   defaultDepositAmount: number | null;
   defaultTermMonths: number | null;
   defaultCadence: string;
+  /** Host-supplied Residential Occupancy Agreement facts (owner-facing reads only). */
+  agreementDetails?: ListingAgreementDetails;
+}
+
+export type UtilityKey = "electricity" | "gas_heating" | "water_sewer" | "internet" | "local_taxes" | "building_fees";
+export type UtilityPayer = "HOST" | "RENTER" | "SHARED" | "INCLUDED" | "NOT_APPLICABLE";
+
+export interface ListingHouseRules {
+  guests: string;
+  pets: string;
+  smoking: string;
+  noise: string;
+  parkingStorage: string;
+  sharedAreas: string;
+}
+
+/** backend schemas/agreement_details.py ListingAgreementDetails. Utility
+ *  keys are data keys (dict keys), so they stay snake_case on the wire. */
+export interface ListingAgreementDetails {
+  exclusiveUseAreas: string;
+  sharedUseAreas: string;
+  hostServiceAddress: string;
+  rentDueRule: string;
+  renewalRule: string;
+  utilities: Partial<Record<UtilityKey, { payer: UtilityPayer | null; notes: string }>>;
+  houseRules: ListingHouseRules;
 }
 
 export interface PublishEligibility {
@@ -355,6 +379,26 @@ export interface OfferTermsRecord {
   createdAt: string;
 }
 
+export type OfferCounterStatus = "PENDING" | "ACCEPTED" | "REJECTED" | "SUPERSEDED";
+
+/** A renter's counter to a sent offer (backend models/leasing.py
+ *  OfferCounterProposal). startDate/termMonths null = unchanged from the
+ *  terms version it was based on. */
+export interface OfferCounterProposal {
+  id: number;
+  basedOnTermsVersion: number;
+  monthlyRent: number;
+  depositAmount: number;
+  currency: string;
+  startDate: string | null;
+  termMonths: number | null;
+  message: string;
+  status: OfferCounterStatus;
+  responseNote: string;
+  createdAt: string;
+  respondedAt: string | null;
+}
+
 export type AgreementStatus =
   | "DRAFT"
   | "SENT"
@@ -405,6 +449,7 @@ export interface Offer {
   currentVersion: number;
   createdAt: string;
   terms: OfferTermsRecord[];
+  counterProposals: OfferCounterProposal[];
   agreement: Agreement | null;
   guestHasAccount: boolean;
 }
@@ -970,9 +1015,20 @@ export interface RentalPaymentDispute {
   reportedByPartyId: number | null;
   reportedAt: string;
   resolvedByAdminId: number | null;
+  /** Set when the tenant / host resolved it themselves. */
+  resolvedByGuestId: string | null;
+  resolvedByPartyId: number | null;
   resolvedAt: string | null;
   resolutionNotes: string;
+  outcome: RentalPaymentDisputeOutcome | null;
+  /** The dispute case opened for this report (shown on the Disputes pages). */
+  disputeCaseId: number | null;
 }
+
+/** What the tenant / host can do on a payment-record problem: the host
+ *  confirms receiving it, the tenant confirms it wasn't paid, or whoever
+ *  reported it withdraws the report. */
+export type PaymentDisputePartyAction = "CONFIRM_RECEIVED" | "CONFIRM_NOT_PAID" | "WITHDRAW";
 
 // --- Admin Payments page (/api/finance/payments-overview) ---
 export interface CurrencyTotal {
@@ -1250,34 +1306,7 @@ export interface IdentityVerificationRecord {
   verifierNotes: string;
 }
 
-/** Admin-facing shape, returned by /api/identity-verifications -- field names
- *  mirror the backend's ORM-passthrough schema, which is why this differs
- *  slightly from IdentityVerificationRecord above (e.g. encryptedReference
- *  instead of documentNumber). */
-export interface AdminIdentityVerification {
-  id: number;
-  partyId: number;
-  documentType: IdentityDocumentType;
-  documentCategory: DocumentCategory;
-  customDocumentName: string;
-  encryptedReference: string | null;
-  evidenceRef: string;
-  verifiedAt: string | null;
-  expiresAt: string | null;
-  verifierAdminId: number | null;
-  verifierNotes: string;
-  status: IdentityVerificationStatus;
-  hasDocument: boolean;
-  documentFileOriginalName: string;
-  documentFileContentType: string;
-  /** What the automated scan read off the document, if it ran. */
-  ocrExtractedNumber: string | null;
-  ocrConfidence: number | null;
-  /** True when the automated scan (not an admin) sent this back for more evidence -- a super admin can overrule it. */
-  autoFlagged: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
+/* The admin identity queue/case shapes live in src/lib/identity.ts (ZR-IDENTITY-001). */
 
 export interface UserApplication {
   id: number;
@@ -2045,7 +2074,22 @@ export interface PropertyVerification {
   extractedDocumentNumber?: string | null;
   nameMatched?: boolean | null;
   addressMatched?: boolean | null;
+  /** Map check of the property address (backend services/geocoding.py). Only
+   *  "FOUND" lets the verification complete automatically; null = not checked. */
+  geocodeStatus?: GeocodeStatus | null;
+  geocodeProvider?: string;
+  geocodeQuery?: string;
+  geocodeFormattedAddress?: string;
+  geocodeLatitude?: number | null;
+  geocodeLongitude?: number | null;
+  geocodePrecision?: "HOUSE" | "STREET" | "LOCALITY" | "REGION" | "";
+  geocodeCountryCode?: string;
+  geocodeDetail?: string;
+  geocodedAt?: string | null;
+  googleMapsUrl?: string;
 }
+
+export type GeocodeStatus = "FOUND" | "NOT_FOUND" | "IMPRECISE" | "COUNTRY_MISMATCH" | "UNAVAILABLE";
 
 export type ScreeningDecisionStatus = "AUTHORIZED" | "PASS" | "FAIL" | "INCONCLUSIVE" | "DISPUTED_SOURCE";
 

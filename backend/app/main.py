@@ -49,6 +49,7 @@ from app.api.routes import (
     user_contact,
     user_hosting,
     user_identity,
+    user_identity_flow,
     user_notifications,
     user_payments,
     user_rentals,
@@ -145,6 +146,9 @@ Path(settings.property_verification_upload_dir).mkdir(parents=True, exist_ok=Tru
 app.include_router(auth.router)
 app.include_router(user_auth.router)
 app.include_router(user_identity.router)
+app.include_router(user_identity_flow.router)
+app.include_router(user_identity_flow.webhook_router)
+app.include_router(user_identity_flow.veriff_webhook_router)
 app.include_router(user_payments.router)
 app.include_router(user_rentals.router)
 app.include_router(user_hosting.router)

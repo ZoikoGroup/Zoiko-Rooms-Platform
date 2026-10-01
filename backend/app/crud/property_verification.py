@@ -19,6 +19,7 @@ from app.models.admin_user import AdminUser
 from app.models.property_verification import PropertyVerification
 from app.models.room import Room
 from app.models.user_account import UserAccount
+from app.services import geocoding
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -82,10 +83,13 @@ def declare_property_verification(
     party actually owns. No OCR: details are grabbed with regex from the PDF
     text layer and the typed evidence_ref (services/document_regex.py),
     stored on the row, and compared against the host's name and the room's
-    property address. The row then waits AUTO_VERIFY_DELAY_SECONDS and is
-    verified by verify_due_property_verifications -- unless the document is
-    a duplicate of another host's upload, or it has readable text in which
-    neither the name nor the address matches; those go to a super admin."""
+    property address. The property's address is also looked up on a map
+    (services/geocoding.py). The row then waits AUTO_VERIFY_DELAY_SECONDS and
+    is verified by verify_due_property_verifications -- but only when the
+    address was found on the map (street/house level, in the region's
+    country). A map miss, a duplicate of another host's upload, or readable
+    text in which neither the name nor the address matches goes to a super
+    admin instead."""
     if not user.party_id or room.property.owner_party_id != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only submit property evidence for your own room")
     if not evidence_ref.strip():
@@ -98,6 +102,7 @@ def declare_property_verification(
         document_sha256=sha256_hash, status="pending",
     )
     _extract_and_match(db, record, user, room)
+    _geocode_property_address(record, room)
     db.add(record)
     db.flush()
 
@@ -111,6 +116,12 @@ def declare_property_verification(
             db, record, user,
             f"This document matches property verification #{duplicate_of.id} submitted for another host's room "
             f"-- review for reuse or fraud.",
+        )
+    elif record.geocode_status != geocoding.FOUND:
+        record.verifier_notes = REVIEW_PENDING_NOTE
+        _notify_review_needed(
+            db, record, user,
+            f"The property address could not be confirmed on the map ({_geocode_reason(record)}).",
         )
     elif mismatch:
         record.verifier_notes = REVIEW_PENDING_NOTE
@@ -177,6 +188,33 @@ def _extract_and_match(db: Session, record: PropertyVerification, user: UserAcco
         record.address_matched = document_regex.address_matches(prop.landmark, prop.city, address_text) or False
 
 
+def _geocode_property_address(record: PropertyVerification, room: Room) -> None:
+    """Looks the room's property address up on a map and stores the result
+    on the record. Never raises -- an unreachable provider is stored as
+    UNAVAILABLE, which routes the submission to manual review."""
+    prop = room.property
+    result = geocoding.geocode_address(prop.address, prop.city, getattr(prop, "landmark", None), prop.jurisdiction_code)
+    record.geocode_status = result.status
+    record.geocode_provider = result.provider
+    record.geocode_query = result.query[:500]
+    record.geocode_formatted_address = result.formatted_address[:500]
+    record.geocode_latitude = result.latitude
+    record.geocode_longitude = result.longitude
+    record.geocode_precision = result.precision
+    record.geocode_country_code = result.country_code[:2]
+    record.geocode_detail = result.detail[:500]
+    record.geocoded_at = datetime.now(timezone.utc)
+
+
+def _geocode_reason(record: PropertyVerification) -> str:
+    return record.geocode_detail or {
+        geocoding.NOT_FOUND: "address not found",
+        geocoding.IMPRECISE: "only the area was found, not the street or building",
+        geocoding.COUNTRY_MISMATCH: "address is in a different country than the property's region",
+        geocoding.UNAVAILABLE: "map lookup was unavailable",
+    }.get(record.geocode_status or "", "address was not checked")
+
+
 def _find_duplicate(db: Session, record: PropertyVerification) -> PropertyVerification | None:
     if not record.document_sha256:
         return None
@@ -215,6 +253,8 @@ def verify_due_property_verifications(db: Session, *, room_id: int | None = None
     query = select(PropertyVerification).where(
         PropertyVerification.status == "pending",
         PropertyVerification.verifier_notes == AUTO_VERIFY_PENDING_NOTE,
+        # Never auto-verify an address that wasn't confirmed on the map.
+        PropertyVerification.geocode_status == geocoding.FOUND,
     )
     if room_id is not None:
         query = query.where(PropertyVerification.room_id == room_id)
@@ -244,10 +284,11 @@ def verify_due_property_verifications(db: Session, *, room_id: int | None = None
 
 
 def _auto_verified_note(record: PropertyVerification) -> str:
+    on_map = f"address found on the map ({record.geocode_precision.lower()} level)"
     matched = [label for label, ok in (("owner name", record.name_matched), ("property address", record.address_matched)) if ok]
     if matched:
-        return f"Auto-verified: document matched the {' and '.join(matched)}."
-    return "Auto-verified on upload (no readable text to compare)."
+        return f"Auto-verified: {on_map}; document matched the {' and '.join(matched)}."
+    return f"Auto-verified: {on_map}; no readable document text to compare."
 
 
 def _as_utc(value: datetime) -> datetime:

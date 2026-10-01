@@ -12,20 +12,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.agreement_documents import resolve_agreement_document_path, save_agreement_document
-from app.core.mailer import send_agreement_executed_email, send_application_decided_email
+from app.core.mailer import (
+    send_agreement_executed_email, send_agreement_ready_email, send_application_decided_email,
+    send_offer_issued_email, send_offer_outcome_email, send_signature_status_email,
+)
 from app.core.security import hash_password
 from app.crud.audit import log_audit_event
 from app.crud.eligibility import check_agreement_eligibility, check_offer_eligibility
 from app.crud.events import emit_event
 from app.crud.guest import get_guest_for_user, get_user_for_guest
 from app.crud.ids import dicebear_avatar, new_id
-from app.crud.listing import is_listing_available, resolve_market_release
+from app.crud.listing import is_listing_available
 from app.crud.market_policy import resolve_market_policy
 from app.crud import notification as notif_crud
 from app.crud.occupancy import _add_months
 from app.crud.party import assert_provider_access, assert_provider_access_any, party_id_for_listing
 from app.crud.user import get_user_by_party_id
-from app.services.policy import get_policy
 from app.models.admin_user import AdminUser
 from app.models.agreement_amendment import AgreementAmendment
 from app.models.agreement_clause import ClauseDefinition
@@ -41,6 +43,7 @@ from app.models.leasing import (
     ApplicationDecision,
     DocumentArtifact,
     Offer,
+    OfferCounterProposal,
     OfferTerms,
     SignatureEvent,
 )
@@ -49,8 +52,13 @@ from app.models.occupancy import Occupancy
 from app.models.listing_approval import CURRENT_POLICY_VERSION
 from app.models.signature_provider import SignatureRequest
 from app.models.user_account import UserAccount
-from app.schemas.leasing import ApplicationCreate, ApplicationDecide, ApplicationRead, ApplicationUpdate, OfferTermsCreate
+from app.schemas.leasing import (
+    ApplicationCreate, ApplicationDecide, ApplicationRead, ApplicationUpdate, OfferCounterCreate, OfferTermsCreate,
+)
 from app.services import inventory as inventory_service
+from app.services.agreement_document import (
+    build_document_facts, build_document_model, render_agreement_pdf, render_agreement_text,
+)
 from app.services.agreement_profile import DEFAULT_DISCLOSURES, no_agreement_profile_message, resolve_agreement_profile
 from app.services.overlap import evaluate_occupant_overlap
 from app.services.booking_expiry import (
@@ -59,6 +67,7 @@ from app.services.booking_expiry import (
     expire_checkout_if_overdue,
     expire_offer_if_overdue,
 )
+
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -145,17 +154,6 @@ def submit_application(db: Session, data: ApplicationCreate) -> Application:
     db.add(application)
     db.commit()
     db.refresh(application)
-
-    market_release = resolve_market_release(db, listing)
-    if not get_policy(market_release, "application.requires_manual_decision"):
-        from app.schemas.leasing import ApplicationDecide
-
-        decide_application(
-            db, application, _get_system_actor(db),
-            ApplicationDecide(decision="APPROVED", reason_code="auto_approved_low_risk_market"),
-        )
-        db.refresh(application)
-
     return application
 
 
@@ -253,15 +251,10 @@ def withdraw_application(db: Session, application: Application, admin: AdminUser
 
 def _apply_application_decision(
     db: Session, application: Application, data: ApplicationDecide, *, admin_id: int | None, user_id: int | None,
-    actor: "AdminUser | UserAccount | None" = None,
 ) -> ApplicationDecision:
     """Shared core of decide_application/decide_application_as_host -- the same
     status transition and renter/host notifications regardless of which actor
-    decided. Exactly one of admin_id/user_id is set by the caller.
-
-    actor is the same admin_id/user_id, but as a real object -- needed (only
-    on the APPROVED branch) to auto-create an offer as that same
-    already-authorized provider actor, see _auto_create_offer_if_enabled."""
+    decided. Exactly one of admin_id/user_id is set by the caller."""
     if data.decision not in ("APPROVED", "REJECTED"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "decision must be APPROVED or REJECTED")
 
@@ -291,7 +284,7 @@ def _apply_application_decision(
         if renter_user and application.listing:
             send_application_decided_email(
                 renter_user.email, renter_user.full_name, application.listing.name,
-                approved=data.decision == "APPROVED",
+                approved=data.decision == "APPROVED", application_id=application.id,
             )
 
     # The host has a real stake in this decision too (an approval means they can
@@ -315,10 +308,6 @@ def _apply_application_decision(
 
     db.commit()
     db.refresh(decision)
-
-    if data.decision == "APPROVED" and actor is not None:
-        _auto_create_offer_if_enabled(db, application, actor)
-
     return decision
 
 
@@ -327,9 +316,8 @@ SYSTEM_ACTOR_EMAIL = "automation@zoikorooms.internal"
 
 def _get_system_actor(db: Session) -> AdminUser:
     """The actor recorded for every automatic pipeline step that has no real
-    human in the loop -- e.g. a renter accepting an offer has no provider-
-    side access, but agreement auto-creation still needs one (see
-    _auto_create_agreement_if_enabled). super_admin gives it an unconditional
+    human in the loop -- e.g. publishing a listing once its Listing Fee is
+    paid (crud/listing_fee.py). super_admin gives it an unconditional
     pass through assert_provider_access (crud/party.py) without granting it
     membership over any specific provider's party. is_active=False plus a
     random, never-surfaced password means this row can never actually log
@@ -353,76 +341,13 @@ def _get_system_actor(db: Session) -> AdminUser:
     return actor
 
 
-def _auto_create_offer_if_enabled(db: Session, application: Application, actor: "AdminUser | UserAccount") -> None:
-    """Section 14 policy key offer.requires_manual_creation (services/policy.py),
-    same opt-in-per-market-release shape as publication.requires_approval /
-    _auto_approve_and_publish_low_risk_market in crud/listing.py. Runs
-    synchronously as the same actor who just approved the application -- they
-    already have provider access, so this reuses create_offer/add_offer_terms/
-    set_offer_status completely unchanged rather than inventing a system path.
-
-    Silently no-ops (falls back to the existing manual flow) whenever the
-    policy is on manual, the listing hasn't set default terms, or any of the
-    real functions this calls raise -- an automation failure must never
-    corrupt or roll back the application decision that already succeeded and
-    that a real host/renter is waiting on. Same best-effort idiom already
-    used elsewhere in this file for the rent-invoice/rental-payment hooks."""
-    listing = application.listing
-    if listing is None:
-        return
-    if get_policy(resolve_market_release(db, listing), "offer.requires_manual_creation"):
-        return
-
-    try:
-        monthly_rent, deposit_amount, term_months = _default_offer_terms(db, listing)
-        offer = create_offer(db, application, actor)
-        add_offer_terms(
-            db, offer, actor,
-            OfferTermsCreate(
-                monthly_rent=monthly_rent,
-                deposit_amount=deposit_amount,
-                start_date=application.desired_move_in or date_.today(),
-                term_months=term_months,
-                cadence=listing.default_cadence or "MONTHLY",
-            ),
-        )
-        set_offer_status(db, offer, actor, "SENT")
-    except Exception:
-        logger.exception("auto offer creation failed for application %s", application.id)
-
-
-# Used when a host hasn't set a listing's default term length.
-DEFAULT_OFFER_TERM_MONTHS = 12
-
-
-def _default_offer_terms(db: Session, listing: Listing) -> tuple[float, float, int]:
-    """(monthly_rent, deposit_amount, term_months) for an auto-created offer.
-    The listing's own defaults win; anything the host left blank falls back
-    to rent = price_per_night x 30, deposit = one month's rent kept within the
-    market's deposit rules, and DEFAULT_OFFER_TERM_MONTHS."""
-    monthly_rent = listing.default_monthly_rent
-    if monthly_rent is None:
-        monthly_rent = round(listing.price_per_night * 30, 2)
-
-    deposit_amount = listing.default_deposit_amount
-    if deposit_amount is None:
-        policy = resolve_market_policy(db, listing.room.property.jurisdiction_code)
-        if policy.deposit_instrument_allowed == "PROHIBITED":
-            deposit_amount = 0.0
-        else:
-            deposit_amount = round(monthly_rent * min(1.0, float(policy.deposit_max_rent_multiple)), 2)
-
-    term_months = listing.default_term_months or DEFAULT_OFFER_TERM_MONTHS
-    return monthly_rent, deposit_amount, term_months
-
-
 def decide_application(db: Session, application: Application, admin: AdminUser, data: ApplicationDecide) -> ApplicationDecision:
     """Restricted to super_admin at the route level -- applicant screening/approval is
     a platform trust & safety decision, not a provider one, unlike everything after it
     (offer terms, agreement) which stays with the provider. This is the admin-portal
     path; a self-service Host decides their own party-owned listing's applications
     through decide_application_as_host below instead."""
-    return _apply_application_decision(db, application, data, admin_id=admin.id, user_id=None, actor=admin)
+    return _apply_application_decision(db, application, data, admin_id=admin.id, user_id=None)
 
 
 def decide_application_as_host(
@@ -435,7 +360,7 @@ def decide_application_as_host(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only decide applications for your own listings")
     if application.status != "SUBMITTED":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Application in status {application.status} cannot be decided")
-    return _apply_application_decision(db, application, data, admin_id=None, user_id=user.id, actor=user)
+    return _apply_application_decision(db, application, data, admin_id=None, user_id=user.id)
 
 
 def get_offer_or_404(db: Session, offer_id: int, correlation_id: str = "") -> Offer:
@@ -464,38 +389,10 @@ def create_offer(db: Session, application: Application, admin: AdminUser | UserA
     return offer
 
 
-def add_offer_terms(
-    db: Session, offer: Offer, admin: AdminUser | UserAccount, data: OfferTermsCreate, correlation_id: str = "",
-) -> OfferTerms:
-    """ZR-ENG-CLR-004 AC-06 'A change to rent, dates, parties, premises,
-    deposit or other configured material term invalidates a pending signing
-    version'. Two cases:
-
-    1. No Agreement exists yet (offer.status in DRAFT/SENT) -- nothing to
-       invalidate, this is just ordinary pre-acceptance negotiation.
-    2. An Agreement already exists but its current version is still WORKING
-       (not yet frozen/executed) -- Section 17's own edge case, 'Host changes
-       rent after renter opens agreement': allowed, but the material change
-       closes the current version as SUPERSEDED and opens a fresh WORKING
-       version from the new terms (see _invalidate_pending_agreement_version).
-
-    Once a version reaches FROZEN/EXECUTED_IMMUTABLE, neither case applies --
-    the guard below rejects the request outright, exactly as before."""
-    assert_provider_access_any(db, admin, party_id_for_listing(offer.listing))
-    agreement = offer.agreement
-    reversioning = False
-    if offer.status not in ("DRAFT", "SENT"):
-        can_reversion = (
-            offer.status == "ACCEPTED"
-            and agreement is not None
-            and agreement.versions
-            and agreement.versions[-1].status == "WORKING"
-            and agreement.status not in ("SIGNED", "EXPIRED", "VOID")
-        )
-        if not can_reversion:
-            raise HTTPException(status.HTTP_409_CONFLICT, "Offer terms can only be added while the offer is draft or sent")
-        reversioning = True
-
+def _validate_offer_terms(db: Session, offer: Offer, data: OfferTermsCreate) -> None:
+    """Market-pack rules every terms version must satisfy -- shared by
+    add_offer_terms and a renter's counter proposal (user_counter_offer), so
+    a counter the host could never legally accept is rejected up front."""
     # ZR-ENG-CLR-002 AC-02: the quote engine must reject any deposit amount
     # above the resolved market-pack cap -- not a Zoiko-invented number, and
     # not something the UI can silently bypass by omission.
@@ -551,6 +448,42 @@ def add_offer_terms(
             f"market cap of {policy.advance_rent_max_months} month(s) (jurisdiction={policy.jurisdiction_code})",
         )
 
+
+def add_offer_terms(
+    db: Session, offer: Offer, admin: AdminUser | UserAccount, data: OfferTermsCreate, correlation_id: str = "",
+    *, notify_renter_of_revision: bool = True,
+) -> OfferTerms:
+    """ZR-ENG-CLR-004 AC-06 'A change to rent, dates, parties, premises,
+    deposit or other configured material term invalidates a pending signing
+    version'. Two cases:
+
+    1. No Agreement exists yet (offer.status in DRAFT/SENT) -- nothing to
+       invalidate, this is just ordinary pre-acceptance negotiation.
+    2. An Agreement already exists but its current version is still WORKING
+       (not yet frozen/executed) -- Section 17's own edge case, 'Host changes
+       rent after renter opens agreement': allowed, but the material change
+       closes the current version as SUPERSEDED and opens a fresh WORKING
+       version from the new terms (see _invalidate_pending_agreement_version).
+
+    Once a version reaches FROZEN/EXECUTED_IMMUTABLE, neither case applies --
+    the guard below rejects the request outright, exactly as before."""
+    assert_provider_access_any(db, admin, party_id_for_listing(offer.listing))
+    agreement = offer.agreement
+    reversioning = False
+    if offer.status not in ("DRAFT", "SENT"):
+        can_reversion = (
+            offer.status == "ACCEPTED"
+            and agreement is not None
+            and agreement.versions
+            and agreement.versions[-1].status == "WORKING"
+            and agreement.status not in ("SIGNED", "EXPIRED", "VOID")
+        )
+        if not can_reversion:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Offer terms can only be added while the offer is draft or sent")
+        reversioning = True
+
+    _validate_offer_terms(db, offer, data)
+
     next_version = offer.current_version + 1
     terms = OfferTerms(
         offer_id=offer.id,
@@ -569,8 +502,25 @@ def add_offer_terms(
     if reversioning:
         _invalidate_pending_agreement_version(db, agreement, offer, terms, admin, correlation_id=correlation_id)
 
+    # New terms on an offer the renter can already see: any counter they
+    # still have pending was answered by these terms instead.
+    revised_while_sent = offer.status == "SENT"
+    if revised_while_sent:
+        _close_pending_counters(offer, "SUPERSEDED")
+
     db.commit()
     db.refresh(terms)
+
+    if revised_while_sent and notify_renter_of_revision:
+        _notify_offer_guest(
+            db, offer, title="Your offer terms were updated", notification_type="offer.terms_revised",
+            message=(
+                f'The host updated the terms of your offer for "{offer.listing.name}": '
+                f"{offer.listing.currency} {float(terms.monthly_rent):,.2f}/month, "
+                f"{offer.listing.currency} {float(terms.deposit_amount):,.2f} deposit. Review and accept or decline."
+            ),
+        )
+        _email_offer_issued(db, offer, amended=True)
     return terms
 
 
@@ -699,6 +649,56 @@ def _release_room_hold_for_offer(db: Session, offer: Offer, reason: str, correla
     )
 
 
+def _offer_email_users(db: Session, offer: Offer) -> tuple["UserAccount | None", "UserAccount | None"]:
+    """(renter, host) accounts for offer emails. Either can be None: a walk-in
+    renter has no login, and an admin-portal listing has no host account."""
+    guest = db.get(Guest, offer.guest_id)
+    renter = get_user_for_guest(db, guest) if guest else None
+    listing = offer.listing
+    host = get_user_by_party_id(db, listing.party_id) if listing and listing.party_id else None
+    return renter, host
+
+
+def _email_offer_issued(db: Session, offer: Offer, *, amended: bool, host_note: str = "") -> None:
+    """ZR-EML-OFR-001 to the renter -- best effort, never raises."""
+    try:
+        renter, _ = _offer_email_users(db, offer)
+        if renter is None or not offer.terms:
+            return
+        from app.services.email import formatting as email_fmt
+
+        terms = offer.terms[-1]
+        currency = offer.listing.currency
+        period = {"MONTHLY": "month", "WEEKLY": "week", "FORTNIGHTLY": "fortnight"}.get(terms.cadence, "")
+        rent = email_fmt.money(float(terms.monthly_rent), currency)
+        send_offer_issued_email(
+            renter.email, renter.full_name, offer.listing.name, offer_id=offer.id, terms_version=terms.version,
+            move_in=terms.start_date, rent_text=f"{rent} per {period}" if period else rent,
+            deposit_text=email_fmt.money(float(terms.deposit_amount), currency), term_months=terms.term_months,
+            amended=amended, host_note=host_note,
+        )
+    except Exception:
+        logger.exception("offer email failed for offer %s", offer.id)
+
+
+def _email_offer_outcome(db: Session, offer: Offer, outcome: str) -> None:
+    """ZR-EML-OFR-002 accepted/declined, to both renter and host."""
+    try:
+        renter, host = _offer_email_users(db, offer)
+        name = offer.listing.name if offer.listing else "your room"
+        if renter is not None:
+            send_offer_outcome_email(
+                renter.email, renter.full_name, name, offer_id=offer.id, variant=outcome, status_display=outcome,
+            )
+        if host is not None:
+            send_offer_outcome_email(
+                host.email, host.full_name, name, offer_id=offer.id, variant=f"{outcome}-host-copy",
+                status_display=outcome, recipient_is_host=True,
+            )
+    except Exception:
+        logger.exception("offer outcome email failed for offer %s", offer.id)
+
+
 _OFFER_ALLOWED_FROM_STATUSES: dict[str, tuple[str, ...]] = {
     "SENT": ("DRAFT",),
     # DRAFT is included alongside SENT for the walk-in path: a guest with no
@@ -736,6 +736,7 @@ def set_offer_status(
     listing = offer.listing
     if new_status == "SENT":
         _notify_offer_guest(db, offer, title="You have a new rental offer", notification_type="offer.sent")
+        _email_offer_issued(db, offer, amended=False)
     elif new_status == "ACCEPTED":
         # The authoritative "accepted" state for this workflow -- both sides are
         # told only once it's actually committed here, never earlier.
@@ -751,7 +752,7 @@ def set_offer_status(
                 notification_type="offer.accepted_for_host",
                 related_entity_type="offer", related_entity_id=str(offer.id),
             )
-        _auto_create_agreement_if_enabled(db, offer)
+        _email_offer_outcome(db, offer, "accepted")
     elif new_status == "DECLINED":
         if listing and listing.party_id:
             notif_crud.notify_user_by_party(
@@ -761,6 +762,7 @@ def set_offer_status(
                 notification_type="offer.declined_for_host",
                 related_entity_type="offer", related_entity_id=str(offer.id),
             )
+        _email_offer_outcome(db, offer, "declined")
     return offer
 
 
@@ -811,9 +813,11 @@ def user_accept_offer(
     if offer.status != "SENT":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a sent offer can be accepted")
     _accept_offer_and_hold_room(db, offer, "ACCEPTED", correlation_id=correlation_id, override_reason=override_reason)
+    # Accepting the offer as it stands withdraws any counter still pending.
+    _close_pending_counters(offer, "SUPERSEDED")
     db.commit()
     db.refresh(offer)
-    _auto_create_agreement_if_enabled(db, offer)
+    _email_offer_outcome(db, offer, "accepted")
     return offer
 
 
@@ -823,9 +827,196 @@ def user_decline_offer(db: Session, user: UserAccount, offer: Offer, correlation
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a sent offer can be declined")
     offer.status = "DECLINED"
     _release_room_hold_for_offer(db, offer, reason="offer_declined", correlation_id=correlation_id)
+    _close_pending_counters(offer, "SUPERSEDED")
     db.commit()
     db.refresh(offer)
+    _email_offer_outcome(db, offer, "declined")
     return offer
+
+
+def _pending_counter(offer: Offer) -> OfferCounterProposal | None:
+    return next((c for c in offer.counter_proposals if c.status == "PENDING"), None)
+
+
+def _close_pending_counters(offer: Offer, new_status: str, note: str = "") -> None:
+    now = datetime.now(timezone.utc)
+    for counter in offer.counter_proposals:
+        if counter.status == "PENDING":
+            counter.status = new_status
+            counter.responded_at = now
+            if note:
+                counter.response_note = note
+
+
+def user_counter_offer(db: Session, user: UserAccount, offer: Offer, data: OfferCounterCreate) -> OfferCounterProposal:
+    """The renter's third option on a SENT offer, next to accept/decline: "I'm
+    not taking these terms, this is what I can pay." The offer stays SENT --
+    nothing is held or accepted -- and the host answers it from their offer
+    panel (host_accept_counter / host_reject_counter), or by sending different
+    terms. One pending counter at a time."""
+    _guest_owns_offer(db, user, offer)
+    if offer.status != "SENT":
+        raise HTTPException(status.HTTP_409_CONFLICT, "You can only propose different terms on an offer that has been sent to you")
+    if _pending_counter(offer) is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "You already have a proposal waiting for the host's answer")
+    if not offer.terms:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This offer has no terms to counter yet")
+    current = offer.terms[-1]
+
+    if data.monthly_rent <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Monthly rent must be greater than 0")
+    if data.deposit_amount < 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Deposit amount cannot be negative")
+    if data.term_months is not None and data.term_months < 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Term must be at least 1 month")
+    if data.start_date is not None and data.start_date < date_.today():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Start date cannot be in the past")
+
+    proposed = _counter_as_terms(current, data.monthly_rent, data.deposit_amount, data.start_date, data.term_months)
+    if (
+        round(float(current.monthly_rent), 2) == round(proposed.monthly_rent, 2)
+        and round(float(current.deposit_amount), 2) == round(proposed.deposit_amount, 2)
+        and current.start_date == proposed.start_date
+        and current.term_months == proposed.term_months
+    ):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Your proposal is the same as the current terms -- accept the offer instead")
+    _validate_offer_terms(db, offer, proposed)
+
+    counter = OfferCounterProposal(
+        offer_id=offer.id,
+        based_on_terms_version=current.version,
+        monthly_rent=data.monthly_rent,
+        deposit_amount=data.deposit_amount,
+        start_date=data.start_date,
+        term_months=data.term_months,
+        message=data.message.strip(),
+        proposed_by_user_id=user.id,
+    )
+    db.add(counter)
+    db.commit()
+    db.refresh(counter)
+
+    listing = offer.listing
+    if listing and listing.party_id:
+        currency = listing.currency
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="A renter proposed different terms",
+            message=(
+                f'The renter for "{listing.name}" proposed {currency} {data.monthly_rent:,.2f}/month and a '
+                f"{currency} {data.deposit_amount:,.2f} deposit. Review it in the offer."
+            ),
+            notification_type="offer.countered_for_host",
+            related_entity_type="offer", related_entity_id=str(offer.id),
+        )
+    try:
+        _, host = _offer_email_users(db, offer)
+        if host is not None:
+            from app.services.email import formatting as email_fmt
+
+            details = [
+                ("Proposed rent", email_fmt.money(data.monthly_rent, offer.listing.currency)),
+                ("Proposed deposit", email_fmt.money(data.deposit_amount, offer.listing.currency)),
+            ]
+            if counter.message:
+                details.append(("Renter's message", counter.message))
+            send_offer_outcome_email(
+                host.email, host.full_name, offer.listing.name, offer_id=offer.id,
+                variant="counter-proposal-received", status_display="waiting for your answer to a counter-proposal",
+                recipient_is_host=True, detail_facts=details, event_key=str(counter.id),
+            )
+    except Exception:
+        logger.exception("counter-proposal email failed for offer %s", offer.id)
+    return counter
+
+
+def _counter_as_terms(
+    current: OfferTerms, monthly_rent: float, deposit_amount: float, start_date: date_ | None, term_months: int | None,
+) -> OfferTermsCreate:
+    """A counter's values as a full terms version -- anything the renter left
+    unset (start date, term) and the payment cadence carry over from the
+    terms they countered."""
+    return OfferTermsCreate(
+        monthly_rent=float(monthly_rent),
+        deposit_amount=float(deposit_amount),
+        start_date=start_date or current.start_date,
+        term_months=term_months or current.term_months,
+        cadence=current.cadence,
+        custom_interval_days=current.custom_interval_days,
+    )
+
+
+def _get_pending_counter_or_409(offer: Offer, counter_id: int) -> OfferCounterProposal:
+    counter = next((c for c in offer.counter_proposals if c.id == counter_id), None)
+    if counter is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Proposal not found on this offer")
+    if counter.status != "PENDING" or offer.status != "SENT":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This proposal has already been answered")
+    return counter
+
+
+def host_accept_counter(
+    db: Session, offer: Offer, actor: AdminUser | UserAccount, counter_id: int, note: str = "", correlation_id: str = "",
+) -> OfferTerms:
+    """Host agrees to the renter's proposal: it becomes the offer's next terms
+    version. The offer stays SENT -- the renter still accepts it themselves
+    through the normal accept step (room hold, overlap check), so nothing is
+    accepted on anyone's behalf."""
+    assert_provider_access_any(db, actor, party_id_for_listing(offer.listing))
+    counter = _get_pending_counter_or_409(offer, counter_id)
+    current = offer.terms[-1]
+    counter.status = "ACCEPTED"
+    counter.responded_at = datetime.now(timezone.utc)
+    counter.response_note = note.strip()
+    terms = add_offer_terms(
+        db, offer, actor,
+        _counter_as_terms(current, counter.monthly_rent, counter.deposit_amount, counter.start_date, counter.term_months),
+        correlation_id=correlation_id,
+        notify_renter_of_revision=False,
+    )
+    _notify_offer_guest(
+        db, offer, title="The host accepted your proposed terms", notification_type="offer.counter_accepted",
+        message=(
+            f'The host agreed to {offer.listing.currency} {float(terms.monthly_rent):,.2f}/month for "{offer.listing.name}". '
+            "Open your offer to accept it."
+            + (f" Host's note: {counter.response_note}" if counter.response_note else "")
+        ),
+    )
+    _email_offer_issued(db, offer, amended=True, host_note=counter.response_note)
+    return terms
+
+
+def host_reject_counter(
+    db: Session, offer: Offer, actor: AdminUser | UserAccount, counter_id: int, note: str = "",
+) -> OfferCounterProposal:
+    """Host declines the renter's proposal; the offer's current terms stand
+    and the renter can still accept, decline, or propose again."""
+    assert_provider_access_any(db, actor, party_id_for_listing(offer.listing))
+    counter = _get_pending_counter_or_409(offer, counter_id)
+    counter.status = "REJECTED"
+    counter.responded_at = datetime.now(timezone.utc)
+    counter.response_note = note.strip()
+    db.commit()
+    db.refresh(counter)
+    _notify_offer_guest(
+        db, offer, title="The host declined your proposed terms", notification_type="offer.counter_rejected",
+        message=(
+            f'The host kept the original terms for "{offer.listing.name}". You can accept, decline, or propose again.'
+            + (f" Host's note: {counter.response_note}" if counter.response_note else "")
+        ),
+    )
+    try:
+        renter, _ = _offer_email_users(db, offer)
+        if renter is not None:
+            send_offer_outcome_email(
+                renter.email, renter.full_name, offer.listing.name, offer_id=offer.id,
+                variant="counter-proposal-declined", status_display="unchanged \u2014 your proposal was declined",
+                detail_facts=[("Host's note", counter.response_note)] if counter.response_note else None,
+                event_key=str(counter.id),
+            )
+    except Exception:
+        logger.exception("counter-declined email failed for offer %s", offer.id)
+    return counter
 
 
 def _build_agreement_snapshot(
@@ -872,6 +1063,7 @@ def _build_agreement_snapshot(
         "deposit_amount": float(latest_terms.deposit_amount),
         "start_date": latest_terms.start_date.isoformat(),
         "term_months": latest_terms.term_months,
+        "currency": listing.currency,
         "agreement_class": profile.agreement_class,
         "form_mode": profile.form_mode,
         # AC-04: which exact AgreementFormTemplate this version was
@@ -888,6 +1080,9 @@ def _build_agreement_snapshot(
         "required_signers": list(profile.required_signers),
         "signing_order": profile.signing_order,
         "assurance_level": profile.assurance_level,
+        # Everything the Residential Occupancy Agreement template prints
+        # (services/agreement_document) -- frozen here like every other key.
+        "document": build_document_facts(offer, latest_terms),
     }
 
 
@@ -938,12 +1133,15 @@ def _populate_version_detail_rows(db: Session, version: AgreementVersion, offer:
         agreement_version_id=version.id, listing_id=listing.id, room_id=room.id if room else None,
         address=listing.location, city=listing.city,
         room_size=room.size if room else None, has_ensuite=bool(room.has_ensuite) if room else False,
-        shared_areas=[],
+        shared_areas=[
+            area.strip() for area in ((listing.agreement_details or {}).get("shared_use_areas") or "").split(",")
+            if area.strip()
+        ],
     ))
     db.add(CommercialTermsSnapshot(
         agreement_version_id=version.id, monthly_rent=latest_terms.monthly_rent,
         deposit_amount=latest_terms.deposit_amount, start_date=latest_terms.start_date,
-        term_months=latest_terms.term_months,
+        term_months=latest_terms.term_months, currency=listing.currency,
     ))
 
 
@@ -976,7 +1174,7 @@ def list_optional_clause_choices(db: Session, listing: Listing) -> list[dict]:
 
 def create_agreement(
     db: Session, offer: Offer, admin: AdminUser | UserAccount, selected_optional_clause_ids: list[str] | None = None,
-    *, signing_as_agent: bool = False, agent_authority_evidence_ref: str = "", auto: bool = False,
+    *, signing_as_agent: bool = False, agent_authority_evidence_ref: str = "",
 ) -> Agreement:
     assert_provider_access_any(db, admin, party_id_for_listing(offer.listing))
     reasons = check_agreement_eligibility(db, offer)
@@ -1128,88 +1326,110 @@ def create_agreement(
     except Exception:
         pass
 
-    # auto=True only (i.e. only when _auto_create_agreement_if_enabled called
-    # this, never a manual "Create Agreement" click): delivering every seeded
-    # disclosure immediately is the right behavior for a fully-automatic
-    # pipeline, but NOT the default -- ZR-ENG-CLR-004 AC-15's own delivery
-    # gate (_apply_signature's REQUIRED_MISSING check) depends on disclosures
-    # genuinely starting undelivered after a normal manual creation, and a
-    # real admin/host still needs to see and act on that queue. Confirmed by
-    # the full test suite: making this unconditional silently broke every
-    # test asserting that undelivered state is reachable -- same best-effort
-    # placement as the two blocks above, just gated.
-    if auto:
-        for disclosure in agreement.disclosures:
-            try:
-                deliver_disclosure(db, agreement, disclosure, admin)
-            except Exception:
-                pass
-
     return agreement
 
 
-def _auto_create_agreement_if_enabled(db: Session, offer: Offer) -> None:
-    """Section 14 policy key agreement.requires_manual_creation
-    (services/policy.py) -- same opt-in-per-market-release shape as
-    offer.requires_manual_creation above. Runs as the system actor
-    (_get_system_actor) since the caller accepting the offer may be the
-    renter themselves, who has no provider access at all.
-
-    create_agreement already enforces check_agreement_eligibility
-    internally before doing anything else, so this never bypasses a
-    compliance gate -- an unmet gate (missing authority record, occupancy
-    eligibility, identity verification, etc.) raises the same 409 a manual
-    click would, caught here and silently left for a human to create
-    manually later once the gate clears. Never lets an automation failure
-    touch the offer-acceptance state that already succeeded."""
-    if get_policy(resolve_market_release(db, offer.listing), "agreement.requires_manual_creation"):
-        return
-    # Rooms created before classifications were automatic may have none --
-    # fill in the default so it never holds up the agreement.
-    from app.crud.occupancy_classification import ensure_default_classification
-
-    if offer.listing.room is not None:
-        ensure_default_classification(db, offer.listing.room)
+def _email_booking_confirmed(db: Session, agreement: Agreement) -> None:
+    """ZR-EML-BKG-002 to renter and host. Called from both ways an agreement
+    reaches SIGNED (last signature on an already-paid agreement, or payment
+    clearing after both signatures); the dedupe key makes it send once."""
     try:
-        agreement = create_agreement(db, offer, _get_system_actor(db), auto=True)
-    except HTTPException as exc:
-        logger.info("auto agreement creation skipped for offer %s: %s", offer.id, exc.detail)
-        return
+        renter, host = _offer_email_users(db, agreement.offer)
+        details = _booking_confirmed_email_details(agreement)
+        name = agreement.offer.listing.name
+        if renter is not None:
+            send_agreement_executed_email(renter.email, renter.full_name, name, **details)
+        if host is not None:
+            send_agreement_executed_email(host.email, host.full_name, name, recipient_is_host=True, **details)
     except Exception:
-        logger.exception("auto agreement creation failed for offer %s", offer.id)
-        return
-    # A fully-automatic pipeline that stops at DRAFT defeats the point --
-    # nothing else ever moves this agreement to SENT on its own, so it
-    # would sit invisible to the renter until a human happened to notice
-    # and click Send manually. Sending is purely mechanical (send_agreement
-    # only checks status==DRAFT and a version exists -- no discretion, unlike
-    # the real judgment calls this session deliberately left manual: occupancy
-    # eligibility, move-in confirmation, property/authority verification,
-    # screening decisions). Separate try/except so a send failure never
-    # unwinds the agreement creation that already succeeded.
-    try:
-        send_agreement(db, agreement, _get_system_actor(db))
-    except Exception:
-        pass
+        logger.exception("booking-confirmed email failed for agreement %s", agreement.id)
 
 
-def retry_pending_auto_agreements(db: Session) -> None:
-    """Re-runs _auto_create_agreement_if_enabled for every accepted offer that
-    still has no agreement. Offer acceptance only tries once, so an offer
-    accepted while a gate was unmet (authority record, occupancy
-    classification, agreement clauses) would otherwise wait for a manual
-    click forever. Called after an admin action that can clear one of those
-    gates; never raises, so it can't undo the admin action that triggered it."""
+def _email_signature_status(db: Session, agreement: Agreement, *, reminder: bool = False) -> None:
+    """ZR-EML-AGR-002: after one signature, ask the other party; once both have
+    signed (payment still due), tell both; or a deadline reminder."""
     try:
-        offers = list(db.scalars(
-            select(Offer).outerjoin(Agreement, Agreement.offer_id == Offer.id)
-            .where(Offer.status == "ACCEPTED", Agreement.id.is_(None))
-        ))
-        for offer in offers:
-            _auto_create_agreement_if_enabled(db, offer)
+        renter, host = _offer_email_users(db, agreement.offer)
+        name = agreement.offer.listing.name
+        deadline = agreement.offer.confirmation_expires_at
+        version_key = f"v{agreement.versions[-1].version_no}" if agreement.versions else "v1"
+        host_signed, renter_signed = bool(agreement.signed_by_provider_at), bool(agreement.signed_by_renter_at)
+        completed = ", ".join(n for n, done in (("Host", host_signed), ("Renter", renter_signed)) if done)
+
+        if host_signed and renter_signed:
+            for user, is_host in ((renter, False), (host, True)):
+                if user is not None:
+                    send_signature_status_email(
+                        user.email, user.full_name, name, agreement_id=agreement.id,
+                        variant="all-signers-completed", signature_status="complete",
+                        completed_signers=completed, pending_signers="Initial payment before the booking is confirmed",
+                        deadline=agreement.payment_session_expires_at, event_key=version_key,
+                        recipient_is_host=is_host,
+                    )
+            return
+
+        pending = [(renter, False, "Renter")] if not renter_signed else []
+        pending += [(host, True, "Host")] if not host_signed else []
+        for user, is_host, role in pending:
+            if user is None:
+                continue
+            send_signature_status_email(
+                user.email, user.full_name, name, agreement_id=agreement.id,
+                variant="reminder" if reminder else "signature-requested",
+                signature_status="still required" if reminder else "requested",
+                completed_signers=completed, pending_signers=f"You ({role.lower()})", deadline=deadline,
+                event_key=f"{version_key}:{deadline.date().isoformat() if (reminder and deadline) else 'requested'}",
+                recipient_is_host=is_host,
+            )
     except Exception:
-        logger.exception("retrying pending auto agreements failed")
-        db.rollback()
+        logger.exception("signature status email failed for agreement %s", agreement.id)
+
+
+def send_signature_deadline_reminders(db: Session, *, now: datetime | None = None, window_hours: int = 24) -> int:
+    """Scheduled job: one reminder per pending signer when the signing
+    deadline (offer.confirmation_expires_at) is within window_hours.
+    Revalidated at send time -- only agreements still awaiting a signature."""
+    now = now or datetime.now(timezone.utc)
+    horizon = now + timedelta(hours=window_hours)
+    agreements = db.scalars(
+        select(Agreement).join(Offer, Offer.id == Agreement.offer_id).where(
+            Agreement.status.in_(("SENT", "PARTIALLY_EXECUTED", "AMENDMENT_PENDING")),
+            Offer.confirmation_expires_at.is_not(None),
+            Offer.confirmation_expires_at > now,
+            Offer.confirmation_expires_at <= horizon,
+        )
+    ).all()
+    for agreement in agreements:
+        _email_signature_status(db, agreement, reminder=True)
+    return len(agreements)
+
+
+def _booking_confirmed_email_details(agreement: Agreement) -> dict:
+    """Booking-confirmed email facts (ZR-EML-BKG-002) from the agreement's
+    own frozen snapshot and its paid initial obligations."""
+    from app.services.email import formatting as email_fmt
+
+    snapshot = agreement.versions[-1].snapshot if agreement.versions else {}
+    term = (snapshot.get("document") or {}).get("term") or {}
+    currency = snapshot.get("currency") or (agreement.offer.listing.currency if agreement.offer else "")
+    start = term.get("start_date") or snapshot.get("start_date")
+    months = term.get("term_months") or snapshot.get("term_months")
+    end = term.get("end_date")
+    term_summary = ""
+    if months:
+        term_summary = f"{months} months"
+        if start and end:
+            term_summary += f" ({email_fmt.day(date_.fromisoformat(start))} \u2013 {email_fmt.day(date_.fromisoformat(end))})"
+    paid = [o for o in agreement.obligations if o.status == "PAID"]
+    payment_summary = " + ".join(
+        f"{email_fmt.money(float(o.amount), currency)} {o.obligation_type.lower()}" for o in paid
+    )
+    return {
+        "agreement_id": agreement.id,
+        "move_in": date_.fromisoformat(start) if start else None,
+        "term_summary": term_summary,
+        "payment_summary": payment_summary,
+    }
 
 
 def get_agreement_or_404(db: Session, agreement_id: int, correlation_id: str = "") -> Agreement:
@@ -1271,6 +1491,18 @@ def send_agreement(db: Session, agreement: Agreement, admin: AdminUser | UserAcc
         title="Your rental agreement is ready to sign",
         notification_type="agreement.sent",
     )
+    try:
+        renter, _ = _offer_email_users(db, agreement.offer)
+        if renter is not None:
+            snapshot = agreement.versions[-1].snapshot or {}
+            send_agreement_ready_email(
+                renter.email, renter.full_name, agreement.offer.listing.name, agreement_id=agreement.id,
+                version_no=agreement.versions[-1].version_no,
+                agreement_type=(snapshot.get("agreement_class") or "room_share_agreement").replace("_", " ").capitalize(),
+                required_signers="Host and renter", deadline=agreement.offer.confirmation_expires_at,
+            )
+    except Exception:
+        logger.exception("agreement-ready email failed for agreement %s", agreement.id)
     return agreement
 
 
@@ -1600,12 +1832,7 @@ def _apply_signature(
                     related_entity_type="agreement", related_entity_id=str(agreement.id),
                 )
 
-            renter_user = get_user_for_guest(db, guest) if guest else None
-            if renter_user:
-                send_agreement_executed_email(renter_user.email, renter_user.full_name, listing.name)
-            host_user = get_user_by_party_id(db, listing.party_id) if listing else None
-            if host_user:
-                send_agreement_executed_email(host_user.email, host_user.full_name, listing.name)
+            _email_booking_confirmed(db, agreement)
 
             # Not merely one signature received (see the PARTIALLY_EXECUTED
             # branch below, which must never create one) -- both signatures
@@ -1640,6 +1867,9 @@ def _apply_signature(
             title="Complete payment to confirm your rental agreement",
             notification_type="agreement.payment_due",
         )
+        _email_signature_status(db, agreement)
+    elif agreement.status == "PARTIALLY_EXECUTED":
+        _email_signature_status(db, agreement)
     return agreement
 
 
@@ -1694,6 +1924,7 @@ def confirm_agreement_payment(db: Session, agreement: Agreement, correlation_id:
         title="Your rental agreement is fully signed",
         notification_type="agreement.signed",
     )
+    _email_booking_confirmed(db, agreement)
     from app.crud.booking_change_requests import _complete_premises_change_if_applicable
     _complete_premises_change_if_applicable(db, agreement)
     db.commit()
@@ -1777,79 +2008,19 @@ def user_sign_agreement(
 
 
 def _generate_native_agreement_pdf(agreement: Agreement) -> bytes:
-    """Mode A (native) rendering -- also reused, unmodified, as the
-    'rendered content' side of mode C's own drift check against its
-    authoritative reference text (see generate_agreement_pdf's mode C
-    branch below). A plain summary document, not a legal contract template
-    -- there's no real e-signature provider or clause library behind this,
-    consistent with sign_agreement's own "simulated" framing.
+    """Mode A (native) rendering: the Zoiko Rooms Residential Occupancy
+    Agreement global master template (services/agreement_document) -- also
+    reused, unmodified, as the 'rendered content' side of mode C's own drift
+    check (see generate_agreement_pdf's mode C branch below).
 
     ZR-ENG-CLR-004 AC-27: reads only from the latest AgreementVersion's
-    frozen snapshot (see _build_agreement_snapshot), never from live
-    listing/offer/guest rows -- a later edit to any of those must never
-    change what this renders for an already-generated version. Once a
+    frozen snapshot (see _build_agreement_snapshot) plus the agreement's own
+    execution state, never from live listing/offer/guest rows. Once a
     version reaches EXECUTED_IMMUTABLE this function must not be called
     again for it at all -- see freeze_agreement_version, which renders and
     hashes exactly once and persists the result; GET /agreements/{id}/pdf
     serves the persisted artifact thereafter, never a fresh render."""
-    version = agreement.versions[-1]
-    snapshot = version.snapshot
-
-    buffer = BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    _, height = A4
-    x = 20 * mm
-    y = height - 25 * mm
-
-    def write(text: str, size: float = 10, bold: bool = False, gap: float = 7 * mm) -> None:
-        nonlocal y
-        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        pdf.drawString(x, y, text)
-        y -= gap
-
-    write("Zoiko Rooms -- Room Share Agreement", size=16, bold=True, gap=10 * mm)
-    write(f"Agreement #{agreement.id}  |  Version {version.version_no}  |  Status: {agreement.status}", size=10)
-    write(f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", size=9, gap=10 * mm)
-
-    write("Listing", size=12, bold=True)
-    write(snapshot["listing_name"])
-    write(f"{snapshot['listing_location']}, {snapshot['listing_city']}")
-    if snapshot.get("room_size") is not None:
-        write(
-            f"Private room - {snapshot['room_size']} sqft - "
-            f"{'Ensuite' if snapshot.get('room_has_ensuite') else 'Shared bathroom'}",
-            gap=10 * mm,
-        )
-    else:
-        y -= 10 * mm
-
-    write("Provider", size=12, bold=True)
-    write(snapshot["provider_name"])
-    write(snapshot["provider_email"], gap=10 * mm)
-
-    write("Renter", size=12, bold=True)
-    write(snapshot["renter_name"])
-    write(snapshot["renter_email"])
-    if snapshot.get("renter_phone"):
-        write(snapshot["renter_phone"])
-    y -= 5 * mm
-
-    write("Terms", size=12, bold=True)
-    write(f"Monthly rent: Rs. {snapshot['monthly_rent']:,.2f}")
-    write(f"Security deposit: Rs. {snapshot['deposit_amount']:,.2f}")
-    write(f"Lease start: {snapshot['start_date']}")
-    write(f"Term length: {snapshot['term_months']} months", gap=10 * mm)
-
-    write("Signatures", size=12, bold=True)
-    write(f"Provider: {agreement.signed_by_provider_at.strftime('%Y-%m-%d %H:%M UTC') if agreement.signed_by_provider_at else 'Not yet signed'}")
-    write(f"Renter: {agreement.signed_by_renter_at.strftime('%Y-%m-%d %H:%M UTC') if agreement.signed_by_renter_at else 'Not yet signed'}")
-    if agreement.signature_ref:
-        write(f"Signature reference: {agreement.signature_ref}")
-
-    pdf.showPage()
-    pdf.save()
-    buffer.seek(0)
-    return buffer.getvalue()
+    return render_agreement_pdf(build_document_model(agreement, agreement.versions[-1]))
 
 
 def generate_agreement_pdf(db: Session, agreement: Agreement) -> bytes:
@@ -1913,40 +2084,9 @@ def generate_agreement_accessible_text(agreement: Agreement) -> str:
     """ZR-ENG-CLR-004 AC-28 'Accessibility and alternate execution/delivery
     paths are supported where required' / Q-35 'Renter uses screen reader/
     alternate accessible document flow': a plain-text rendering of the same
-    frozen snapshot generate_agreement_pdf uses -- same AC-27 rule (reads
-    only the version's snapshot, never live listing/offer rows), just a
-    linear-reading-order text format instead of a paginated PDF, for screen
-    readers and any client that can't render PDF at all."""
-    version = agreement.versions[-1]
-    snapshot = version.snapshot
-
-    lines = [
-        "ZOIKO ROOMS -- ROOM SHARE AGREEMENT (accessible text version)",
-        f"Agreement #{agreement.id}, Version {version.version_no}, Status: {agreement.status}",
-        "",
-        "LISTING",
-        snapshot["listing_name"],
-        f"{snapshot['listing_location']}, {snapshot['listing_city']}",
-        "",
-        "PROVIDER",
-        snapshot["provider_name"],
-        snapshot["provider_email"],
-        "",
-        "RENTER",
-        snapshot["renter_name"],
-        snapshot["renter_email"],
-        "",
-        "TERMS",
-        f"Monthly rent: Rs. {snapshot['monthly_rent']:,.2f}",
-        f"Security deposit: Rs. {snapshot['deposit_amount']:,.2f}",
-        f"Lease start: {snapshot['start_date']}",
-        f"Term length: {snapshot['term_months']} months",
-        "",
-        "SIGNATURES",
-        f"Provider: {'signed ' + agreement.signed_by_provider_at.strftime('%Y-%m-%d %H:%M UTC') if agreement.signed_by_provider_at else 'not yet signed'}",
-        f"Renter: {'signed ' + agreement.signed_by_renter_at.strftime('%Y-%m-%d %H:%M UTC') if agreement.signed_by_renter_at else 'not yet signed'}",
-    ]
-    return "\n".join(lines)
+    DocumentModel generate_agreement_pdf renders -- same AC-27 rule (frozen
+    snapshot only), just linear reading order instead of a paginated PDF."""
+    return render_agreement_text(build_document_model(agreement, agreement.versions[-1]))
 
 
 def generate_disclosure_accessible_text(disclosure: DisclosureRequirement) -> str:

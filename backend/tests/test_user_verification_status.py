@@ -40,7 +40,8 @@ class TestRenterVerificationStatus:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["identity"]["status"] == "verified"
-        assert body["identity"]["expiresAt"] is not None
+        # ZR-IDENTITY-001 Section 7.2: no document-driven expiry.
+        assert body["identity"]["expiresAt"] is None
         assert body["occupancyEligibility"] == []
         # AC-42: purpose, sharing, retention and alternatives all explained.
         assert body["identity"]["sharingScope"]

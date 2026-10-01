@@ -5,38 +5,21 @@ import { AlertTriangle, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { useUserSession } from "@/components/user/UserSessionContext";
 
-const copy: Record<string, { title: string; body: string; cta: string }> = {
-  not_submitted: {
-    title: "Identity verification required",
-    body: "Verify your identity using an accepted government-issued identity document. Available document types depend on your country or region.",
-    cta: "Verify identity",
-  },
-  pending: {
-    title: "Your identity verification is still pending",
-    body: "A Zoiko reviewer has to approve your document before this action becomes available.",
-    cta: "View verification status",
-  },
-  rejected: {
-    title: "Your identity verification was rejected",
-    body: "Submit a new document so your account can be verified again.",
-    cta: "Submit a new document",
-  },
-  expired: {
-    title: "Your identity verification has expired",
-    body: "Submit a current document to restore access to this action.",
-    cta: "Submit a new document",
-  },
-  additional_evidence_required: {
-    title: "More evidence is needed",
-    body: "We need a clearer or different document before your identity can be approved. Check the note on your submission for details.",
-    cta: "Submit more evidence",
-  },
+const BODY: Record<string, string> = {
+  NOT_STARTED: "Verify your identity once with an accepted identity document -- it's reused for every listing and booking.",
+  IN_PROGRESS: "You've started verifying your identity. Continue where you left off.",
+  PROCESSING: "We're checking your identity information. We'll update your status when it's done.",
+  PENDING_REVIEW: "We need to review your verification. You can leave this page; we'll update your status.",
+  ACTION_REQUIRED: "We need one more step to complete your identity verification.",
+  REVERIFICATION_REQUIRED: "We need to verify your identity again before this action is available.",
+  FAILED: "We couldn't verify your identity. You can try another verification option.",
 };
 
 /**
- * Renders `children` only when the backend reports a verified identity for this user.
- * Otherwise it explains what is blocking and links to the verification page. Purely a
- * UX affordance -- the backend independently rejects unverified submissions with 403.
+ * Renders `children` only when the server reports a verified identity.
+ * Otherwise explains what is blocking and links to the verification page.
+ * Presentation only -- every gated backend action re-checks identity itself
+ * (ZR-IDENTITY-001 Section 8.4).
  */
 export function IdentityGate({
   action = "this action",
@@ -45,34 +28,37 @@ export function IdentityGate({
   action?: string;
   children: React.ReactNode;
 }) {
-  const { identityVerified, identityStatus, loading } = useUserSession();
+  const { identityVerified, identityProfile, loading } = useUserSession();
 
   if (loading) {
     return (
       <div className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
-        <p className="text-sm text-slate-400">Checking your verification status...</p>
+        <p className="text-sm text-slate-400" role="status">Checking your verification status...</p>
       </div>
     );
   }
 
   if (identityVerified) return <>{children}</>;
 
-  const message = copy[identityStatus] ?? copy.not_submitted;
+  const state = identityProfile?.state ?? "NOT_STARTED";
+  const header = identityProfile?.dashboard.header ?? "Identity not verified";
+  const cta = identityProfile?.dashboard.primaryAction ?? "Verify identity";
+  const detail = identityProfile?.dashboard.message || BODY[state] || BODY.NOT_STARTED;
 
   return (
     <div className="flex flex-col gap-4 rounded-2xl bg-amber-50 p-5 ring-1 ring-amber-200 sm:flex-row sm:items-center sm:justify-between dark:bg-amber-500/10 dark:ring-amber-500/20">
       <div className="flex items-start gap-3">
-        <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+        <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" aria-hidden="true" />
         <div>
-          <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">{message.title}</p>
+          <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">{header}</p>
           <p className="mt-0.5 text-xs text-amber-700 dark:text-amber-400">
-            {message.body} You need a verified identity to {action}.
+            {detail} You need a verified identity to {action}.
           </p>
         </div>
       </div>
       <Link href="/account/identity" className="shrink-0">
         <Button size="sm" variant="primary">
-          <ShieldCheck className="h-4 w-4" /> {message.cta}
+          <ShieldCheck className="h-4 w-4" aria-hidden="true" /> {cta}
         </Button>
       </Link>
     </div>

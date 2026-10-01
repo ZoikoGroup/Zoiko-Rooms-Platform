@@ -509,7 +509,7 @@ class TestEmailWiring:
         calls = []
         monkeypatch.setattr(
             leasing_crud, "send_application_decided_email",
-            lambda to_email, full_name, listing_name, approved: calls.append((to_email, approved)),
+            lambda to_email, full_name, listing_name, approved, **details: calls.append((to_email, approved)),
         )
 
         leasing_crud.decide_application(db_session, application, admin, ApplicationDecide(decision="APPROVED"))
@@ -530,7 +530,7 @@ class TestEmailWiring:
         calls = []
         monkeypatch.setattr(
             finance_crud, "send_payment_confirmed_email",
-            lambda to_email, full_name, amount, currency: calls.append((to_email, amount, currency)),
+            lambda to_email, full_name, amount, currency, **details: calls.append((to_email, amount, currency)),
         )
 
         from app.schemas.finance import PaymentAllocationInput, PaymentConfirm

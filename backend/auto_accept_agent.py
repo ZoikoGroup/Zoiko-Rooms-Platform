@@ -11,15 +11,16 @@ folder.
 
 It performs NO real authenticity/eligibility/ownership/screening/content
 check whatsoever. It finds every identity verification, occupancy-eligibility
-check, property verification, screening check, SUBMITTED application, and
-listing in REVIEW still waiting on a decision, and marks each one
+check, property verification, screening check, and listing in REVIEW
+still waiting on a decision, and marks each one
 approved/PASS/PUBLISHED using the existing crud functions (so
 notifications, audit log entries, and issued credentials all look exactly
 like a real admin/host decision -- only the actual judgment behind it is
 missing). It also confirms move-in the moment an occupancy is genuinely
-eligible, and fills in a listing's default offer terms (from that listing's
-own real price_per_night) when a host left them blank, so a decided
-application doesn't stall waiting on optional fields nobody filled in.
+eligible.
+
+It never touches the host <-> renter steps: approving an application,
+creating/sending an offer and creating an agreement are always manual.
 
 The one thing this deliberately still never does, and will not: sign an
 agreement on anyone's behalf. crud/leasing.py's own sign_agreement refuses
@@ -49,13 +50,7 @@ from sqlalchemy import select
 
 from app.crud.activation_gate import evaluate_activation_gate, persist_activation_decision
 from app.crud.identity_verification import verify_identity_verification
-from app.crud.leasing import (
-    _auto_create_agreement_if_enabled,
-    _auto_create_offer_if_enabled,
-    decide_application,
-    resolve_market_release,
-)
-from app.crud.listing import approve_listing, publish_listing
+from app.crud.listing import approve_listing, publish_listing, resolve_market_release
 from app.crud.occupancy import confirm_move_in
 from app.crud.occupancy_eligibility import (
     get_valid_occupancy_eligibility_credential,
@@ -67,11 +62,10 @@ from app.crud.property_verification import verify_property_verification
 from app.crud.screening import list_pending_screening_checks, record_screening_decision
 from app.db.session import SessionLocal
 from app.models.identity_verification import IdentityVerification
-from app.models.leasing import Agreement, Application, Offer
+from app.models.leasing import Agreement, Offer
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.property_verification import PropertyVerification
-from app.schemas.leasing import ApplicationDecide
 from app.services.verification_requirements import resolve_verification_requirements
 
 AUTO_ACCEPT_REASON = "DEV-ONLY auto_accept_agent.py: no real check performed, unconditional accept"
@@ -218,56 +212,6 @@ def run_once() -> None:
         authority_declared = _auto_declare_and_verify_missing_authority(db, admin)
         occupancy_classified = _auto_classify_missing_occupancy(db)
 
-        # The actual who-do-we-rent-to decision -- approved unconditionally
-        # here per explicit instruction, using the same real crud function
-        # a host's own click uses, so it synchronously triggers whatever
-        # offer auto-creation is already configured for this listing's
-        # market release, same as a real approval would.
-        submitted_applications = list(db.scalars(select(Application).where(Application.status == "SUBMITTED")))
-        for application in submitted_applications:
-            decide_application(db, application, admin, ApplicationDecide(decision="APPROVED", note=AUTO_ACCEPT_REASON))
-        if submitted_applications:
-            db.commit()
-
-        # Retry offer creation for any already-DECIDED application still
-        # missing one -- _auto_create_offer_if_enabled only ever runs once,
-        # synchronously, at the moment of decision (see decide_application
-        # above); if that one attempt failed for a transient reason (e.g. the
-        # market release wasn't resolvable yet), nothing before this retried
-        # it. Same shape as the agreement retry loop further down.
-        #
-        # _auto_create_offer_if_enabled also silently no-ops when the listing
-        # has no default_monthly_rent/default_deposit_amount/default_term_months
-        # set -- a real gap, since the host's own "List a Room" form treats
-        # that as optional. Unlike payment/signing/handover (claims that a
-        # real-world event already happened), a listing's own asking price is
-        # forward-looking business configuration with no objective right
-        # answer -- same category as every other review decision this script
-        # already makes. Derived from the listing's own real, host-set
-        # price_per_night (never a number invented from nothing): monthly
-        # rent == price_per_night, deposit == one month's rent, term == 11
-        # months, matching every other real listing already on this platform.
-        for application in db.scalars(select(Application).where(Application.status == "DECIDED")):
-            listing = application.listing
-            if listing is None or application.offer is not None:
-                continue
-            if listing.default_monthly_rent is None:
-                listing.default_monthly_rent = listing.price_per_night
-            if listing.default_deposit_amount is None:
-                listing.default_deposit_amount = listing.price_per_night
-            if listing.default_term_months is None:
-                listing.default_term_months = 11
-            db.commit()
-
-        retried_offers = 0
-        for application in db.scalars(select(Application).where(Application.status == "DECIDED")):
-            if application.offer is not None:
-                continue
-            _auto_create_offer_if_enabled(db, application, admin)
-            db.refresh(application)
-            if application.offer is not None:
-                retried_offers += 1
-
         # "additional_evidence_required" deliberately excluded -- that status
         # now means a REAL check (services/document_ocr.py) or a real admin
         # genuinely flagged this submission as unreadable/insufficient and
@@ -349,22 +293,6 @@ def run_once() -> None:
         if screening_pending:
             db.commit()
 
-        # Identity and occupancy-eligibility gates above may have just
-        # cleared for an ACCEPTED offer whose agreement auto-creation
-        # already tried and failed once at acceptance time (see
-        # user_accept_offer/_auto_create_agreement_if_enabled in
-        # crud/leasing.py) -- retry using the exact same real function, so
-        # the agreement now gets created the moment every gate is clear,
-        # same policy check and eligibility enforcement as the live path.
-        retried_agreements = 0
-        for offer in db.scalars(select(Offer).where(Offer.status == "ACCEPTED")):
-            if offer.agreement is not None:
-                continue
-            _auto_create_agreement_if_enabled(db, offer)
-            db.refresh(offer)
-            if offer.agreement is not None:
-                retried_agreements += 1
-
         # Never touches signing, payment, or the three handover events
         # (HANDOVER_READY/POSSESSION_DELIVERED/RENTER_RECEIPT) -- all four
         # are a real party's own attestation of something that actually
@@ -407,17 +335,14 @@ def run_once() -> None:
 
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         print(
-            f"[{stamp}] auto-accepted {len(submitted_applications)} application(s), "
-            f"{retried_offers} offer(s) unblocked and created, "
-            f"{len(identity_pending)} identity verification(s), "
+            f"[{stamp}] auto-accepted {len(identity_pending)} identity verification(s), "
             f"{occupancy_opened} newly-opened + {len(occupancy_pending)} already-open occupancy-eligibility check(s), "
             f"{authority_declared} authority record(s) declared+verified, "
             f"{occupancy_classified} room(s) classified, "
             f"{len(property_pending)} property verification(s), "
             f"{len(screening_pending)} screening check(s), "
             f"{listings_published} listing(s) approved+published, "
-            f"{moved_in} move-in(s) confirmed, "
-            f"{retried_agreements} agreement(s) unblocked and created"
+            f"{moved_in} move-in(s) confirmed"
         )
     finally:
         db.close()

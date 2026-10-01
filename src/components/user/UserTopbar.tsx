@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/Badge";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { userLogout } from "@/lib/user-auth";
 import { useUserSession } from "@/components/user/UserSessionContext";
-import { identityStatusLabel, identityStatusTone } from "@/lib/status";
+import { identityStateTone } from "@/lib/identity";
 import { AppNotification } from "@/lib/types";
 import {
   USER_NOTIFICATIONS_BASE,
@@ -34,7 +34,7 @@ function relativeTime(iso: string): string {
 
 export function UserTopbar({ onOpenMobileSidebar }: { onOpenMobileSidebar: () => void }) {
   const router = useRouter();
-  const { user, identityStatus } = useUserSession();
+  const { user, identityProfile } = useUserSession();
   const [profileOpen, setProfileOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
@@ -127,11 +127,17 @@ export function UserTopbar({ onOpenMobileSidebar }: { onOpenMobileSidebar: () =>
       </div>
 
       <div ref={ref} className="flex items-center gap-3">
-        <Link href="/account/identity" className="hidden sm:block">
-          <Badge tone={identityStatusTone[identityStatus]} dot>
-            <ShieldCheck className="h-3.5 w-3.5" /> {identityStatusLabel[identityStatus]}
-          </Badge>
-        </Link>
+        {identityProfile && (
+          <Link
+            href="/account/identity"
+            className="hidden sm:block"
+            aria-label={`Identity status: ${identityProfile.dashboard.header}`}
+          >
+            <Badge tone={identityStateTone[identityProfile.state]} dot>
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> {identityProfile.dashboard.header}
+            </Badge>
+          </Link>
+        )}
 
         <ThemeToggle />
 

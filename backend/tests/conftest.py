@@ -52,6 +52,35 @@ def _isolate_from_real_provider_credentials(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _email_log_disabled(monkeypatch):
+    """The email delivery log (services/email/message_log.py) opens its own
+    session; by default that would be the real database from .env. Off for
+    every test -- tests of the log itself point it at db_session."""
+    from app.services.email import message_log
+
+    monkeypatch.setattr(message_log, "_session_factory", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _offline_geocoder(monkeypatch):
+    """Property verification looks the address up on a map
+    (services/geocoding.py). Tests must never call a real geocoder, so every
+    address "resolves" at house level in the region's own country by
+    default. Tests of the map check itself patch geocode_address again."""
+    from app.services import geocoding
+
+    def _found(address, city, landmark, jurisdiction_code):
+        expected = geocoding.JURISDICTION_COUNTRIES.get(jurisdiction_code, "")
+        return geocoding.GeocodeResult(
+            geocoding.FOUND, "test", geocoding.build_address_query(address, city, landmark, jurisdiction_code),
+            latitude=51.5074, longitude=-0.1278, formatted_address=f"{address}, {city}", precision="HOUSE",
+            country_code=expected, expected_country_code=expected,
+        )
+
+    monkeypatch.setattr(geocoding, "geocode_address", _found)
+
+
+@pytest.fixture(autouse=True)
 def _legacy_payment_capabilities(request, monkeypatch):
     """ZR-PAY-CFG-001 turned off every rental money-movement path and made
     the Listing Fee and PAYMENT_RECEIPT authority fail closed. Most of this

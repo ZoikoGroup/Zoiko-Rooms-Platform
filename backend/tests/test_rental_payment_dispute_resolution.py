@@ -1,6 +1,5 @@
-"""Admin resolution of rent payment disputes: the queue, and the decision
-that goes with closing one -- the payment stands, it wasn't received (owed
-again), or the dispute is simply closed."""
+"""Rent payment disputes on the admin side: a read-only queue. Resolving one
+is between the tenant and host (tests/test_payment_dispute_cases.py)."""
 
 from __future__ import annotations
 
@@ -46,48 +45,17 @@ class TestDisputeQueue:
         assert row["externalReference"] == "REF-1"
 
 
-class TestDisputeOutcomes:
-    def _resolve(self, client, admin, dispute_id: int, **body):
-        return client.post(
-            f"/api/finance/rental-payments/disputes/{dispute_id}/resolve", json=body, cookies=auth_admin_cookie(admin),
+class TestNoAdminDecision:
+    def test_admins_cannot_resolve_a_payment_dispute(self, client, db_session: Session):
+        """Resolved between tenant and host only -- see test_payment_dispute_cases.py."""
+        _rent, _record, dispute, admin = _disputed_payment(client, db_session, "dr-noadmin")
+        r = client.post(
+            f"/api/finance/rental-payments/disputes/{dispute.id}/resolve",
+            json={"resolutionNotes": "x", "outcome": "PAYMENT_STANDS"}, cookies=auth_admin_cookie(admin),
         )
-
-    def test_payment_not_received_makes_the_rent_owed_again(self, client, db_session: Session):
-        rent, record, dispute, admin = _disputed_payment(client, db_session, "dr-nr")
-        r = self._resolve(client, admin, dispute.id, resolutionNotes="Bank statement shows nothing", outcome="PAYMENT_NOT_RECEIVED")
-        assert r.status_code == 200, r.text
+        assert r.status_code in (404, 405)
         db_session.expire_all()
-        assert db_session.get(RentalPaymentDispute, dispute.id).status == "RESOLVED"
-        record = db_session.get(type(record), record.id)
-        assert record.status == "REVERSED"
-        assert record.obligation.status == "REVERSED"
-        assert record.obligation.outstanding_amount == float(rent.amount)
-
-    def test_payment_stands_confirms_it(self, client, db_session: Session):
-        _rent, record, dispute, admin = _disputed_payment(client, db_session, "dr-ok")
-        r = self._resolve(client, admin, dispute.id, resolutionNotes="Found under a different reference", outcome="PAYMENT_STANDS")
-        assert r.status_code == 200, r.text
-        db_session.expire_all()
-        record = db_session.get(type(record), record.id)
-        assert record.status == "CONFIRMED"
-        assert record.obligation.status == "CONFIRMED"
-
-    def test_close_only_leaves_the_payment_as_it_is(self, client, db_session: Session):
-        _rent, record, dispute, admin = _disputed_payment(client, db_session, "dr-close")
-        r = self._resolve(client, admin, dispute.id, resolutionNotes="")
-        assert r.status_code == 200, r.text
-        db_session.expire_all()
-        assert db_session.get(type(record), record.id).status == "DISPUTED"
-
-    def test_a_decision_needs_notes(self, client, db_session: Session):
-        _rent, _record, dispute, admin = _disputed_payment(client, db_session, "dr-notes")
-        r = self._resolve(client, admin, dispute.id, resolutionNotes="  ", outcome="PAYMENT_STANDS")
-        assert r.status_code == 400
-
-    def test_an_unknown_outcome_is_refused(self, client, db_session: Session):
-        _rent, _record, dispute, admin = _disputed_payment(client, db_session, "dr-bad")
-        r = self._resolve(client, admin, dispute.id, resolutionNotes="x", outcome="REFUND_EVERYONE")
-        assert r.status_code == 400
+        assert db_session.get(RentalPaymentDispute, dispute.id).status == "OPEN"
 
 
 class TestSupportEvidenceAccess:

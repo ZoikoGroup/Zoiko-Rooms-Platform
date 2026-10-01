@@ -16,8 +16,13 @@ DISPUTE_DECISION_BASES = (
     "EXTERNAL_PROCEEDING_DISMISSED",
     "EXTERNAL_PROCEEDING_WITHDRAWN",
     "SETTLEMENT_ACCEPTED",
+    # The admin's outcome on a payment-record dispute (ZR-PAY-002), carried
+    # onto its linked claim -- services/payment_dispute_cases.py.
+    "PAYMENT_RECORD_RESOLUTION",
 )
-DISPUTE_DECISION_AUTHORITIES = ("admin", "external_proceeding", "settlement")
+# "party": the tenant or host resolved it themselves (a payment-record
+# dispute -- crud/rental_payment.py:resolve_dispute_by_party).
+DISPUTE_DECISION_AUTHORITIES = ("admin", "external_proceeding", "settlement", "party")
 
 # QA-Q51/Section 25 "authority matrix": "Admin tries to mark legal
 # liability using a service-level resolution code; blocked." decide_claim

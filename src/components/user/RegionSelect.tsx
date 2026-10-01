@@ -27,7 +27,8 @@ export function RegionSelect({
   if (currentCode && !options.includes(currentCode)) options.unshift(currentCode);
   const selected = regions.find((r) => r.code === value);
 
-  let hint = "The region's rules apply to deposits, fees, notice periods and agreements for this property.";
+  let hint =
+    "Pick the region the property is physically located in. Its laws apply to deposits, fees, notice periods and the rental agreement.";
   if (locked) {
     hint = "Locked — this property already has a live listing or a tenancy under this region's rules.";
   } else if (options.length === 0) {
@@ -37,7 +38,7 @@ export function RegionSelect({
   }
 
   return (
-    <Field label="Region" hint={hint}>
+    <Field label="Region where the property is located" hint={hint}>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.config import settings
@@ -54,6 +54,20 @@ from app.services.dispute_state_machine import (
 )
 
 
+
+# Platform default currency when a claim has no tenancy to take one from
+# (same default as models/listing.py's currency column).
+DEFAULT_CLAIM_CURRENCY = "GBP"
+
+
+def _claim_currency(requested: str | None, occupancy) -> str:
+    """A claim is denominated in the tenancy's own currency unless the
+    claimant states one (ZR-ENG-CLR-005 12.3)."""
+    if requested:
+        return requested.strip().upper()
+    listing = getattr(occupancy, "listing", None) if occupancy is not None else None
+    return (getattr(listing, "currency", None) or DEFAULT_CLAIM_CURRENCY).upper()
+
 def _property_id_for_occupancy(occupancy: Occupancy) -> int | None:
     if occupancy.listing and occupancy.listing.room and occupancy.listing.room.property:
         return occupancy.listing.room.property.id
@@ -94,9 +108,24 @@ def _sync_case_status_after_claim_change(case: DisputeResolutionCase) -> None:
         transition_case(case, target)
 
 
+# Claims Zoiko Rooms itself has to act on: a complaint about Zoiko Rooms (A0),
+# a safety issue (A6), or one with no mapped forum yet (None). Everything else
+# is resolved between the tenant and host themselves.
+_ZOIKO_HANDLED_AUTHORITY = ("A0", "A6", None)
+
+
 def _notify_case_opened(db: Session, case: DisputeResolutionCase) -> None:
     title = "A dispute has been opened"
-    message = f"A {case.primary_claim_family.lower().replace('_', ' ')} dispute has been opened and is under review."
+    authorities = db.scalars(
+        select(DisputeResolutionClaim.authority_class).where(DisputeResolutionClaim.case_id == case.id)
+    ).all()
+    needs_zoiko = not authorities or any(a in _ZOIKO_HANDLED_AUTHORITY for a in authorities)
+    family = case.primary_claim_family.lower().replace("_", " ")
+    message = (
+        f"A {family} dispute has been opened and is under review."
+        if needs_zoiko
+        else f"A {family} dispute has been opened. Open it on your Disputes page to respond and sort it out together."
+    )
     if case.opened_by_guest_id and case.property_id:
         prop = db.get(Property, case.property_id)
         if prop:
@@ -109,6 +138,8 @@ def _notify_case_opened(db: Session, case: DisputeResolutionCase) -> None:
             notif_crud.notify_user_by_guest(
                 db, occ.guest, title=title, message=message, notification_type="dispute_case.opened_for_renter",
             )
+    if not needs_zoiko:
+        return
     notif_crud.notify_all_super_admins(
         db,
         title="New dispute case opened",
@@ -423,7 +454,7 @@ def open_case(
         claim_family=data.claim.claim_family,
         claimant_role=claimant_role,
         amount=data.claim.amount,
-        currency=data.claim.currency,
+        currency=_claim_currency(data.claim.currency, occupancy),
         requested_remedy=data.claim.requested_remedy,
         authority_class=resolution.authority_class,
         resolver_confidence=resolution.confidence,
@@ -474,7 +505,7 @@ def add_claim(db: Session, case: DisputeResolutionCase, data: DisputeClaimCreate
         claim_family=data.claim_family,
         claimant_role=claimant_role,
         amount=data.amount,
-        currency=data.currency,
+        currency=_claim_currency(data.currency, case.occupancy),
         requested_remedy=data.requested_remedy,
         authority_class=resolution.authority_class,
         resolver_confidence=resolution.confidence,
@@ -575,10 +606,37 @@ def get_hold_or_404(db: Session, hold_id: int) -> DisputeResolutionHold:
     return hold
 
 
+def _payment_dispute_case_ids(*, guest_id: str | None = None, party_id: int | None = None):
+    """Cases opened from a problem reported on a payment record
+    (services/payment_dispute_cases.py). Both sides of that payment -- the
+    tenant who paid and the party it was paid to -- can see the case, even
+    when it isn't anchored to an occupancy (e.g. a deposit before move-in)."""
+    from app.models.rental_payment import RentalPaymentDispute, RentalPaymentObligation, RentalPaymentRecord
+
+    query = (
+        select(RentalPaymentDispute.dispute_case_id)
+        .join(RentalPaymentRecord, RentalPaymentRecord.id == RentalPaymentDispute.record_id)
+        .join(RentalPaymentObligation, RentalPaymentObligation.id == RentalPaymentRecord.obligation_id)
+        .where(RentalPaymentDispute.dispute_case_id.is_not(None))
+    )
+    if guest_id is not None:
+        query = query.where(RentalPaymentObligation.tenant_guest_id == guest_id)
+    if party_id is not None:
+        query = query.where(RentalPaymentObligation.recipient_party_id == party_id)
+    return query
+
+
+def _is_payment_party(case: DisputeResolutionCase, **who) -> bool:
+    db = object_session(case)
+    return db is not None and case.id in set(db.scalars(_payment_dispute_case_ids(**who)))
+
+
 def assert_guest_can_access_case(case: DisputeResolutionCase, guest: Guest) -> None:
     if case.opened_by_guest_id == guest.id:
         return
     if case.occupancy is not None and case.occupancy.guest_id == guest.id:
+        return
+    if _is_payment_party(case, guest_id=guest.id):
         return
     raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to this dispute case")
 
@@ -588,6 +646,8 @@ def assert_party_can_access_case(case: DisputeResolutionCase, party_id: int) -> 
         return
     if case.property is not None and case.property.owner_party_id == party_id:
         return
+    if _is_payment_party(case, party_id=party_id):
+        return
     raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to this dispute case")
 
 
@@ -595,7 +655,13 @@ def list_cases_for_guest(db: Session, guest: Guest) -> list[DisputeResolutionCas
     query = (
         select(DisputeResolutionCase)
         .join(Occupancy, Occupancy.id == DisputeResolutionCase.occupancy_id, isouter=True)
-        .where(or_(DisputeResolutionCase.opened_by_guest_id == guest.id, Occupancy.guest_id == guest.id))
+        .where(
+            or_(
+                DisputeResolutionCase.opened_by_guest_id == guest.id,
+                Occupancy.guest_id == guest.id,
+                DisputeResolutionCase.id.in_(_payment_dispute_case_ids(guest_id=guest.id)),
+            )
+        )
         .order_by(DisputeResolutionCase.opened_at.desc())
     )
     return list(db.scalars(query))
@@ -605,7 +671,13 @@ def list_cases_for_party(db: Session, party_id: int) -> list[DisputeResolutionCa
     query = (
         select(DisputeResolutionCase)
         .join(Property, Property.id == DisputeResolutionCase.property_id, isouter=True)
-        .where(or_(DisputeResolutionCase.opened_by_party_id == party_id, Property.owner_party_id == party_id))
+        .where(
+            or_(
+                DisputeResolutionCase.opened_by_party_id == party_id,
+                Property.owner_party_id == party_id,
+                DisputeResolutionCase.id.in_(_payment_dispute_case_ids(party_id=party_id)),
+            )
+        )
         .order_by(DisputeResolutionCase.opened_at.desc())
     )
     return list(db.scalars(query))
@@ -886,7 +958,24 @@ def _has_open_external_proceeding(db: Session, claim_id: int) -> bool:
     return False
 
 
-def close_case(db: Session, case: DisputeResolutionCase, admin: AdminUser, *, force_close_reason: str = "") -> DisputeResolutionCase:
+def close_case_when_resolved(db: Session, case: DisputeResolutionCase, *, admin: AdminUser | None = None) -> bool:
+    """Disputes between a tenant and a host close on their own once every
+    claim on the case is resolved (settled, withdrawn or decided) -- no
+    Zoiko Rooms review step. Returns False, leaving the case as it is, while
+    a claim is still open or a financial hold is still active."""
+    if case.status == "CLOSED" or not case.claims:
+        return False
+    if any(c.status not in CLAIM_TERMINAL_STATUSES for c in case.claims):
+        return False
+    if any(hold.status in ("PROPOSED", "ACTIVE", "RELEASE_PENDING") for c in case.claims for hold in c.holds):
+        return False
+    close_case(db, case, admin)
+    return True
+
+
+def close_case(
+    db: Session, case: DisputeResolutionCase, admin: AdminUser | None, *, force_close_reason: str = "",
+) -> DisputeResolutionCase:
     # AC-24: a case cannot close while a required material claim remains
     # unresolved -- UNLESS force_close_reason is given (QA-Q45: partial
     # closure while a claim is genuinely stuck awaiting an external
@@ -924,7 +1013,7 @@ def close_case(db: Session, case: DisputeResolutionCase, admin: AdminUser, *, fo
             transition_case(case, "RESOLVED")
         transition_case(case, "CLOSED")
     case.closed_at = datetime.now(timezone.utc)
-    case.closed_by_admin_id = admin.id
+    case.closed_by_admin_id = admin.id if admin else None
 
     db.commit()
     _notify_case_participants(

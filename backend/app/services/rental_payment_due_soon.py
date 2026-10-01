@@ -60,6 +60,7 @@ def sweep_rental_payment_due_soon(db: Session, *, today: date | None = None) -> 
             related_entity_type="rental_payment_obligation", related_entity_id=str(obligation.id),
         )
         obligation.due_soon_notified_at = now
+        _email_due_soon(db, obligation)
         emit_event(
             db, "rental_payment.due", "rental_payment_obligation", str(obligation.id),
             {"dueDate": obligation.due_date.isoformat(), "amount": float(obligation.amount), "currency": obligation.currency},
@@ -69,3 +70,47 @@ def sweep_rental_payment_due_soon(db: Session, *, today: date | None = None) -> 
     if notified:
         db.commit()
     return notified
+
+
+def _email_due_soon(db: Session, obligation: RentalPaymentObligation) -> None:
+    """ZR-EML-RENT-001 for rent, ZR-EML-PAY-001 for anything else (e.g. the
+    deposit). Best effort -- never stops the sweep."""
+    import logging
+
+    from app.core.mailer import send_payment_due_email, send_rent_reminder_email
+    from app.crud.guest import get_user_for_guest
+    from app.crud.user import get_user_by_party_id
+    from app.models.finance import AutopayMandate
+
+    try:
+        tenant = get_user_for_guest(db, obligation.tenant) if obligation.tenant else None
+        if tenant is None:
+            return
+        host = get_user_by_party_id(db, obligation.recipient_party_id)
+        payee = f"{host.full_name} (your host), paid directly" if host else "Your host, paid directly"
+        listing = None
+        if obligation.agreement is not None and obligation.agreement.offer is not None:
+            listing = obligation.agreement.offer.listing
+        elif obligation.occupancy is not None and obligation.occupancy.offer is not None:
+            listing = obligation.occupancy.offer.listing
+        room_label = listing.name if listing else "your rental"
+
+        if obligation.obligation_type == "RENT":
+            autopay = None
+            if obligation.occupancy_id:
+                autopay = db.scalar(select(AutopayMandate).where(
+                    AutopayMandate.occupancy_id == obligation.occupancy_id, AutopayMandate.status == "ACTIVE",
+                ))
+            send_rent_reminder_email(
+                tenant.email, tenant.full_name, obligation_id=obligation.id, amount=float(obligation.amount),
+                currency=obligation.currency, due_date=obligation.due_date, room_label=room_label, payee=payee,
+                autopay_status="Active" if autopay else "Not set up",
+            )
+        else:
+            send_payment_due_email(
+                tenant.email, tenant.full_name, obligation_id=obligation.id,
+                purpose=f"the {obligation.display_label} for {room_label}", amount=float(obligation.amount),
+                currency=obligation.currency, due_date=obligation.due_date, payee=payee,
+            )
+    except Exception:
+        logging.getLogger("uvicorn.error").exception("due-soon email failed for obligation %s", obligation.id)

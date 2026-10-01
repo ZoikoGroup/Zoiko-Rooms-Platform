@@ -879,6 +879,13 @@ def report_discrepancy(
             notification_type="rental_payment.disputed",
             related_entity_type="rental_payment_dispute", related_entity_id=str(dispute.id),
         )
+
+    # Also open a dispute case, so the problem shows on every party's Disputes
+    # page with messages/evidence/settlements (best effort, never raises).
+    from app.services.payment_dispute_cases import open_linked_case
+
+    open_linked_case(db, dispute)
+    db.refresh(dispute)
     return dispute
 
 
@@ -1148,27 +1155,30 @@ def list_disputes(db: Session, *, status_filter: str | None = DISPUTE_OPEN_STATU
 
 
 def _apply_dispute_outcome(
-    db: Session, admin: AdminUser, record: RentalPaymentRecord, outcome: str, notes: str,
+    db: Session, record: RentalPaymentRecord, outcome: str, notes: str, *,
+    admin: AdminUser | None = None, guest_id: str | None = None, party_id: int | None = None,
 ) -> None:
     """PAYMENT_STANDS confirms the disputed payment; PAYMENT_NOT_RECEIVED
     marks it REVERSED (the money isn't with the host, so the rent is owed
     again); CLOSE_ONLY leaves the payment as it is. Each change is an
-    append-only RentalPaymentCorrection, same as every other admin override
-    in this module."""
+    append-only RentalPaymentCorrection naming who made it."""
+    actor = {"actor_admin_id": admin.id if admin else None, "actor_guest_id": guest_id, "actor_party_id": party_id}
     if outcome == "PAYMENT_STANDS" and record.status in RECORD_CONFIRMABLE_STATUSES:
         db.add(RentalPaymentCorrection(
             record_id=record.id, field_name="status", previous_value=record.status, new_value="CONFIRMED",
-            reason=notes or "Dispute resolved: payment stands", actor_admin_id=admin.id,
+            reason=notes or "Dispute resolved: payment stands", **actor,
         ))
         record.status = "CONFIRMED"
-        record.provenance = "ADMIN_CORRECTION"
+        record.provenance = "ADMIN_CORRECTION" if admin else "RECIPIENT_CONFIRMATION"
+        if party_id is not None:
+            record.confirmed_by_party_id = party_id
         if record.confirmed_amount is None:
             record.confirmed_amount = record.declared_amount
         record.confirmed_at = datetime.now(timezone.utc)
     elif outcome == "PAYMENT_NOT_RECEIVED" and record.status in ("PAYER_RECORDED", "DISPUTED", "CONFIRMED", "PARTIALLY_PAID"):
         db.add(RentalPaymentCorrection(
             record_id=record.id, field_name="status", previous_value=record.status, new_value="REVERSED",
-            reason=notes or "Dispute resolved: payment not received", actor_admin_id=admin.id,
+            reason=notes or "Dispute resolved: payment not received", **actor,
         ))
         record.status = "REVERSED"
     else:
@@ -1187,9 +1197,74 @@ def resolve_dispute(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"outcome must be one of {DISPUTE_OUTCOMES}")
     if outcome != "CLOSE_ONLY" and not resolution_notes.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Explain the decision in the resolution notes")
-    _apply_dispute_outcome(db, admin, dispute.record, outcome, resolution_notes.strip())
+    return _finalise_dispute(
+        db, dispute, outcome, resolution_notes, admin=admin, correlation_id=correlation_id,
+        resolved_by_text="Zoiko Rooms support resolved",
+    )
+
+
+def resolve_dispute_by_party(
+    db: Session, dispute: RentalPaymentDispute, *, action: str, notes: str = "",
+    guest: Guest | None = None, party_id: int | None = None, correlation_id: str = "",
+) -> RentalPaymentDispute:
+    """A payment-record dispute is settled between the tenant and the host,
+    with no Zoiko Rooms decision. Each side can only concede the point that
+    is theirs to concede, so neither can decide it in their own favour:
+
+    - CONFIRM_RECEIVED (the payment's recipient): "I have this money" ->
+      PAYMENT_STANDS, the payment is confirmed.
+    - CONFIRM_NOT_PAID (the tenant who declared it): "this wasn't paid" ->
+      PAYMENT_NOT_RECEIVED, the amount is owed again.
+    - WITHDRAW (whoever reported the problem) -> CLOSE_ONLY, the payment
+      is left as it is."""
+    from app.schemas.rental_payment import PAYMENT_DISPUTE_PARTY_ACTIONS
+
+    if action not in PAYMENT_DISPUTE_PARTY_ACTIONS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"action must be one of {PAYMENT_DISPUTE_PARTY_ACTIONS}")
+    if (guest is None) == (party_id is None):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Exactly one of the tenant or the host resolves a dispute")
+    if dispute.status == DISPUTE_RESOLVED_STATUS:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This dispute is already resolved")
+
+    record = dispute.record
+    obligation = record.obligation
+    is_tenant = guest is not None and guest.id in (record.declared_by_guest_id, obligation.tenant_guest_id)
+    is_recipient = party_id is not None and party_id == obligation.recipient_party_id
+    is_reporter = (guest is not None and dispute.reported_by_guest_id == guest.id) or (
+        party_id is not None and dispute.reported_by_party_id == party_id
+    )
+    if action == "CONFIRM_RECEIVED":
+        if not is_recipient:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person this payment was made to can confirm receiving it")
+        outcome, who = "PAYMENT_STANDS", "The host confirmed they received this payment"
+    elif action == "CONFIRM_NOT_PAID":
+        if not is_tenant:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the tenant who recorded this payment can confirm it wasn't paid")
+        outcome, who = "PAYMENT_NOT_RECEIVED", "The tenant confirmed this payment wasn't made"
+    else:
+        if not is_reporter:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person who reported this problem can withdraw it")
+        outcome, who = "CLOSE_ONLY", "The person who reported this problem withdrew it"
+
+    return _finalise_dispute(
+        db, dispute, outcome, notes, guest_id=guest.id if guest else None, party_id=party_id,
+        correlation_id=correlation_id, resolved_by_text=who,
+    )
+
+
+def _finalise_dispute(
+    db: Session, dispute: RentalPaymentDispute, outcome: str, resolution_notes: str, *,
+    admin: AdminUser | None = None, guest_id: str | None = None, party_id: int | None = None,
+    correlation_id: str = "", resolved_by_text: str,
+) -> RentalPaymentDispute:
+    _apply_dispute_outcome(
+        db, dispute.record, outcome, resolution_notes.strip(), admin=admin, guest_id=guest_id, party_id=party_id,
+    )
     dispute.status = DISPUTE_RESOLVED_STATUS
-    dispute.resolved_by_admin_id = admin.id
+    dispute.outcome = outcome
+    dispute.resolved_by_admin_id = admin.id if admin else None
+    dispute.resolved_by_guest_id = guest_id
+    dispute.resolved_by_party_id = party_id
     dispute.resolved_at = datetime.now(timezone.utc)
     dispute.resolution_notes = resolution_notes
     db.commit()
@@ -1197,22 +1272,25 @@ def resolve_dispute(
 
     log_audit_event(
         db, admin, "rental_payment.dispute_resolved", "rental_payment_dispute", str(dispute.id), correlation_id,
-        reason=resolution_notes,
+        reason=resolution_notes or outcome,
+    )
+    actor_kind, actor_id = (
+        ("admin", str(admin.id)) if admin else ("guest", guest_id) if guest_id else ("party", str(party_id))
     )
     emit_event(
         db, "rental_payment.dispute_resolved", "rental_payment_dispute", str(dispute.id), {"outcome": outcome},
-        correlation_id=correlation_id, new_state="RESOLVED",
+        correlation_id=correlation_id, actor_kind=actor_kind, actor_id=actor_id, new_state="RESOLVED",
     )
     db.commit()
 
     record = dispute.record
     obligation = record.obligation
     summary = {
-        "PAYMENT_STANDS": "The payment was confirmed.",
-        "PAYMENT_NOT_RECEIVED": "The payment was found not received, so this amount is owed again.",
-        "CLOSE_ONLY": "The dispute was closed.",
+        "PAYMENT_STANDS": "The payment is confirmed.",
+        "PAYMENT_NOT_RECEIVED": "This amount is owed again.",
+        "CLOSE_ONLY": "The payment is left as it was.",
     }[outcome]
-    message = f"Zoiko Rooms support resolved the problem reported on a {obligation.display_label} payment. {summary}"
+    message = f"{resolved_by_text} on the {obligation.display_label} payment. {summary}"
     if resolution_notes.strip():
         message += f" Notes: {resolution_notes.strip()}"
     for notify in (
@@ -1228,6 +1306,14 @@ def resolve_dispute(
         ),
     ):
         notify()
+
+    # The linked dispute case follows this outcome and closes.
+    from app.services.payment_dispute_cases import sync_case_after_payment_resolution
+
+    sync_case_after_payment_resolution(
+        db, dispute, outcome, resolution_notes.strip(), admin=admin, guest_id=guest_id, party_id=party_id,
+    )
+    db.refresh(dispute)
     return dispute
 
 

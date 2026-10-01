@@ -37,7 +37,7 @@ class PropertyComplianceCredential(Base):
     __tablename__ = "property_compliance_credentials"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    room_id: Mapped[int] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+    room_id: Mapped[int] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False, index=True)
     requirement_code: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="VALID")
     issuer_source: Mapped[str] = mapped_column(String(200), default="")

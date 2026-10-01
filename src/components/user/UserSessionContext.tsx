@@ -3,7 +3,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { IdentityVerificationRecord, IdentityVerificationStatus, UserProfile } from "@/lib/types";
 import { getCurrentUser } from "@/lib/user-auth";
-import { hasVerifiedIdentity, listIdentityVerifications } from "@/lib/user-api";
+import { listIdentityVerifications } from "@/lib/user-api";
+import { IdentityProfile, getMyIdentity } from "@/lib/identity";
 
 interface UserSession {
   user: UserProfile | null;
@@ -11,6 +12,9 @@ interface UserSession {
   identityRecords: IdentityVerificationRecord[];
   /** Status of the most relevant document: a verified one wins, else the newest. */
   identityStatus: IdentityVerificationStatus | "not_submitted";
+  /** ZR-IDENTITY-001: the account-level identity profile -- the server's
+   *  word on whether this person is verified (never derived client-side). */
+  identityProfile: IdentityProfile | null;
   identityVerified: boolean;
   loading: boolean;
   refreshUser: () => Promise<UserProfile | null>;
@@ -31,6 +35,7 @@ export function UserSessionProvider({
 }) {
   const [user, setUser] = useState<UserProfile | null>(initialUser);
   const [identityRecords, setIdentityRecords] = useState<IdentityVerificationRecord[]>([]);
+  const [identityProfile, setIdentityProfile] = useState<IdentityProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refreshUser = useCallback(async () => {
@@ -40,11 +45,9 @@ export function UserSessionProvider({
   }, []);
 
   const refreshIdentity = useCallback(async () => {
-    try {
-      setIdentityRecords(await listIdentityVerifications());
-    } catch {
-      setIdentityRecords([]);
-    }
+    const [records, profile] = await Promise.allSettled([listIdentityVerifications(), getMyIdentity()]);
+    setIdentityRecords(records.status === "fulfilled" ? records.value : []);
+    setIdentityProfile(profile.status === "fulfilled" ? profile.value : null);
   }, []);
 
   useEffect(() => {
@@ -52,7 +55,7 @@ export function UserSessionProvider({
   }, [refreshIdentity]);
 
   const value = useMemo<UserSession>(() => {
-    const verified = hasVerifiedIdentity(identityRecords);
+    const verified = identityProfile?.state === "VERIFIED";
     const identityStatus: UserSession["identityStatus"] = verified
       ? "verified"
       : identityRecords[0]?.status ?? "not_submitted";
@@ -61,12 +64,13 @@ export function UserSessionProvider({
       user,
       identityRecords,
       identityStatus,
+      identityProfile,
       identityVerified: verified,
       loading,
       refreshUser,
       refreshIdentity,
     };
-  }, [user, identityRecords, loading, refreshUser, refreshIdentity]);
+  }, [user, identityRecords, identityProfile, loading, refreshUser, refreshIdentity]);
 
   return <UserSessionContext.Provider value={value}>{children}</UserSessionContext.Provider>;
 }

@@ -23,7 +23,7 @@ class TestSubmit:
         )
         assert r.status_code == 401, r.text
 
-    def test_submits_a_pending_verification_with_the_uploaded_document(
+    def test_an_upload_is_saved_until_the_legal_details_are_confirmed(
         self, client, db_session: Session, tmp_path, monkeypatch
     ):
         monkeypatch.setattr(settings, "identity_upload_dir", str(tmp_path))
@@ -42,7 +42,10 @@ class TestSubmit:
         )
         assert r.status_code == 201, r.text
         body = r.json()
-        assert body["status"] == "pending"
+        # ZR-IDENTITY-001 Section 4: no date of birth confirmed yet (India
+        # requires one), so the document is saved but not submitted.
+        assert body["status"] == "draft"
+        assert body["documentNumber"] == "••••7654"
         assert body["documentType"] == "passport"
         assert body["hasDocument"] is True
         assert body["documentOriginalName"] == "passport.pdf"
@@ -101,6 +104,11 @@ class TestSubmit:
         user_b = _make_user(db_session, email="uidv-dup-b@test.com")
         user_b.party_id = party_b.id
         db_session.commit()
+        for user in (user_a, user_b):
+            r = client.put("/api/users/identity/details", json={
+                "givenName": "Test", "familyName": "User", "dateOfBirth": "1990-01-01", "countryCode": "IN",
+            }, cookies=auth_user_cookie(user))
+            assert r.status_code == 200, r.text
 
         r1 = client.post(
             "/api/users/identity-verifications",

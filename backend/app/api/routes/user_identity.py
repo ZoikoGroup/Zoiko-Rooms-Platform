@@ -26,7 +26,8 @@ def _to_user_read(record: IdentityVerification) -> dict:
         "document_type": record.document_type,
         "document_category": record.document_category,
         "custom_document_name": record.custom_document_name,
-        "document_number": record.encrypted_reference or "",
+        # Masked only -- the full number is never returned (ZR-IDENTITY-001 Section 5.4).
+        "document_number": record.masked_document_number,
         "evidence_ref": record.evidence_ref,
         "status": record.status,
         "has_document": record.has_document,
@@ -114,9 +115,6 @@ def get_identity_verification(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Identity verification not found")
     if record.party_id != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own identity verifications")
-    crud.verify_due_submissions_for_party(db, record.party_id)
-    db.refresh(record)
-
     return _to_user_read(record)
 
 

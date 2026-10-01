@@ -87,6 +87,13 @@ def _claims_for_settlement(db: Session, case: DisputeResolutionCase, claim_ids: 
                 status.HTTP_409_CONFLICT,
                 f"Claim {claim_id} (authority class {claim.authority_class}) cannot be settled bilaterally",
             )
+        if claim.source_record_type == "RENTAL_PAYMENT_DISPUTE":
+            # Resolved on the payment record itself so the payment's status
+            # follows (crud/rental_payment.py:resolve_dispute_by_party).
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Claim {claim_id} is a payment-record problem -- resolve it with the payment actions on the claim",
+            )
         _assert_no_termination_double_recovery(claim)
         _assert_not_non_waivable(db, case, claim)
         claims.append(claim)
@@ -139,11 +146,13 @@ def propose_settlement(
 
     # ZR-ENG-CLR-005 12.3 'Contractual obligation is denominated in the
     # agreement currency': resolve from the case's occupancy/listing when one
-    # is linked (the common shape); "INR" is a last-resort fallback only for
-    # the claim families that never attach an occupancy at all (see
-    # DisputeResolutionCase's own docstring on occupancy_id/property_id).
+    # is linked (the common shape); the platform default is a last-resort
+    # fallback only for the claim families that never attach an occupancy at
+    # all (see DisputeResolutionCase's own docstring on occupancy_id/property_id).
     if currency is None:
-        currency = case.occupancy.listing.currency if case.occupancy else "INR"
+        from app.crud.disputes import _claim_currency
+
+        currency = _claim_currency(None, case.occupancy)
     if not acknowledges_no_nonwaivable_waiver:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -306,6 +315,11 @@ def respond_settlement(
         # ever notified anyone on this side of the response.
         _notify_original_proposer(db, case, settlement, title="Your settlement offer was accepted", message=f"Settlement #{settlement.id} was accepted and is now effective.")
         db.commit()
+        # Agreed between the two of them: the case closes on its own.
+        from app.crud.disputes import close_case_when_resolved
+
+        db.refresh(case)
+        close_case_when_resolved(db, case)
         db.refresh(settlement)
         return settlement
 

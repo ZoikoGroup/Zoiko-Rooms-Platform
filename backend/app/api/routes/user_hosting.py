@@ -42,6 +42,7 @@ from app.schemas.leasing import (
     ApplicationRead,
     DisclosureDeliverRequest,
     DisclosureRequirementRead,
+    OfferCounterRespond,
     OfferRead,
     OfferTermsCreate,
     OfferTermsRead,
@@ -594,6 +595,57 @@ def create_hosted_offer_terms(
     )
     db.commit()
     return terms
+
+
+@router.post("/offers/{offer_id}/counters/{counter_id}/accept", response_model=OfferRead)
+def accept_hosted_offer_counter(
+    offer_id: int,
+    counter_id: int,
+    request: Request,
+    payload: OfferCounterRespond = OfferCounterRespond(),
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Agree to the renter's proposed terms -- they become the offer's new
+    terms version; the renter still accepts the offer themselves."""
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_for_host_or_404(db, offer_id, user)
+    terms = leasing_crud.host_accept_counter(db, offer, user, counter_id, payload.note, correlation_id=correlation_id)
+    log_audit_event(
+        db, None, "user_offer.counter_accept", "offer", str(offer_id), correlation_id,
+        reason=f"user:{user.id}; counter={counter_id}; terms_version={terms.version}",
+    )
+    emit_event(
+        db, "offer.counter_accepted", "offer", str(offer_id), {"counterId": counter_id, "version": terms.version},
+        correlation_id=correlation_id,
+    )
+    db.commit()
+    db.refresh(offer)
+    return offer
+
+
+@router.post("/offers/{offer_id}/counters/{counter_id}/reject", response_model=OfferRead)
+def reject_hosted_offer_counter(
+    offer_id: int,
+    counter_id: int,
+    request: Request,
+    payload: OfferCounterRespond = OfferCounterRespond(),
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_for_host_or_404(db, offer_id, user)
+    leasing_crud.host_reject_counter(db, offer, user, counter_id, payload.note)
+    log_audit_event(
+        db, None, "user_offer.counter_reject", "offer", str(offer_id), correlation_id,
+        reason=f"user:{user.id}; counter={counter_id}",
+    )
+    emit_event(
+        db, "offer.counter_rejected", "offer", str(offer_id), {"counterId": counter_id}, correlation_id=correlation_id,
+    )
+    db.commit()
+    db.refresh(offer)
+    return offer
 
 
 @router.post("/offers/{offer_id}/send", response_model=OfferRead)
