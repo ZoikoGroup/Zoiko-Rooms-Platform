@@ -72,8 +72,14 @@ export function VerificationOperationsPanel() {
   async function sweepFollowUps() {
     setSweepingFollowUps(true);
     try {
-      const result = await apiClientFetch<{ notifiedCount: number }>("/api/verification/occupancy-eligibility-checks/sweep-follow-ups", { method: "POST" });
-      showToast(`Follow-up sweep: ${result.notifiedCount} notification(s) sent.`);
+      const [occupancy, identity] = await Promise.all([
+        apiClientFetch<{ notifiedCount: number }>("/api/verification/occupancy-eligibility-checks/sweep-follow-ups", { method: "POST" }),
+        apiClientFetch<{ notifiedCount: number }>("/api/verification/identity-verifications/sweep-follow-ups", { method: "POST" }),
+      ]);
+      showToast(
+        `Follow-up sweep: ${occupancy.notifiedCount + identity.notifiedCount} notification(s) sent ` +
+          `(${identity.notifiedCount} identity, ${occupancy.notifiedCount} occupancy).`,
+      );
       await load();
     } catch {
       showToast("Follow-up sweep failed");

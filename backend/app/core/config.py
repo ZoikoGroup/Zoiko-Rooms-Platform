@@ -55,6 +55,34 @@ class Settings(BaseSettings):
     # `python -c "from cryptography.fernet import Fernet;
     # print(Fernet.generate_key().decode())"` for any real deployment.
     field_encryption_key: str = DEV_FIELD_ENCRYPTION_KEY
+    # ZR-IDENTITY-001 Section 8.3: HMAC secret for an external identity
+    # provider's signed webhook (services/identity/providers.py:
+    # SignedWebhookProvider). Blank = no external provider enabled.
+    identity_webhook_secret: str = ""
+    # ZR-IDV-ADR-001: Veriff, the primary identity provider (Document + Selfie
+    # IDV). Credentials come only from the environment / secret store -- a
+    # separate integration per environment, rotated without code changes,
+    # never sent to a browser or app. Blank = Veriff not configured.
+    veriff_api_key: str = ""
+    veriff_shared_secret: str = ""
+    veriff_base_url: str = "https://stationapi.veriff.com"
+    # Non-secret label for which integration this is ("sandbox" / "production").
+    veriff_integration_id: str = "sandbox"
+    veriff_timeout_seconds: float = 10.0
+    # Hosted sessions with no decision after this long are reconciled against
+    # Veriff's decision API (Section 8 / 13).
+    veriff_reconcile_after_minutes: int = 60
+    # Which result webhook the contracted Veriff plan provides (ADR Section 2):
+    # "decision" (Plus / Premium -- Decision Webhook) or "full_auto" (Essential).
+    veriff_plan: str = "decision"
+    # (The webhook URLs on the readiness page are built from public_api_url.)
+    # Provider written into new country packs; packs are edited afterwards.
+    identity_default_provider: str = "zoiko_document_check"
+    # Whether the built-in document check (number format + name in a PDF --
+    # no authenticity or selfie check) may verify someone on its own. Unset
+    # = allowed outside production only; in production its "pass" goes to a
+    # reviewer. Setting it true in production is refused at startup.
+    identity_builtin_check_can_verify: bool | None = None
     # Comma-separated allow-list. Includes the authenticated platform frontend
     # and the public marketing site (local dev + deployed) so the anonymous
     # assistant widget can call /api/public/assistant cross-origin.
@@ -83,6 +111,18 @@ class Settings(BaseSettings):
     # -- same never-publicly-mounted convention as identity_upload_dir.
     property_verification_upload_dir: str = "secure_uploads/property_verification"
     property_verification_document_max_size_mb: int = 10
+
+    # Address check for property verification (services/geocoding.py): a
+    # property is only auto-verified when its address resolves on a map.
+    # "auto" uses Google's Geocoding API when google_maps_api_key is set,
+    # otherwise OpenStreetMap Nominatim (free, no key; usage policy requires
+    # an identifying User-Agent and <= 1 request/second). "none" disables
+    # lookups -- every submission then goes to manual review.
+    geocoding_provider: str = "auto"
+    google_maps_api_key: str = ""
+    nominatim_url: str = "https://nominatim.openstreetmap.org/search"
+    nominatim_user_agent: str = "ZoikoRooms/1.0 (property-verification; support@zoikorooms.com)"
+    geocoding_timeout_seconds: float = 6.0
 
     # ZR-ENG-CLR-004 Section 13.1/AC-08: executed agreement PDFs, stored once
     # per AgreementVersion and never regenerated/overwritten -- same
@@ -197,6 +237,21 @@ class Settings(BaseSettings):
     # e.g. port 587). Mutually exclusive with smtp_use_tls in practice -- set
     # this true for a 465-style provider and smtp_use_tls is then ignored.
     smtp_use_ssl: bool = False
+    # ZR-COMMS-EMAIL-001 Section 1.2 sending streams (services/email/streams.py).
+    # Blank = send as the stream's display name from email_from's address. Set a
+    # stream's own address only once its domain has aligned SPF/DKIM/DMARC.
+    email_from_security: str = ""
+    email_from_transactions: str = ""
+    email_from_money: str = ""
+    email_from_trust: str = ""
+    email_from_organizations: str = ""
+    email_from_marketing: str = ""
+    email_reply_to_security: str = ""
+    email_reply_to_transactions: str = ""
+    email_reply_to_money: str = ""
+    email_reply_to_trust: str = ""
+    email_reply_to_organizations: str = ""
+    email_reply_to_marketing: str = ""
 
     # Chat SSE rate limiting (requests per window, per authenticated actor).
     chat_rate_limit_max: int = 20
@@ -357,11 +412,41 @@ class Settings(BaseSettings):
             problems.append("LISTING_FEE_FAIL_CLOSED must be true in production")
         if not self.payment_receipt_authority_required:
             problems.append("PAYMENT_RECEIPT_AUTHORITY_REQUIRED must be true in production")
+        problems.extend(self._identity_production_problems())
         if problems:
             raise ValueError(
                 "Refusing to boot in production due to insecure configuration:\n- " + "\n- ".join(problems)
             )
         return self
+
+    @property
+    def builtin_check_can_verify(self) -> bool:
+        if self.identity_builtin_check_can_verify is None:
+            return not self.is_production
+        return self.identity_builtin_check_can_verify
+
+    def _identity_production_problems(self) -> list[str]:
+        """ZR-IDV-ADR-001 Sections 12 / 17: identity verification settings
+        that must be right before production traffic."""
+        problems = []
+        if self.identity_builtin_check_can_verify:
+            problems.append(
+                "IDENTITY_BUILTIN_CHECK_CAN_VERIFY must not be true in production -- the built-in check can't "
+                "confirm a document is genuine"
+            )
+        if self.veriff_plan not in ("decision", "full_auto"):
+            problems.append("VERIFF_PLAN must be 'decision' or 'full_auto'")
+        veriff_keys = bool(self.veriff_api_key) + bool(self.veriff_shared_secret)
+        if veriff_keys == 1:
+            problems.append("VERIFF_API_KEY and VERIFF_SHARED_SECRET must be set together")
+        if self.veriff_integration_id == "production" and veriff_keys != 2:
+            problems.append("VERIFF_INTEGRATION_ID=production needs VERIFF_API_KEY and VERIFF_SHARED_SECRET")
+        if veriff_keys == 2:
+            if not self.veriff_base_url.startswith("https://"):
+                problems.append("VERIFF_BASE_URL must be https")
+            if not self.public_api_url.startswith("https://"):
+                problems.append("PUBLIC_API_URL must be the public https URL Veriff sends webhooks to")
+        return problems
 
     @property
     def cors_origin_list(self) -> list[str]:

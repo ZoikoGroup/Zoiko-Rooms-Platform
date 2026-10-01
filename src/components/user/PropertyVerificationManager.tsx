@@ -5,6 +5,7 @@ import { CheckCircle2, Loader2, ShieldCheck, Upload, XCircle } from "lucide-reac
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Card, Field, Toast, inputClass, useToast } from "@/components/user/ui";
+import { PropertyMapCheck } from "@/components/user/PropertyMapCheck";
 import { ACCEPTED_DOCUMENT_EXTENSIONS, MAX_DOCUMENT_SIZE_MB } from "@/lib/identity-documents";
 import { PropertyVerification } from "@/lib/types";
 import { formatDate } from "@/lib/utils";
@@ -71,8 +72,9 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
     <div className="space-y-4">
       <p className="text-xs text-slate-500 dark:text-slate-400">
         Upload evidence that this property is yours -- a title deed, sale deed, property tax receipt, utility bill or
-        similar document showing the owner&apos;s name and the property address. It&apos;s verified automatically in a
-        few seconds.
+        similar document showing the owner&apos;s name and the property address. We also check that the property&apos;s
+        address exists on the map; when it does, it&apos;s verified automatically in a few seconds. Otherwise the Zoiko
+        team reviews it.
       </p>
 
       {current && !showForm && (
@@ -111,6 +113,11 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
           </div>
           {current.verifierNotes && !currentIsVerifying && (
             <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">{current.verifierNotes}</p>
+          )}
+          {current.geocodeStatus && (
+            <div className="mt-3 border-t border-slate-200/70 pt-3 dark:border-white/10">
+              <PropertyMapCheck record={current} />
+            </div>
           )}
           <dl className="mt-3 space-y-1.5 text-sm">
             <div className="flex justify-between">

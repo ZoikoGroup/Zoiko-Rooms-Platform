@@ -16,7 +16,7 @@ uses the platform_fee_* prefix."""
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Numeric, String
+from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Index, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.config import settings
@@ -195,6 +195,11 @@ class ListingFeePayment(Base):
     in-flight checkout."""
 
     __tablename__ = "listing_fee_payments"
+    # Unique indexes (not constraints), matching migration 8f1a2c3d4e5b.
+    __table_args__ = (
+        Index("uq_listing_fee_payments_idempotency_key", "idempotency_key", unique=True),
+        Index("uq_listing_fee_payments_provider_intent", "provider_payment_intent_id", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     quote_id: Mapped[int] = mapped_column(ForeignKey("listing_fee_quotes.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -203,7 +208,7 @@ class ListingFeePayment(Base):
     amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="PENDING")
-    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     billing_country: Mapped[str] = mapped_column(String(2), default="")
     # Known immediately at checkout creation (Stripe returns the Checkout
     # Session id synchronously) -- this is what the return-leg from Stripe's
@@ -216,7 +221,7 @@ class ListingFeePayment(Base):
     # Checkout Session creation time (unlike a raw PaymentIntent, which is
     # confirmed to exist immediately). Backfilled by the webhook's
     # checkout.session.completed handling once it does.
-    provider_payment_intent_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    provider_payment_intent_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     failure_message: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -244,10 +249,14 @@ class ListingFeeReceipt(Base):
     ListingFeePolicy row."""
 
     __tablename__ = "listing_fee_receipts"
+    __table_args__ = (
+        Index("uq_listing_fee_receipts_payment_id", "payment_id", unique=True),
+        Index("uq_listing_fee_receipts_receipt_number", "receipt_number", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    payment_id: Mapped[int] = mapped_column(ForeignKey("listing_fee_payments.id", ondelete="CASCADE"), unique=True, nullable=False)
-    receipt_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False)
+    payment_id: Mapped[int] = mapped_column(ForeignKey("listing_fee_payments.id", ondelete="CASCADE"), nullable=False)
+    receipt_number: Mapped[str] = mapped_column(String(30), nullable=False)
     legal_entity_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     tax_registration_number: Mapped[str] = mapped_column(String(50), default="")
     amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
@@ -274,6 +283,10 @@ class ListingFeeRefund(Base):
     other financial command in this codebase."""
 
     __tablename__ = "listing_fee_refunds"
+    __table_args__ = (
+        Index("uq_listing_fee_refunds_idempotency_key", "idempotency_key", unique=True),
+        Index("uq_listing_fee_refunds_provider_refund_id", "provider_refund_id", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     payment_id: Mapped[int] = mapped_column(ForeignKey("listing_fee_payments.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -281,8 +294,8 @@ class ListingFeeRefund(Base):
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     reason: Mapped[str] = mapped_column(String(2000), default="")
     status: Mapped[str] = mapped_column(String(20), default="REQUESTED")
-    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    provider_refund_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_refund_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     requested_by_admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id"), nullable=False)
     failure_message: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -306,9 +319,10 @@ class ListingFeeProviderEvent(Base):
     mistaken for) a Listing Fee one."""
 
     __tablename__ = "listing_fee_provider_events"
+    __table_args__ = (Index("uq_listing_fee_provider_events_event_id", "provider_event_id", unique=True),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    provider_event_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    provider_event_id: Mapped[str] = mapped_column(String(100), nullable=False)
     listing_fee_payment_id: Mapped[int | None] = mapped_column(ForeignKey("listing_fee_payments.id"), nullable=True)
     listing_fee_refund_id: Mapped[int | None] = mapped_column(ForeignKey("listing_fee_refunds.id"), nullable=True)
     event_type: Mapped[str] = mapped_column(String(30), nullable=False)

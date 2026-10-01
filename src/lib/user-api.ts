@@ -2,6 +2,7 @@ import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
   Agreement,
   Application,
+  ListingAgreementDetails,
   AuthorityRecord,
   AuthorityRelationshipType,
   AutopayMandate,
@@ -14,6 +15,7 @@ import {
   DisputeCaseExportRead,
   DisputeCaseRead,
   DisputeClaimCreate,
+  PaymentDisputePartyAction,
   DisputeClaimRead,
   DisputeDeadlineRead,
   DisputeCaseMessageRead,
@@ -27,7 +29,6 @@ import {
   ExternalPaymentSessionCreateResult,
   HandoverEvent,
   HostedListing,
-  IdentityDocumentType,
   IdentityVerificationRecord,
   ListingFeeCheckoutSession,
   ListingFeeListingStatus,
@@ -92,38 +93,8 @@ export function errorMessage(err: unknown, fallback = "Something went wrong. Ple
 
 // --- Identity verification -------------------------------------------------
 
-/** Submits a real uploaded document -- this is a multipart request, not JSON, so
- *  apiClientFetch is told to let the browser set its own multipart boundary. */
-export function submitIdentityVerification(payload: {
-  documentType: IdentityDocumentType;
-  file: File;
-  documentNumber?: string;
-  customDocumentName?: string;
-}): Promise<IdentityVerificationRecord> {
-  const form = new FormData();
-  form.append("document_type", payload.documentType);
-  form.append("document_number", payload.documentNumber ?? "");
-  form.append("custom_document_name", payload.customDocumentName ?? "");
-  form.append("file", payload.file);
-  return apiClientFetch<IdentityVerificationRecord>("/api/users/identity-verifications", {
-    method: "POST",
-    body: form,
-  });
-}
-
 export function listIdentityVerifications(): Promise<IdentityVerificationRecord[]> {
   return apiClientFetch<IdentityVerificationRecord[]>("/api/users/identity-verifications");
-}
-
-export function getIdentityVerification(verificationId: number): Promise<IdentityVerificationRecord> {
-  return apiClientFetch<IdentityVerificationRecord>(`/api/users/identity-verifications/${verificationId}`);
-}
-
-/** Opens/downloads the caller's own uploaded document. The backend enforces
- *  ownership by party_id -- this URL 403s for anyone else's verification, so it's
- *  safe to build client-side with nothing but the verification id. */
-export function identityDocumentUrl(verificationId: number): string {
-  return `${API_URL}/api/users/identity-verifications/${verificationId}/document`;
 }
 
 /** ZR-ENG-CLR-012 Section 19: the renter's own identity + occupancy-eligibility
@@ -132,10 +103,6 @@ export function getMyVerificationStatus(): Promise<RenterVerificationStatus> {
   return apiClientFetch<RenterVerificationStatus>("/api/users/verification-status");
 }
 
-/** True when at least one submitted document has been approved by a super admin. */
-export function hasVerifiedIdentity(records: IdentityVerificationRecord[]): boolean {
-  return records.some((record) => record.status === "verified");
-}
 
 // --- Renting ---------------------------------------------------------------
 
@@ -212,6 +179,18 @@ export function acceptOwnOffer(offerId: number, overrideReason?: string): Promis
 
 export function declineOwnOffer(offerId: number): Promise<Offer> {
   return apiClientFetch<Offer>(`/api/users/rentals/offers/${offerId}/decline`, { method: "POST" });
+}
+
+/** Renter's counter to a sent offer: the rent/deposit they can pay instead.
+ *  startDate/termMonths omitted = keep the current terms' values. */
+export function counterOwnOffer(
+  offerId: number,
+  payload: { monthlyRent: number; depositAmount: number; startDate?: string | null; termMonths?: number | null; message?: string }
+): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/rentals/offers/${offerId}/counter`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function signOwnAgreement(agreementId: number): Promise<Agreement> {
@@ -393,7 +372,7 @@ export function withdrawSubletRequest(subletRequestId: number): Promise<SubletRe
 }
 
 /** The tenant's own downloadable decision record (ZR-SUB-003 Wireframe J) --
- *  a direct link, same pattern as identityDocumentUrl above. 409s until the
+ *  a direct link, a plain authenticated URL built client-side. 409s until the
  *  request reaches a completed state (approved/rejected/withdrawn). */
 export function tenantSubletDecisionRecordUrl(subletRequestId: number): string {
   return `${API_URL}/api/users/rentals/sublet-requests/${subletRequestId}/record`;
@@ -657,6 +636,7 @@ export interface HostedListingInput {
   defaultDepositAmount?: number | null;
   defaultTermMonths?: number | null;
   defaultCadence?: string;
+  agreementDetails?: ListingAgreementDetails;
 }
 
 export function listHostedListings(): Promise<HostedListing[]> {
@@ -773,6 +753,20 @@ export function addHostedOfferTerms(
     method: "POST",
     body: JSON.stringify(payload),
   }).then(() => getHostedOffer(offerId));
+}
+
+export function acceptHostedOfferCounter(offerId: number, counterId: number, note = ""): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/offers/${offerId}/counters/${counterId}/accept`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
+export function rejectHostedOfferCounter(offerId: number, counterId: number, note = ""): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/offers/${offerId}/counters/${counterId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
 }
 
 export function sendHostedOffer(offerId: number): Promise<Offer> {
@@ -1358,6 +1352,13 @@ function makeDisputeClient(basePath: string) {
     },
     requestClaimReview(caseId: number, claimId: number, reason: string): Promise<DisputeClaimRead> {
       return apiClientFetch<DisputeClaimRead>(`${basePath}/${caseId}/claims/${claimId}/request-review`, { method: "POST", body: JSON.stringify({ reason }) });
+    },
+    /** A payment-record problem, resolved between tenant and host (no Zoiko Rooms decision). */
+    resolvePaymentClaim(caseId: number, claimId: number, action: PaymentDisputePartyAction, notes: string): Promise<DisputeCaseRead> {
+      return apiClientFetch<DisputeCaseRead>(`${basePath}/${caseId}/claims/${claimId}/payment-resolution`, {
+        method: "POST",
+        body: JSON.stringify({ action, notes }),
+      });
     },
   };
 }

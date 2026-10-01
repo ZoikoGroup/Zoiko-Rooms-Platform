@@ -136,16 +136,16 @@ class IdentityVerificationCreate(CamelModel):
 
 
 class IdentityVerificationRead(CamelModel):
-    """Admin-facing full read -- field names deliberately match the ORM columns
-    (including the legacy `encrypted_reference` name) so this can be returned
-    straight from the model via response_model, no manual mapping needed."""
+    """Admin-facing read straight from the ORM. The document number is only
+    ever exposed masked (ZR-IDENTITY-001 Section 5.4/9.2) -- the encrypted
+    column is deliberately not a field here."""
 
     id: int
     party_id: int
     document_type: str
     document_category: str
     custom_document_name: str
-    encrypted_reference: str | None
+    masked_document_number: str = ""
     evidence_ref: str
     verified_at: datetime | None
     expires_at: datetime | None
@@ -160,6 +160,20 @@ class IdentityVerificationRead(CamelModel):
     ocr_extracted_number: str | None = None
     ocr_confidence: float | None = None
     auto_flagged: bool = False
+    # ZR-IDENTITY-001 session fields.
+    session_state: str = ""
+    method_type: str = ""
+    country_code: str = ""
+    role_context: str = ""
+    assurance_level: str = ""
+    provider_code: str = ""
+    reason_codes: list[str] = []
+    match_results: dict = {}
+    legal_name_snapshot: str = ""
+    alternative_reason: str = ""
+    escalated_at: datetime | None = None
+    submitted_at: datetime | None = None
+    decided_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

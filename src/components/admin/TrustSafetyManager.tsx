@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Switch } from "@/components/ui/Switch";
+import { PropertyMapCheck } from "@/components/user/PropertyMapCheck";
 import { apiClientFetch } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import {
@@ -130,21 +131,20 @@ export function TrustSafetyManager() {
     }
   }
 
-  // Section 14 automation toggles (backend/app/services/policy.py) -- default
-  // True/manual when the key is absent from policyOverrides, same as the
-  // backend's own get_policy() fallback. Always sends the FULL override set
-  // (set_market_release_policy_overrides replaces, never patches).
-  async function setAutomationPolicy(release: MarketRelease, key: string, requiresManual: boolean) {
+  // Section 14 market policy toggles (backend/app/services/policy.py). Always
+  // sends the FULL override set (set_market_release_policy_overrides
+  // replaces, never patches).
+  async function setMarketPolicy(release: MarketRelease, key: string, value: boolean) {
     try {
-      const overrides = { ...release.policyOverrides, [key]: requiresManual };
+      const overrides = { ...release.policyOverrides, [key]: value };
       const updated = await apiClientFetch<MarketRelease>(`/api/market-releases/${release.id}/policy`, {
         method: "PUT",
         body: JSON.stringify({ overrides }),
       });
       setReleases((prev) => prev.map((r) => (r.id === release.id ? updated : r)));
-      showToast("Automation setting updated");
+      showToast("Market setting updated");
     } catch {
-      showToast("Failed to update automation setting");
+      showToast("Failed to update market setting");
     }
   }
 
@@ -341,28 +341,8 @@ export function TrustSafetyManager() {
               </div>
               <div className="space-y-2 border-t border-slate-200 pt-3 dark:border-white/10">
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Automation — skips the manual click once every compliance gate already passes
+                  Payments
                 </p>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs text-slate-600 dark:text-slate-300">
-                    Auto-create &amp; send offers once a host approves an application
-                  </span>
-                  <Switch
-                    checked={release.policyOverrides["offer.requires_manual_creation"] === false}
-                    onChange={(auto) => setAutomationPolicy(release, "offer.requires_manual_creation", !auto)}
-                    label="Auto-create offers"
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs text-slate-600 dark:text-slate-300">
-                    Auto-create the agreement once a renter accepts an offer
-                  </span>
-                  <Switch
-                    checked={release.policyOverrides["agreement.requires_manual_creation"] === false}
-                    onChange={(auto) => setAutomationPolicy(release, "agreement.requires_manual_creation", !auto)}
-                    label="Auto-create agreements"
-                  />
-                </div>
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs text-slate-600 dark:text-slate-300">
                     Let renters pay the recipient online through the recipient&apos;s own payment provider (Zoiko never
@@ -370,7 +350,7 @@ export function TrustSafetyManager() {
                   </span>
                   <Switch
                     checked={release.policyOverrides["payment.external_handoff_approved"] === true}
-                    onChange={(approved) => setAutomationPolicy(release, "payment.external_handoff_approved", approved)}
+                    onChange={(approved) => setMarketPolicy(release, "payment.external_handoff_approved", approved)}
                     label="Approve online payment handoff"
                   />
                 </div>
@@ -476,6 +456,9 @@ export function TrustSafetyManager() {
                     {record.expiresAt && ` · expires ${formatDate(record.expiresAt)}`}
                     {record.verifierNotes && ` · ${record.verifierNotes}`}
                   </p>
+                  <div className="mt-2">
+                    <PropertyMapCheck record={record} compact />
+                  </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge tone={propertyVerificationStatusTone[record.status]}>{propertyVerificationStatusLabel[record.status]}</Badge>

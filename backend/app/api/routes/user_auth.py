@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import USER_COOKIE_NAME, get_current_user
 from app.core.config import settings
-from app.core.mailer import send_email, send_password_reset_email
+from app.core.mailer import send_password_reset_email, send_welcome_email
 from app.core.rate_limit import login_limiter
 from app.core.security import create_access_token, verify_password
 from app.crud import notification as notif_crud
@@ -68,17 +68,7 @@ def register_user(payload: UserRegisterRequest, db: Session = Depends(get_db)):
             notification_type="user.registered",
         )
         db.commit()
-        send_email(
-            user.email,
-            "Welcome to Zoiko Rooms",
-            heading=f"Welcome, {user.full_name.split(' ')[0]}!",
-            body_lines=[
-                "Your Zoiko Rooms account is ready.",
-                "Verify your identity to apply for a room or start hosting one of your own.",
-            ],
-            cta_label="Verify your identity",
-            cta_url=f"{settings.frontend_url}/account/identity",
-        )
+        send_welcome_email(user.email, user.full_name)
         return UserRegisterResponse(message="Registration successful", user_id=user.id)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
@@ -144,7 +134,7 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
     if user and user.is_active:
         raw_token = create_reset_token(db, user)
         reset_link = f"{settings.frontend_url}/account/reset-password?token={raw_token}"
-        send_password_reset_email(user.email, reset_link, settings.password_reset_token_expire_minutes)
+        send_password_reset_email(user.email, reset_link, settings.password_reset_token_expire_minutes, user.full_name)
     return ForgotPasswordResponse(message=GENERIC_FORGOT_PASSWORD_MESSAGE)
 
 

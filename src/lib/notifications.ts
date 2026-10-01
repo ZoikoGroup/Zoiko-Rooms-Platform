@@ -73,7 +73,11 @@ export function resolveNotificationHref(
     return "/account/host/listings";
   }
   // The Host's own "Applications to review" surface (ZR-ENG-CLR-011 Section 10).
-  if (notificationType === "application.received" || notificationType === "application.decided") {
+  if (
+    notificationType === "application.received" ||
+    notificationType === "application.decided" ||
+    notificationType === "offer.countered_for_host"
+  ) {
     return "/account/host/applications";
   }
   // Host-facing variants of renter-facing events -- distinct notificationType

@@ -941,6 +941,7 @@ export function DisputeResolutionManager() {
                   {claims.length === 0 && <p className="px-2 text-xs text-slate-400">No claims on this case.</p>}
                   {claims.map((claim) => {
                     const terminal = TERMINAL_CLAIM_STATUSES.includes(claim.status);
+                    const paymentLinked = claim.sourceRecordType === "RENTAL_PAYMENT_DISPUTE" && Boolean(claim.sourceRecordId);
                     const holds = holdsByClaim[claim.id] ?? [];
                     return (
                       <div key={claim.id} className="space-y-2 rounded-xl bg-white p-3 ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
@@ -958,9 +959,15 @@ export function DisputeResolutionManager() {
                           </div>
                         </div>
                         {claim.requestedRemedy && <p className="text-xs text-slate-500 dark:text-slate-400">Remedy: {claim.requestedRemedy}</p>}
+                        {paymentLinked && (
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            Reported on a payment record (payment dispute #{claim.sourceRecordId}). The tenant and host
+                            resolve this between themselves -- the case closes on its own when they do.
+                          </p>
+                        )}
 
                         <div className="flex flex-wrap gap-2">
-                          {!terminal && (
+                          {!terminal && !paymentLinked && (
                             <Button size="sm" variant="outline" onClick={() => setDecideOpenFor(decideOpenFor === claim.id ? null : claim.id)}>
                               Decide
                             </Button>

@@ -17,6 +17,7 @@ import {
   DisputeExternalProceedingRead,
   DisputePartyRead,
   DisputeSettlementRead,
+  PaymentDisputePartyAction,
 } from "@/lib/types";
 import {
   disputeCaseStatusTone,
@@ -40,6 +41,30 @@ import type { ToastTone } from "@/components/user/ui";
  *  hand-duplicating ~500 lines of near-identical detail-view UI twice. */
 
 export type DisputeViewerRole = "RENTER" | "HOST";
+
+const PAYMENT_CLAIM_SOURCE = "RENTAL_PAYMENT_DISPUTE";
+
+function isPaymentClaim(claim: DisputeClaimRead): boolean {
+  return claim.sourceRecordType === PAYMENT_CLAIM_SOURCE && Boolean(claim.sourceRecordId);
+}
+
+/** The actions each side has on a payment-record problem. Each side can only
+ *  concede its own point, so neither decides it in their own favour; the
+ *  backend checks the same rules. */
+function paymentActionsFor(
+  viewerRole: DisputeViewerRole,
+  caseData: DisputeCaseRead,
+): { action: PaymentDisputePartyAction; label: string; hint: string }[] {
+  const reportedByViewer = viewerRole === "RENTER" ? Boolean(caseData.openedByGuestId) : Boolean(caseData.openedByPartyId);
+  const actions: { action: PaymentDisputePartyAction; label: string; hint: string }[] =
+    viewerRole === "HOST"
+      ? [{ action: "CONFIRM_RECEIVED", label: "I've received this payment", hint: "The payment is confirmed and this dispute closes." }]
+      : [{ action: "CONFIRM_NOT_PAID", label: "This payment wasn't made", hint: "The amount becomes due again and this dispute closes." }];
+  if (reportedByViewer) {
+    actions.push({ action: "WITHDRAW", label: "Withdraw my report", hint: "The payment is left as it is and this dispute closes." });
+  }
+  return actions;
+}
 /** Both `renterDisputes` and `hostDisputes` come from the same factory in
  *  user-api.ts, so they share this exact shape. */
 export type DisputeClient = typeof renterDisputes;
@@ -138,6 +163,7 @@ function OpenCaseModal({
   client,
   occupancyId,
   allowOccupancyInput,
+  defaultCurrency,
   showToast,
   onCreated,
 }: {
@@ -146,6 +172,7 @@ function OpenCaseModal({
   client: DisputeClient;
   occupancyId?: number;
   allowOccupancyInput?: boolean;
+  defaultCurrency: string;
   showToast: (message: string, tone?: ToastTone) => void;
   onCreated: () => void;
 }) {
@@ -153,7 +180,7 @@ function OpenCaseModal({
   const [claimCode, setClaimCode] = useState("");
   const [claimFamily, setClaimFamily] = useState<DisputeClaimFamily>("DEPOSIT");
   const [amount, setAmount] = useState("");
-  const [currency, setCurrency] = useState("INR");
+  const [currency, setCurrency] = useState(defaultCurrency);
   const [remedy, setRemedy] = useState("");
   const [safetyFlag, setSafetyFlag] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -165,11 +192,11 @@ function OpenCaseModal({
     setClaimCode("");
     setClaimFamily("DEPOSIT");
     setAmount("");
-    setCurrency("INR");
+    setCurrency(defaultCurrency);
     setRemedy("");
     setSafetyFlag(false);
     setError("");
-  }, [open]);
+  }, [open, defaultCurrency]);
 
   async function handleSubmit() {
     const resolvedOccupancyId = allowOccupancyInput ? parseOptionalNumber(occupancyInput) : occupancyId;
@@ -190,7 +217,7 @@ function OpenCaseModal({
           claimCode: claimCode.trim(),
           claimFamily,
           amount: parseOptionalNumber(amount) ?? null,
-          currency,
+          currency: currency.trim() || undefined,
           requestedRemedy: remedy.trim(),
           safetyFlag,
         },
@@ -328,6 +355,7 @@ function DisputeCaseDetail({
   client,
   viewerRole,
   caseId,
+  defaultCurrency,
   showToast,
   onChanged,
 }: {
@@ -336,6 +364,8 @@ function DisputeCaseDetail({
   client: DisputeClient;
   viewerRole: DisputeViewerRole;
   caseId: number;
+  /** The case's own currency (from its claims); prefills the money fields. */
+  defaultCurrency: string;
   showToast: (message: string, tone?: ToastTone) => void;
   onChanged: () => void;
 }) {
@@ -349,12 +379,17 @@ function DisputeCaseDetail({
   const [parties, setParties] = useState<DisputePartyRead[]>([]);
   const [external, setExternal] = useState<DisputeExternalProceedingRead[]>([]);
 
+  // Payment-record problem (resolved between tenant and host)
+  const [paymentConfirm, setPaymentConfirm] = useState<{ claimId: number; action: PaymentDisputePartyAction } | null>(null);
+  const [paymentNotes, setPaymentNotes] = useState("");
+  const [paymentBusy, setPaymentBusy] = useState(false);
+
   // Add claim
   const [addClaimOpen, setAddClaimOpen] = useState(false);
   const [newClaimCode, setNewClaimCode] = useState("");
   const [newClaimFamily, setNewClaimFamily] = useState<DisputeClaimFamily>("DEPOSIT");
   const [newClaimAmount, setNewClaimAmount] = useState("");
-  const [newClaimCurrency, setNewClaimCurrency] = useState("INR");
+  const [newClaimCurrency, setNewClaimCurrency] = useState(defaultCurrency);
   const [newClaimRemedy, setNewClaimRemedy] = useState("");
   const [newClaimSafetyFlag, setNewClaimSafetyFlag] = useState(false);
   const [claimBusy, setClaimBusy] = useState(false);
@@ -378,7 +413,7 @@ function DisputeCaseDetail({
   const [settlementClaimIds, setSettlementClaimIds] = useState<number[]>([]);
   const [settlementTerms, setSettlementTerms] = useState("");
   const [settlementAmount, setSettlementAmount] = useState("");
-  const [settlementCurrency, setSettlementCurrency] = useState("INR");
+  const [settlementCurrency, setSettlementCurrency] = useState(defaultCurrency);
   const [settlementExpiresAt, setSettlementExpiresAt] = useState("");
   const [settlementAck, setSettlementAck] = useState(false);
   const [settlementBusy, setSettlementBusy] = useState(false);
@@ -387,7 +422,7 @@ function DisputeCaseDetail({
   const [counterTargetId, setCounterTargetId] = useState<number | null>(null);
   const [counterTerms, setCounterTerms] = useState("");
   const [counterAmount, setCounterAmount] = useState("");
-  const [counterCurrency, setCounterCurrency] = useState("INR");
+  const [counterCurrency, setCounterCurrency] = useState(defaultCurrency);
   const [counterExpiresAt, setCounterExpiresAt] = useState("");
   const [settlementActionBusy, setSettlementActionBusy] = useState<number | null>(null);
 
@@ -586,6 +621,23 @@ function DisputeCaseDetail({
     }
   }
 
+  async function handlePaymentResolution() {
+    if (!paymentConfirm) return;
+    setPaymentBusy(true);
+    try {
+      await client.resolvePaymentClaim(caseId, paymentConfirm.claimId, paymentConfirm.action, paymentNotes.trim());
+      showToast("Done -- the payment record is updated and this dispute is closed.");
+      setPaymentConfirm(null);
+      setPaymentNotes("");
+      await loadAll();
+      onChanged();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not resolve this payment problem."), "error");
+    } finally {
+      setPaymentBusy(false);
+    }
+  }
+
   async function handleVoidSettlement(settlementId: number) {
     setSettlementActionBusy(settlementId);
     try {
@@ -673,7 +725,58 @@ function DisputeCaseDetail({
                     </span>
                   </div>
                   {claim.requestedRemedy && <p className="text-xs text-slate-500 dark:text-slate-400">&ldquo;{claim.requestedRemedy}&rdquo;</p>}
-                  {TERMINAL_CLAIM_STATUSES.has(claim.status) && (
+                  {isPaymentClaim(claim) && !TERMINAL_CLAIM_STATUSES.has(claim.status) && (
+                    <div className="space-y-2 pt-1">
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        A problem reported on a payment. You and the other side sort this out between you -- once either of
+                        you confirms what happened, the payment record updates and this dispute closes.
+                      </p>
+                      {paymentConfirm?.claimId === claim.id ? (
+                        <div className="space-y-2 rounded-lg bg-white p-3 ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700">
+                          <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                            {paymentActionsFor(viewerRole, caseData).find((a) => a.action === paymentConfirm.action)?.label}
+                          </p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            {paymentActionsFor(viewerRole, caseData).find((a) => a.action === paymentConfirm.action)?.hint} This
+                            can&apos;t be undone.
+                          </p>
+                          <input
+                            type="text"
+                            value={paymentNotes}
+                            onChange={(e) => setPaymentNotes(e.target.value)}
+                            placeholder="Add a note for the other side (optional)"
+                            maxLength={2000}
+                            className={inputClass}
+                          />
+                          <div className="flex gap-2">
+                            <Button size="sm" variant="primary" loading={paymentBusy} onClick={handlePaymentResolution}>
+                              Confirm
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => setPaymentConfirm(null)}>
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {paymentActionsFor(viewerRole, caseData).map((a) => (
+                            <Button
+                              key={a.action}
+                              size="sm"
+                              variant={a.action === "WITHDRAW" ? "ghost" : "outline"}
+                              onClick={() => {
+                                setPaymentConfirm({ claimId: claim.id, action: a.action });
+                                setPaymentNotes("");
+                              }}
+                            >
+                              {a.label}
+                            </Button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {TERMINAL_CLAIM_STATUSES.has(claim.status) && claim.authorityClass === "A0" && (
                     <div>
                       {reviewClaimId === claim.id ? (
                         <div className="flex flex-col gap-2 sm:flex-row">
@@ -813,7 +916,7 @@ function DisputeCaseDetail({
                 <div>
                   <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Claims covered</p>
                   <div className="space-y-1">
-                    {caseData.claims.map((claim) => (
+                    {caseData.claims.filter((claim) => !isPaymentClaim(claim)).map((claim) => (
                       <label key={claim.id} className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
                         <input
                           type="checkbox"
@@ -1034,6 +1137,11 @@ export function DisputeCasesSection({
   const [openFormVisible, setOpenFormVisible] = useState(false);
   const [detailCaseId, setDetailCaseId] = useState<number | null>(null);
   const [exportCaseId, setExportCaseId] = useState<number | null>(null);
+  // Currency already used on these tenancies' claims; blank lets the backend
+  // take the tenancy's own currency (crud/disputes.py:_claim_currency).
+  const knownCurrency = cases.flatMap((c) => c.claims).find((claim) => claim.currency)?.currency ?? "";
+  const detailCurrency =
+    cases.find((c) => c.id === detailCaseId)?.claims.find((claim) => claim.currency)?.currency ?? knownCurrency;
 
   function renderCaseRow(c: DisputeCaseRead) {
     return (
@@ -1111,6 +1219,7 @@ export function DisputeCasesSection({
         client={client}
         occupancyId={occupancyId}
         allowOccupancyInput={allowOccupancyInput}
+        defaultCurrency={knownCurrency}
         showToast={showToast}
         onCreated={onChanged}
       />
@@ -1123,6 +1232,7 @@ export function DisputeCasesSection({
           client={client}
           viewerRole={viewerRole}
           caseId={detailCaseId}
+          defaultCurrency={detailCurrency}
           showToast={showToast}
           onChanged={onChanged}
         />

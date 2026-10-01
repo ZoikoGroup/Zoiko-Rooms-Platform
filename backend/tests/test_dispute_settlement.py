@@ -135,7 +135,8 @@ class TestResponse:
         r = client.get(f"/api/users/rentals/disputes/{case_id}", cookies=renter_cookies)
         case = r.json()
         assert case["claims"][0]["status"] == "SETTLED"
-        assert case["status"] == "RESOLVED"
+        # Agreed between tenant and host: closes on its own, no admin step.
+        assert case["status"] == "CLOSED"
 
         # Section 10 gap: the original proposer (the renter) is now told
         # their settlement was accepted -- previously silent.

@@ -715,11 +715,14 @@ class TestAccessibilityAC28:
         r = client.get(f"/api/leasing/agreements/{agreement_id}/accessible-text", cookies=admin_cookies)
         assert r.status_code == 200, r.text
         assert "text/plain" in r.headers["content-type"]
-        assert "Monthly rent: Rs. 500.00" in r.text
+        # Rent is printed in the listing's own ISO currency, per the template.
+        currency = offer.listing.currency
+        assert f"Rent: {currency} 500.00 per month" in r.text
+        assert "Rs." not in r.text
 
         r = client.get(f"/api/users/rentals/agreements/{agreement_id}/accessible-text", cookies=auth_user_cookie(renter))
         assert r.status_code == 200, r.text
-        assert "Monthly rent" in r.text
+        assert f"{currency} 500.00 per month" in r.text
 
     def test_disclosure_delivery_channel_recorded_and_accessible_text_available(self, client, db_session: Session):
         listing_id, _room_id = _make_listing_with_room(db_session)

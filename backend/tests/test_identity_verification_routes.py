@@ -31,8 +31,10 @@ class TestListAndCreate:
 
         r = client.get("/api/identity-verifications", cookies=auth_admin_cookie(admin_a))
         assert r.status_code == 200, r.text
-        refs = {row["encryptedReference"] for row in r.json()}
-        assert refs == {"A-REF"}
+        # Only ever the masked number (ZR-IDENTITY-001 Section 5.4).
+        refs = {row["maskedDocumentNumber"] for row in r.json()}
+        assert refs == {"••••AREF"}
+        assert "encryptedReference" not in r.json()[0]
 
     def test_super_admin_can_filter_by_status(self, client, db_session: Session):
         super_admin = _make_admin(db_session, email="idvr-super@test.com", role="super_admin")

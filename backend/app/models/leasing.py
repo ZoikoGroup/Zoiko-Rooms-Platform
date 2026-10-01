@@ -8,6 +8,12 @@ from app.db.base import Base
 APPLICATION_STATUSES = ("SUBMITTED", "WITHDRAWN", "DECIDED")
 APPLICATION_DECISIONS = ("APPROVED", "REJECTED")
 OFFER_STATUSES = ("DRAFT", "SENT", "ACCEPTED", "DECLINED", "EXPIRED", "WITHDRAWN")
+# OfferCounterProposal lifecycle. PENDING: waiting on the host. ACCEPTED: the
+# host turned it into the offer's new terms version (the renter still has to
+# accept the offer themselves). REJECTED: the host declined it; the existing
+# terms stand. SUPERSEDED: overtaken before the host answered -- the host sent
+# different terms, or the renter accepted/declined the offer as it stood.
+OFFER_COUNTER_STATUSES = ("PENDING", "ACCEPTED", "REJECTED", "SUPERSEDED")
 # ZR-ENG-CLR-001 Rule 7: PAYMENT_IN_PROGRESS/PAYMENT_PENDING sit between both
 # signatures landing and the agreement becoming terminally SIGNED -- SIGNED is
 # reached only once every initial (rent+deposit) obligation clears (see
@@ -130,6 +136,9 @@ class Offer(Base):
     listing: Mapped["Listing"] = relationship()
     guest: Mapped["Guest"] = relationship()
     terms: Mapped[list["OfferTerms"]] = relationship(back_populates="offer", cascade="all, delete-orphan", order_by="OfferTerms.version")
+    counter_proposals: Mapped[list["OfferCounterProposal"]] = relationship(
+        back_populates="offer", cascade="all, delete-orphan", order_by="OfferCounterProposal.id",
+    )
     agreement: Mapped["Agreement"] = relationship(back_populates="offer", uselist=False)
 
     @property
@@ -173,6 +182,37 @@ class OfferTerms(Base):
         surfaced through OfferTermsRead so the frontend can format monthly
         rent/deposit in the listing's real currency instead of assuming
         INR (formatCurrency's own default)."""
+        return self.offer.listing.currency
+
+
+class OfferCounterProposal(Base):
+    """A renter's counter to a SENT offer ("I'm not taking these terms, I can
+    pay this"). Never edits OfferTerms itself -- if the host accepts it,
+    crud/leasing.py adds a fresh OfferTerms version from these values, and
+    the renter still accepts the offer through the normal accept step.
+    start_date/term_months are optional: None means "same as the terms this
+    was based on"."""
+
+    __tablename__ = "offer_counter_proposals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    offer_id: Mapped[int] = mapped_column(ForeignKey("offers.id", ondelete="CASCADE"), nullable=False, index=True)
+    based_on_terms_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    monthly_rent: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    deposit_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    term_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    proposed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
+    response_note: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    offer: Mapped["Offer"] = relationship(back_populates="counter_proposals")
+
+    @property
+    def currency(self) -> str:
         return self.offer.listing.currency
 
 

@@ -92,11 +92,14 @@ class TestOpenJurisdictions:
         assert jurisdiction_service.list_open_jurisdictions(db_session) == []
 
     def test_agreements_supported_flag_reflects_clause_registry(self, db_session: Session):
+        """Every open region gets the default clause registry seeded as
+        APPROVED (services/agreement_profile.py:ensure_default_clause_registry),
+        so a newly opened region supports agreements straight away."""
         _open_market(db_session, "England")
         _open_market(db_session, SCOTLAND)
         db_session.commit()
         flags = {j.code: j.agreements_supported for j in jurisdiction_service.list_open_jurisdictions(db_session)}
-        assert flags == {"England": True, SCOTLAND: False}
+        assert flags == {"England": True, SCOTLAND: True}
 
     def test_host_endpoint_lists_open_regions(self, client, db_session: Session):
         _open_market(db_session, "England")
@@ -220,29 +223,32 @@ class TestAgreementClausesPerRegion:
         for row in rows:
             clause_crud.approve_clause_version(db, admin, row)
 
-    def test_new_region_blocks_agreements_until_its_clauses_are_approved(self, db_session: Session):
+    def test_new_region_gets_the_default_clauses_unless_it_is_manual_only(self, db_session: Session):
+        """A newly opened region is seeded with the default clauses as
+        APPROVED, so agreements resolve immediately -- unless the region's
+        market is flagged manual-agreements-only, which still fails closed."""
         scotland = _open_market(db_session, SCOTLAND)
         host = _make_host(db_session)
         room = _make_room(db_session, host, jurisdiction_code=SCOTLAND)
         listing = _make_listing(db_session, room)
         listing.market_release_id = scotland.id
-        admin = _make_admin(db_session, email="clause-admin@test.com", role="super_admin")
         db_session.commit()
 
-        assert resolve_agreement_profile(db_session, listing, room) is None
-        assert "has no approved agreement clauses yet" in agreement_profile_block_reason(db_session, listing, room)
-
-        drafts = clause_crud.copy_default_clauses_to_jurisdiction(db_session, admin, SCOTLAND)
-        assert {d.clause_id for d in drafts} == {clause_id for clause_id, _, _ in DEFAULT_CLAUSES}
-        assert all(d.status == "DRAFT" and d.version == 1 and d.jurisdiction_scope == SCOTLAND for d in drafts)
-        # Drafts alone don't make agreements possible.
-        assert resolve_agreement_profile(db_session, listing, room) is None
-
-        self._approve_all(db_session, admin, drafts)
         profile = resolve_agreement_profile(db_session, listing, room)
         assert profile is not None
         assert profile.jurisdiction == SCOTLAND
         assert agreement_profile_block_reason(db_session, listing, room) is None
+        seeded = {
+            row.clause_id for row in db_session.query(ClauseDefinition).filter(
+                ClauseDefinition.jurisdiction_scope == SCOTLAND, ClauseDefinition.status == "APPROVED",
+            )
+        }
+        assert seeded == {clause_id for clause_id, _, _ in DEFAULT_CLAUSES}
+
+        scotland.manual_agreement_only = True
+        db_session.commit()
+        assert resolve_agreement_profile(db_session, listing, room) is None
+        assert "handled manually" in agreement_profile_block_reason(db_session, listing, room)
 
     def test_copy_defaults_is_idempotent_and_refuses_england(self, db_session: Session):
         admin = _make_admin(db_session, email="clause-admin2@test.com", role="super_admin")

@@ -435,6 +435,13 @@ def update_listing(db: Session, listing: Listing, data: ListingUpdate) -> Listin
         _validate_image_count(data.images)
 
     updates = data.model_dump(exclude_unset=True)
+    # Agreement details are replaced as a whole (every field defaulted), never
+    # merged from a partial dump; an explicit null leaves them unchanged.
+    if "agreement_details" in updates:
+        if data.agreement_details is None:
+            del updates["agreement_details"]
+        else:
+            updates["agreement_details"] = data.agreement_details.model_dump()
     for field, value in updates.items():
         setattr(listing, field, value)
     if "room_id" in updates:
@@ -817,7 +824,10 @@ def _auto_approve_and_publish_low_risk_market(db: Session, listing: Listing) -> 
     # (get_user_by_party_id returns None), not only when a notification fires.
     db.commit()
     if user:
-        send_listing_published_email(user.email, user.full_name, listing.name)
+        send_listing_published_email(
+            user.email, user.full_name, listing.name,
+            listing_id=listing.id, market_name=listing.city, min_stay_nights=listing.min_stay_nights,
+        )
     return listing
 
 
@@ -955,7 +965,10 @@ def publish_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
             related_entity_type="listing", related_entity_id=listing.id,
         )
         db.commit()
-        send_listing_published_email(user.email, user.full_name, listing.name)
+        send_listing_published_email(
+            user.email, user.full_name, listing.name,
+            listing_id=listing.id, market_name=listing.city, min_stay_nights=listing.min_stay_nights,
+        )
     return listing
 
 

@@ -23,8 +23,23 @@ class RentalPaymentDisputeRead(CamelModel):
     reported_by_party_id: int | None
     reported_at: datetime
     resolved_by_admin_id: int | None
+    resolved_by_guest_id: str | None = None
+    resolved_by_party_id: int | None = None
     resolved_at: datetime | None
     resolution_notes: str
+    outcome: str | None = None
+    # The linked dispute case (services/payment_dispute_cases.py), if any.
+    dispute_case_id: int | None = None
+
+
+# What the tenant / host may do on an open payment-record dispute
+# (crud/rental_payment.py:resolve_dispute_by_party).
+PAYMENT_DISPUTE_PARTY_ACTIONS = ("CONFIRM_RECEIVED", "CONFIRM_NOT_PAID", "WITHDRAW")
+
+
+class RentalPaymentDisputePartyResolve(CamelModel):
+    action: str
+    notes: str = ""
 
 
 class RentalPaymentCorrectionRead(CamelModel):

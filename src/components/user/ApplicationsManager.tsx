@@ -25,6 +25,7 @@ import {
   acceptAlternativeChangeTerms,
   acceptOwnOffer,
   acknowledgeOwnDisclosure,
+  counterOwnOffer,
   declineAlternativeChangeTerms,
   declineOwnOffer,
   errorMessage,
@@ -91,6 +92,11 @@ export function ApplicationsManager() {
   const [rentalPaymentObligations, setRentalPaymentObligations] = useState<RentalPaymentObligation[]>([]);
   const [overlapMessage, setOverlapMessage] = useState("");
   const [overrideReasonInput, setOverrideReasonInput] = useState("");
+  // The renter's third option on a sent offer: propose the rent/deposit they
+  // can pay instead (backend user_counter_offer). The host answers it manually.
+  const [counterOpen, setCounterOpen] = useState(false);
+  const [counterForm, setCounterForm] = useState<CounterForm>(emptyCounterForm);
+  const [counterError, setCounterError] = useState("");
   const [payingObligationId, setPayingObligationId] = useState<number | null>(null);
   const [obligationMethods, setObligationMethods] = useState<Record<number, string[]>>({});
   const [selectedMethod, setSelectedMethod] = useState<Record<number, string>>({});
@@ -302,6 +308,9 @@ export function ApplicationsManager() {
     setObligationMethods({});
     setOverlapMessage("");
     setOverrideReasonInput("");
+    setCounterOpen(false);
+    setCounterForm(emptyCounterForm);
+    setCounterError("");
     setOfferLoading(true);
     try {
       const loaded = await getOwnOffer(application.id);
@@ -389,6 +398,64 @@ export function ApplicationsManager() {
       } else {
         showToast(errorMessage(err, "Could not accept this offer."), "error");
       }
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  function openCounterForm() {
+    if (!offer || offer.terms.length === 0) return;
+    const latest = offer.terms[offer.terms.length - 1];
+    setCounterForm({
+      monthlyRent: String(latest.monthlyRent),
+      depositAmount: String(latest.depositAmount),
+      startDate: latest.startDate,
+      termMonths: String(latest.termMonths),
+      message: "",
+    });
+    setCounterError("");
+    setCounterOpen(true);
+  }
+
+  async function handleSubmitCounter() {
+    if (!offer || offer.terms.length === 0) return;
+    const latest = offer.terms[offer.terms.length - 1];
+    const monthlyRent = Number(counterForm.monthlyRent);
+    const depositAmount = Number(counterForm.depositAmount);
+    const termMonths = Number(counterForm.termMonths);
+    if (!Number.isFinite(monthlyRent) || monthlyRent <= 0) {
+      setCounterError("Enter the monthly rent you can pay (greater than zero).");
+      return;
+    }
+    if (!Number.isFinite(depositAmount) || depositAmount < 0) {
+      setCounterError("Enter a valid deposit amount.");
+      return;
+    }
+    if (!counterForm.startDate) {
+      setCounterError("Pick a start date.");
+      return;
+    }
+    if (!Number.isInteger(termMonths) || termMonths < 1) {
+      setCounterError("Enter a term of at least 1 month.");
+      return;
+    }
+    setActionBusy(true);
+    setCounterError("");
+    try {
+      setOffer(
+        await counterOwnOffer(offer.id, {
+          monthlyRent,
+          depositAmount,
+          // Only send what actually changed -- unchanged fields keep the host's terms.
+          startDate: counterForm.startDate !== latest.startDate ? counterForm.startDate : null,
+          termMonths: termMonths !== latest.termMonths ? termMonths : null,
+          message: counterForm.message.trim(),
+        })
+      );
+      setCounterOpen(false);
+      showToast("Your proposal was sent to the host.");
+    } catch (err) {
+      setCounterError(errorMessage(err, "Could not send your proposal."));
     } finally {
       setActionBusy(false);
     }
@@ -595,13 +662,88 @@ export function ApplicationsManager() {
                   </div>
                 </div>
               ) : (
-                <div className="flex justify-end gap-2">
-                  <Button variant="outline" loading={actionBusy} onClick={handleDeclineOffer}>
-                    Decline
-                  </Button>
-                  <Button loading={actionBusy} onClick={() => handleAcceptOffer()}>
-                    Accept offer
-                  </Button>
+                <div className="space-y-3">
+                  <CounterProposalStatus offer={offer} />
+
+                  {counterOpen ? (
+                    <div className="space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-100 dark:bg-slate-800/60 dark:ring-white/10">
+                      <p className="text-xs font-semibold text-primary-900 dark:text-white">Propose different terms</p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Tell the host what you can pay. They can accept it, decline it, or send you new terms.
+                      </p>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <Field label="Monthly rent you can pay">
+                          <input
+                            inputMode="decimal"
+                            value={counterForm.monthlyRent}
+                            onChange={(e) => setCounterForm((f) => ({ ...f, monthlyRent: e.target.value }))}
+                            className={inputClass}
+                          />
+                        </Field>
+                        <Field label="Deposit you can pay">
+                          <input
+                            inputMode="decimal"
+                            value={counterForm.depositAmount}
+                            onChange={(e) => setCounterForm((f) => ({ ...f, depositAmount: e.target.value }))}
+                            className={inputClass}
+                          />
+                        </Field>
+                        <Field label="Start date">
+                          <input
+                            type="date"
+                            value={counterForm.startDate}
+                            onChange={(e) => setCounterForm((f) => ({ ...f, startDate: e.target.value }))}
+                            className={inputClass}
+                          />
+                        </Field>
+                        <Field label="Term (months)">
+                          <input
+                            inputMode="numeric"
+                            value={counterForm.termMonths}
+                            onChange={(e) => setCounterForm((f) => ({ ...f, termMonths: e.target.value }))}
+                            className={inputClass}
+                          />
+                        </Field>
+                      </div>
+                      <Field label="Message to the host (optional)">
+                        <textarea
+                          value={counterForm.message}
+                          onChange={(e) => setCounterForm((f) => ({ ...f, message: e.target.value }))}
+                          rows={2}
+                          maxLength={1000}
+                          placeholder="e.g. This is the most I can manage right now."
+                          className={inputClass}
+                        />
+                      </Field>
+                      {counterError && (
+                        <p className="rounded-lg bg-accent-50 px-3 py-2 text-xs font-medium text-accent-700 ring-1 ring-accent-200">
+                          {counterError}
+                        </p>
+                      )}
+                      <div className="flex justify-end gap-2">
+                        <Button variant="ghost" size="sm" onClick={() => setCounterOpen(false)}>
+                          Cancel
+                        </Button>
+                        <Button size="sm" loading={actionBusy} onClick={handleSubmitCounter}>
+                          Send proposal
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap justify-end gap-2">
+                      <Button variant="outline" loading={actionBusy} onClick={handleDeclineOffer}>
+                        Decline
+                      </Button>
+                      {!offer.counterProposals.some((c) => c.status === "PENDING") && (
+                        <Button variant="outline" loading={actionBusy} onClick={openCounterForm}>
+                          Propose different terms
+                        </Button>
+                      )}
+                      <Button loading={actionBusy} onClick={() => handleAcceptOffer()}>
+                        Accept offer
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )
             )}
@@ -1077,6 +1219,49 @@ export function ApplicationsManager() {
       </Modal>
 
       <Toast toast={toast} />
+    </div>
+  );
+}
+
+
+interface CounterForm {
+  monthlyRent: string;
+  depositAmount: string;
+  startDate: string;
+  termMonths: string;
+  message: string;
+}
+
+const emptyCounterForm: CounterForm = { monthlyRent: "", depositAmount: "", startDate: "", termMonths: "", message: "" };
+
+/** The renter's latest counter proposal on a sent offer, if it still matters:
+ *  waiting on the host, or the host's answer to it. */
+function CounterProposalStatus({ offer }: { offer: Offer }) {
+  const latest = offer.counterProposals[offer.counterProposals.length - 1];
+  if (!latest || latest.status === "SUPERSEDED") return null;
+  const amounts = `${formatCurrency(latest.monthlyRent, latest.currency)}/month · ${formatCurrency(
+    latest.depositAmount,
+    latest.currency
+  )} deposit`;
+  if (latest.status === "PENDING") {
+    return (
+      <div className="rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-700 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20">
+        You proposed {amounts}. Waiting for the host to answer — you can still accept the offer as it is.
+      </div>
+    );
+  }
+  if (latest.status === "ACCEPTED") {
+    return (
+      <div className="rounded-xl bg-emerald-50 px-4 py-3 text-xs text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20">
+        The host accepted your proposal ({amounts}) — the terms above are updated. Accept the offer to continue.
+        {latest.responseNote && <span className="mt-1 block">Host&apos;s note: {latest.responseNote}</span>}
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-xl bg-slate-100 px-4 py-3 text-xs text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
+      The host declined your proposal ({amounts}) and kept the terms above.
+      {latest.responseNote && <span className="mt-1 block">Host&apos;s note: {latest.responseNote}</span>}
     </div>
   );
 }

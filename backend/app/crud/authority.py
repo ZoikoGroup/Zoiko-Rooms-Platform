@@ -121,12 +121,6 @@ def verify_authority_record(db: Session, record: AuthorityRecord, verifier: Admi
     record.verifier_admin_id = verifier.id
     db.commit()
     db.refresh(record)
-
-    # A verified authority record can be the last gate an accepted offer was waiting on.
-    from app.crud.leasing import retry_pending_auto_agreements
-
-    retry_pending_auto_agreements(db)
-    db.refresh(record)
     return record
 
 

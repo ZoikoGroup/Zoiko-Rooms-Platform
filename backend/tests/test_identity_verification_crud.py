@@ -6,13 +6,14 @@ listing, additional-evidence, and the verified-identity lookup other flows
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.crud import identity_verification as crud
+from app.services.identity import service as identity_service
 from app.crud.party import get_or_create_default_party
 from app.models.identity_verification import IdentityVerification
 from app.models.notification import Notification
@@ -114,8 +115,10 @@ class TestVerifyAndRejectRequireSuperAdmin:
         assert updated.status == "verified"
         assert updated.verifier_admin_id == super_admin.id
         assert updated.verified_at is not None
-        assert updated.expires_at is not None
-        assert updated.expires_at - before > timedelta(days=360)
+        # ZR-IDENTITY-001 Section 7.2: identity doesn't expire with the
+        # document; renewal is policy-driven (none by default).
+        assert updated.expires_at is None
+        assert updated.verified_at >= before.replace(tzinfo=updated.verified_at.tzinfo)
 
         notification = db_session.query(Notification).filter(
             Notification.recipient_user_id == user.id,
@@ -253,7 +256,10 @@ class TestSubmitIdentityVerificationForUser:
             )
         assert exc.value.status_code == 409
 
-    def test_success_creates_a_pending_record_and_notifies_super_admins(self, db_session: Session):
+    def test_an_upload_before_the_legal_details_are_confirmed_is_saved_not_submitted(self, db_session: Session):
+        """ZR-IDENTITY-001 Section 4: nothing is checked or approved until the
+        person has confirmed their legal details (India needs a date of
+        birth) -- the document is kept and the session waits in IN_PROGRESS."""
         super_admin = _make_admin(db_session, email="idv-notify-super@test.com", role="super_admin")
         user = _make_user(db_session, email="idv-user4@test.com")
         party = Party(party_type="renter", status="active", jurisdiction="IN")
@@ -267,16 +273,18 @@ class TestSubmitIdentityVerificationForUser:
             stored_filename="stored.pdf", original_filename="my-passport.pdf",
             content_type="application/pdf", file_size=1234,
         )
-        assert record.status == "pending"
+        assert (record.status, record.session_state) == ("draft", "IN_PROGRESS")
         assert record.party_id == party.id
         assert record.document_file_path == "stored.pdf"
         assert record.document_file_original_name == "my-passport.pdf"
+
+        assert record.masked_document_number == "••••P123"
 
         notification = db_session.query(Notification).filter(
             Notification.recipient_admin_id == super_admin.id,
             Notification.notification_type == "identity_verification.submitted",
         ).one_or_none()
-        assert notification is not None
+        assert notification is None
 
     def test_duplicate_of_verification_id_is_flagged_in_the_admin_notification(self, db_session: Session):
         """ZR-ENG-CLR-012 Section 18: duplicate-hash matches (resolved by the
@@ -289,13 +297,18 @@ class TestSubmitIdentityVerificationForUser:
         db_session.flush()
         user.party_id = party.id
         db_session.commit()
+        identity_service.update_details(
+            db_session, user, given_name="Dup", middle_names="", family_name="User",
+            date_of_birth=date(1990, 1, 1), country_code="IN",
+        )
 
         record = crud.submit_identity_verification_for_user(
             db_session, user, document_type="passport", document_number="P999", custom_document_name="",
             stored_filename="stored2.pdf", original_filename="my-passport-2.pdf",
             content_type="application/pdf", file_size=1234, duplicate_of_verification_id=42,
         )
-        assert record.status == "pending"
+        # A duplicate is never auto-verified: it waits for a reviewer.
+        assert (record.status, record.session_state) == ("pending", "PENDING_REVIEW")
 
         notification = db_session.query(Notification).filter(
             Notification.recipient_admin_id == super_admin.id,
@@ -304,7 +317,7 @@ class TestSubmitIdentityVerificationForUser:
         ).one_or_none()
         assert notification is not None
         assert "verification #42" in notification.message
-        assert "reuse or fraud" in notification.message
+        assert "DUPLICATE_EVIDENCE" in notification.message
 
 
 class TestListing:
@@ -325,7 +338,7 @@ class TestListing:
 
         results_a = crud.list_identity_verifications(db_session, admin_a)
         assert len(results_a) == 1
-        assert results_a[0].encrypted_reference == "A"
+        assert results_a[0].masked_document_number == "••••A"
 
     def test_super_admin_sees_every_partys_verifications(self, db_session: Session):
         admin_a = _make_admin(db_session, email="idv-list-a2@test.com", role="admin")
@@ -339,5 +352,5 @@ class TestListing:
         )
 
         results = crud.list_identity_verifications(db_session, super_admin)
-        refs = {r.encrypted_reference for r in results}
-        assert {"A2", "B2"}.issubset(refs)
+        refs = {r.masked_document_number for r in results}
+        assert {"••••A2", "••••B2"}.issubset(refs)

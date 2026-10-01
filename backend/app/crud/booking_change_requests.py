@@ -851,13 +851,10 @@ def _approve_premises_change(db: Session, bcr: BookingChangeRequest, admin: Admi
             listing_id=target_listing.id, guest_id=bcr.requested_by_guest_id,
             message=f"Room/property change migration from listing {agreement.offer.listing_id} (request #{bcr.id})",
         ))
-        # submit_application may already have auto-approved it
-        # (application.requires_manual_decision policy) -- never decide twice.
-        if application.status != "DECIDED":
-            decide_application(db, application, admin, ApplicationDecide(
-                decision="APPROVED", reason_code="PREMISES_CHANGE_MIGRATION",
-                note=decision_note or "Pre-approved: renter's existing tenancy is being migrated to this listing.",
-            ))
+        decide_application(db, application, admin, ApplicationDecide(
+            decision="APPROVED", reason_code="PREMISES_CHANGE_MIGRATION",
+            note=decision_note or "Pre-approved: renter's existing tenancy is being migrated to this listing.",
+        ))
     except HTTPException as exc:
         # Section 24 edge case: e.g. the target listing became ineligible
         # between the renter's request and this approval.

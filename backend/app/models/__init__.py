@@ -48,6 +48,7 @@ from app.models.refund_entitlement import RefundEntitlement, RefundEntitlementLi
 from app.models.habitability_incident import HabitabilityIncident
 from app.models.host_entry_visit import HostEntryVisit
 from app.models.guest import Guest
+from app.models.email_message import EmailMessage
 from app.models.leasing import (
     Agreement,
     AgreementVersion,
@@ -55,6 +56,7 @@ from app.models.leasing import (
     ApplicationDecision,
     DocumentArtifact,
     Offer,
+    OfferCounterProposal,
     OfferTerms,
     SignatureEvent,
 )
@@ -86,6 +88,8 @@ from app.models.room import Room
 from app.models.room_hold import RoomHold
 from app.models.room_passport import RoomPassportClaim, RoomPassportSnapshot
 from app.models.identity_verification import IdentityVerification
+from app.models.identity_profile import IdentityProfile, IdentityProviderEvent, IdentityRegulatoryPack
+from app.models.identity_provider_config import IdentityGoLiveGate, IdentityProviderCheck, IdentityProviderReasonMapping
 from app.models.break_glass_access import BreakGlassAccessGrant
 from app.models.evidence_artifact import EvidenceArtifact
 from app.models.occupancy_eligibility_check import OccupancyEligibilityCheck
@@ -117,6 +121,7 @@ from app.models.document_sequence import DocumentSequence
 from app.models.external_payment_session import ExternalPaymentSession, RentalPaymentProviderEvent
 
 __all__ = [
+    "EmailMessage",
     "DocumentSequence",
     "RentalPaymentReturn",
     "BillingEntity",
@@ -155,6 +160,7 @@ __all__ = [
     "Application",
     "ApplicationDecision",
     "Offer",
+    "OfferCounterProposal",
     "OfferTerms",
     "Agreement",
     "AgreementVersion",
@@ -212,6 +218,12 @@ __all__ = [
     "PaymentReceipt",
     "PaymentSchedule",
     "IdentityVerification",
+    "IdentityProfile",
+    "IdentityProviderEvent",
+    "IdentityRegulatoryPack",
+    "IdentityGoLiveGate",
+    "IdentityProviderCheck",
+    "IdentityProviderReasonMapping",
     "BreakGlassAccessGrant",
     "EvidenceArtifact",
     "OccupancyEligibilityCheck",

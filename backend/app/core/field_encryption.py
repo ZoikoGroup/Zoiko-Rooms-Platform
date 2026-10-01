@@ -45,3 +45,16 @@ def decrypt_json(blob: str) -> dict[str, str]:
     except InvalidToken:
         raise
     return json.loads(raw.decode("utf-8"))
+
+
+def encrypt_text(value: str) -> str:
+    """One string, encrypted -- e.g. an identity document number."""
+    return _fernet().encrypt(value.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_text(blob: str | None) -> str:
+    """"" for a blank blob. A value that isn't a Fernet token (a document
+    number stored before encryption existed) raises InvalidToken."""
+    if not blob:
+        return ""
+    return _fernet().decrypt(blob.encode("utf-8")).decode("utf-8")

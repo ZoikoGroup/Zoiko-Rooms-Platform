@@ -50,6 +50,9 @@ DISPUTE_CLAIMANT_ROLES = ("RENTER", "HOST")
 # TERM_INTERPRETATION-style requests, never an actual termination.
 DISPUTE_CLAIM_SOURCE_RECORD_TYPES = (
     "HABITABILITY_INCIDENT", "BOOKING_CHANGE_REQUEST", "SUBLET_REQUEST", "OCCUPANCY_HANDOVER_EVENT", "TERMINATION_CASE",
+    # A problem reported on a rent/deposit payment record (ZR-PAY-002) --
+    # see services/payment_dispute_cases.py.
+    "RENTAL_PAYMENT_DISPUTE",
 )
 
 # Section 6 confidence: RESOLVED means the forum resolver found a mapped

@@ -50,6 +50,7 @@ from app.models.dispute_message import DisputeCaseMessage
 from app.models.dispute_party import DisputeParty
 from app.models.dispute_settlement import DisputeSettlement
 from app.models.user_account import UserAccount
+from app.schemas.rental_payment import RentalPaymentDisputePartyResolve
 from app.schemas.disputes import (
     DisputeCaseAssign,
     DisputeCaseClose,
@@ -405,6 +406,43 @@ def post_request_review_as_renter(
     return updated
 
 
+def _payment_dispute_for_claim(db: Session, case: DisputeResolutionCase, claim_id: int):
+    """The payment-record dispute behind a claim opened from "Report a
+    problem" on a payment (services/payment_dispute_cases.py)."""
+    from app.models.rental_payment import RentalPaymentDispute
+
+    claim = crud.get_claim_or_404(db, claim_id)
+    if claim.case_id != case.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Claim not found on this case")
+    if claim.source_record_type != "RENTAL_PAYMENT_DISPUTE" or not claim.source_record_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This claim isn't a payment-record problem")
+    dispute = db.get(RentalPaymentDispute, int(claim.source_record_id))
+    if dispute is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment dispute not found")
+    return dispute
+
+
+@renter_router.post("/{case_id}/claims/{claim_id}/payment-resolution", response_model=DisputeCaseRead)
+def post_payment_resolution_as_renter(
+    case_id: int, claim_id: int, payload: RentalPaymentDisputePartyResolve, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The tenant confirms the payment wasn't made, or withdraws their own
+    report -- resolved between tenant and host, no Zoiko Rooms decision."""
+    from app.crud.rental_payment import resolve_dispute_by_party
+
+    guest = get_or_create_guest_for_user(db, user)
+    case = crud.get_case_or_404(db, case_id)
+    crud.assert_guest_can_access_case(case, guest)
+    dispute = _payment_dispute_for_claim(db, case, claim_id)
+    resolve_dispute_by_party(
+        db, dispute, action=payload.action, notes=payload.notes.strip(), guest=guest,
+        correlation_id=get_correlation_id(request),
+    )
+    db.refresh(case)
+    return _to_case_read(case)
+
+
 # -- Host intake (Section 10) ----------------------------------------------
 
 def _host_party_id(user: UserAccount) -> int:
@@ -647,6 +685,27 @@ def post_add_claim_as_host(
     )
     db.commit()
     return claim
+
+
+@host_router.post("/{case_id}/claims/{claim_id}/payment-resolution", response_model=DisputeCaseRead)
+def post_payment_resolution_as_host(
+    case_id: int, claim_id: int, payload: RentalPaymentDisputePartyResolve, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The host confirms they received the payment, or withdraws their own
+    report -- resolved between tenant and host, no Zoiko Rooms decision."""
+    from app.crud.rental_payment import resolve_dispute_by_party
+
+    party_id = _host_party_id(user)
+    case = crud.get_case_or_404(db, case_id)
+    crud.assert_party_can_access_case(case, party_id)
+    dispute = _payment_dispute_for_claim(db, case, claim_id)
+    resolve_dispute_by_party(
+        db, dispute, action=payload.action, notes=payload.notes.strip(), party_id=party_id,
+        correlation_id=get_correlation_id(request),
+    )
+    db.refresh(case)
+    return _to_case_read(case)
 
 
 @host_router.post("/{case_id}/claims/{claim_id}/request-review", response_model=DisputeClaimRead)

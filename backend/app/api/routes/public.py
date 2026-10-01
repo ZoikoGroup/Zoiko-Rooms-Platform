@@ -127,7 +127,10 @@ def post_alert(payload: RoomAlertCreate, db: Session = Depends(get_db)):
 
     alert = create_alert(db, payload)
     unsubscribe_url = f"{settings.public_api_url}/api/public/alerts/{alert.id}/unsubscribe?token={alert.unsubscribe_token}"
-    send_alert_confirmation_email(alert.email, alert.city, unsubscribe_url)
+    send_alert_confirmation_email(
+        alert.email, alert.city, unsubscribe_url,
+        min_price=payload.min_price, max_price=payload.max_price, room_type=payload.room_type,
+    )
     return alert
 
 
@@ -175,3 +178,13 @@ def get_alert_unsubscribe(alert_id: str, token: str, db: Session = Depends(get_d
             message="You won't receive any more room alert emails for this subscription.",
         )
     )
+
+
+@router.post("/alerts/{alert_id}/unsubscribe")
+def post_alert_unsubscribe(alert_id: str, token: str, db: Session = Depends(get_db)):
+    """RFC 8058 one-click unsubscribe (ZR-COMMS-EMAIL-001 Section 3.2): mail
+    clients POST "List-Unsubscribe=One-Click" to the List-Unsubscribe URL
+    without user interaction. Idempotent -- an already-used token still
+    answers 200 so the client doesn't retry or show an error."""
+    unsubscribe_alert(db, alert_id, token)
+    return {"unsubscribed": True}

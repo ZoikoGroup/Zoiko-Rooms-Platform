@@ -85,6 +85,36 @@ class OfferTermsRead(CamelModel):
     created_at: datetime
 
 
+class OfferCounterCreate(CamelModel):
+    """The renter's counter to a SENT offer. start_date/term_months left
+    unset keep whatever the current terms already say."""
+
+    monthly_rent: float
+    deposit_amount: float
+    start_date: date | None = None
+    term_months: int | None = None
+    message: str = Field(default="", max_length=1000)
+
+
+class OfferCounterRespond(CamelModel):
+    note: str = Field(default="", max_length=1000)
+
+
+class OfferCounterRead(CamelModel):
+    id: int
+    based_on_terms_version: int
+    monthly_rent: float
+    deposit_amount: float
+    currency: str
+    start_date: date | None
+    term_months: int | None
+    message: str
+    status: str
+    response_note: str
+    created_at: datetime
+    responded_at: datetime | None
+
+
 class AgreementRead(CamelModel):
     id: int
     offer_id: int
@@ -364,6 +394,7 @@ class OfferRead(CamelModel):
     occupant_risk_tier: str = "NONE"
     occupant_risk_reason: str = ""
     terms: list[OfferTermsRead] = []
+    counter_proposals: list[OfferCounterRead] = []
     agreement: AgreementRead | None = None
     guest_has_account: bool = False
 
