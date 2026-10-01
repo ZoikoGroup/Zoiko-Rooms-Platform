@@ -265,7 +265,13 @@ class RentalPaymentDispute(Base):
     """ZR-PAY-002 Section 5.2: 'A discrepancy changes the record status but
     does not trigger a Zoiko Rooms refund.' Either side may open one
     (Section 11: tenant or landlord/agent) -- exactly one of
-    reported_by_guest_id/reported_by_party_id is set."""
+    reported_by_guest_id/reported_by_party_id is set.
+
+    Resolved between the tenant and the host themselves
+    (crud/rental_payment.py:resolve_dispute_by_party): the host confirms
+    they received it, the tenant confirms it wasn't paid, or whoever
+    reported it withdraws the report. resolved_by_guest_id /
+    resolved_by_party_id record which of them did."""
 
     __tablename__ = "rental_payment_disputes"
 
@@ -278,8 +284,20 @@ class RentalPaymentDispute(Base):
     reported_by_party_id: Mapped[int | None] = mapped_column(ForeignKey("parties.id"), nullable=True)
     reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     resolved_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    resolved_by_guest_id: Mapped[str | None] = mapped_column(ForeignKey("guests.id"), nullable=True)
+    resolved_by_party_id: Mapped[int | None] = mapped_column(ForeignKey("parties.id"), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolution_notes: Mapped[str] = mapped_column(String(2000), default="")
+    # PAYMENT_STANDS / PAYMENT_NOT_RECEIVED / CLOSE_ONLY once resolved.
+    outcome: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # The dispute case opened alongside this report (services/
+    # payment_dispute_cases.py), so the problem appears on every party's
+    # Disputes page with messages and evidence. The money outcome is
+    # decided here (crud/rental_payment.py:resolve_dispute_by_party), which
+    # then closes the linked case.
+    dispute_case_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dispute_resolution_cases.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
 
     record: Mapped["RentalPaymentRecord"] = relationship(back_populates="disputes")
 

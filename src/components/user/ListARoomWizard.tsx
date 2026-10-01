@@ -85,11 +85,6 @@ function emptyDetails(contact: { name: string; phone: string; email: string }): 
  *  friendlier entry point on top of the same backend endpoints, not a
  *  replacement. Review offers "Save as Draft" (create only, same as before) or
  *  "Submit for Review" (create, then immediately ask an admin to review it). */
-/** Pre-select the region only when there's exactly one to choose from. */
-function defaultRegion(regions: OpenJurisdiction[]): string {
-  return regions.length === 1 ? regions[0].code : "";
-}
-
 export function ListARoomWizard({
   open,
   onClose,
@@ -148,7 +143,9 @@ export function ListARoomWizard({
         setPropertyChoice(
           owned.length > 0
             ? { mode: "existing", propertyId: owned[0].id }
-            : { mode: "new", address: "", city: "", landmark: "", jurisdictionCode: defaultRegion(openRegions) }
+            : // Region is never pre-selected: it decides which law governs the agreement,
+              // so the host must pick it even when only one region is open.
+              { mode: "new", address: "", city: "", landmark: "", jurisdictionCode: "" }
         );
       })
       .finally(() => setLoadingContext(false));
@@ -390,7 +387,7 @@ export function ListARoomWizard({
                     name="property-choice"
                     checked={propertyChoice.mode === "new"}
                     onChange={() =>
-                      setPropertyChoice({ mode: "new", address: "", city: "", landmark: "", jurisdictionCode: defaultRegion(regions) })
+                      setPropertyChoice({ mode: "new", address: "", city: "", landmark: "", jurisdictionCode: "" })
                     }
                   />
                   <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200">

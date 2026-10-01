@@ -215,7 +215,8 @@ export function HostingPropertiesManager() {
                 address: "",
                 city: "",
                 landmark: "",
-                jurisdictionCode: regions.length === 1 ? regions[0].code : "",
+                // Never pre-selected -- see RegionSelect / ListARoomWizard.defaultRegion.
+                jurisdictionCode: "",
                 regionLocked: false,
               })
             }

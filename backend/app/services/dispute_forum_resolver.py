@@ -85,6 +85,10 @@ _FAMILY_TO_POLICY_FIELD: dict[str, str] = {
 # force A6 (emergency/criminal, Section 6) and SEV-0 (Section 8) outright.
 _SAFETY_FORCED_CODES = frozenset({"ILLEGAL_LOCKOUT", "VIOLENCE_RISK"})
 
+# Claim codes for problems reported on a payment record (services/
+# payment_dispute_cases.py builds PAYMENT_RECORD_<discrepancy reason>).
+PAYMENT_RECORD_CLAIM_PREFIX = "PAYMENT_RECORD_"
+
 _SEV2_FAMILIES = frozenset({"DEPOSIT", "PAYMENT", "REFUND_PAYOUT", "BOOKING_AGREEMENT"})
 _SEV3_FAMILIES = frozenset({"ZOIKO_SERVICE"})
 
@@ -102,6 +106,16 @@ def resolve_claim_authority(
         return ForumResolution(None, "LEGAL_REVIEW_REQUIRED", f"Unrecognized claim family '{claim_family}'.")
     if claim_family == "ZOIKO_SERVICE":
         return ForumResolution("A0", "RESOLVED", "")
+    if claim_family == "PAYMENT" and claim_code.startswith(PAYMENT_RECORD_CLAIM_PREFIX):
+        # A problem reported on a direct rent/deposit payment record
+        # (ZR-PAY-002) is not a card chargeback: the two parties can resolve
+        # it themselves (A1), and Zoiko Rooms only records the outcome on the
+        # payment record (crud/rental_payment.py:resolve_dispute).
+        return ForumResolution(
+            "A1", "RESOLVED",
+            "Payment-record discrepancy: resolved between the parties; Zoiko Rooms records the outcome on the "
+            "payment record.",
+        )
 
     policy_field = _FAMILY_TO_POLICY_FIELD.get(claim_family)
     if policy_field is None:

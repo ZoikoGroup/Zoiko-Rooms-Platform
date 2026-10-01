@@ -181,12 +181,6 @@ def approve_clause_version(db: Session, admin: AdminUser, row: ClauseDefinition)
     row.effective_to = None
     db.commit()
     db.refresh(row)
-
-    # Approving the last mandatory clause can be the last gate an accepted offer was waiting on.
-    from app.crud.leasing import retry_pending_auto_agreements
-
-    retry_pending_auto_agreements(db)
-    db.refresh(row)
     return row
 
 

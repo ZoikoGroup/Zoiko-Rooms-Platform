@@ -42,7 +42,6 @@ from app.schemas.rental_payment import (
     RentalPaymentDisputeCreate,
     RentalPaymentDisputeRead,
     RentalPaymentDisputeAdminRead,
-    RentalPaymentDisputeResolve,
     RentalPaymentDisputeUpdate,
     RentalPaymentEvidenceHoldCreate,
     RentalPaymentEvidenceHoldRead,
@@ -767,24 +766,10 @@ def get_rental_payment_disputes(dispute_status: str | None = Query(default="OPEN
     return [_to_dispute_admin_read(d) for d in rp_crud.list_disputes(db, status_filter=dispute_status or None)]
 
 
-@admin_router.post(
-    "/disputes/{dispute_id}/resolve", response_model=RentalPaymentDisputeRead,
-    dependencies=[Depends(require_super_admin_or_payment_staff)],
-)
-def post_resolve_rental_payment_dispute(
-    dispute_id: int, payload: RentalPaymentDisputeResolve, request: Request,
-    admin: AdminUser = Depends(require_super_admin_or_payment_staff), db: Session = Depends(get_db),
-):
-    """Closes a dispute and, per payload.outcome, decides the payment:
-    PAYMENT_STANDS confirms it, PAYMENT_NOT_RECEIVED makes it owed again,
-    CLOSE_ONLY leaves it as it is. Both sides are notified."""
-    dispute = db.get(RentalPaymentDispute, dispute_id)
-    if not dispute:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dispute not found")
-    return rp_crud.resolve_dispute(
-        db, admin, dispute, resolution_notes=payload.resolution_notes, outcome=payload.outcome,
-        correlation_id=get_correlation_id(request),
-    )
+# No admin resolve endpoint: a problem with a rent/deposit payment is
+# resolved between the tenant and the host themselves
+# (POST .../disputes/{case_id}/claims/{claim_id}/payment-resolution,
+# crud/rental_payment.py:resolve_dispute_by_party).
 
 
 @admin_router.post("/records/{record_id}/reverse", response_model=RentalPaymentRecordRead, dependencies=[Depends(require_super_admin)])

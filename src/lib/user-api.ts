@@ -2,6 +2,7 @@ import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
   Agreement,
   Application,
+  ListingAgreementDetails,
   AuthorityRecord,
   AuthorityRelationshipType,
   AutopayMandate,
@@ -14,6 +15,7 @@ import {
   DisputeCaseExportRead,
   DisputeCaseRead,
   DisputeClaimCreate,
+  PaymentDisputePartyAction,
   DisputeClaimRead,
   DisputeDeadlineRead,
   DisputeCaseMessageRead,
@@ -212,6 +214,18 @@ export function acceptOwnOffer(offerId: number, overrideReason?: string): Promis
 
 export function declineOwnOffer(offerId: number): Promise<Offer> {
   return apiClientFetch<Offer>(`/api/users/rentals/offers/${offerId}/decline`, { method: "POST" });
+}
+
+/** Renter's counter to a sent offer: the rent/deposit they can pay instead.
+ *  startDate/termMonths omitted = keep the current terms' values. */
+export function counterOwnOffer(
+  offerId: number,
+  payload: { monthlyRent: number; depositAmount: number; startDate?: string | null; termMonths?: number | null; message?: string }
+): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/rentals/offers/${offerId}/counter`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function signOwnAgreement(agreementId: number): Promise<Agreement> {
@@ -657,6 +671,7 @@ export interface HostedListingInput {
   defaultDepositAmount?: number | null;
   defaultTermMonths?: number | null;
   defaultCadence?: string;
+  agreementDetails?: ListingAgreementDetails;
 }
 
 export function listHostedListings(): Promise<HostedListing[]> {
@@ -773,6 +788,20 @@ export function addHostedOfferTerms(
     method: "POST",
     body: JSON.stringify(payload),
   }).then(() => getHostedOffer(offerId));
+}
+
+export function acceptHostedOfferCounter(offerId: number, counterId: number, note = ""): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/offers/${offerId}/counters/${counterId}/accept`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
+export function rejectHostedOfferCounter(offerId: number, counterId: number, note = ""): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/offers/${offerId}/counters/${counterId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
 }
 
 export function sendHostedOffer(offerId: number): Promise<Offer> {
@@ -1358,6 +1387,13 @@ function makeDisputeClient(basePath: string) {
     },
     requestClaimReview(caseId: number, claimId: number, reason: string): Promise<DisputeClaimRead> {
       return apiClientFetch<DisputeClaimRead>(`${basePath}/${caseId}/claims/${claimId}/request-review`, { method: "POST", body: JSON.stringify({ reason }) });
+    },
+    /** A payment-record problem, resolved between tenant and host (no Zoiko Rooms decision). */
+    resolvePaymentClaim(caseId: number, claimId: number, action: PaymentDisputePartyAction, notes: string): Promise<DisputeCaseRead> {
+      return apiClientFetch<DisputeCaseRead>(`${basePath}/${caseId}/claims/${claimId}/payment-resolution`, {
+        method: "POST",
+        body: JSON.stringify({ action, notes }),
+      });
     },
   };
 }

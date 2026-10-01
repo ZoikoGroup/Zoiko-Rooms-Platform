@@ -7,7 +7,9 @@ class DisputeClaimCreate(CamelModel):
     claim_code: str
     claim_family: str
     amount: float | None = None
-    currency: str = "INR"
+    # None = the tenancy's own currency (crud/disputes.py:_claim_currency) --
+    # never a hard-coded market default.
+    currency: str | None = None
     requested_remedy: str = ""
     safety_flag: bool = False
 

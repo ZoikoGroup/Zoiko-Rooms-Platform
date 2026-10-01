@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CheckCircle2, Clock, FileSignature, Send, ShieldCheck } from "lucide-react";
+import { CheckCircle2, Clock, FileSignature, MessageSquare, Send, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
@@ -17,6 +17,7 @@ import {
 } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
+  acceptHostedOfferCounter,
   addHostedOfferTerms,
   createHostedAgreement,
   createHostedOffer,
@@ -25,6 +26,7 @@ import {
   getHostedOffer,
   listHostedAgreementDisclosures,
   listRecipientRentalPaymentObligations,
+  rejectHostedOfferCounter,
   sendHostedAgreement,
   sendHostedOffer,
   signHostedAgreement,
@@ -64,6 +66,10 @@ export function HostOfferAgreementPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [termsForm, setTermsForm] = useState<TermsForm>(emptyTermsForm);
+  // SENT offers: the host can answer a renter's counter proposal, or send
+  // revised terms of their own instead.
+  const [reviseOpen, setReviseOpen] = useState(false);
+  const [counterNote, setCounterNote] = useState("");
   const [rentalPaymentObligations, setRentalPaymentObligations] = useState<RentalPaymentObligation[]>([]);
   const { toast, showToast } = useToast();
 
@@ -94,6 +100,8 @@ export function HostOfferAgreementPanel({
     if (!open) return;
     setError("");
     setTermsForm(emptyTermsForm);
+    setReviseOpen(false);
+    setCounterNote("");
     setLoading(true);
     (async () => {
       try {
@@ -156,6 +164,27 @@ export function HostOfferAgreementPanel({
     await runAction(async () => {
       await addHostedOfferTerms(offer.id, { monthlyRent, depositAmount, startDate: termsForm.startDate, termMonths });
       await reload(offer.id);
+      if (offer.status === "SENT") {
+        setReviseOpen(false);
+        setTermsForm(emptyTermsForm);
+        showToast("Revised terms sent to the renter.");
+      }
+    });
+  }
+
+  async function handleAnswerCounter(counterId: number, accept: boolean) {
+    if (!offer) return;
+    await runAction(async () => {
+      const updated = accept
+        ? await acceptHostedOfferCounter(offer.id, counterId, counterNote.trim())
+        : await rejectHostedOfferCounter(offer.id, counterId, counterNote.trim());
+      setOffer(updated);
+      setCounterNote("");
+      showToast(
+        accept
+          ? "Proposal accepted. The renter now needs to accept the updated offer."
+          : "Proposal declined. Your original terms stand."
+      );
     });
   }
 
@@ -202,6 +231,8 @@ export function HostOfferAgreementPanel({
 
   const agreement = offer?.agreement ?? null;
   const latestTerms = offer && offer.terms.length > 0 ? offer.terms[offer.terms.length - 1] : null;
+  const pendingCounter = offer?.counterProposals.find((c) => c.status === "PENDING") ?? null;
+  const showTermsForm = offer?.status === "DRAFT" || (offer?.status === "SENT" && reviseOpen && !pendingCounter);
   const allDisclosuresDelivered = disclosures.length > 0 && disclosures.every((d) => d.status !== "REQUIRED_MISSING");
 
   return (
@@ -233,11 +264,11 @@ export function HostOfferAgreementPanel({
             </div>
           )}
 
-          {/* Step 2: terms */}
-          {offer && offer.status === "DRAFT" && (
+          {/* Step 2: terms (also used to send revised terms on a SENT offer) */}
+          {offer && showTermsForm && (
             <div className="space-y-3">
               <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
-                {latestTerms ? "Update terms" : "Set terms"}
+                {offer.status === "SENT" ? "Send revised terms" : latestTerms ? "Update terms" : "Set terms"}
               </p>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <Field label="Monthly rent">
@@ -275,9 +306,16 @@ export function HostOfferAgreementPanel({
                   />
                 </Field>
               </div>
-              <Button loading={busy} onClick={handleSaveTerms}>
-                Save terms
-              </Button>
+              <div className="flex gap-2">
+                <Button loading={busy} onClick={handleSaveTerms}>
+                  {offer.status === "SENT" ? "Send revised terms" : "Save terms"}
+                </Button>
+                {offer.status === "SENT" && (
+                  <Button variant="ghost" onClick={() => setReviseOpen(false)}>
+                    Cancel
+                  </Button>
+                )}
+              </div>
             </div>
           )}
 
@@ -296,9 +334,81 @@ export function HostOfferAgreementPanel({
             </p>
           )}
 
-          {offer && offer.status === "SENT" && (
-            <div className="flex items-center gap-2 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-700 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20">
-              <Clock className="h-3.5 w-3.5 shrink-0" /> Waiting for the renter to accept or decline.
+          {offer && offer.status === "SENT" && pendingCounter && latestTerms && (
+            <div className="space-y-3 rounded-xl bg-sky-50 p-4 ring-1 ring-sky-200 dark:bg-sky-500/10 dark:ring-sky-500/20">
+              <p className="flex items-center gap-1.5 text-sm font-semibold text-sky-800 dark:text-sky-200">
+                <MessageSquare className="h-4 w-4" /> The renter proposed different terms
+              </p>
+              <dl className="grid grid-cols-2 gap-3 text-xs">
+                <div>
+                  <dt className="text-slate-500 dark:text-slate-400">Monthly rent</dt>
+                  <dd className="font-semibold text-primary-900 dark:text-white">
+                    {formatCurrency(pendingCounter.monthlyRent, pendingCounter.currency)}{" "}
+                    <span className="font-normal text-slate-400">
+                      (yours: {formatCurrency(latestTerms.monthlyRent, latestTerms.currency)})
+                    </span>
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500 dark:text-slate-400">Deposit</dt>
+                  <dd className="font-semibold text-primary-900 dark:text-white">
+                    {formatCurrency(pendingCounter.depositAmount, pendingCounter.currency)}{" "}
+                    <span className="font-normal text-slate-400">
+                      (yours: {formatCurrency(latestTerms.depositAmount, latestTerms.currency)})
+                    </span>
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500 dark:text-slate-400">Start date</dt>
+                  <dd className="font-semibold text-primary-900 dark:text-white">
+                    {formatDate(pendingCounter.startDate ?? latestTerms.startDate)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500 dark:text-slate-400">Term</dt>
+                  <dd className="font-semibold text-primary-900 dark:text-white">
+                    {pendingCounter.termMonths ?? latestTerms.termMonths} months
+                  </dd>
+                </div>
+              </dl>
+              {pendingCounter.message && (
+                <p className="rounded-lg bg-white px-3 py-2 text-xs text-slate-600 dark:bg-slate-900 dark:text-slate-300">
+                  &ldquo;{pendingCounter.message}&rdquo;
+                </p>
+              )}
+              <Field label="Note to the renter (optional)">
+                <input
+                  value={counterNote}
+                  onChange={(e) => setCounterNote(e.target.value)}
+                  maxLength={1000}
+                  className={inputClass}
+                />
+              </Field>
+              <div className="flex flex-wrap gap-2">
+                <Button loading={busy} onClick={() => handleAnswerCounter(pendingCounter.id, true)}>
+                  Accept proposal
+                </Button>
+                <Button variant="outline" loading={busy} onClick={() => handleAnswerCounter(pendingCounter.id, false)}>
+                  Decline proposal
+                </Button>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Accepting updates the offer to these terms; the renter then accepts the offer themselves.
+              </p>
+            </div>
+          )}
+
+          {offer && offer.status === "SENT" && !pendingCounter && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-700 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20">
+              <span className="flex items-center gap-2">
+                <Clock className="h-3.5 w-3.5 shrink-0" /> Waiting for the renter to accept, decline, or propose
+                different terms.
+              </span>
+              {!reviseOpen && (
+                <Button size="sm" variant="outline" onClick={() => setReviseOpen(true)}>
+                  Send revised terms
+                </Button>
+              )}
             </div>
           )}
 

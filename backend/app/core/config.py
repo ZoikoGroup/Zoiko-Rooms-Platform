@@ -84,6 +84,18 @@ class Settings(BaseSettings):
     property_verification_upload_dir: str = "secure_uploads/property_verification"
     property_verification_document_max_size_mb: int = 10
 
+    # Address check for property verification (services/geocoding.py): a
+    # property is only auto-verified when its address resolves on a map.
+    # "auto" uses Google's Geocoding API when google_maps_api_key is set,
+    # otherwise OpenStreetMap Nominatim (free, no key; usage policy requires
+    # an identifying User-Agent and <= 1 request/second). "none" disables
+    # lookups -- every submission then goes to manual review.
+    geocoding_provider: str = "auto"
+    google_maps_api_key: str = ""
+    nominatim_url: str = "https://nominatim.openstreetmap.org/search"
+    nominatim_user_agent: str = "ZoikoRooms/1.0 (property-verification; support@zoikorooms.com)"
+    geocoding_timeout_seconds: float = 6.0
+
     # ZR-ENG-CLR-004 Section 13.1/AC-08: executed agreement PDFs, stored once
     # per AgreementVersion and never regenerated/overwritten -- same
     # never-publicly-mounted directory convention as identity_upload_dir.
@@ -197,6 +209,21 @@ class Settings(BaseSettings):
     # e.g. port 587). Mutually exclusive with smtp_use_tls in practice -- set
     # this true for a 465-style provider and smtp_use_tls is then ignored.
     smtp_use_ssl: bool = False
+    # ZR-COMMS-EMAIL-001 Section 1.2 sending streams (services/email/streams.py).
+    # Blank = send as the stream's display name from email_from's address. Set a
+    # stream's own address only once its domain has aligned SPF/DKIM/DMARC.
+    email_from_security: str = ""
+    email_from_transactions: str = ""
+    email_from_money: str = ""
+    email_from_trust: str = ""
+    email_from_organizations: str = ""
+    email_from_marketing: str = ""
+    email_reply_to_security: str = ""
+    email_reply_to_transactions: str = ""
+    email_reply_to_money: str = ""
+    email_reply_to_trust: str = ""
+    email_reply_to_organizations: str = ""
+    email_reply_to_marketing: str = ""
 
     # Chat SSE rate limiting (requests per window, per authenticated actor).
     chat_rate_limit_max: int = 20

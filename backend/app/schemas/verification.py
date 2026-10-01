@@ -124,6 +124,19 @@ class PropertyVerificationRead(CamelModel):
     extracted_document_number: str | None = None
     name_matched: bool | None = None
     address_matched: bool | None = None
+    # Map check of the property address (services/geocoding.py). Only
+    # geocode_status "FOUND" allows automatic verification.
+    geocode_status: str | None = None
+    geocode_provider: str = ""
+    geocode_query: str = ""
+    geocode_formatted_address: str = ""
+    geocode_latitude: float | None = None
+    geocode_longitude: float | None = None
+    geocode_precision: str = ""
+    geocode_country_code: str = ""
+    geocode_detail: str = ""
+    geocoded_at: datetime | None = None
+    google_maps_url: str = ""
 
 
 class ScreeningCheckCreate(CamelModel):

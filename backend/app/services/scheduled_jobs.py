@@ -139,6 +139,22 @@ def send_due_soon_reminders(db: Session) -> int:
     return len(sweep_rental_payment_due_soon(db))
 
 
+def send_signature_reminders(db: Session) -> int:
+    """Emails each pending signer once when an agreement's signing deadline is
+    within 24 hours (ZR-EML-AGR-002 reminder; deduplicated per deadline)."""
+    from app.crud.leasing import send_signature_deadline_reminders
+
+    return send_signature_deadline_reminders(db)
+
+
+def link_payment_disputes_to_cases(db: Session) -> int:
+    """Safety net: any open payment-record dispute without a dispute case
+    (e.g. reported before the link existed, or its case failed to open)."""
+    from app.services.payment_dispute_cases import link_open_payment_disputes
+
+    return link_open_payment_disputes(db)
+
+
 def reconcile_listing_fee_refunds(db: Session) -> int:
     """Listing Fee refunds stuck in PROCESSING are checked with Stripe (in case
     their webhook never arrived) -- succeeded ones confirmed, failed ones marked
@@ -186,6 +202,8 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("generate_due_rent", generate_due_rent),
     ("refresh_due_statuses", refresh_due_statuses),
     ("send_due_soon_reminders", send_due_soon_reminders),
+    ("send_signature_reminders", send_signature_reminders),
+    ("link_payment_disputes_to_cases", link_payment_disputes_to_cases),
     ("remind_hosts_of_unconfirmed_payments", remind_hosts_of_unconfirmed_payments),
     ("reconcile_listing_fee_refunds", reconcile_listing_fee_refunds),
 )

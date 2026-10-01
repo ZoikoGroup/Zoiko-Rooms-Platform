@@ -146,7 +146,7 @@ def verify_identity_verification(
     db.commit()
 
     if user:
-        send_identity_verification_approved_email(user.email, user.full_name)
+        send_identity_verification_approved_email(user.email, user.full_name, verification_id=record.id)
     return record
 
 
@@ -175,7 +175,7 @@ def reject_identity_verification(
     db.refresh(record)
 
     if user:
-        send_identity_verification_rejected_email(user.email, user.full_name, notes)
+        send_identity_verification_rejected_email(user.email, user.full_name, notes, verification_id=record.id)
     return record
 
 
@@ -394,6 +394,6 @@ def request_additional_evidence(db: Session, record: IdentityVerification, verif
     db.refresh(record)
 
     if user:
-        send_identity_verification_additional_evidence_email(user.email, user.full_name, note)
+        send_identity_verification_additional_evidence_email(user.email, user.full_name, note, verification_id=record.id)
     return record
 

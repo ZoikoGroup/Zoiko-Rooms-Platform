@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -120,16 +120,20 @@ class Listing(Base):
         nullable=True,
     )
 
-    # Section 14 offer.requires_manual_creation (services/policy.py): a host's
-    # own reusable offer terms for this listing, used only when a market
-    # release has opted into automatic offer creation -- see
-    # crud/leasing.py:_auto_create_offer_if_enabled. All nullable and
-    # optional; a listing with none of these set simply stays on the
-    # existing fully-manual offer flow regardless of the policy setting.
+    # Legacy: reusable offer terms that only ever fed automatic offer
+    # creation, which has been removed (offers are always created manually
+    # by the host). Kept so existing rows/API payloads stay valid; nothing
+    # reads them any more.
     default_monthly_rent: Mapped[float | None] = mapped_column(Float, nullable=True)
     default_deposit_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     default_term_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     default_cadence: Mapped[str] = mapped_column(String(20), default="MONTHLY")
+
+    # Host-supplied Residential Occupancy Agreement facts (Schedule A areas,
+    # service address, rent due/renewal rules; Schedule B utilities and house
+    # rules) -- shape and validation in schemas/agreement_details.py. Frozen
+    # into each agreement version's snapshot, never read live by a render.
+    agreement_details: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default="{}")
 
     owner: Mapped["AdminUser"] = relationship(back_populates="listings")
     party: Mapped["Party"] = relationship(back_populates="listings")

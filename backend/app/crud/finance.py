@@ -480,7 +480,10 @@ def confirm_payment(db: Session, payment: SimulatedPayment, data: PaymentConfirm
     )
     payer = get_user_for_guest(db, payment.guest) if payment.guest else None
     if payer:
-        send_payment_confirmed_email(payer.email, payer.full_name, payment.amount, payment.currency)
+        send_payment_confirmed_email(
+            payer.email, payer.full_name, payment.amount, payment.currency,
+            payment_id=payment.id, paid_at=payment.confirmed_at, method_class=payment.method_class,
+        )
     db.commit()
 
     # ZR-ENG-CLR-005 AC-16: same Booking Orchestrator boundary as above, for
@@ -936,7 +939,11 @@ def _notify_deposit_guest(db: Session, record: DepositRecord, *, released: bool)
     )
     renter_user = get_user_for_guest(db, guest)
     if renter_user:
-        send_deposit_status_email(renter_user.email, renter_user.full_name, _round2(record.released_amount), released)
+        send_deposit_status_email(
+            renter_user.email, renter_user.full_name, _round2(record.released_amount), released,
+            held_amount=_round2(record.held_amount), currency=obligation.currency, deposit_id=record.id,
+            room_label=obligation.agreement.offer.listing.name if obligation.agreement else "",
+        )
 
 
 def to_deposit_record_read(record: DepositRecord) -> DepositRecordRead:
@@ -1759,7 +1766,10 @@ def _resolve_payout(db: Session, party: Party, admin: AdminUser, period_key: str
         )
         host_user = get_user_by_party_id(db, party.id)
         if host_user:
-            send_payout_paid_email(host_user.email, host_user.full_name, disbursed, payout.currency, period_key)
+            send_payout_paid_email(
+                host_user.email, host_user.full_name, disbursed, payout.currency, period_key,
+                payout_id=payout.id, paid_at=payout.paid_at,
+            )
     else:
         # Actionable, not just informational -- the host needs to resolve the
         # missing authority record before this payout can actually go out.
@@ -2229,7 +2239,10 @@ def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: Re
         )
         payer = get_user_for_guest(db, refund.payment.guest)
         if payer:
-            send_refund_completed_email(payer.email, payer.full_name, refund.amount, refund.payment.currency)
+            send_refund_completed_email(
+                payer.email, payer.full_name, refund.amount, refund.payment.currency,
+                refund_id=refund.id, reason=refund.reason, initiated_at=refund.created_at,
+            )
 
     db.commit()
     db.refresh(refund)

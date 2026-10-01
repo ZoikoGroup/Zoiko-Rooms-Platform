@@ -59,6 +59,20 @@ class PropertyVerification(Base):
     extracted_document_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
     name_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     address_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Map check of the property's own address (services/geocoding.py), taken
+    # at submission. Auto-verification requires geocode_status == "FOUND":
+    # the address resolved at street/house level in the region's country.
+    # None = never checked (rows submitted before this existed).
+    geocode_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    geocode_provider: Mapped[str] = mapped_column(String(20), nullable=False, default="", server_default="")
+    geocode_query: Mapped[str] = mapped_column(String(500), nullable=False, default="", server_default="")
+    geocode_formatted_address: Mapped[str] = mapped_column(String(500), nullable=False, default="", server_default="")
+    geocode_latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    geocode_longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    geocode_precision: Mapped[str] = mapped_column(String(20), nullable=False, default="", server_default="")
+    geocode_country_code: Mapped[str] = mapped_column(String(2), nullable=False, default="", server_default="")
+    geocode_detail: Mapped[str] = mapped_column(String(500), nullable=False, default="", server_default="")
+    geocoded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # sha256 of the uploaded file, so the same document reused for another
     # host's room is caught and sent to a reviewer instead of auto-verified.
     document_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
@@ -77,3 +91,11 @@ class PropertyVerification(Base):
     @property
     def has_document(self) -> bool:
         return bool(self.document_file_path)
+
+    @property
+    def google_maps_url(self) -> str:
+        """Public Google Maps link to where the address resolved (or a search
+        for the address text if it didn't), for hosts and reviewers."""
+        from app.services.geocoding import google_maps_url
+
+        return google_maps_url(self.geocode_latitude, self.geocode_longitude, self.geocode_query)

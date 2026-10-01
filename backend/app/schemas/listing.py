@@ -1,5 +1,8 @@
 from datetime import datetime
 
+from pydantic import Field
+
+from app.schemas.agreement_details import ListingAgreementDetails
 from app.schemas.common import CamelModel
 
 
@@ -35,12 +38,8 @@ class ListingBase(CamelModel):
     featured: bool = False
     room_id: int | None = None
     min_stay_nights: int = 30
-    # Section 14 offer.requires_manual_creation (services/policy.py): reusable
-    # offer terms for this listing, consulted only when a market release has
-    # opted into automatic offer creation (crud/leasing.py:
-    # _auto_create_offer_if_enabled). Optional -- leaving these unset keeps
-    # this listing on the existing fully-manual offer flow regardless of the
-    # policy setting.
+    # Legacy, unused: these only fed automatic offer creation, which has been
+    # removed (see models/listing.py). Still accepted for compatibility.
     default_monthly_rent: float | None = None
     default_deposit_amount: float | None = None
     default_term_months: int | None = None
@@ -51,6 +50,9 @@ class ListingCreate(ListingBase):
     contact_name: str = ""
     contact_phone: str = ""
     contact_email: str = ""
+    # Not on ListingBase: PublicListingRead must never expose the host's
+    # formal service address.
+    agreement_details: ListingAgreementDetails = Field(default_factory=ListingAgreementDetails)
 
 
 class ListingUpdate(CamelModel):
@@ -80,6 +82,7 @@ class ListingUpdate(CamelModel):
     default_deposit_amount: float | None = None
     default_term_months: int | None = None
     default_cadence: str | None = None
+    agreement_details: ListingAgreementDetails | None = None
 
 
 class ListingRead(ListingBase):
@@ -97,6 +100,7 @@ class ListingRead(ListingBase):
     contact_name: str = ""
     contact_phone: str = ""
     contact_email: str = ""
+    agreement_details: ListingAgreementDetails = Field(default_factory=ListingAgreementDetails)
     # Real-time: PUBLISHED state alone doesn't mean a renter hasn't since
     # moved in. Computed by crud.listing.annotate_availability/is_listing_available
     # -- never trust Listing.state alone for "is this actually live" in a new caller.

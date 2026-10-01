@@ -48,6 +48,7 @@ from app.models.refund_entitlement import RefundEntitlement, RefundEntitlementLi
 from app.models.habitability_incident import HabitabilityIncident
 from app.models.host_entry_visit import HostEntryVisit
 from app.models.guest import Guest
+from app.models.email_message import EmailMessage
 from app.models.leasing import (
     Agreement,
     AgreementVersion,
@@ -55,6 +56,7 @@ from app.models.leasing import (
     ApplicationDecision,
     DocumentArtifact,
     Offer,
+    OfferCounterProposal,
     OfferTerms,
     SignatureEvent,
 )
@@ -117,6 +119,7 @@ from app.models.document_sequence import DocumentSequence
 from app.models.external_payment_session import ExternalPaymentSession, RentalPaymentProviderEvent
 
 __all__ = [
+    "EmailMessage",
     "DocumentSequence",
     "RentalPaymentReturn",
     "BillingEntity",
@@ -155,6 +158,7 @@ __all__ = [
     "Application",
     "ApplicationDecision",
     "Offer",
+    "OfferCounterProposal",
     "OfferTerms",
     "Agreement",
     "AgreementVersion",

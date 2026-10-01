@@ -53,10 +53,4 @@ def set_classification(db: Session, room: Room, data: OccupancyClassificationSet
     record.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(record)
-
-    # A resolved classification can be the last gate an accepted offer was waiting on.
-    from app.crud.leasing import retry_pending_auto_agreements
-
-    retry_pending_auto_agreements(db)
-    db.refresh(record)
     return record
