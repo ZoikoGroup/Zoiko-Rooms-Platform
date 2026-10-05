@@ -115,10 +115,8 @@ from app.models.rental_payment import (
     RentalPaymentObligation,
     RentalPaymentRecord,
 )
-from app.models.rental_payment_provider_account import RentalPaymentProviderAccount
 from app.models.rental_payment_return import RentalPaymentReturn
 from app.models.document_sequence import DocumentSequence
-from app.models.external_payment_session import ExternalPaymentSession, RentalPaymentProviderEvent
 
 __all__ = [
     "EmailMessage",
@@ -249,7 +247,18 @@ __all__ = [
     "RentalPaymentCorrection",
     "RentalPaymentInstruction",
     "RentalPaymentEvidenceHold",
-    "RentalPaymentProviderAccount",
-    "ExternalPaymentSession",
-    "RentalPaymentProviderEvent",
 ]
+from app.models.property_location import (  # noqa: E402,F401
+    PropertyLocationEvidence,
+    PropertyLocationVerification,
+    PropertyRegulatoryPack,
+)
+from app.models.authority_verification import (  # noqa: E402,F401
+    AuthorityConfirmation,
+    AuthorityEvidence,
+    AuthorityRegulatoryPack,
+    AuthorityVerification,
+    Organization,
+)
+
+from app.models.sublet_payment import SubletPaymentArrangement  # noqa: E402,F401

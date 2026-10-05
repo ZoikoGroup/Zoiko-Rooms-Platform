@@ -23,6 +23,9 @@ from app.api.routes import (
     handoffs,
     feature_flags,
     identity_verification,
+    property_location,
+    authority_verification,
+    sublet_payments,
     leasing,
     listings,
     listing_fees,
@@ -147,8 +150,8 @@ app.include_router(auth.router)
 app.include_router(user_auth.router)
 app.include_router(user_identity.router)
 app.include_router(user_identity_flow.router)
-app.include_router(user_identity_flow.webhook_router)
 app.include_router(user_identity_flow.veriff_webhook_router)
+app.include_router(user_identity_flow.v1_router)
 app.include_router(user_payments.router)
 app.include_router(user_rentals.router)
 app.include_router(user_hosting.router)
@@ -160,7 +163,7 @@ app.include_router(rental_payment_returns.router)
 app.include_router(rental_payments.router)
 app.include_router(rental_payments.recipient_router)
 app.include_router(rental_payments.admin_router)
-app.include_router(rental_payments.webhook_router)
+app.include_router(sublet_payments.router)
 app.include_router(knowledge.router)
 app.include_router(bookings.router)
 app.include_router(guests.router)
@@ -180,6 +183,14 @@ app.include_router(properties.router)
 app.include_router(party.router)
 app.include_router(authority.router)
 app.include_router(identity_verification.router)
+app.include_router(property_location.router)
+app.include_router(property_location.location_router)
+app.include_router(property_location.admin_location_router)
+app.include_router(property_location.admin_router)
+app.include_router(authority_verification.router)
+app.include_router(authority_verification.confirmation_router)
+app.include_router(authority_verification.admin_router)
+app.include_router(identity_verification.internal_router)
 app.include_router(room_passport.router)
 app.include_router(occupancy_classification.router)
 app.include_router(leasing.router)

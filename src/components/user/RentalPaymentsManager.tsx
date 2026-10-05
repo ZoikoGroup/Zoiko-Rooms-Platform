@@ -1,22 +1,20 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, CalendarClock, FileWarning, Home, Upload } from "lucide-react";
+import { AlertTriangle, CalendarClock, Copy, Download, FileWarning, Home, Upload } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { RentalPaymentEvidenceList } from "@/components/user/RentalPaymentEvidenceList";
-import { CardPaymentOutcome, CardPaymentOutcomeTag } from "@/components/user/CardPaymentOutcome";
 import { resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
-import { DIRECT_RENT_PAYMENT_WORDING, usePaymentCapabilities } from "@/components/user/DirectPaymentNotice";
+import { DIRECT_RENT_PAYMENT_WORDING } from "@/components/user/DirectPaymentNotice";
+import { HowToPay, downloadRentalPaymentReceipt, getHowToPay, payeeTypeLabel } from "@/lib/sublet-payments";
 import { TenantReturnsSection } from "@/components/user/RentalPaymentReturns";
 import { RentalPaymentTimeline } from "@/components/user/RentalPaymentTimeline";
 import {
   RentalPaymentDiscrepancyReason,
-  RentalPaymentInstruction,
   RentalPaymentMethodCategory,
   RentalPaymentObligation,
   RentalPaymentObligationType,
@@ -32,8 +30,6 @@ import {
   listMyRentalPaymentObligations,
   markRentalPaymentPaid,
   reportRentalPaymentDiscrepancyAsTenant,
-  resolveRentalPaymentCheckoutSession,
-  startRentalPaymentSession,
   uploadRentalPaymentEvidence,
 } from "@/lib/user-api";
 
@@ -45,7 +41,7 @@ const METHOD_OPTIONS: { value: RentalPaymentMethodCategory; label: string }[] = 
 ];
 
 const METHOD_LABELS: Record<string, string> = {
-  BANK_TRANSFER: "Bank transfer", UPI: "UPI", CASH: "Cash", CARD: "Card", OTHER: "Other",
+  BANK_TRANSFER: "Bank transfer", UPI: "UPI", CASH: "Cash", OTHER: "Other",
 };
 
 const DISCREPANCY_OPTIONS: { value: RentalPaymentDiscrepancyReason; label: string }[] = [
@@ -65,14 +61,9 @@ const TYPE_FILTERS: { value: RentalPaymentObligationType | "ALL"; label: string 
 
 type Tab = "overview" | "upcoming" | "records" | "instructions";
 
-// PAYMENT_SESSION_STARTED included so an obligation with an online payment
-// in flight stays visible here rather than disappearing mid-payment --
-// canMarkPaid below still only fires for UPCOMING/DUE/OVERDUE, so it won't
-// offer a second, conflicting payment action while one is already underway.
-// REVERSED too: the earlier payment went back (e.g. a card dispute the bank
-// decided for the tenant), so this rent is owed again. PARTIALLY_PAID: the
-// remainder is still owed (and payable online).
-const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "PAYMENT_SESSION_STARTED", "REVERSED", "PARTIALLY_PAID"]);
+// REVERSED: the earlier payment went back, so this is owed again.
+// PARTIALLY_PAID: the remainder is still owed.
+const OPEN_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "REVERSED", "PARTIALLY_PAID"]);
 
 // GET /obligations is now paginated (ZR-PAY-LINK-003 Section 19/G11 -- an
 // unbounded list doesn't scale to a years-long tenancy). This view's
@@ -98,31 +89,6 @@ export function RentalPaymentsManager() {
   const [instructionsObligation, setInstructionsObligation] = useState<RentalPaymentObligation | null>(null);
   const [disputingRecord, setDisputingRecord] = useState<RentalPaymentRecord | null>(null);
   const [viewingRecord, setViewingRecord] = useState<RentalPaymentRecord | null>(null);
-  const [startingSessionForId, setStartingSessionForId] = useState<number | null>(null);
-
-  /** ZR-PAY-LINK-003 Section 19/Wireframe F: "Continue to secure payment."
-   *  The recipient may not have connected a provider account yet -- that
-   *  shows up as an ordinary error toast here, same as InstructionsModal's
-   *  own "recipient has not set up payment instructions yet" empty state
-   *  for the other rail, rather than trying to know in advance whether the
-   *  button will work. */
-  async function handlePaySecurely(obligation: RentalPaymentObligation) {
-    setStartingSessionForId(obligation.id);
-    try {
-      const result = await startRentalPaymentSession(obligation.id);
-      if (result.checkoutUrl) {
-        window.location.href = result.checkoutUrl;
-        return;
-      }
-      // Stripe not configured server-side -- completed synchronously.
-      showToast("Payment confirmed.");
-      load();
-    } catch (err) {
-      showToast(errorMessage(err, "Could not start secure payment."), "error");
-    } finally {
-      setStartingSessionForId(null);
-    }
-  }
 
   function load() {
     listMyRentalPaymentObligations(undefined, { limit: OBLIGATIONS_PAGE_LIMIT, offset: 0 })
@@ -147,38 +113,6 @@ export function RentalPaymentsManager() {
   }
 
   useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const router = useRouter();
-  const searchParams = useSearchParams();
-
-  // Landed back here from Stripe's own hosted checkout page (see
-  // handlePaySecurely's real redirect, and the backend's own
-  // success_url/cancel_url) -- same pattern as
-  // HostingListingsManager.tsx's own checkoutSessionId handling for the
-  // Listing Fee return.
-  useEffect(() => {
-    const checkoutSessionId = searchParams.get("checkoutSessionId");
-    if (!checkoutSessionId) return;
-    // cancel_url adds cancelled=1 -- the tenant left Stripe's page without paying.
-    const cancelledCheckout = searchParams.get("cancelled") === "1";
-    resolveRentalPaymentCheckoutSession(checkoutSessionId)
-      .then((session) => {
-        if (session.status === "SUCCEEDED") {
-          showToast("Payment confirmed.");
-        } else if (cancelledCheckout) {
-          showToast("Payment cancelled -- nothing was charged. You can pay again whenever you're ready.");
-        } else if (session.status === "FAILED") {
-          showToast(session.failureMessage || "Your payment did not go through.", "error");
-        } else {
-          showToast("Your payment is still processing -- we'll update the record once it's confirmed.");
-        }
-        load();
-      })
-      .catch(() => showToast("Could not confirm your payment. Please check your payment records.", "error"))
-      .finally(() => router.replace("/account/rent-payments"));
-    // Only ever react to the query param changing, not to every toast/router update.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
 
   const filteredObligations = useMemo(
     () => (typeFilter === "ALL" ? obligations : obligations.filter((o) => o.obligationType === typeFilter)),
@@ -237,8 +171,6 @@ export function RentalPaymentsManager() {
               obligation={nextObligation}
               onPay={() => setPayingObligation(nextObligation)}
               onViewInstructions={() => setInstructionsObligation(nextObligation)}
-              onPaySecurely={() => handlePaySecurely(nextObligation)}
-              payingSecurely={startingSessionForId === nextObligation.id}
             />
           ) : (
             <Card>
@@ -263,8 +195,6 @@ export function RentalPaymentsManager() {
                   obligation={o}
                   onPay={() => setPayingObligation(o)}
                   onViewInstructions={() => setInstructionsObligation(o)}
-                  onPaySecurely={() => handlePaySecurely(o)}
-                  payingSecurely={startingSessionForId === o.id}
                 />
               ))}
             </div>
@@ -319,7 +249,6 @@ export function RentalPaymentsManager() {
                         <td className="px-5 py-3 capitalize text-slate-600 dark:text-slate-300">{obligation.displayLabel}</td>
                         <td className="px-5 py-3 font-semibold text-primary-900 dark:text-white">
                           {formatMoney(record.declaredAmount, record.declaredCurrency)}
-                          <CardPaymentOutcomeTag record={record} />
                         </td>
                         <td className="px-5 py-3">
                           <Badge tone={rentalPaymentStatusTone[record.status] ?? "neutral"}>
@@ -430,33 +359,13 @@ function ObligationCard({
   obligation,
   onPay,
   onViewInstructions,
-  onPaySecurely,
-  payingSecurely,
 }: {
   obligation: RentalPaymentObligation;
   onPay: () => void;
   onViewInstructions: () => void;
-  onPaySecurely: () => void;
-  payingSecurely: boolean;
 }) {
   // Owed in full or in part -- the renter can record a direct payment they made.
   const canMarkPaid = ["UPCOMING", "DUE", "OVERDUE", "REVERSED", "PARTIALLY_PAID"].includes(obligation.status);
-  // Rent is paid directly to the host -- a Zoiko card checkout only exists
-  // where the backend has that rail switched on (off by default).
-  const capabilities = usePaymentCapabilities();
-  const cardCheckoutEnabled = capabilities?.rent_card_checkout_enabled === true;
-  // A tenant who closed the Stripe tab mid-checkout must be able to get back
-  // to it -- the backend hands back the same open checkout (never a second
-  // one), or replaces it if it expired.
-  const sessionInProgress = obligation.status === "PAYMENT_SESSION_STARTED";
-  // Owed again after the earlier payment went back -- payable online (the
-  // backend accepts REVERSED); mark-paid stays limited to canMarkPaid.
-  const dueAgain = obligation.status === "REVERSED";
-  // Part of it was received (or part of a card payment refunded) -- only the
-  // remainder is charged online. A shared (joint) obligation's remainder is
-  // settled per payer, so the backend refuses it and it isn't offered here.
-  const partlyPaid = obligation.status === "PARTIALLY_PAID";
-  const canPayRemainder = partlyPaid && obligation.payerAllocations.length === 0;
   const showRemaining = obligation.outstandingAmount > 0 && obligation.outstandingAmount < obligation.amount;
 
   // ZR-PAY-LINK-003 Section 3.1: self-contained per-card fetch, same shape
@@ -504,6 +413,12 @@ function ObligationCard({
                 </dd>
               </div>
             )}
+            {obligation.paymentReference && (
+              <div>
+                <dt className="text-xs text-slate-400">Reference to quote</dt>
+                <dd className="font-mono text-xs text-slate-600 dark:text-slate-300">{obligation.paymentReference}</dd>
+              </div>
+            )}
             <div>
               <dt className="text-xs text-slate-400">Due date</dt>
               <dd className="flex items-center gap-1 text-slate-600 dark:text-slate-300">
@@ -514,13 +429,8 @@ function ObligationCard({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button size="sm" variant="outline" onClick={onViewInstructions}>
-            View payment instructions
+            How to pay
           </Button>
-          {cardCheckoutEnabled && (canMarkPaid || sessionInProgress || dueAgain || canPayRemainder) && (
-            <Button size="sm" variant="outline" loading={payingSecurely} disabled={suspended} onClick={onPaySecurely}>
-              {sessionInProgress ? "Resume secure payment" : canPayRemainder ? "Pay the remainder securely" : "Continue to secure payment"}
-            </Button>
-          )}
           {canMarkPaid && (
             <Button size="sm" disabled={suspended} onClick={onPay}>
               I have made this payment
@@ -535,7 +445,10 @@ function ObligationCard({
           contact your landlord or agent before sending money.
         </p>
       )}
-      <p className="mt-3 text-xs text-slate-400">{DIRECT_RENT_PAYMENT_WORDING}</p>
+      <p className="mt-3 text-xs text-slate-400">
+        {obligation.payeeType !== "LANDLORD_AGENT" && <>Paid to: {payeeTypeLabel[obligation.payeeType]}. </>}
+        {DIRECT_RENT_PAYMENT_WORDING} Zoiko Rooms platform fee: {formatMoney(0, obligation.currency)}.
+      </p>
     </Card>
   );
 }
@@ -584,24 +497,6 @@ export function SingleObligationPaymentCard({ obligation, onChanged }: { obligat
   const { toast, showToast } = useToast();
   const [paying, setPaying] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);
-  const [startingSession, setStartingSession] = useState(false);
-
-  async function handlePaySecurely() {
-    setStartingSession(true);
-    try {
-      const result = await startRentalPaymentSession(obligation.id);
-      if (result.checkoutUrl) {
-        window.location.href = result.checkoutUrl;
-        return;
-      }
-      showToast("Payment confirmed.");
-      onChanged();
-    } catch (err) {
-      showToast(errorMessage(err, "Could not start secure payment."), "error");
-    } finally {
-      setStartingSession(false);
-    }
-  }
 
   return (
     <>
@@ -609,8 +504,6 @@ export function SingleObligationPaymentCard({ obligation, onChanged }: { obligat
         obligation={obligation}
         onPay={() => setPaying(true)}
         onViewInstructions={() => setShowInstructions(true)}
-        onPaySecurely={handlePaySecurely}
-        payingSecurely={startingSession}
       />
       <PayObligationModal
         obligation={paying ? obligation : null}
@@ -627,123 +520,127 @@ export function SingleObligationPaymentCard({ obligation, onChanged }: { obligat
   );
 }
 
+/** ZR-SUBLET-PAY-003 Screens C/D/E: who receives this payment and why, the
+ *  amount (Zoiko fee 0), the reference to quote, and the payee's own bank
+ *  account or UPI ID -- the renter pays them directly. */
 function InstructionsModal({ obligation, onClose }: { obligation: RentalPaymentObligation | null; onClose: () => void }) {
   const { toast, showToast } = useToast();
-  const [instruction, setInstruction] = useState<RentalPaymentInstruction | null>(null);
+  const [view, setView] = useState<HowToPay | null>(null);
   const [loading, setLoading] = useState(false);
-  // The server's own reason -- e.g. no instructions set up yet, or the
-  // recipient's PAYMENT_RECEIPT authority isn't verified (ZR-PAY-CFG-001 PAY-CFG-06).
-  const [unavailableReason, setUnavailableReason] = useState("");
+  const [error, setError] = useState("");
 
   useEffect(() => {
     if (!obligation) return;
     setLoading(true);
-    setUnavailableReason("");
-    getMyRentalPaymentInstructions(obligation.id)
-      .then(setInstruction)
-      .catch((err) =>
-        setUnavailableReason(errorMessage(err, "The recipient has not set up payment instructions yet.")),
-      )
+    setError("");
+    setView(null);
+    getHowToPay(obligation.id)
+      .then(setView)
+      .catch((err) => setError(errorMessage(err, "Payment details aren't available yet.")))
       .finally(() => setLoading(false));
   }, [obligation]);
 
-  async function copyReference() {
-    if (!instruction?.referenceFormat) return;
-    try {
-      await navigator.clipboard.writeText(instruction.referenceFormat);
-      showToast("Copied.");
-    } catch {
-      showToast("Could not copy to clipboard.", "error");
-    }
-  }
-
-  function formattedBankDetails(): string {
-    if (!instruction?.bankDetails) return "";
-    const schema = resolveBankFieldSchema(instruction.countryCode, instruction.method);
-    return Object.entries(instruction.bankDetails)
-      .map(([key, value]) => {
-        const label = schema.fields.find((f) => f.key === key)?.label ?? key;
-        return `${label}: ${value}`;
-      })
-      .join("\n");
-  }
-
-  async function copyPaymentDetails() {
-    const text = formattedBankDetails();
-    if (!text) return;
+  async function copy(text: string, what: string) {
     try {
       await navigator.clipboard.writeText(text);
-      showToast("Payment details copied.");
+      showToast(`${what} copied.`);
     } catch {
       showToast("Could not copy to clipboard.", "error");
     }
   }
 
+  const schema = view?.details ? resolveBankFieldSchema(view.countryCode, view.method as RentalPaymentMethodCategory) : null;
+  const detailRows = view?.details
+    ? Object.entries(view.details).map(([key, value]) => ({ key, value, label: schema?.fields.find((f) => f.key === key)?.label ?? key }))
+    : [];
+
   return (
-    <Modal open={Boolean(obligation)} onClose={onClose} title="Payment instructions">
+    <Modal open={Boolean(obligation)} onClose={onClose} title="How to pay">
       {loading ? (
         <Loader label="Loading" />
-      ) : unavailableReason ? (
-        <EmptyState
-          message={`${unavailableReason.replace(/\.$/, "")}. Please don't send any payment until instructions are available here.`}
-        />
-      ) : instruction ? (
+      ) : error ? (
+        <EmptyState message={`${error.replace(/\.$/, "")}. Please don't send any payment until details are available here.`} />
+      ) : view ? (
         <div className="space-y-3 text-sm">
-          <Row label="Recipient" value={instruction.recipientName} />
-          <Row label="Method" value={METHOD_LABELS[instruction.method] ?? instruction.method} />
-          {instruction.method === "CASH" && (
-            <p className="rounded-xl bg-slate-50 px-4 py-2.5 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-              Pay your host in person -- see the notes below for where and when.
+          <div className="rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800">
+            <span className="block text-xs text-slate-400">Pay to</span>
+            <span className="font-semibold text-primary-900 dark:text-white">{view.payee.name}</span>
+            <span className="ml-2 text-xs text-slate-500">{payeeTypeLabel[view.payee.type] ?? ""}</span>
+            {view.payee.why && <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Why this payee? {view.payee.why}</p>}
+          </div>
+          <Row label="Payment" value={view.label} />
+          <Row label="Amount" value={formatMoney(view.outstanding, view.currency)} />
+          <Row label="Due date" value={formatDate(view.dueDate)} />
+          {view.periodStart && view.periodEnd && (
+            <Row label="Period" value={`${formatDate(view.periodStart)} – ${formatDate(view.periodEnd)}`} />
+          )}
+          <Row label="Zoiko Rooms platform fee" value={formatMoney(view.platformFee, view.currency)} />
+          <Row label="Total to pay" value={formatMoney(view.total, view.currency)} />
+          <Row label="Accepted methods" value={view.acceptedMethods.map((m) => METHOD_LABELS[m] ?? m).join(", ")} />
+
+          {view.blockedReason ? (
+            <p role="alert" className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> {view.blockedReason}
             </p>
-          )}
-          {instruction.referenceFormat && (
-            <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-4 py-2.5 dark:bg-slate-800">
-              <div>
-                <span className="block text-xs text-slate-400">Payment reference</span>
-                <span className="font-semibold text-slate-700 dark:text-slate-200">{instruction.referenceFormat}</span>
-              </div>
-              <button onClick={copyReference} className="text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300">
-                Copy
-              </button>
-            </div>
-          )}
-          {instruction.bankDetails && Object.keys(instruction.bankDetails).length > 0 && (
-            <div className="rounded-xl bg-primary-50 px-4 py-3 dark:bg-primary-500/10">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold uppercase tracking-wide text-primary-700 dark:text-primary-300">
-                  Payment details
-                </span>
-                <button
-                  onClick={copyPaymentDetails}
-                  aria-label="Copy payment details"
-                  className="text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300"
-                >
-                  Copy
+          ) : (
+            <>
+              <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-4 py-2.5 dark:bg-slate-800">
+                <div>
+                  <span className="block text-xs text-slate-400">Reference to quote on your transfer</span>
+                  <span className="font-mono font-semibold text-slate-700 dark:text-slate-200">{view.paymentReference}</span>
+                </div>
+                <button onClick={() => copy(view.paymentReference, "Reference")}
+                        className="flex items-center gap-1 text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300">
+                  <Copy className="h-3.5 w-3.5" aria-hidden="true" /> Copy
                 </button>
               </div>
-              <div className="mt-1.5 space-y-1 text-sm font-medium text-slate-800 dark:text-slate-100">
-                {Object.entries(instruction.bankDetails).map(([key, value]) => {
-                  const schema = resolveBankFieldSchema(instruction.countryCode, instruction.method);
-                  const label = schema.fields.find((f) => f.key === key)?.label ?? key;
-                  return (
-                    <p key={key}>
-                      <span className="text-slate-500 dark:text-slate-400">{label}:</span> {value}
-                    </p>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {instruction.additionalInstructions && (
-            <div className="rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800">
-              <span className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Notes</span>
-              <p className="mt-1.5 whitespace-pre-wrap text-sm text-slate-700 dark:text-slate-200">
-                {instruction.additionalInstructions}
-              </p>
-            </div>
+              {view.custodian ? (
+                <div className="rounded-xl bg-primary-50 px-4 py-3 dark:bg-primary-500/10">
+                  <span className="text-xs font-bold uppercase tracking-wide text-primary-700 dark:text-primary-300">Deposit protection scheme</span>
+                  <p className="mt-1 font-semibold">{view.custodian.name}</p>
+                  {view.custodian.reference && <p className="text-xs">Reference: {view.custodian.reference}</p>}
+                  <p className="mt-1 whitespace-pre-wrap">{view.custodian.instructions}</p>
+                </div>
+              ) : view.method === "CASH" || (!view.details && view.acceptedMethods.includes("CASH")) ? (
+                <p className="rounded-xl bg-slate-50 px-4 py-2.5 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  Pay {view.payee.name} in cash and ask them to confirm it here.
+                </p>
+              ) : null}
+              {detailRows.length > 0 && (
+                <div className="rounded-xl bg-primary-50 px-4 py-3 dark:bg-primary-500/10">
+                  <span className="text-xs font-bold uppercase tracking-wide text-primary-700 dark:text-primary-300">
+                    {view.method === "UPI" ? "UPI ID" : "Bank account"}
+                  </span>
+                  <div className="mt-1.5 space-y-1.5">
+                    {detailRows.map((row) => (
+                      <div key={row.key} className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                          <span className="text-slate-500 dark:text-slate-400">{row.label}:</span> {row.value}
+                        </p>
+                        <button onClick={() => copy(row.value, row.label)} aria-label={`Copy ${row.label}`}
+                                className="flex items-center gap-1 text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300">
+                          <Copy className="h-3.5 w-3.5" aria-hidden="true" /> Copy
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {view.additionalInstructions && (
+                <div className="rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800">
+                  <span className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Notes</span>
+                  <p className="mt-1.5 whitespace-pre-wrap text-sm text-slate-700 dark:text-slate-200">{view.additionalInstructions}</p>
+                </div>
+              )}
+              {view.setupIncomplete && (
+                <p className="rounded-xl bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">
+                  Payment setup incomplete -- the payee hasn&apos;t added confirmed bank or UPI details yet.
+                </p>
+              )}
+            </>
           )}
           <p className="flex items-center gap-1.5 pt-2 text-xs font-semibold text-primary-700 dark:text-primary-300">
-            <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> Confirm the recipient and details before sending funds.
+            <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> {view.zoikoNotice} Check the payee before sending money.
           </p>
         </div>
       ) : null}
@@ -997,7 +894,26 @@ function RecordDetailModal({
         )}
         <Row label="Marked paid at" value={formatDateTime(record.createdAt)} />
         {record.confirmedAt && <Row label="Confirmed at" value={formatDateTime(record.confirmedAt)} />}
-        <CardPaymentOutcome record={record} viewer="tenant" />
+        {(record.status === "CONFIRMED" || record.status === "PARTIALLY_PAID") && (
+          <button
+            type="button"
+            onClick={() =>
+              downloadRentalPaymentReceipt(record.id)
+                .then((blob) => {
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `receipt-${record.id}.pdf`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                })
+                .catch((err) => setError(errorMessage(err, "Could not download the receipt.")))
+            }
+            className="flex items-center gap-1.5 text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden="true" /> Download receipt
+          </button>
+        )}
         <RentalPaymentTimeline recordId={record.id} />
         <div>
           <span className="mb-1 block text-xs text-slate-400">Proof of payment</span>

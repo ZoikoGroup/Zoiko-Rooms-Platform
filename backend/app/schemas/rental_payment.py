@@ -69,13 +69,6 @@ class RentalPaymentRecordRead(CamelModel):
     confirmed_by_party_id: int | None
     confirmed_amount: float | None
     provider_reference: str
-    # A card payment refunded from the host's own Stripe account, and a
-    # tenant's card chargeback on it as reported by Stripe -- see
-    # models/rental_payment.py:RentalPaymentRecord.
-    refunded_amount: float | None = None
-    provider_refund_id: str = ""
-    provider_dispute_id: str = ""
-    provider_dispute_status: str = ""
     confirmed_at: datetime | None
     created_at: datetime
     disputes: list[RentalPaymentDisputeRead] = []
@@ -115,6 +108,18 @@ class RentalPaymentObligationRead(CamelModel):
     waived_reason: str
     waived_at: datetime | None
     created_at: datetime
+    # ZR-SUBLET-PAY-003 Section 11.1 ledger fields.
+    payee_type: str = "LANDLORD_AGENT"
+    payee_basis: str = ""
+    payee_authority_ref: str = ""
+    period_start: date | None = None
+    period_end: date | None = None
+    arrangement_id: int | None = None
+    arrangement_version: int | None = None
+    agreement_version_no: int | None = None
+    payment_reference: str = ""
+    platform_fee_amount: float = 0.0
+    version: int = 1
     records: list[RentalPaymentRecordRead] = []
     # ZR-PAY-LINK-003 Section 15/Wireframe PAY-17 -- empty for the ordinary
     # single-payer obligation (the default).

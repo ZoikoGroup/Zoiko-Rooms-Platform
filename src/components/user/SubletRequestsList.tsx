@@ -1,5 +1,6 @@
 "use client";
 
+import { SubletPaymentsPanel } from "@/components/user/SubletPaymentsPanel";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { AlertTriangle, CalendarClock, Download, Repeat } from "lucide-react";
@@ -242,6 +243,7 @@ export function SubletRequestsList() {
                 legal or contractual requirements.
               </p>
             )}
+            {request.status === "approved" && request.newAgreementId && <SubletPaymentsPanel subletId={request.id} />}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Badge tone={subletRequestStatusTone[request.status] ?? "neutral"}>

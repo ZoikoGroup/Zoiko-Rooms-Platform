@@ -41,6 +41,10 @@ class RentalPaymentReturn(Base):
     external_reference: Mapped[str] = mapped_column(String(255), default="")
     returned_date: Mapped[date] = mapped_column(Date, nullable=False)
     note: Mapped[str] = mapped_column(String(2000), default="")
+    # ZR-SUBLET-PAY-003 Section 15: the payment this return gives money back
+    # on -- a separate, linked entry; the original payment is never edited.
+    obligation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("rental_payment_obligations.id", ondelete="SET NULL"), nullable=True, index=True)
     tenant_responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tenant_dispute_details: Mapped[str] = mapped_column(String(2000), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

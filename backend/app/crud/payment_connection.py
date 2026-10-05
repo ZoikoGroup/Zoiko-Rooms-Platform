@@ -20,7 +20,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from app.models.authority_record import AuthorityRecord
-from app.crud.rental_payment_provider_account import get_charge_ready_provider_account_for_party
 from app.models.room import Room
 from app.models.user_account import UserAccount
 from app.schemas.payment_connection import PaymentConnectionRead
@@ -31,7 +30,6 @@ PAYMENT_CONNECTION_STATES = (
 
 
 def get_payment_connection_for_room(db: Session, room: Room) -> PaymentConnectionRead:
-    from app.crud.market_policy import DEFAULT_JURISDICTION, resolve_available_payment_methods
     from app.crud.rental_payment import get_active_rental_payment_instruction, list_rental_payment_instructions_for_party
     from app.crud.rental_payment import resolve_rent_recipient_party_id
 
@@ -43,50 +41,21 @@ def get_payment_connection_for_room(db: Session, room: Room) -> PaymentConnectio
     )
     recipient_party_id = resolve_rent_recipient_party_id(db, room)
 
-    # ZR-PAY-LINK-003 Section 22/AC-12: a charge-ready provider account only
-    # counts as this room's destination when the online rail is actually
-    # permitted in this room's own jurisdiction -- same
-    # resolve_available_payment_methods gate
-    # crud/external_payment_session.py:create_session independently
-    # enforces before actually letting a session start; this is what keeps
-    # the connection VIEW honest about it too, rather than showing ACTIVE
-    # for a rail that would then 409 the moment a tenant tried to use it.
-    jurisdiction_code = (room.property.jurisdiction_code if room.property else None) or DEFAULT_JURISDICTION
-    # Rent is paid directly to the host unless the card rent rail is switched
-    # on (settings.rent_card_checkout_enabled) -- a Stripe account alone must
-    # never make a room look payment-ready while that rail is off.
-    from app.services.payment_boundary import capability_enabled
-
-    online_rail_permitted = capability_enabled("rent_card_checkout_enabled") and (
-        "CARD" in resolve_available_payment_methods(db, jurisdiction_code)
-    )
-
-    # ZR-PAY-LINK-003 Section 6: a charge-ready online provider account is
-    # checked FIRST and, when present, wins over the direct-instruction
-    # destination below -- a recipient who has completed Stripe Connect
-    # onboarding is unambiguously "ready," whereas a direct instruction can
-    # sit at PENDING_VERIFICATION/PENDING_REVIEW indefinitely. Either rail
-    # alone is enough for ACTIVE (Section 6: 'Manual bank transfer and
-    # provider-hosted digital payment are two rails over the same
-    # relationship').
-    provider_account = None
+    # Rent is paid directly to the recipient by bank transfer, UPI or cash
+    # (no card / payment-provider rail): the room is payment-ready once the
+    # recipient's own payment instructions are active.
     destination = None
     if recipient_party_id is not None:
-        if online_rail_permitted:
-            provider_account = get_charge_ready_provider_account_for_party(db, recipient_party_id)
-        if provider_account is None:
-            destination = get_active_rental_payment_instruction(db, recipient_party_id)
-            if destination is None:
-                candidates = list_rental_payment_instructions_for_party(db, recipient_party_id)
-                latest = candidates[0] if candidates else None
-                if latest is not None and latest.status in ("PENDING_VERIFICATION", "PENDING_REVIEW", "REJECTED"):
-                    destination = latest
+        destination = get_active_rental_payment_instruction(db, recipient_party_id)
+        if destination is None:
+            candidates = list_rental_payment_instructions_for_party(db, recipient_party_id)
+            latest = candidates[0] if candidates else None
+            if latest is not None and latest.status in ("PENDING_VERIFICATION", "PENDING_REVIEW", "REJECTED"):
+                destination = latest
 
-    state = _derive_state(authority, provider_account, destination)
+    state = _derive_state(authority, destination)
 
-    if provider_account is not None:
-        destination_method, destination_status, destination_masked = "ONLINE_PROVIDER", "COMPLETE", None
-    elif destination is not None:
+    if destination is not None:
         destination_method, destination_status = destination.method, destination.status
         destination_masked = f"******{destination.account_identifier_last4}"
     else:
@@ -116,7 +85,7 @@ def get_payment_connection_for_room_owned_by(db: Session, user: UserAccount, roo
     return get_payment_connection_for_room(db, room)
 
 
-def _derive_state(authority, provider_account, destination) -> str:
+def _derive_state(authority, destination) -> str:
     if authority is None:
         return "DRAFT"
     # Listing authority still being checked by an admin.
@@ -130,8 +99,6 @@ def _derive_state(authority, provider_account, destination) -> str:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at is not None and expires_at <= datetime.now(timezone.utc):
         return "SUSPENDED"
-    if provider_account is not None:
-        return "ACTIVE"
     if destination is None:
         return "RECIPIENT_SETUP_REQUIRED"
     if destination.status == "ACTIVE":

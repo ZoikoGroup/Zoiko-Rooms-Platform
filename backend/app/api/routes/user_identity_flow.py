@@ -1,22 +1,23 @@
-"""ZR-IDENTITY-001 Section 8.3 -- the person's identity verification flow:
-profile + details, country policy, sessions (create/reuse, document,
-submit, alternative, resume/phone handoff) and the provider webhook.
-Every status returned is server-authoritative."""
+"""ZR-IDENTITY-001 Section 8.3 / ZR-IDV-ADR-001 -- the person's identity
+verification flow: profile + details, country policy, sessions (create /
+reuse, attest, capture photos, complete, refresh, restart, resume / phone
+handoff) and Veriff's webhooks. The document and selfie are photographed in
+Zoiko's own screens and each photo is relayed straight to Veriff (never
+stored); Veriff decides and no person at Zoiko reviews it. Every status
+returned is server-authoritative."""
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.core.correlation import get_correlation_id
-from app.core.identity_uploads import save_identity_document
-from app.crud import evidence_vault as evidence_vault_crud
 from app.db.session import get_db
 from app.models.identity_profile import IdentityProfile
 from app.models.identity_verification import IdentityVerification
 from app.models.party import Party
 from app.models.user_account import UserAccount
 from app.schemas.identity import (
-    IdentityAlternativeRequest,
     IdentityCountryRead,
     IdentityDetailsUpdate,
     IdentityHandoffClaim,
@@ -32,19 +33,18 @@ from app.services.identity import service as identity_service
 from app.services.identity.reason_codes import describe
 
 router = APIRouter(prefix="/api/users/identity", tags=["user-identity-flow"], dependencies=[Depends(get_current_user)])
-webhook_router = APIRouter(prefix="/api/webhooks/identity", tags=["identity-webhooks"])
 
 
-def session_read(session: IdentityVerification, *, include_launch_url: bool = False) -> dict:
+def session_read(session: IdentityVerification) -> dict:
     info = describe(session.reason_codes or [])
-    url = identity_service.launch_url(session)
     restartable = session.session_state == "FAILED" or (
         session.session_state in identity_service.OPEN_SESSION_STATES
         and bool(set(session.reason_codes or []) & set(identity_service._RESTARTABLE))
     )
     return {
-        "launch_available": url is not None,
-        "launch_url": url if include_launch_url else None,
+        "capture_available": identity_service.capture_open(session),
+        "captured": identity_service.captured_contexts(session),
+        "back_required": identity_service.back_side_required(session.document_type),
         "can_restart": restartable and "AGE_REQUIREMENT_NOT_MET" not in (session.reason_codes or []),
         "id": session.id,
         "state": session.session_state,
@@ -147,33 +147,6 @@ def get_identity_session(session_id: int, user: UserAccount = Depends(get_curren
     return session_read(identity_service.get_session_for_user(db, user, session_id))
 
 
-@router.post("/verifications/{session_id}/document", response_model=IdentitySessionRead)
-async def post_identity_document(
-    session_id: int, request: Request,
-    document_type: str = Form(...), document_number: str = Form(""), file: UploadFile = File(...),
-    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
-):
-    session = identity_service.get_session_for_user(db, user, session_id)
-    stored_filename, original_filename, content_type, file_size, sha256_hash = await save_identity_document(file)
-    duplicate = evidence_vault_crud.find_duplicate_by_hash(db, sha256_hash, exclude_uploaded_by_user_id=user.id)
-    duplicate_of = (
-        int(duplicate.related_entity_id)
-        if duplicate and duplicate.related_entity_type == "identity_verification" else None
-    )
-    session = identity_service.attach_document(
-        db, user, session, document_type=document_type, document_number=document_number,
-        stored_filename=stored_filename, original_filename=original_filename, content_type=content_type,
-        file_size=file_size, duplicate_of_verification_id=duplicate_of, correlation_id=get_correlation_id(request),
-    )
-    evidence_vault_crud.register_evidence_artifact(
-        db, related_entity_type="identity_verification", related_entity_id=str(session.id),
-        stored_filename=stored_filename, sha256_hash=sha256_hash, original_filename=original_filename,
-        content_type=content_type, file_size=file_size, uploaded_by_user_id=user.id,
-    )
-    db.commit()
-    return session_read(session)
-
-
 @router.post("/verifications/{session_id}/submit", response_model=IdentitySessionRead)
 def post_identity_submit(
     session_id: int, payload: IdentitySubmit, request: Request,
@@ -182,17 +155,33 @@ def post_identity_submit(
     session = identity_service.get_session_for_user(db, user, session_id)
     return session_read(identity_service.submit(
         db, user, session, attested=payload.attested, correlation_id=get_correlation_id(request),
-    ), include_launch_url=True)
+    ))
 
 
-@router.post("/verifications/{session_id}/launch", response_model=IdentitySessionRead)
-def post_identity_launch(session_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
-    """ZR-IDV-ADR-001 step 4: the provider's capture URL for this person's own
-    open session (to resume, or after a resubmission request)."""
+@router.post("/verifications/{session_id}/capture", response_model=IdentitySessionRead)
+async def post_identity_capture(
+    session_id: int, request: Request,
+    context: str = Form(...), document_type: str = Form(""), file: UploadFile = File(...),
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """One photo (document-front / document-back / face) taken in Zoiko's
+    capture screen. It goes straight to Veriff -- never to disk or the
+    database."""
     session = identity_service.get_session_for_user(db, user, session_id)
-    if identity_service.launch_url(session) is None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "This verification can't be continued -- start again")
-    return session_read(session, include_launch_url=True)
+    content = await file.read(10 * 1024 * 1024 + 1)
+    return session_read(identity_service.capture_photo(
+        db, user, session, context=context, content=content, document_type=document_type,
+        correlation_id=get_correlation_id(request),
+    ))
+
+
+@router.post("/verifications/{session_id}/complete", response_model=IdentitySessionRead)
+def post_identity_complete(
+    session_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """All photos taken: Veriff starts deciding (result by webhook / decision API)."""
+    session = identity_service.get_session_for_user(db, user, session_id)
+    return session_read(identity_service.complete_capture(db, user, session, correlation_id=get_correlation_id(request)))
 
 
 @router.post("/verifications/{session_id}/refresh", response_model=IdentitySessionRead)
@@ -212,18 +201,6 @@ def post_identity_restart(
     return session_read(identity_service.restart(db, user, session, correlation_id=get_correlation_id(request)))
 
 
-@router.post("/verifications/{session_id}/alternative", response_model=IdentitySessionRead)
-def post_identity_alternative(
-    session_id: int, payload: IdentityAlternativeRequest, request: Request,
-    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
-):
-    session = identity_service.get_session_for_user(db, user, session_id)
-    return session_read(identity_service.request_alternative(
-        db, user, session, reason_code=payload.reason_code, note=payload.note,
-        correlation_id=get_correlation_id(request),
-    ))
-
-
 @router.post("/verifications/{session_id}/resume", response_model=IdentityHandoffRead)
 def post_identity_resume(session_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     """A fresh short-lived token to continue this session on another device."""
@@ -239,40 +216,73 @@ def post_identity_handoff_claim(
     return session_read(identity_service.claim_handoff_token(db, user, payload.token))
 
 
-@webhook_router.post("/{provider_code}")
-async def post_identity_provider_webhook(provider_code: str, request: Request, db: Session = Depends(get_db)):
-    body = await request.body()
-    return identity_service.process_webhook(
-        db, provider_code, dict(request.headers), body, correlation_id=get_correlation_id(request),
+def _client_ip(request: Request) -> str:
+    """The webhook caller's address for the optional IP allow-list. Behind
+    N trusted proxies it's the N-th address from the right of
+    X-Forwarded-For (the ones those proxies appended), so a caller can't
+    choose it by sending the header themselves."""
+    hops = settings.veriff_webhook_trusted_proxy_hops
+    if hops > 0:
+        chain = [part.strip() for part in request.headers.get("x-forwarded-for", "").split(",") if part.strip()]
+        if len(chain) >= hops:
+            return chain[-hops]
+        return ""
+    return request.client.host if request.client else ""
+
+
+def _process_events_later(app, event_ids: list[int], correlation_id: str) -> None:
+    """Runs after the acknowledgement is sent (ADR Section 8: authenticate,
+    persist, acknowledge, then process). Uses its own database session; an
+    event that fails here stays "accepted" for the scheduled sweeper."""
+    session_factory = app.dependency_overrides.get(get_db, get_db)
+    sessions = session_factory()
+    db = next(sessions)
+    try:
+        identity_service.process_webhook_events(db, event_ids, correlation_id=correlation_id)
+    finally:
+        sessions.close()
+
+
+async def _ingest(request: Request, background: BackgroundTasks, db: Session, provider_code: str, kind: str) -> dict:
+    body = await request.body()  # the exact raw bytes, for the HMAC check
+    correlation_id = get_correlation_id(request)
+    result = identity_service.ingest_webhook(
+        db, provider_code, dict(request.headers), body, kind=kind, client_ip=_client_ip(request),
+        correlation_id=correlation_id,
     )
+    event_ids = result.pop("event_ids")
+    if event_ids:
+        background.add_task(_process_events_later, request.app, event_ids, correlation_id)
+    return result
 
 
-# ZR-IDV-ADR-001 Section 10: Veriff's decision and event webhooks. The raw
-# request bytes are read untouched for the HMAC check.
+# ZR-IDV-ADR-001 Section 10: Veriff's decision and event webhooks.
 veriff_webhook_router = APIRouter(prefix="/api/v1/webhooks/veriff", tags=["identity-webhooks"])
 
 
 @veriff_webhook_router.post("/decision")
-async def post_veriff_decision(request: Request, db: Session = Depends(get_db)):
-    body = await request.body()
-    return identity_service.ingest_webhook(
-        db, "veriff", dict(request.headers), body, kind="decision", correlation_id=get_correlation_id(request),
-    )
+async def post_veriff_decision(request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
+    return await _ingest(request, background, db, "veriff", "decision")
 
 
 @veriff_webhook_router.post("/full-auto")
-async def post_veriff_full_auto(request: Request, db: Session = Depends(get_db)):
+async def post_veriff_full_auto(request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
     """Essential-plan "Full Auto" result webhook (used when VERIFF_PLAN=full_auto)."""
-    body = await request.body()
-    return identity_service.ingest_webhook(
-        db, "veriff", dict(request.headers), body, kind="full_auto", correlation_id=get_correlation_id(request),
-    )
+    return await _ingest(request, background, db, "veriff", "full_auto")
 
 
 @veriff_webhook_router.post("/events")
-async def post_veriff_events(request: Request, db: Session = Depends(get_db)):
+async def post_veriff_events(request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
     """Progress only (started / submitted) -- never a verification decision."""
-    body = await request.body()
-    return identity_service.ingest_webhook(
-        db, "veriff", dict(request.headers), body, kind="events", correlation_id=get_correlation_id(request),
-    )
+    return await _ingest(request, background, db, "veriff", "events")
+
+
+# ZR-IDV-ADR-001 Section 10 internal API contract, at the paths the ADR names.
+# Same handlers as the /api/users/identity/verifications routes above.
+v1_router = APIRouter(prefix="/api/v1/identity-verifications", tags=["user-identity-flow"],
+                      dependencies=[Depends(get_current_user)])
+v1_router.add_api_route("", post_identity_session, methods=["POST"], response_model=IdentitySessionRead,
+                        status_code=status.HTTP_201_CREATED)
+v1_router.add_api_route("/{session_id}", get_identity_session, methods=["GET"], response_model=IdentitySessionRead)
+v1_router.add_api_route("/{session_id}/restart", post_identity_restart, methods=["POST"],
+                        response_model=IdentitySessionRead, status_code=status.HTTP_201_CREATED)

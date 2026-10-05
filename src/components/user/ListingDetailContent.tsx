@@ -33,7 +33,7 @@ export function ListingDetailContent({
             <Badge tone="primary">{listing.roomType}</Badge>
           </div>
           <p className="mt-1 flex items-center gap-1.5 text-sm text-slate-500 dark:text-slate-400">
-            <MapPin className="h-4 w-4" /> {listing.location}, {listing.city}
+            <MapPin className="h-4 w-4" /> {[listing.location, listing.city].filter(Boolean).join(", ")}
           </p>
           {listing.reviewCount > 0 && (
             <div className="mt-1.5 flex items-center gap-1.5">

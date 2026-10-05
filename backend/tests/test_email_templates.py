@@ -38,7 +38,6 @@ ALL_SENDERS = [
     ("ZR-EML-ID-006", lambda: mailer.send_password_reset_email("a@x.com", "https://app/reset?t=1", 30, "Ravi")),
     ("ZR-EML-ID-003", lambda: mailer.send_payout_beneficiary_verification_code_email("a@x.com", "Ravi", "482913", 15)),
     ("ZR-EML-ID-003", lambda: mailer.send_rental_payment_instruction_verification_code_email("a@x.com", "Ravi", "482913", 15)),
-    ("ZR-EML-ID-003", lambda: mailer.send_rental_payment_provider_account_change_verification_code_email("a@x.com", "Ravi", "482913", 15)),
     ("ZR-EML-VER-001", lambda: mailer.send_identity_verification_approved_email("a@x.com", "Ravi", verification_id=7)),
     ("ZR-EML-VER-001", lambda: mailer.send_identity_verification_rejected_email("a@x.com", "Ravi", "Blurry", verification_id=7)),
     ("ZR-EML-VER-001", lambda: mailer.send_identity_verification_additional_evidence_email("a@x.com", "Ravi", "", verification_id=7)),

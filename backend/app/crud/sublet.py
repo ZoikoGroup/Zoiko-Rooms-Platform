@@ -876,6 +876,12 @@ def approve_sublet_request(
     else:
         sublet_request.decided_by_user_id = actor.id
     sublet_request.decided_at = datetime.now(timezone.utc)
+    db.flush()
+    # ZR-SUBLET-PAY-003: who receives each payment, where the deposit goes and
+    # how it's paid (bank / UPI / cash) -- derived from the approval.
+    from app.services.sublet_payments import on_sublet_approved
+
+    on_sublet_approved(db, sublet_request)
 
     _notify_sublet_requester(db, requester_guest_id, sublet_request.id, approved=True, notes=notes)
     _notify_sublet_host(db, sublet_request.current_occupancy, sublet_request.id, approved=True)

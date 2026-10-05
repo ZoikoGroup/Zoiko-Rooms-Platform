@@ -67,10 +67,19 @@ def booking_money_summary(db: Session, occupancy: Occupancy) -> dict:
 
     currency = obligations[0].currency if obligations else ""
     recipient_party_id = obligations[0].recipient_party_id if obligations else None
+    # A sublet may route the deposit to a different payee than the rent
+    # (ZR-SUBLET-PAY-003 Section 9): the deposit is returned by whoever got it.
+    deposit_obligation = next((o for o in obligations if o.obligation_type == "DEPOSIT"), None)
+    paid_obligation = next((o for o in sorted(obligations, key=lambda o: o.obligation_type != "DEPOSIT")
+                            if _received([o]) > 0), None)
     deposit_paid = _received(obligations, obligation_type="DEPOSIT")
     total_paid = _received(obligations)
     return {
         "recipient_party_id": recipient_party_id,
+        "deposit_recipient_party_id": deposit_obligation.recipient_party_id if deposit_obligation else recipient_party_id,
+        "deposit_obligation_id": deposit_obligation.id if deposit_obligation else None,
+        "paid_obligation_id": paid_obligation.id if paid_obligation else None,
+        "paid_recipient_party_ids": sorted({o.recipient_party_id for o in obligations if _received([o]) > 0}),
         "currency": currency,
         "deposit_paid": deposit_paid,
         "total_paid": total_paid,
@@ -114,8 +123,12 @@ def record_return(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"paymentMethodCategory must be one of {RETURN_METHODS}")
 
     summary = booking_money_summary(db, occupancy)
-    if summary["recipient_party_id"] != party.id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the host who received this booking's payments can record this")
+    allowed = (
+        {summary["deposit_recipient_party_id"]} if kind == "DEPOSIT_RETURN"
+        else set(summary["paid_recipient_party_ids"]) or {summary["recipient_party_id"]}
+    )
+    if party.id not in allowed:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the payee who received this money can record its return")
 
     amount = _round2(amount)
     deductions_amount = _round2(deductions_amount)
@@ -139,6 +152,7 @@ def record_return(
         deductions_amount=deductions_amount, deductions_reason=deductions_reason.strip(),
         payment_method_category=payment_method_category, external_reference=external_reference.strip(),
         returned_date=returned_date, note=note.strip(),
+        obligation_id=summary["deposit_obligation_id"] if kind == "DEPOSIT_RETURN" else summary["paid_obligation_id"],
     )
     db.add(record)
     db.commit()
