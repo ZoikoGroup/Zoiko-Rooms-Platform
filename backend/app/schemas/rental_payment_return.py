@@ -9,6 +9,7 @@ from app.schemas.rental_payment import MAX_MONEY_AMOUNT
 class RentalPaymentReturnRead(CamelModel):
     id: int
     occupancy_id: int
+    obligation_id: int | None = None
     kind: str
     status: str
     tenant_guest_id: str
@@ -46,6 +47,7 @@ class RentalPaymentReturnCandidateRead(CamelModel):
     some of it back."""
 
     occupancy_id: int
+    obligation_id: int | None = None
     kind: str
     listing_name: str
     occupancy_status: str

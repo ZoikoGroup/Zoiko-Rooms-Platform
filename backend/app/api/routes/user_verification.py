@@ -139,10 +139,12 @@ def get_my_verification_status(user: UserAccount = Depends(get_current_user), db
         if authority_record:
             authority_status = "verified"
         else:
+            from app.services.authority_service import room_status
+
             latest_authority_submission = db.scalar(
                 select(AuthorityRecord).where(AuthorityRecord.room_id == room_id).order_by(AuthorityRecord.id.desc())
             )
-            authority_status = (
+            authority_status = room_status(db, room_id) or (
                 effective_verification_status(latest_authority_submission, now) if latest_authority_submission else "not_submitted"
             )
         authority_to_list_items.append(

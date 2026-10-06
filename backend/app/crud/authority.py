@@ -26,7 +26,17 @@ def get_authority_record(db: Session, authority_id: int) -> AuthorityRecord | No
     return db.get(AuthorityRecord, authority_id)
 
 
-def get_valid_authority_for_room(db: Session, room_id: int) -> AuthorityRecord | None:
+def get_valid_authority_for_room(db: Session, room_id: int):
+    """The authority gate. ZR-AUTHORITY-002: a current VERIFIED property-scoped
+    AuthorityVerification wins; a legacy AuthorityRecord counts only when a
+    reviewer verified it (self-declared ones were revoked by migration and are
+    no longer auto-verified). Both shapes expose id, party_id,
+    relationship_type and expires_at for callers."""
+    from app.services.authority_service import valid_for_room
+
+    current = valid_for_room(db, room_id)
+    if current is not None:
+        return current
     now = datetime.now(timezone.utc)
     return db.scalar(
         select(AuthorityRecord)
@@ -71,10 +81,10 @@ def declare_authority_record(
     room.property.owner_party_id) rather than assert_provider_access, which
     only ever recognizes an AdminUser's Membership.
 
-    Saved as 'pending' and then verified automatically straight away
-    (the ownership check above already proves this host owns the room) --
-    a super admin can still reject or revoke it through the existing
-    reject_authority_record/revoke_authority_record workflow."""
+    Saved as 'pending' for a super admin. ZR-AUTHORITY-002 Section 16:
+    owning the account that created a property is not authority, so this is
+    no longer verified automatically -- hosts use the evidence-based
+    AuthorityVerification flow (app/services/authority_service.py)."""
     if not user.party_id or room.property.owner_party_id != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only submit authority evidence for your own room")
 
@@ -95,14 +105,7 @@ def declare_authority_record(
         reason=f"user:{user.id}; room={room.id}; relationship={relationship_type}",
     )
     db.commit()
-
-    from app.crud.payment_provider import get_system_admin
-
-    try:
-        system_admin = get_system_admin(db)
-    except HTTPException:
-        return record  # no system admin configured -- stays pending for a super admin
-    return verify_authority_record(db, record, system_admin)
+    return record
 
 
 def list_authority_records_for_room_owned_by(db: Session, user: UserAccount, room: Room) -> list[AuthorityRecord]:

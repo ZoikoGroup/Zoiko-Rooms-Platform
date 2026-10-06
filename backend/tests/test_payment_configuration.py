@@ -376,17 +376,3 @@ class TestPaymentReceiptAuthority:
         assert confirmed.status == "CONFIRMED"
 
 
-# ---------------------------------------------------------------- external handoff is market-approved only
-
-class TestExternalHandoffMarketApproval:
-    def test_handoff_refused_unless_the_market_approved_it(self, client, db_session: Session, monkeypatch):
-        from app.crud import external_payment_session as session_crud
-        from app.services import policy
-
-        user, _cookies, agreement_id, _start = _create_signed_agreement(client, db_session, email_suffix="handoff1")
-        rent = _rental_payment_obligations_for(db_session, agreement_id)["RENT"]
-        guest = get_guest_for_user(db_session, user)
-        monkeypatch.setitem(policy._DEFAULTS, "payment.external_handoff_approved", lambda: False)
-        with pytest.raises(HTTPException) as exc:
-            session_crud.create_session(db_session, guest, rent, success_url="http://x", cancel_url="http://x")
-        assert "isn't available in this market" in exc.value.detail

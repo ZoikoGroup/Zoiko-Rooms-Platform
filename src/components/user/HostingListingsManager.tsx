@@ -29,8 +29,9 @@ import { ListingAgreementDetailsFields, toAgreementDetailsForm } from "@/compone
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { ListingFeeCheckout, StripeReturn } from "@/components/user/ListingFeeCheckout";
-import { PropertyVerificationManager } from "@/components/user/PropertyVerificationManager";
-import { AuthorityRecordManager } from "@/components/user/AuthorityRecordManager";
+import { PropertyVerificationWizard } from "@/components/user/PropertyVerificationWizard";
+import { getPropertyVerificationForRoom } from "@/lib/property-verification";
+import { AuthorityVerificationWizard } from "@/components/user/AuthorityVerificationWizard";
 import { RentPaymentReadiness } from "@/components/user/RentPaymentReadiness";
 
 const MAX_LISTING_IMAGES = 10;
@@ -600,19 +601,55 @@ export function HostingListingsManager() {
         open={propertyVerificationRoomId !== null}
         onClose={() => setPropertyVerificationRoomId(null)}
         title="Property verification"
+        size="xl"
       >
-        {propertyVerificationRoomId !== null && <PropertyVerificationManager roomId={propertyVerificationRoomId} />}
+        {propertyVerificationRoomId !== null && (
+          <RoomPropertyVerification roomId={propertyVerificationRoomId} onClose={() => setPropertyVerificationRoomId(null)} />
+        )}
       </Modal>
 
       <Modal
         open={authorityRecordRoomId !== null}
         onClose={() => setAuthorityRecordRoomId(null)}
         title="Authority to list"
+        size="xl"
       >
-        {authorityRecordRoomId !== null && <AuthorityRecordManager roomId={authorityRecordRoomId} />}
+        {authorityRecordRoomId !== null && (
+          <RoomAuthorityVerification roomId={authorityRecordRoomId} onClose={() => setAuthorityRecordRoomId(null)} />
+        )}
       </Modal>
 
       <Toast toast={toast} />
     </div>
   );
+}
+
+/** ZR-AUTHORITY-002: authority is verified per property (optionally scoped
+ *  to rooms), so a listing opens its room's property authority flow. */
+function RoomAuthorityVerification({ roomId, onClose }: { roomId: number; onClose: () => void }) {
+  const [target, setTarget] = useState<{ propertyId: number; propertyLabel: string } | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    getPropertyVerificationForRoom(roomId)
+      .then((r) => setTarget({ propertyId: r.propertyId, propertyLabel: r.propertyLabel }))
+      .catch((err) => setError(errorMessage(err, "Could not load this property.")));
+  }, [roomId]);
+  if (error) return <p className="text-sm text-accent-700" role="alert">{error}</p>;
+  if (!target) return <p className="text-sm text-slate-400" role="status">Loading authority verification...</p>;
+  return <AuthorityVerificationWizard propertyId={target.propertyId} propertyLabel={target.propertyLabel} onClose={onClose} />;
+}
+
+/** ZR-PROPERTY-VERIFY-001: verification is per property (it covers every
+ *  room), so a listing opens its room's property verification wizard. */
+function RoomPropertyVerification({ roomId, onClose }: { roomId: number; onClose: () => void }) {
+  const [target, setTarget] = useState<{ propertyId: number; propertyLabel: string } | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    getPropertyVerificationForRoom(roomId)
+      .then((r) => setTarget({ propertyId: r.propertyId, propertyLabel: r.propertyLabel }))
+      .catch((err) => setError(errorMessage(err, "Could not load this property's verification.")));
+  }, [roomId]);
+  if (error) return <p className="text-sm text-accent-700" role="alert">{error}</p>;
+  if (!target) return <p className="text-sm text-slate-400" role="status">Loading property verification...</p>;
+  return <PropertyVerificationWizard propertyId={target.propertyId} propertyLabel={target.propertyLabel} onClose={onClose} />;
 }

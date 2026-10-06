@@ -51,7 +51,17 @@ def get_property_verification_or_404(db: Session, verification_id: int) -> Prope
     return record
 
 
-def get_valid_property_verification_for_room(db: Session, room_id: int) -> PropertyVerification | None:
+def get_valid_property_verification_for_room(db: Session, room_id: int):
+    """The publish / status gate. ZR-PROPERTY-VERIFY-001: a property-level
+    verification (services/property_location_service.py) covers every room
+    of the property; older per-room records still count until they lapse."""
+    from app.services.property_location_service import valid_for_property
+
+    room = db.get(Room, room_id)
+    if room is not None:
+        property_level = valid_for_property(db, room.property_id)
+        if property_level is not None:
+            return property_level
     verify_due_property_verifications(db, room_id=room_id)
     now = datetime.now(timezone.utc)
     return db.scalar(
@@ -107,9 +117,12 @@ def declare_property_verification(
     db.flush()
 
     duplicate_of = _find_duplicate(db, record)
-    mismatch = not (record.name_matched or record.address_matched) and (
-        record.name_matched is False or record.address_matched is False
-    )
+    # ZR-PROPERTY-VERIFY-001 Section 8 / P0 #2: a map hit alone never
+    # verifies a property. The document must positively match the owner
+    # name or the property address; unreadable evidence (a photo, a scan
+    # without a text layer) goes to a reviewer instead.
+    corroborated = bool(record.name_matched or record.address_matched)
+    unreadable = record.name_matched is None and record.address_matched is None
     if duplicate_of is not None:
         record.verifier_notes = REVIEW_PENDING_NOTE
         _notify_review_needed(
@@ -123,7 +136,14 @@ def declare_property_verification(
             db, record, user,
             f"The property address could not be confirmed on the map ({_geocode_reason(record)}).",
         )
-    elif mismatch:
+    elif unreadable:
+        record.verifier_notes = REVIEW_PENDING_NOTE
+        _notify_review_needed(
+            db, record, user,
+            "The address was found on the map, but the document has no readable text to confirm the property "
+            "-- check the evidence.",
+        )
+    elif not corroborated:
         record.verifier_notes = REVIEW_PENDING_NOTE
         _notify_review_needed(
             db, record, user,
@@ -156,12 +176,12 @@ def _extract_and_match(db: Session, record: PropertyVerification, user: UserAcco
     """Regex-only (no OCR) owner name / address / document number, plus
     whether the document mentions the host's name and this property's
     address. name_matched/address_matched stay None when there's no text."""
-    from app.core.property_verification_uploads import resolve_property_verification_document_path
+    from app.core.property_verification_uploads import read_property_verification_document
     from app.crud.identity_verification import get_verified_identity_for_party
     from app.services import document_regex
 
     try:
-        document_bytes = resolve_property_verification_document_path(record.document_file_path).read_bytes()
+        document_bytes = read_property_verification_document(record.document_file_path) or b""
     except (OSError, TypeError):
         document_bytes = b""
     details = document_regex.extract_property_details(
@@ -253,8 +273,10 @@ def verify_due_property_verifications(db: Session, *, room_id: int | None = None
     query = select(PropertyVerification).where(
         PropertyVerification.status == "pending",
         PropertyVerification.verifier_notes == AUTO_VERIFY_PENDING_NOTE,
-        # Never auto-verify an address that wasn't confirmed on the map.
+        # Never auto-verify an address that wasn't confirmed on the map, nor
+        # on map evidence alone: the document must have matched too.
         PropertyVerification.geocode_status == geocoding.FOUND,
+        (PropertyVerification.name_matched.is_(True)) | (PropertyVerification.address_matched.is_(True)),
     )
     if room_id is not None:
         query = query.where(PropertyVerification.room_id == room_id)
@@ -286,9 +308,50 @@ def verify_due_property_verifications(db: Session, *, room_id: int | None = None
 def _auto_verified_note(record: PropertyVerification) -> str:
     on_map = f"address found on the map ({record.geocode_precision.lower()} level)"
     matched = [label for label, ok in (("owner name", record.name_matched), ("property address", record.address_matched)) if ok]
-    if matched:
-        return f"Auto-verified: {on_map}; document matched the {' and '.join(matched)}."
-    return f"Auto-verified: {on_map}; no readable document text to compare."
+    return f"Auto-verified: {on_map}; document matched the {' and '.join(matched)}."
+
+
+ADDRESS_CHANGED_NOTE = "The property address changed after this was submitted -- verify the property again."
+
+
+def _normal_address_part(value: str | None) -> str:
+    return " ".join((value or "").lower().replace(",", " ").split())
+
+
+def is_material_address_change(old: dict, new: dict) -> bool:
+    """Case, spacing and commas don't count; anything else in the address,
+    city, landmark or region does."""
+    return any(_normal_address_part(old.get(k)) != _normal_address_part(new.get(k))
+               for k in ("address", "city", "landmark", "jurisdiction_code"))
+
+
+def invalidate_for_address_change(db: Session, property_id: int, *, actor_user_id: int | None = None,
+                                  correlation_id: str = "") -> int:
+    """ZR-PROPERTY-VERIFY-001 Section 13.3: a material address/location change
+    invalidates the property's verifications -- verified and still-open ones
+    alike (their evidence was for the old address). History is kept: rows
+    are marked revoked, never deleted. Returns how many were invalidated."""
+    from app.crud.events import emit_event
+
+    rows = list(db.scalars(
+        select(PropertyVerification).join(Room, Room.id == PropertyVerification.room_id).where(
+            Room.property_id == property_id,
+            PropertyVerification.status.in_(("verified", "pending", "additional_evidence_required")),
+        )
+    ))
+    for record in rows:
+        previous = record.status
+        record.status = "revoked"
+        record.verifier_notes = ADDRESS_CHANGED_NOTE
+        emit_event(
+            db, "PROPERTY_VERIFICATION_INVALIDATED", "property_verification", str(record.id),
+            {"propertyId": property_id, "roomId": record.room_id, "reasonCode": "ADDRESS_CHANGED"},
+            correlation_id=correlation_id, actor_kind="user" if actor_user_id else "system",
+            actor_id=str(actor_user_id or ""), previous_state=previous, new_state="revoked",
+        )
+    if rows:
+        db.flush()
+    return len(rows)
 
 
 def _as_utc(value: datetime) -> datetime:

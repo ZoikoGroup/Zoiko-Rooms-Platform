@@ -87,36 +87,17 @@ class TestDeclareAuthorityRecordCrud:
 
 
 class TestDeclareAuthorityRecordRoute:
-    def test_host_can_submit_authority_for_their_own_room(self, client, db_session: Session):
+    def test_self_declaration_route_is_retired(self, client, db_session: Session):
+        """ZR-AUTHORITY-002 Section 16: a free-text declaration can't establish
+        authority -- hosts use the evidence-based AuthorityVerification flow."""
         user, room = _make_host_with_room(db_session, email="route-owner@test.com")
         r = client.post(
             f"/api/users/hosting/rooms/{room.id}/authority-records",
             json={"roomId": room.id, "relationshipType": "OWNER", "evidenceRef": "deed.pdf"},
             cookies=auth_user_cookie(user),
         )
-        assert r.status_code == 201, r.text
-        body = r.json()
-        assert body["relationshipType"] == "OWNER"
-        assert body["status"] == "pending"
-
-    def test_host_cannot_submit_for_a_room_they_dont_own(self, client, db_session: Session):
-        user, _room = _make_host_with_room(db_session, email="route-outsider@test.com")
-        other_party = Party(party_type="provider", status="active", jurisdiction="IN")
-        db_session.add(other_party)
-        db_session.commit()
-        other_prop = Property(owner_party_id=other_party.id, address="9 Other Rd", city="Bengaluru", status="active")
-        db_session.add(other_prop)
-        db_session.flush()
-        other_room = Room(property_id=other_prop.id, room_type="private_room", size=100, has_ensuite=True, status="active")
-        db_session.add(other_room)
-        db_session.commit()
-
-        r = client.post(
-            f"/api/users/hosting/rooms/{other_room.id}/authority-records",
-            json={"roomId": other_room.id, "relationshipType": "OWNER", "evidenceRef": "deed.pdf"},
-            cookies=auth_user_cookie(user),
-        )
-        assert r.status_code == 403, r.text
+        assert r.status_code == 410, r.text
+        assert db_session.query(AuthorityRecord).count() == 0
 
     def test_host_cannot_view_another_hosts_authority_records(self, client, db_session: Session):
         user, room = _make_host_with_room(db_session, email="route-viewer-owner@test.com")
@@ -134,15 +115,6 @@ class TestDeclareAuthorityRecordRoute:
         assert r.status_code == 200, r.text
         assert len(r.json()) == 1
         assert r.json()[0]["relationshipType"] == "AGENT"
-
-    def test_room_id_mismatch_between_url_and_body_is_rejected(self, client, db_session: Session):
-        user, room = _make_host_with_room(db_session, email="route-mismatch@test.com")
-        r = client.post(
-            f"/api/users/hosting/rooms/{room.id}/authority-records",
-            json={"roomId": room.id + 999, "relationshipType": "OWNER", "evidenceRef": "deed.pdf"},
-            cookies=auth_user_cookie(user),
-        )
-        assert r.status_code == 400, r.text
 
     def test_admin_verify_reject_revoke_workflow_still_works_on_a_host_declared_record(self, client, db_session: Session):
         """The host self-service path lands in the same 'pending' status and

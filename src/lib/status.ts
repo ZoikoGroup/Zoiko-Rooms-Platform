@@ -585,8 +585,6 @@ export const listingFeeRefundStatusTone = {
 export const rentalPaymentStatusTone = {
   UPCOMING: "neutral",
   DUE: "warning",
-  PAYMENT_SESSION_STARTED: "primary",
-  PROVIDER_PROCESSING: "primary",
   PAYER_RECORDED: "primary",
   RECIPIENT_CONFIRMATION_PENDING: "primary",
   CONFIRMED: "success",
@@ -601,11 +599,9 @@ export const rentalPaymentStatusTone = {
 export const rentalPaymentStatusLabel = {
   UPCOMING: "Upcoming",
   DUE: "Payment due",
-  PAYMENT_SESSION_STARTED: "Secure payment in progress",
-  PROVIDER_PROCESSING: "Processing",
-  PAYER_RECORDED: "Marked as paid",
+  PAYER_RECORDED: "Reported paid",
   RECIPIENT_CONFIRMATION_PENDING: "Awaiting confirmation",
-  CONFIRMED: "Confirmed",
+  CONFIRMED: "Paid",
   PARTIALLY_PAID: "Partially paid",
   OVERDUE: "Overdue",
   DISPUTED: "Disputed",

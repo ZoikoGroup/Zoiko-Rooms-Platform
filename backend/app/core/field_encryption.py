@@ -47,6 +47,15 @@ def decrypt_json(blob: str) -> dict[str, str]:
     return json.loads(raw.decode("utf-8"))
 
 
+def encrypt_bytes(value: bytes) -> bytes:
+    """A whole file, encrypted at rest (e.g. property evidence)."""
+    return _fernet().encrypt(value)
+
+
+def decrypt_bytes(blob: bytes) -> bytes:
+    return _fernet().decrypt(blob)
+
+
 def encrypt_text(value: str) -> str:
     """One string, encrypted -- e.g. an identity document number."""
     return _fernet().encrypt(value.encode("utf-8")).decode("utf-8")

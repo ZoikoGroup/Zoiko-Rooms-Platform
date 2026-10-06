@@ -248,12 +248,6 @@ def send_rental_payment_instruction_verification_code_email(to_email: str, full_
                        action="confirm the payment instructions renters will see", variant="step-up-payment-instructions")
 
 
-def send_rental_payment_provider_account_change_verification_code_email(to_email: str, full_name: str, code: str, expires_minutes: int) -> None:
-    _send_step_up_code(to_email, full_name, code, expires_minutes,
-                       action="confirm changing the account that receives your online rent payments",
-                       variant="step-up-payment-account")
-
-
 # -------------------------------------------------------- C -- Verification
 
 def _send_identity_status(

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -32,6 +32,31 @@ class Property(Base):
     # explicitly (services/jurisdictions.py) -- this column default only
     # applies to rows created directly in code (seed data, tests).
     jurisdiction_code: Mapped[str] = mapped_column(String(10), nullable=False, default="England")
+
+    # ZR-PROPERTY-VERIFY-001 Section 12.1 canonical structured address.
+    # `address` / `city` above stay as the display mirror (line 1 [+ line 2]
+    # / locality) that the rest of the app reads.
+    address_line_1: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    address_line_2: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    subpremise: Mapped[str] = mapped_column(String(50), default="", server_default="")  # unit / flat / apt
+    locality: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    administrative_area: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    postal_code: Mapped[str] = mapped_column(String(20), default="", server_default="")
+    country_code: Mapped[str] = mapped_column(String(2), default="", server_default="")  # ISO 3166-1 alpha-2
+    canonical_formatted_address: Mapped[str] = mapped_column(String(600), default="", server_default="")
+    property_kind: Mapped[str] = mapped_column(String(12), default="", server_default="")
+    building_name: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    floor: Mapped[str] = mapped_column(String(20), default="", server_default="")
+    # Private location (Section 10): never served on public endpoints.
+    latitude_private: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude_private: Mapped[float | None] = mapped_column(Float, nullable=True)
+    location_precision: Mapped[str] = mapped_column(String(14), default="", server_default="")
+    public_location_decimals: Mapped[int] = mapped_column(Integer, default=2, server_default="2")
+    geocode_status: Mapped[str] = mapped_column(String(12), default="", server_default="")
+    pin_status: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    provider_refs: Mapped[list] = mapped_column(JSON, default=list, server_default=text("'[]'"))
+    # Optimistic concurrency for address/location updates (Section 13.3).
+    location_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     owner_party: Mapped["Party"] = relationship(back_populates="properties")

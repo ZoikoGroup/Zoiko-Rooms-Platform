@@ -181,23 +181,13 @@ def download_property_verification_document(
 ):
     """Admin-side counterpart to user_hosting.py's own download route --
     same streaming shape, no ownership check since any admin may review."""
-    from fastapi.responses import FileResponse
-
-    from app.core.property_verification_uploads import resolve_property_verification_document_path
+    from app.core.property_verification_uploads import document_response
 
     record = property_verification_crud.get_property_verification_or_404(db, verification_id)
     if not record.document_file_path:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No document was uploaded for this verification")
-
-    path = resolve_property_verification_document_path(record.document_file_path)
-    if not path.is_file():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored document could not be found")
-
-    return FileResponse(
-        path,
-        media_type=record.document_file_content_type or "application/octet-stream",
-        filename=record.document_file_original_name or "document",
-    )
+    return document_response(record.document_file_path, record.document_file_content_type,
+                             record.document_file_original_name)
 
 
 @router.post(

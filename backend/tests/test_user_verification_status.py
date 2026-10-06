@@ -11,13 +11,12 @@ from sqlalchemy.orm import Session
 
 from app.crud import authority as authority_crud
 from app.crud import property_verification as property_verification_crud
-from app.crud.identity_verification import verify_identity_verification
 from app.models.identity_verification import IdentityVerification
 from app.models.party import Party
 from app.models.property import Property
 from app.models.room import Room
 from app.models.user_account import UserAccount
-from tests.conftest import _make_admin, _make_user, auth_user_cookie
+from tests.conftest import _make_admin, _make_user, auth_user_cookie, approve_identity_via_provider
 from tests.test_room_hold_atomicity import _make_verified_renter
 from tests.test_property_verification import _declare as _declare_property
 
@@ -33,8 +32,7 @@ class TestRenterVerificationStatus:
         db_session.add(record)
         db_session.commit()
 
-        super_admin = _make_admin(db_session, email="uvs-admin-01@test.com", role="super_admin")
-        verify_identity_verification(db_session, record, super_admin)
+        approve_identity_via_provider(db_session, record)
 
         r = client.get("/api/users/verification-status", cookies=auth_user_cookie(user))
         assert r.status_code == 200, r.text

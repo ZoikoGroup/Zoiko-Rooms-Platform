@@ -326,7 +326,7 @@ class TestRegexAutoVerify:
 
     def test_upload_waits_then_auto_verifies(self, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-auto@test.com")
-        record = _declare(db_session, user, room, evidence_ref="title deed")
+        record = _declare(db_session, user, room, evidence_ref="Title deed\nProperty Address: 1 Verify Way, Bengaluru")
         assert record.status == "pending"
         assert record.verifier_notes == crud.AUTO_VERIFY_PENDING_NOTE
 

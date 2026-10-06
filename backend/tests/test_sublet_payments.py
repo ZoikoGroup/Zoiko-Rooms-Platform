@@ -60,7 +60,13 @@ class TestSubleasePaysTheOriginalRenter:
         assert obligations["RENT"].recipient_party_id == tenant_user.party_id  # the original renter, not the host
         assert float(obligations["RENT"].amount) == 300.0  # the negotiated rent
         assert obligations["RENT"].due_date == date.today()  # the sublet's own start, not the old tenancy's
-        assert obligations["DEPOSIT"].recipient_party_id == tenant_user.party_id
+        # ZR-SUBLET-PAY-003 Section 9: the deposit is routed independently by
+        # the country pack -- never assumed to follow the rent to the sublessor.
+        host_party_id = db_session.get(Occupancy, occupancy_id).room.property.owner_party_id
+        assert obligations["DEPOSIT"].recipient_party_id == host_party_id
+        assert obligations["RENT"].payee_type == "SUBLESSOR"
+        assert obligations["RENT"].payment_reference.startswith("ZR-SUB")
+        assert float(obligations["RENT"].platform_fee_amount) == 0
 
     def test_the_original_renter_can_mark_it_received_and_that_confirms_the_sublet(self, client, db_session: Session):
         tenant_user, _proposed, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="sp2")
@@ -68,11 +74,11 @@ class TestSubleasePaysTheOriginalRenter:
         agreement = db_session.get(Agreement, body["newAgreementId"])
         assert agreement.status == "PAYMENT_IN_PROGRESS"
 
-        original_renter = db_session.get(Party, tenant_user.party_id)
         for obligation in _obligations(db_session, agreement.id).values():
-            assert rp_crud.recipient_holds_payment_receipt_authority(db_session, obligation, original_renter.id)
+            payee = db_session.get(Party, obligation.recipient_party_id)
+            assert rp_crud.recipient_holds_payment_receipt_authority(db_session, obligation, payee.id)
             rp_crud.record_receipt_as_recipient(
-                db_session, original_renter, obligation, amount=None, received_date=date.today(),
+                db_session, payee, obligation, amount=None, received_date=date.today(),
                 payment_method_category="UPI",
             )
         db_session.refresh(agreement)
@@ -105,8 +111,8 @@ class TestSubleasePaysTheOriginalRenter:
         original_renter = db_session.get(Party, tenant_user.party_id)
         for obligation in _obligations(db_session, agreement.id).values():
             rp_crud.record_receipt_as_recipient(
-                db_session, original_renter, obligation, amount=None, received_date=date.today(),
-                payment_method_category="UPI",
+                db_session, db_session.get(Party, obligation.recipient_party_id), obligation, amount=None,
+                received_date=date.today(), payment_method_category="UPI",
             )
         sub_occupancy = db_session.scalar(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id))
         assert rp_crud.resolve_rent_recipient_for_occupancy(db_session, sub_occupancy) == original_renter.id

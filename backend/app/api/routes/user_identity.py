@@ -1,13 +1,10 @@
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.core.correlation import get_correlation_id
-from app.core.identity_uploads import resolve_identity_document_path, save_identity_document
-from app.crud import evidence_vault as evidence_vault_crud
+from app.core.identity_uploads import resolve_identity_document_path
 from app.crud import identity_verification as crud
-from app.crud.audit import log_audit_event
 from app.db.session import get_db
 from app.models.identity_verification import IdentityVerification
 from app.models.user_account import UserAccount
@@ -41,56 +38,9 @@ def _to_user_read(record: IdentityVerification) -> dict:
     }
 
 
-@router.post("", response_model=IdentityVerificationUserRead, status_code=status.HTTP_201_CREATED)
-async def submit_identity_verification(
-    request: Request,
-    document_type: str = Form(...),
-    document_number: str = Form(""),
-    custom_document_name: str = Form(""),
-    file: UploadFile = File(...),
-    user: UserAccount = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """User submits their identity verification with an uploaded document. This is
-    a multipart request (not JSON) because it always carries a real file -- see
-    app/core/identity_uploads.py for the content validation and storage."""
-    stored_filename, original_filename, content_type, file_size, sha256_hash = await save_identity_document(file)
-
-    # ZR-ENG-CLR-012 Section 18: checked before the new record/artifact exist,
-    # so a match here is necessarily a *prior* submission, never the one
-    # being created right now.
-    duplicate_artifact = evidence_vault_crud.find_duplicate_by_hash(
-        db, sha256_hash, exclude_uploaded_by_user_id=user.id,
-    )
-    duplicate_of_verification_id = (
-        int(duplicate_artifact.related_entity_id)
-        if duplicate_artifact and duplicate_artifact.related_entity_type == "identity_verification"
-        else None
-    )
-
-    record = crud.submit_identity_verification_for_user(
-        db,
-        user,
-        document_type=document_type,
-        document_number=document_number,
-        custom_document_name=custom_document_name,
-        stored_filename=stored_filename,
-        original_filename=original_filename,
-        content_type=content_type,
-        file_size=file_size,
-        duplicate_of_verification_id=duplicate_of_verification_id,
-    )
-    evidence_vault_crud.register_evidence_artifact(
-        db, related_entity_type="identity_verification", related_entity_id=str(record.id),
-        stored_filename=stored_filename, sha256_hash=sha256_hash, original_filename=original_filename,
-        content_type=content_type, file_size=file_size, uploaded_by_user_id=user.id,
-    )
-    log_audit_event(
-        db, None, "user_identity_verification.submit", "identity_verification", str(record.id),
-        get_correlation_id(request), reason=f"user:{user.id}",
-    )
-    db.commit()
-    return _to_user_read(record)
+# Uploading a document here is no longer possible: identity is verified only
+# through the identity provider's own capture (/api/users/identity, Veriff).
+# These routes are read-only history.
 
 
 @router.get("", response_model=list[IdentityVerificationUserRead])

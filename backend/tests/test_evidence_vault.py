@@ -59,22 +59,3 @@ class TestEvidenceVaultRegistration:
         )
         assert find_duplicate_by_hash(db_session, h) is not None
         assert find_duplicate_by_hash(db_session, "no-such-hash") is None
-
-
-class TestEvidenceVaultWiredIntoRealUpload:
-    def test_submitting_identity_document_registers_an_evidence_artifact(self, client, db_session: Session):
-        user = _verified_user_with_party(db_session, email="evv-user-01@test.com")
-        r = client.post(
-            "/api/users/identity-verifications",
-            data={"document_type": "passport", "document_number": "P123456"},
-            files={"file": ("passport.pdf", _PDF_BYTES, "application/pdf")},
-            cookies=auth_user_cookie(user),
-        )
-        assert r.status_code == 201, r.text
-        verification_id = r.json()["id"]
-
-        artifacts = list_evidence_artifacts_for_entity(db_session, "identity_verification", str(verification_id))
-        assert len(artifacts) == 1
-        assert artifacts[0].sha256_hash == hashlib.sha256(_PDF_BYTES).hexdigest()
-        assert artifacts[0].scan_status == "NOT_SCANNED"
-        assert artifacts[0].uploaded_by_user_id == user.id

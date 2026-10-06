@@ -11,23 +11,23 @@ Nothing outside this module sees a provider's own payload or result codes:
 every outcome becomes a NormalizedResult, and only a normalized PASS can
 lead to Identity Verified.
 
-Providers:
-- VeriffProvider ("veriff") -- the P0 primary provider: Document + Selfie
-  IDV, hosted capture, decision webhook (ZR-IDV-ADR-001).
-- DocumentCheckProvider ("zoiko_document_check") -- the built-in upload check
-  used where Veriff isn't configured (local development / sandbox-less).
-- ManualReviewProvider ("zoiko_manual_review") -- the accessible manual route.
-- SignedWebhookProvider ("signed_webhook") -- a generic signed-webhook
-  provider, kept for a future secondary vendor.
+Provider: VeriffProvider ("veriff") -- Document + Selfie IDV with a
+decision webhook (ZR-IDV-ADR-001). The person takes the photos in Zoiko's
+own capture screens; the backend relays each photo straight to Veriff's
+media API (never stored by Zoiko) and then submits the session. Veriff
+decides whether the document is genuine and belongs to the person; there is
+no Zoiko manual-review route and no built-in fallback. When Veriff isn't configured, verification is
+unavailable (nobody is verified). A future secondary vendor is added as
+another IdentityProvider subclass.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
 import logging
-import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
@@ -35,8 +35,13 @@ from app.core.config import settings
 
 logger = logging.getLogger("uvicorn.error")
 
-UPLOAD = "UPLOAD"  # the person uploads to Zoiko; the provider evaluates it
-PROVIDER_HOSTED = "PROVIDER_HOSTED"  # the person captures inside the provider's flow
+PROVIDER_HOSTED = "PROVIDER_HOSTED"  # a provider session exists; the provider decides
+
+# Photos the person takes in Zoiko's capture screens, as Veriff media contexts.
+DOCUMENT_FRONT = "document-front"
+DOCUMENT_BACK = "document-back"
+FACE = "face"
+CAPTURE_CONTEXTS = (DOCUMENT_FRONT, DOCUMENT_BACK, FACE)
 
 
 class ProviderUnavailable(Exception):
@@ -72,6 +77,9 @@ class NormalizedResult:
     risk_signals: list[str] = field(default_factory=list)
     # True when the provider's own review team is looking (not a Zoiko reviewer).
     provider_reviewing: bool = False
+    # When the provider itself made this decision (ISO 8601, "" if it didn't
+    # say) -- used to drop decisions that arrive out of order (ADR Section 8).
+    provider_decided_at: str = ""
     provider_completed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_json(self) -> str:
@@ -98,20 +106,6 @@ class ProviderCapabilities:
 
 
 @dataclass
-class Evidence:
-    """What an UPLOAD provider evaluates for one session."""
-
-    document_type: str
-    document_bytes: bytes
-    content_type: str
-    typed_number: str
-    legal_name: str
-    country_code: str
-    duplicate_of_verification_id: int | None = None
-    number_used_by_other_account: bool = False
-
-
-@dataclass
 class WebhookEvent:
     provider_event_id: str
     event_type: str  # "decision" | "progress.started" | "progress.submitted" | ...
@@ -123,7 +117,7 @@ class WebhookEvent:
 class IdentityProvider:
     code = ""
     display_name = ""
-    capture_mode = UPLOAD
+    capture_mode = PROVIDER_HOSTED
     supports_webhooks = False
     checks_document_authenticity = False
     checks_person_binding = False
@@ -137,11 +131,6 @@ class IdentityProvider:
             asynchronous_decisions=self.supports_webhooks,
         )
 
-    # UPLOAD providers
-    def evaluate(self, evidence: Evidence) -> NormalizedResult:
-        raise NotImplementedError
-
-    # PROVIDER_HOSTED providers
     def create_session(self, *, vendor_data: str, end_user_id: str, callback_url: str) -> ProviderSession:
         raise NotImplementedError
 
@@ -150,6 +139,14 @@ class IdentityProvider:
 
     def delete_session(self, provider_session_id: str) -> bool:
         return False
+
+    def upload_media(self, provider_session_id: str, context: str, content: bytes, content_type: str) -> None:
+        """Relays one photo to the provider. Raises ProviderUnavailable."""
+        raise NotImplementedError
+
+    def submit_session(self, provider_session_id: str) -> None:
+        """All photos are in: ask the provider to decide."""
+        raise NotImplementedError
 
     # Webhooks
     def verify_webhook(self, headers: dict[str, str], body: bytes) -> bool:
@@ -241,6 +238,20 @@ class VeriffProvider(IdentityProvider):
         except ProviderUnavailable:
             return False
 
+    def upload_media(self, provider_session_id: str, context: str, content: bytes, content_type: str) -> None:
+        """POST /v1/sessions/{id}/media -- the image as a data URI, the body
+        HMAC-signed. The bytes are only passed through; nothing is kept."""
+        if context not in CAPTURE_CONTEXTS:
+            raise ValueError(f"context must be one of {CAPTURE_CONTEXTS}")
+        data_uri = f"data:{content_type};base64," + base64.b64encode(content).decode("ascii")
+        body = json.dumps({"image": {"context": context, "content": data_uri}}, separators=(",", ":")).encode("utf-8")
+        self._request("POST", f"/v1/sessions/{provider_session_id}/media", body=body, signed_payload=body)
+
+    def submit_session(self, provider_session_id: str) -> None:
+        """PATCH /v1/sessions/{id} status=submitted: Veriff starts deciding."""
+        body = json.dumps({"verification": {"status": "submitted"}}, separators=(",", ":")).encode("utf-8")
+        self._request("PATCH", f"/v1/sessions/{provider_session_id}", body=body, signed_payload=body)
+
     def verify_webhook(self, headers: dict[str, str], body: bytes) -> bool:
         """x-auth-client must be this environment's integration key and
         x-hmac-signature the HMAC-SHA256 of the exact raw body -- both
@@ -292,6 +303,7 @@ class VeriffProvider(IdentityProvider):
         verification = {
             "id": session_id, "attemptId": attempt, "status": decision,
             "vendorData": data.get("vendorData"), "reasonCode": _unwrap(inner.get("reasonCode")),
+            "decisionTime": _unwrap(inner.get("decisionTime")) or data.get("time") or "",
             "person": person, "document": document,
         }
         return WebhookEvent(
@@ -317,6 +329,7 @@ class VeriffProvider(IdentityProvider):
             provider_decision=decision if decision in _VERIFF_OUTCOME else "unknown",
             provider_status=decision,
             provider_reviewing=decision == "review",
+            provider_decided_at=str(verification.get("decisionTime") or ""),
             document_metadata={
                 "masked_document_number": mask_number(str(document.get("number") or "")),
                 "issuer_country": str(document.get("country") or ""),
@@ -343,145 +356,10 @@ def _unwrap(value):
     return value.get("value") if isinstance(value, dict) and "value" in value else value
 
 
-# -- built-in providers ------------------------------------------------------------
-
-class DocumentCheckProvider(IdentityProvider):
-    """Built-in upload check (services/document_regex.py -- no OCR, no
-    vendor) for environments without Veriff. It can confirm the number's
-    format and that the confirmed legal name appears in a PDF's text layer;
-    it cannot judge authenticity or that the person holds the document, so
-    anything it can't confirm goes to a reviewer."""
-
-    code = "zoiko_document_check"
-    display_name = "Zoiko document check"
-
-    def evaluate(self, evidence: Evidence) -> NormalizedResult:
-        from app.services import document_regex
-
-        text = document_regex.pdf_text(evidence.document_bytes) if evidence.content_type == "application/pdf" else ""
-        typed = document_regex.extract_number(evidence.document_type, evidence.typed_number)
-        in_document = document_regex.extract_number(evidence.document_type, text) if text else None
-        number = typed or in_document
-        result = NormalizedResult(
-            provider_code=self.code,
-            normalized_outcome="PASS",
-            provider_status="completed",
-            document_metadata={"masked_document_number": mask_number(number or ""), "issuer_country": evidence.country_code},
-            match_results={
-                "document_authenticity": "NOT_CHECKED",
-                "person_document_binding": "NOT_CHECKED",
-                "liveness_or_alternative_binding": "NOT_AVAILABLE",
-            },
-        )
-        # A document already used by another account always goes to a
-        # person, whatever else is wrong with it (Section 9.1).
-        if evidence.duplicate_of_verification_id is not None or evidence.number_used_by_other_account:
-            result.risk_signals.append("DUPLICATE_EVIDENCE")
-            return _outcome(result, "REVIEW", "DUPLICATE_EVIDENCE")
-        if not number:
-            return _outcome(result, "ACTION_REQUIRED", "DOCUMENT_NUMBER_INVALID")
-        if typed and in_document and typed != in_document:
-            return _outcome(result, "ACTION_REQUIRED", "DOCUMENT_NUMBER_INVALID")
-
-        name_found = document_regex.name_matches(evidence.legal_name, text) if text else None
-        result.match_results["extracted_name_match"] = (
-            "PASS" if name_found else "FAIL" if name_found is False else "NOT_CHECKED"
-        )
-        if name_found is False:
-            return _outcome(result, "ACTION_REQUIRED", "NAME_MISMATCH")
-        if name_found is None:
-            return _outcome(result, "REVIEW", "NAME_NOT_CHECKABLE")
-
-        result.verified_attributes = {"legal_name": evidence.legal_name}
-        return result
-
-
-class ManualReviewProvider(IdentityProvider):
-    """The alternative / manual route: a trained Zoiko reviewer decides."""
-
-    code = "zoiko_manual_review"
-    display_name = "Manual review"
-
-    def evaluate(self, evidence: Evidence) -> NormalizedResult:
-        return NormalizedResult(
-            provider_code=self.code, normalized_outcome="REVIEW", reason_codes=["ALTERNATIVE_REQUESTED"],
-            method_type="MANUAL", provider_status="queued",
-            match_results={"document_authenticity": "NOT_CHECKED", "person_document_binding": "NOT_CHECKED",
-                           "liveness_or_alternative_binding": "NOT_CHECKED"},
-        )
-
-
-class SignedWebhookProvider(IdentityProvider):
-    """Generic provider reporting results to POST /api/webhooks/identity/{code},
-    signed as `X-Identity-Timestamp` + `X-Identity-Signature: sha256=<hex HMAC
-    of "{timestamp}.{body}">`, body already normalized:
-    {"events": [{"id", "type", "provider_session_id", "outcome", ...}]}.
-    Enabled only when settings.identity_webhook_secret is set."""
-
-    code = "signed_webhook"
-    display_name = "External identity provider"
-    supports_webhooks = True
-    checks_document_authenticity = True
-    checks_person_binding = True
-    tolerance_seconds = 300
-
-    def __init__(self, secret: str):
-        self._secret = secret
-
-    def evaluate(self, evidence: Evidence) -> NormalizedResult:
-        return NormalizedResult(provider_code=self.code, normalized_outcome="", provider_status="pending")
-
-    def verify_webhook(self, headers: dict[str, str], body: bytes) -> bool:
-        lowered = {k.lower(): v for k, v in headers.items()}
-        timestamp = lowered.get("x-identity-timestamp", "")
-        signature = lowered.get("x-identity-signature", "").removeprefix("sha256=")
-        if not timestamp.isdigit() or not signature:
-            return False
-        if abs(time.time() - int(timestamp)) > self.tolerance_seconds:
-            return False  # replay window
-        return hmac.compare_digest(sign(self._secret, timestamp, body), signature)
-
-    def parse_webhook(self, body: bytes, kind: str = "decision") -> list[WebhookEvent]:
-        data = json.loads(body or b"{}")
-        events = []
-        for raw in data.get("events", []):
-            outcome = str(raw.get("outcome", "")).upper()
-            result = None
-            if outcome in ("PASS", "REVIEW", "ACTION_REQUIRED", "FAIL"):
-                result = NormalizedResult(
-                    provider_code=self.code, normalized_outcome=outcome,
-                    reason_codes=[str(c) for c in raw.get("reason_codes", [])],
-                    provider_session_id=str(raw.get("provider_session_id", "")), provider_status="completed",
-                    match_results=dict(raw.get("match_results") or {}),
-                    document_metadata=dict(raw.get("document_metadata") or {}),
-                    verified_attributes=dict(raw.get("verified_attributes") or {}),
-                )
-            events.append(WebhookEvent(
-                provider_event_id=str(raw.get("id", "")), event_type=str(raw.get("type", "")) or "decision",
-                provider_session_id=str(raw.get("provider_session_id", "")), result=result,
-            ))
-        return events
-
-
-def sign(secret: str, timestamp: str, body: bytes) -> str:
-    return hmac.new(secret.encode("utf-8"), f"{timestamp}.".encode("utf-8") + body, hashlib.sha256).hexdigest()
-
-
-def _outcome(result: NormalizedResult, outcome: str, code: str) -> NormalizedResult:
-    result.normalized_outcome = outcome
-    result.reason_codes = [code]
-    return result
-
-
 def mask_number(number: str) -> str:
     """Last four characters only: "••••4567"."""
     cleaned = "".join(ch for ch in number if ch.isalnum())
     return f"••••{cleaned[-4:]}" if cleaned else ""
-
-
-def number_hash(document_type: str, number: str) -> str:
-    cleaned = "".join(ch for ch in number.upper() if ch.isalnum())
-    return hashlib.sha256(f"{document_type}:{cleaned}".encode("utf-8")).hexdigest() if cleaned else ""
 
 
 def veriff_configured() -> bool:
@@ -496,13 +374,7 @@ def get_provider(code: str) -> IdentityProvider | None:
             settings.veriff_api_key, settings.veriff_shared_secret, settings.veriff_base_url,
             settings.veriff_timeout_seconds,
         )
-    if code == DocumentCheckProvider.code:
-        return DocumentCheckProvider()
-    if code == ManualReviewProvider.code:
-        return ManualReviewProvider()
-    if code == SignedWebhookProvider.code and settings.identity_webhook_secret:
-        return SignedWebhookProvider(settings.identity_webhook_secret)
     return None
 
 
-PROVIDER_CODES = (VeriffProvider.code, DocumentCheckProvider.code, SignedWebhookProvider.code)
+PROVIDER_CODES = (VeriffProvider.code,)

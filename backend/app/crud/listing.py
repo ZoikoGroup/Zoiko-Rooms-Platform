@@ -292,6 +292,24 @@ def get_listing(db: Session, listing_id: str) -> Listing | None:
     return db.get(Listing, listing_id)
 
 
+# ZR-PROPERTY-VERIFY-001 Section 10 privacy lock: public payloads carry the
+# city and an approximate position only -- never the street address or the
+# exact pin of an occupied home. 2 decimal places is a ~1.1 km cell.
+PUBLIC_COORDINATE_DECIMALS = 2
+
+
+def _public_coordinate(value: float | None, decimals: int = PUBLIC_COORDINATE_DECIMALS) -> float | None:
+    return round(float(value), decimals) if value is not None else None
+
+
+def _public_decimals(listing: Listing) -> int:
+    """The property's country pack precision (set on the property when it is
+    verified), never finer than 3 decimals (~110 m)."""
+    prop = listing.room.property if listing.room is not None and listing.room.property is not None else None
+    value = getattr(prop, "public_location_decimals", None) if prop is not None else None
+    return max(0, min(int(value), 3)) if value is not None else PUBLIC_COORDINATE_DECIMALS
+
+
 def to_public_listing_read(listing: Listing) -> PublicListingRead:
     """ZR-ENG-CLR-001 Rule 3 (AC-03): public content is served from the
     immutable current_public_version snapshot, never the live Listing row --
@@ -314,9 +332,9 @@ def to_public_listing_read(listing: Listing) -> PublicListingRead:
         property_type=field("property_type"),
         room_type=field("room_type"),
         city=field("city"),
-        location=field("location"),
-        latitude=field("latitude"),
-        longitude=field("longitude"),
+        location="",  # the street address is private (Section 10)
+        latitude=_public_coordinate(field("latitude"), _public_decimals(listing)),
+        longitude=_public_coordinate(field("longitude"), _public_decimals(listing)),
         price_per_night=field("price_per_night"),
         currency=field("currency"),
         rating=listing.rating,

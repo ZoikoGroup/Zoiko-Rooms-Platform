@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.crud.identity_verification import verify_identity_verification
 from app.crud.occupancy_eligibility import open_occupancy_eligibility_check, record_occupancy_eligibility_result
 from app.crud.property_compliance import issue_property_compliance_credential
 from app.models.identity_verification import IdentityVerification
@@ -21,7 +20,7 @@ from app.services.verification_followups import (
     sweep_occupancy_eligibility_follow_ups,
     sweep_property_compliance_follow_ups,
 )
-from tests.conftest import _make_admin
+from tests.conftest import _make_admin, approve_identity_via_provider
 
 
 def _passed_check_with_follow_up(db: Session, admin, *, follow_up_in_days: int, email_suffix: str):
@@ -80,14 +79,13 @@ class TestFollowUpSweep:
 
 class TestIdentityVerificationFollowUpSweep:
     def test_verified_record_due_soon_is_notified(self, db_session: Session):
-        admin = _make_admin(db_session, email="vfu-idv-admin-01@test.com", role="super_admin")
         party = Party(party_type="renter", status="active", jurisdiction="IN")
         db_session.add(party)
         db_session.flush()
         record = IdentityVerification(party_id=party.id, document_type="passport", status="pending")
         db_session.add(record)
         db_session.commit()
-        verify_identity_verification(db_session, record, admin)
+        approve_identity_via_provider(db_session, record)
         record.expires_at = datetime.now(timezone.utc) + timedelta(days=10)
         db_session.commit()
 
@@ -97,14 +95,13 @@ class TestIdentityVerificationFollowUpSweep:
         assert record.expiry_notified_at is not None
 
     def test_sweep_is_idempotent(self, db_session: Session):
-        admin = _make_admin(db_session, email="vfu-idv-admin-02@test.com", role="super_admin")
         party = Party(party_type="renter", status="active", jurisdiction="IN")
         db_session.add(party)
         db_session.flush()
         record = IdentityVerification(party_id=party.id, document_type="passport", status="pending")
         db_session.add(record)
         db_session.commit()
-        verify_identity_verification(db_session, record, admin)
+        approve_identity_via_provider(db_session, record)
         record.expires_at = datetime.now(timezone.utc) + timedelta(days=10)
         db_session.commit()
 

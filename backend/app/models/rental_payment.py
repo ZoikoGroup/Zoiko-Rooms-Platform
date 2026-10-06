@@ -49,7 +49,7 @@ RENTAL_PAYMENT_OBLIGATION_TYPES = ("RENT", "DEPOSIT", "OTHER")
 # models/market_policy.py:FUNDS_FLOW_PROFILES' TRUST_ESCROW_CUSTODY/
 # ZOIKO_REGULATED_CUSTODY.
 RENTAL_PAYMENT_STATUSES = (
-    "UPCOMING", "DUE", "PAYMENT_SESSION_STARTED", "PROVIDER_PROCESSING", "PAYER_RECORDED",
+    "UPCOMING", "DUE", "PAYER_RECORDED",
     "RECIPIENT_CONFIRMATION_PENDING", "CONFIRMED", "PARTIALLY_PAID", "OVERDUE", "DISPUTED", "REVERSED",
     "CANCELLED", "WAIVED",
 )
@@ -60,7 +60,7 @@ RENTAL_PAYMENT_STATUSES = (
 RENTAL_PAYMENT_PROVENANCE = (
     "TENANT_DECLARATION", "RECIPIENT_CONFIRMATION", "PROVIDER_CONFIRMATION", "ADMIN_CORRECTION", "SYSTEM_DERIVATION",
 )
-RENTAL_PAYMENT_METHOD_CATEGORIES = ("BANK_TRANSFER", "UPI", "CASH", "CARD", "OTHER")
+RENTAL_PAYMENT_METHOD_CATEGORIES = ("BANK_TRANSFER", "UPI", "CASH", "OTHER")
 # The direct methods a host may offer renters in new payment instructions
 # (Zoiko Rooms Payment Model: rent is paid straight to the host -- bank
 # transfer, UPI or cash). CARD/OTHER instructions saved before this stay
@@ -116,10 +116,30 @@ class RentalPaymentObligation(Base):
     # never-re-notify-once-sent discipline as
     # OccupancyEligibilityCheck.follow_up_notified_at.
     due_soon_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ZR-SUBLET-PAY-003 Section 11.1 ledger fields. payee_type / payee_basis
+    # explain who the recipient is and why (LANDLORD_AGENT | SUBLESSOR |
+    # CUSTODIAN); payee_authority_ref names the record that entitles them
+    # ("authority_verification:12", "sublet_request:5", ...).
+    payee_type: Mapped[str] = mapped_column(String(20), default="LANDLORD_AGENT", server_default="LANDLORD_AGENT")
+    payee_basis: Mapped[str] = mapped_column(String(60), default="", server_default="")
+    payee_authority_ref: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    period_start: Mapped[date | None] = mapped_column(nullable=True)
+    period_end: Mapped[date | None] = mapped_column(nullable=True)
+    arrangement_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sublet_payment_arrangements.id", ondelete="SET NULL"), nullable=True, index=True)
+    arrangement_version: Mapped[int | None] = mapped_column(nullable=True)
+    agreement_version_no: Mapped[int | None] = mapped_column(nullable=True)
+    # Reference the payer quotes on the bank / UPI transfer so the payee can
+    # match it (e.g. ZR-SUB-11-202611).
+    payment_reference: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    # Zoiko Rooms charges no fee on rent or deposits (Listing Fee only).
+    platform_fee_amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0, server_default="0")
+    version: Mapped[int] = mapped_column(default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     tenant: Mapped["Guest"] = relationship()
     recipient: Mapped["Party"] = relationship()
+
     # One-directional only -- Agreement/Occupancy don't declare a matching
     # back_populates for this mirrored evidence-only row (see this module's
     # own docstring on why the two domains stay independent).
@@ -242,16 +262,6 @@ class RentalPaymentRecord(Base):
     # reference a PROVIDER_CONFIRMATION-provenance confirmation is backed
     # by. Never set for any other provenance.
     provider_reference: Mapped[str] = mapped_column(String(255), default="")
-    # A card payment refunded back to the tenant straight out of the host's
-    # own connected account (e.g. crud/occupancy.py:cancel_before_move_in) --
-    # never out of Zoiko Rooms' balance. Null/blank until a refund is issued.
-    refunded_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
-    provider_refund_id: Mapped[str] = mapped_column(String(255), default="", server_default="")
-    # A card chargeback the tenant raised with their bank, as reported by
-    # Stripe (charge.dispute.*) -- the host's own dispute to answer in their
-    # Stripe Dashboard; mirrored here so both sides see it. Blank if none.
-    provider_dispute_id: Mapped[str] = mapped_column(String(255), default="", server_default="")
-    provider_dispute_status: Mapped[str] = mapped_column(String(30), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     obligation: Mapped["RentalPaymentObligation"] = relationship(back_populates="records")

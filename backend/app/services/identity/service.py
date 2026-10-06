@@ -1,10 +1,15 @@
 """ZR-IDENTITY-001 orchestration: the account-level identity profile, its
-verification sessions, provider results, reviewer decisions and
-re-verification. Server-authoritative: nothing a client sends can mark a
-person verified (Section 8.4) -- only a provider PASS or a reviewer APPROVE.
+verification sessions, provider results and re-verification.
+Server-authoritative: nothing a client sends can mark a person verified
+(Section 8.4) -- only an approved decision from the identity provider
+(Veriff, ZR-IDV-ADR-001), which checks that the document is genuine and
+belongs to the person. There is no manual-review route: no person at Zoiko
+approves or rejects an identity.
 
-Flow (Section 4): start_session -> attach_document -> submit (attested) ->
-provider -> VERIFIED / PENDING_REVIEW / ACTION_REQUIRED / FAILED.
+Flow: start_session -> submit (attested; creates the Veriff session) ->
+capture_photo (document front / back, selfie -- taken in Zoiko's own screens
+and relayed to Veriff, never stored) -> complete_capture (Veriff starts
+deciding) -> decision webhook -> VERIFIED / ACTION_REQUIRED / FAILED.
 """
 
 from __future__ import annotations
@@ -26,20 +31,22 @@ from app.models.admin_user import AdminUser
 from app.models.identity_profile import (
     ASSURANCE_LEVELS, IdentityProfile, IdentityProviderEvent, ROLE_CONTEXTS, VERIFICATION_METHODS,
 )
-from app.models.identity_verification import DOCUMENT_CATEGORY_BY_TYPE, IDENTITY_DOCUMENT_TYPES, IdentityVerification
+from app.models.identity_verification import IdentityVerification
 from app.models.user_account import UserAccount
 from app.models.verification_credential import VerificationCredential
 from app.services.identity import policy, providers
-from app.services.identity.reason_codes import ALTERNATIVE_REASON_CODES, REVIEWER_REASON_CODES, describe
+from app.services.identity.reason_codes import describe
 
 logger = logging.getLogger("uvicorn.error")
 
 # Section 7.1 transitions a verification session may make.
 _SESSION_TRANSITIONS: dict[str, set[str]] = {
-    "IN_PROGRESS": {"PROCESSING", "PENDING_REVIEW", "IN_PROGRESS"},
-    "PROCESSING": {"VERIFIED", "PENDING_REVIEW", "ACTION_REQUIRED", "FAILED", "IN_PROGRESS"},
-    "PENDING_REVIEW": {"VERIFIED", "ACTION_REQUIRED", "FAILED", "PENDING_REVIEW"},
-    "ACTION_REQUIRED": {"IN_PROGRESS", "PENDING_REVIEW", "FAILED"},
+    "IN_PROGRESS": {"PROCESSING", "IN_PROGRESS"},
+    "PROCESSING": {"VERIFIED", "ACTION_REQUIRED", "FAILED", "IN_PROGRESS"},
+    # Only rows from before the manual route was removed can be here; they
+    # can only be closed.
+    "PENDING_REVIEW": {"FAILED"},
+    "ACTION_REQUIRED": {"IN_PROGRESS", "FAILED"},
     "VERIFIED": {"REVERIFICATION_REQUIRED"},
     "FAILED": set(),
     "REVERIFICATION_REQUIRED": set(),
@@ -64,13 +71,8 @@ _DASHBOARD = {
     "FAILED": ("Could not verify", "Try another method"),
 }
 _HANDOFF_TTL = timedelta(minutes=15)
-_ALTERNATIVE_DAILY_LIMIT = 3
-# Section 2.3: whichever provider confirms authenticity + binding gives IV-1.
-# The built-in check confirms neither, so its pass is IV-1 only in the
-# sense of "the platform's standard gate", recorded honestly in
-# match_results; a manual approval after review is IV-2.
+# Section 2.3: the provider confirmed document authenticity + person binding.
 _PROVIDER_PASS_LEVEL = "IV-1"
-_REVIEWED_LEVEL = "IV-2"
 
 
 def _now() -> datetime:
@@ -376,45 +378,12 @@ def start_session(db: Session, user: UserAccount, *, method: str = "DOCUMENT", r
     return session
 
 
-def attach_document(db: Session, user: UserAccount, session: IdentityVerification, *, document_type: str,
-                    document_number: str, stored_filename: str, original_filename: str, content_type: str,
-                    file_size: int, duplicate_of_verification_id: int | None = None,
-                    correlation_id: str = "") -> IdentityVerification:
-    profile = get_or_create_profile(db, session.party_id)
-    if session.session_state == "ACTION_REQUIRED":
-        _transition(session, "IN_PROGRESS")
-    if session.session_state != "IN_PROGRESS":
-        raise HTTPException(status.HTTP_409_CONFLICT, "This verification can't take a new document now")
-    pack = policy.get_pack(db, profile.country_code)
-    if document_type not in IDENTITY_DOCUMENT_TYPES or document_type not in (pack.accepted_document_types or []):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "This document can't be used for this verification. Choose another accepted identity document.",
-        )
-    from app.core.field_encryption import encrypt_text
-
-    number = document_number.strip()
-    session.document_type = document_type
-    session.document_category = DOCUMENT_CATEGORY_BY_TYPE[document_type]
-    session.encrypted_reference = encrypt_text(number) if number else None
-    session.masked_document_number = providers.mask_number(number)
-    session.document_number_hash = providers.number_hash(document_type, number)
-    session.document_file_path = stored_filename
-    session.document_file_original_name = original_filename
-    session.document_file_content_type = content_type
-    session.document_file_size = file_size
-    session.match_results = {**(session.match_results or {}), "duplicate_of_verification_id": duplicate_of_verification_id}
-    session.updated_at = _now()
-    _event(db, "IDENTITY_EVIDENCE_CAPTURED", profile, session, actor_kind="user", actor_id=str(user.id),
-           correlation_id=correlation_id)
-    db.commit()
-    db.refresh(session)
-    return session
-
-
 def submit(db: Session, user: UserAccount, session: IdentityVerification, *, attested: bool,
            correlation_id: str = "") -> IdentityVerification:
-    """Section 5.6 review & attest, then automated checks."""
+    """Section 5.6 review & attest, then hand over to Veriff's capture. The
+    result comes only from Veriff's decision (webhook / decision API).
+    Without an available provider nothing is verified: the session stays
+    open with PROVIDER_UNAVAILABLE and the person is told to try later."""
     if not attested:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Confirm the information is accurate and that it's your own identity",
@@ -427,54 +396,23 @@ def submit(db: Session, user: UserAccount, session: IdentityVerification, *, att
         raise HTTPException(status.HTTP_400_BAD_REQUEST, describe(["DETAILS_INCOMPLETE"])["message"])
     from app.services.identity.golive import resolve_provider
 
-    provider_code = providers.ManualReviewProvider.code if session.method_type == "MANUAL" else pack.document_provider_code
-    provider = resolve_provider(db, provider_code)
-    hosted = provider is not None and provider.capture_mode == providers.PROVIDER_HOSTED
-    if provider is None:
-        # Configured provider not reachable / not configured: keep progress.
+    provider = resolve_provider(db, pack.document_provider_code)
+    if provider is None or provider.capture_mode != providers.PROVIDER_HOSTED:
         session.attested_at = _now()
         return _provider_unavailable(db, session, profile, correlation_id)
-    if session.method_type == "DOCUMENT" and not hosted and not session.document_file_path:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Add your identity document before submitting")
-    if pack.minimum_age and profile.date_of_birth and policy.age_on(profile.date_of_birth) < pack.minimum_age:
-        pass  # decided below, after the attempt is recorded
-    elif hosted:
-        return _launch_hosted(db, session, profile, pack, provider, correlation_id=correlation_id)
-
-    session.attested_at = _now()
-    session.submitted_at = _now()
-    session.legal_name_snapshot = profile.legal_name
-    session.country_code = profile.country_code
-    _transition(session, "PROCESSING")
-    _set_profile_state(profile, "PROCESSING")
-    db.flush()
 
     if pack.minimum_age and profile.date_of_birth and policy.age_on(profile.date_of_birth) < pack.minimum_age:
+        session.attested_at = _now()
+        session.submitted_at = _now()
+        session.legal_name_snapshot = profile.legal_name
+        session.country_code = profile.country_code
+        _transition(session, "PROCESSING")
+        db.flush()
         result = providers.NormalizedResult(
             provider_code="zoiko_policy", normalized_outcome="FAIL", reason_codes=["AGE_REQUIREMENT_NOT_MET"],
         )
         return apply_result(db, session, result, correlation_id=correlation_id)
-
-    if provider is None:
-        return _provider_unavailable(db, session, profile, correlation_id)
-    session.provider_code = provider.code
-    try:
-        result = provider.evaluate(_evidence(db, session, profile))
-    except providers.ProviderUnavailable:
-        return _provider_unavailable(db, session, profile, correlation_id)
-    if (result.normalized_outcome == "PASS" and provider.code == providers.DocumentCheckProvider.code
-            and not settings.builtin_check_can_verify):
-        # The built-in check can't confirm authenticity or that it's the
-        # person's own document: in production a reviewer decides.
-        result.normalized_outcome = "REVIEW"
-        result.reason_codes = ["AUTOMATED_CHECK_INSUFFICIENT"]
-    if not result.normalized_outcome:
-        # Asynchronous provider: the result arrives by webhook.
-        session.provider_session_id = result.provider_session_id
-        db.commit()
-        db.refresh(session)
-        return session
-    return apply_result(db, session, result, correlation_id=correlation_id)
+    return _launch_hosted(db, session, profile, pack, provider, correlation_id=correlation_id)
 
 
 def _provider_unavailable(db: Session, session: IdentityVerification, profile: IdentityProfile,
@@ -490,35 +428,51 @@ def _provider_unavailable(db: Session, session: IdentityVerification, profile: I
     return session
 
 
-def _evidence(db: Session, session: IdentityVerification, profile: IdentityProfile) -> providers.Evidence:
-    from app.core.field_encryption import decrypt_text
-    from app.core.identity_uploads import resolve_identity_document_path
-
-    document_bytes = b""
-    if session.document_file_path:
-        try:
-            document_bytes = resolve_identity_document_path(session.document_file_path).read_bytes()
-        except OSError:
-            logger.warning("identity_verification #%s: stored document unreadable", session.id)
-    used_elsewhere = bool(session.document_number_hash) and db.scalar(
-        select(func.count(IdentityVerification.id)).where(
-            IdentityVerification.document_number_hash == session.document_number_hash,
-            IdentityVerification.party_id != session.party_id,
-            IdentityVerification.session_state.in_(("VERIFIED", "PENDING_REVIEW", "REVERIFICATION_REQUIRED")),
-        )
-    ) > 0
-    return providers.Evidence(
-        document_type=session.document_type, document_bytes=document_bytes,
-        content_type=session.document_file_content_type, typed_number=decrypt_text(session.encrypted_reference),
-        legal_name=profile.legal_name, country_code=profile.country_code,
-        duplicate_of_verification_id=(session.match_results or {}).get("duplicate_of_verification_id"),
-        number_used_by_other_account=used_elsewhere,
-    )
-
-
 # States a provider decision may still change. Anything else is final for
 # this attempt (ZR-IDV-ADR-001 Section 13: never regress VERIFIED).
-_DECIDABLE_BY_PROVIDER = ("IN_PROGRESS", "PROCESSING", "PENDING_REVIEW", "ACTION_REQUIRED")
+_DECIDABLE_BY_PROVIDER = ("IN_PROGRESS", "PROCESSING", "ACTION_REQUIRED")
+# Provider decision precedence across attempts of one session: an interim
+# outcome from an earlier attempt can't override a later attempt's outcome.
+_DECISION_RANK = {"resubmission_requested": 1, "review": 2,
+                  "approved": 3, "declined": 3, "expired": 3, "abandoned": 3}
+
+
+def _parse_time(value: str) -> datetime | None:
+    try:
+        return _as_utc(datetime.fromisoformat(value.replace("Z", "+00:00"))) if value else None
+    except ValueError:
+        return None
+
+
+def _is_stale(session: IdentityVerification, result: providers.NormalizedResult) -> bool:
+    """ZR-IDV-ADR-001 Section 8 ordering safety: True when this decision is
+    older than the one already applied to the session. Delivery is unordered,
+    so compare the provider's decision time when both sides have one, then
+    the attempt and decision precedence."""
+    current = session.provider_decision
+    if not current or not result.provider_decision:
+        return False
+    incoming_at = _parse_time(result.provider_decided_at)
+    current_at = _parse_time((session.match_results or {}).get("provider_decided_at", ""))
+    same_attempt = (result.provider_attempt_id or "") == (session.provider_attempt_id or "")
+    if incoming_at and current_at:
+        # The same decision again (e.g. the decision API re-read before the
+        # provider has decided on new photos) is as stale as an older one.
+        if incoming_at <= current_at:
+            return True
+        # A decision made before the person's latest submission belongs to
+        # the previous set of photos (small allowance for clock skew).
+        submitted = _as_utc(session.submitted_at)
+        return bool(submitted and incoming_at < submitted - timedelta(seconds=30))
+    if same_attempt and result.provider_decision == current:
+        decided, submitted = _as_utc(session.decided_at), _as_utc(session.submitted_at)
+        if decided and submitted and submitted > decided:
+            return True  # already applied, and the person has resubmitted since
+    rank_in, rank_now = _DECISION_RANK.get(result.provider_decision, 0), _DECISION_RANK.get(current, 0)
+    if same_attempt:
+        # Within one attempt "review" only ever comes before the final decision.
+        return result.provider_decision == "review" and current != "review"
+    return rank_in < rank_now
 
 
 def apply_result(db: Session, session: IdentityVerification, result: providers.NormalizedResult, *,
@@ -526,9 +480,15 @@ def apply_result(db: Session, session: IdentityVerification, result: providers.N
     """Maps a normalized provider outcome onto the session and profile.
     Only a normalized PASS can verify."""
     profile = get_or_create_profile(db, session.party_id)
+    if _is_stale(session, result):
+        logger.info("identity: out-of-order %s decision for attempt #%s ignored", result.provider_decision, session.id)
+        return session
     if session.session_state not in _DECIDABLE_BY_PROVIDER:
-        if session.session_state == "VERIFIED" and result.normalized_outcome == "FAIL":
+        same_attempt = (result.provider_attempt_id or "") == (session.provider_attempt_id or "")
+        if session.session_state == "VERIFIED" and result.normalized_outcome == "FAIL" and same_attempt:
             # The provider later invalidated evidence it had passed (Section 7.3).
+            # Only for the attempt that verified -- a late decline from an
+            # earlier attempt says nothing about the approved one.
             mark_reverification_required(db, profile, "EVIDENCE_INVALIDATED", correlation_id=correlation_id)
             db.commit()
         return session
@@ -553,6 +513,8 @@ def apply_result(db: Session, session: IdentityVerification, result: providers.N
         session.provider_session_id = result.provider_session_id
     session.match_results = {**(session.match_results or {}), **result.match_results,
                              "risk_signals": list(result.risk_signals)}
+    if result.provider_decided_at:
+        session.match_results["provider_decided_at"] = result.provider_decided_at
     if result.document_metadata.get("masked_document_number") and not session.masked_document_number:
         session.masked_document_number = result.document_metadata["masked_document_number"]
     session.ocr_extracted_number = result.document_metadata.get("masked_document_number") or session.ocr_extracted_number
@@ -563,14 +525,12 @@ def apply_result(db: Session, session: IdentityVerification, result: providers.N
     if outcome == "PASS":
         _verify(db, session, profile, assurance=_PROVIDER_PASS_LEVEL, correlation_id=correlation_id,
                 verified_attributes=result.verified_attributes)
-    elif outcome == "REVIEW" and result.provider_reviewing:
-        # The provider's own reviewers are looking: still "checking", and it
-        # never lands in the Zoiko review queue (the provider decides).
+    elif outcome == "REVIEW":
+        # The provider's own review team is looking: still "checking" -- the
+        # provider decides, never a Zoiko reviewer.
         if session.session_state != "PROCESSING":
             _transition(session, "PROCESSING")
         _set_profile_state(profile, "PROCESSING", result.reason_codes)
-    elif outcome == "REVIEW":
-        _to_review(db, session, profile, result.reason_codes, correlation_id=correlation_id)
     elif outcome == "ACTION_REQUIRED":
         _to_action_required(db, session, profile, result.reason_codes, correlation_id=correlation_id)
     else:
@@ -581,8 +541,7 @@ def apply_result(db: Session, session: IdentityVerification, result: providers.N
 
 
 def _verify(db: Session, session: IdentityVerification, profile: IdentityProfile, *, assurance: str,
-            admin: AdminUser | None = None, note: str = "", correlation_id: str = "",
-            verified_attributes: dict | None = None) -> None:
+            correlation_id: str = "", verified_attributes: dict | None = None) -> None:
     assert assurance in ASSURANCE_LEVELS
     was_verified_before = profile.verified_at is not None
     previous = profile.state
@@ -596,8 +555,8 @@ def _verify(db: Session, session: IdentityVerification, profile: IdentityProfile
     session.verified_at = now
     # Section 7.2: identity validity is policy-driven, not document expiry.
     session.expires_at = renew_at
-    session.verifier_admin_id = admin.id if admin else None
-    session.verifier_notes = note
+    session.verifier_admin_id = None
+    session.verifier_notes = ""
     profile.state = "VERIFIED"
     profile.assurance_level = assurance
     profile.reason_codes = []
@@ -622,8 +581,7 @@ def _verify(db: Session, session: IdentityVerification, profile: IdentityProfile
         source_identity_verification_id=session.id, expires_at=renew_at,
     ))
     _event(db, "IDENTITY_REVERIFIED" if was_verified_before else "IDENTITY_VERIFIED", profile, session,
-           actor_kind="admin" if admin else "system", actor_id=str(admin.id) if admin else "",
-           previous_state=previous, new_state="VERIFIED", correlation_id=correlation_id)
+           actor_kind="system", previous_state=previous, new_state="VERIFIED", correlation_id=correlation_id)
 
     user = _user_for_party(db, session.party_id)
     if user:
@@ -639,41 +597,16 @@ def _verify(db: Session, session: IdentityVerification, profile: IdentityProfile
         send_identity_verification_approved_email(user.email, user.full_name, verification_id=session.id)
 
 
-def _to_review(db: Session, session: IdentityVerification, profile: IdentityProfile, reason_codes: list[str], *,
-               correlation_id: str = "") -> None:
-    previous = profile.state
-    _transition(session, "PENDING_REVIEW")
-    session.assurance_level = _REVIEWED_LEVEL
-    _set_profile_state(profile, "PENDING_REVIEW", reason_codes)
-    _event(db, "IDENTITY_MANUAL_REVIEW_STARTED", profile, session, reason_codes=reason_codes,
-           previous_state=previous, new_state="PENDING_REVIEW", correlation_id=correlation_id)
-    user = _user_for_party(db, session.party_id)
-    who = user.full_name if user else f"Party #{session.party_id}"
-    message = f"{who}'s identity verification needs a reviewer ({', '.join(reason_codes) or 'manual review'})."
-    duplicate_of = (session.match_results or {}).get("duplicate_of_verification_id")
-    if duplicate_of:
-        # Reviewer-only context -- never shown to the person.
-        message += f" Its document matches verification #{duplicate_of}; check for reuse."
-    notif_crud.notify_all_super_admins(
-        db, title="Identity verification pending review",
-        message=message,
-        notification_type="identity_verification.submitted",
-        related_entity_type="identity_verification", related_entity_id=str(session.id),
-    )
-
-
 def _to_action_required(db: Session, session: IdentityVerification, profile: IdentityProfile, reason_codes: list[str],
-                        *, admin: AdminUser | None = None, note: str = "", correlation_id: str = "") -> None:
+                        *, correlation_id: str = "") -> None:
     previous = profile.state
     _transition(session, "ACTION_REQUIRED")
     session.decided_at = _now()
-    if admin is not None:
-        session.verifier_admin_id = admin.id
-    message = note or describe(reason_codes)["message"]
+    message = describe(reason_codes)["message"]
     session.verifier_notes = message
     _set_profile_state(profile, "ACTION_REQUIRED", reason_codes)
     _event(db, "IDENTITY_ACTION_REQUIRED", profile, session, reason_codes=reason_codes,
-           actor_kind="admin" if admin else "system", actor_id=str(admin.id) if admin else "",
+           actor_kind="system",
            previous_state=previous, new_state="ACTION_REQUIRED", correlation_id=correlation_id)
     user = _user_for_party(db, session.party_id)
     if user:
@@ -689,17 +622,15 @@ def _to_action_required(db: Session, session: IdentityVerification, profile: Ide
 
 
 def _to_failed(db: Session, session: IdentityVerification, profile: IdentityProfile, reason_codes: list[str], *,
-               admin: AdminUser | None = None, note: str = "", correlation_id: str = "") -> None:
+               correlation_id: str = "") -> None:
     previous = profile.state
     _transition(session, "FAILED")
     session.decided_at = _now()
-    if admin is not None:
-        session.verifier_admin_id = admin.id
     message = describe(reason_codes)["message"]
     session.verifier_notes = message
     _set_profile_state(profile, "FAILED", reason_codes)
     _event(db, "IDENTITY_VERIFICATION_FAILED", profile, session, reason_codes=reason_codes,
-           actor_kind="admin" if admin else "system", actor_id=str(admin.id) if admin else "",
+           actor_kind="system",
            previous_state=previous, new_state="FAILED", correlation_id=correlation_id)
     user = _user_for_party(db, session.party_id)
     if user:
@@ -714,36 +645,7 @@ def _to_failed(db: Session, session: IdentityVerification, profile: IdentityProf
         send_identity_verification_rejected_email(user.email, user.full_name, message, verification_id=session.id)
 
 
-# -- alternative route, resume, phone handoff ----------------------------------
-
-def request_alternative(db: Session, user: UserAccount, session: IdentityVerification, *, reason_code: str,
-                        note: str = "", correlation_id: str = "") -> IdentityVerification:
-    """Section 5.3/11: a manual route instead of a dead end. Rate-limited."""
-    if reason_code not in ALTERNATIVE_REASON_CODES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"reason must be one of {ALTERNATIVE_REASON_CODES}")
-    recent = db.scalar(select(func.count(IdentityVerification.id)).where(
-        IdentityVerification.party_id == session.party_id,
-        IdentityVerification.alternative_reason != "",
-        IdentityVerification.updated_at >= _now() - timedelta(days=1),
-    )) or 0
-    if recent >= _ALTERNATIVE_DAILY_LIMIT:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many review requests today -- please try again tomorrow")
-    profile = get_or_create_profile(db, session.party_id)
-    if session.session_state not in OPEN_SESSION_STATES:
-        raise HTTPException(status.HTTP_409_CONFLICT, "This verification can't be moved to manual review now")
-    if session.session_state == "ACTION_REQUIRED":
-        _transition(session, "IN_PROGRESS")
-    session.method_type = "MANUAL"
-    session.alternative_reason = reason_code
-    session.provider_code = providers.ManualReviewProvider.code
-    session.legal_name_snapshot = profile.legal_name
-    session.submitted_at = _now()
-    session.verifier_notes = note.strip()[:2000]
-    _to_review(db, session, profile, ["ALTERNATIVE_REQUESTED"], correlation_id=correlation_id)
-    db.commit()
-    db.refresh(session)
-    return session
-
+# -- resume / phone handoff ------------------------------------------------------
 
 def issue_handoff_token(db: Session, session: IdentityVerification) -> str:
     """Section 5.3 "Continue on phone" / 8.3 resume: a fresh short-lived,
@@ -771,72 +673,6 @@ def claim_handoff_token(db: Session, user: UserAccount, token: str) -> IdentityV
     return session
 
 
-# -- reviewer decisions (Section 13) -------------------------------------------
-
-REVIEWER_DECISIONS = ("APPROVE", "ACTION_REQUIRED", "REJECT", "ESCALATE")
-
-
-def reviewer_decision(db: Session, admin: AdminUser, session: IdentityVerification, *, decision: str,
-                      reason_code: str, note: str, correlation_id: str = "") -> IdentityVerification:
-    """Approve / Action required / Reject / Escalate. A reason code and a
-    reviewer note are required for every manual decision; the decision is
-    recorded as an immutable IDENTITY_REVIEWER_DECISION event with the
-    before/after state."""
-    if admin.role != "super_admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
-    decision = decision.upper()
-    if decision not in REVIEWER_DECISIONS:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"decision must be one of {REVIEWER_DECISIONS}")
-    if reason_code not in REVIEWER_REASON_CODES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"reasonCode must be one of {REVIEWER_REASON_CODES}")
-    if not note.strip():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Add a reviewer note explaining the decision")
-    profile = get_or_create_profile(db, session.party_id)
-    if session.session_state not in ("PENDING_REVIEW", "PROCESSING", "ACTION_REQUIRED"):
-        raise HTTPException(status.HTTP_409_CONFLICT, f"This verification is {session.session_state} and can't be decided")
-    before = session.session_state
-
-    if decision == "APPROVE":
-        if session.session_state == "ACTION_REQUIRED":
-            _transition(session, "PENDING_REVIEW")
-        _verify(db, session, profile, assurance=_REVIEWED_LEVEL, admin=admin, note=note.strip(),
-                correlation_id=correlation_id)
-    elif decision == "ACTION_REQUIRED":
-        if session.session_state == "ACTION_REQUIRED":
-            raise HTTPException(status.HTTP_409_CONFLICT, "Action is already required on this verification")
-        _to_action_required(db, session, profile, [reason_code], admin=admin, note=note.strip(),
-                            correlation_id=correlation_id)
-    elif decision == "REJECT":
-        if session.session_state == "ACTION_REQUIRED":
-            _transition(session, "PENDING_REVIEW")
-        _to_failed(db, session, profile, [reason_code if reason_code != "REVIEWER_APPROVED" else "REVIEWER_REJECTED"],
-                   admin=admin, note=note.strip(), correlation_id=correlation_id)
-    else:  # ESCALATE -- stays in review at the enhanced level, flagged for a senior reviewer
-        if session.session_state != "PENDING_REVIEW":
-            raise HTTPException(status.HTTP_409_CONFLICT, "Only a verification in review can be escalated")
-        session.escalated_at = _now()
-        session.assurance_level = _REVIEWED_LEVEL
-        session.reason_codes = list(dict.fromkeys([*(session.reason_codes or []), "ESCALATED"]))
-        notif_crud.notify_all_super_admins(
-            db, title="Identity verification escalated",
-            message=f"Identity verification #{session.id} was escalated for a senior review: {note.strip()[:500]}",
-            notification_type="identity_verification.escalated",
-            related_entity_type="identity_verification", related_entity_id=str(session.id),
-        )
-    session.verifier_admin_id = admin.id
-    if decision != "APPROVE":
-        session.verifier_notes = note.strip()[:2000]
-    emit_event(
-        db, "IDENTITY_REVIEWER_DECISION", "identity_verification", str(session.id),
-        {"partyId": session.party_id, "decision": decision, "reasonCode": reason_code},
-        correlation_id=correlation_id, actor_kind="admin", actor_id=str(admin.id),
-        previous_state=before, new_state=session.session_state,
-    )
-    db.commit()
-    db.refresh(session)
-    return session
-
-
 # -- hosted provider sessions (ZR-IDV-ADR-001 Section 6) ------------------------
 
 def _launch_hosted(db: Session, session: IdentityVerification, profile: IdentityProfile, pack,
@@ -860,10 +696,14 @@ def _launch_hosted(db: Session, session: IdentityVerification, profile: Identity
         profile.provider_subject_reference = str(uuid.uuid4())  # opaque endUserId, no personal data
     db.flush()
     if not session.provider_session_id:
+        # Veriff accepts only HTTPS return URLs (error 1302). Locally (http)
+        # none is sent: the integration's default applies, and the InContext
+        # SDK reports completion to the page itself.
+        return_url = f"{settings.frontend_url.rstrip('/')}/account/identity?verification=returned"
         try:
             created = provider.create_session(
                 vendor_data=f"zr-idv-{session.id}", end_user_id=profile.provider_subject_reference,
-                callback_url=f"{settings.frontend_url.rstrip('/')}/account/identity?verification=returned",
+                callback_url=return_url if return_url.startswith("https://") else "",
             )
         except providers.ProviderUnavailable:
             session.reason_codes = ["PROVIDER_UNAVAILABLE"]
@@ -883,18 +723,129 @@ def _launch_hosted(db: Session, session: IdentityVerification, profile: Identity
     return session
 
 
-def launch_url(session: IdentityVerification) -> str | None:
-    """The provider capture URL, only while the person can still capture
-    (in progress, or the provider asked for a resubmission)."""
-    from app.core.field_encryption import decrypt_text
+def capture_open(session: IdentityVerification) -> bool:
+    """Whether the person can take photos for this session now: a Veriff
+    session exists and it's in progress, or Veriff asked for a resubmission."""
+    if not session.provider_session_id or not session.provider_session_url_encrypted:
+        return False
+    if session.session_state == "IN_PROGRESS":
+        return True
+    return session.session_state == "ACTION_REQUIRED" and session.provider_decision == "resubmission_requested"
 
-    if not session.provider_session_url_encrypted:
-        return None
-    if session.session_state not in ("IN_PROGRESS", "ACTION_REQUIRED"):
-        return None
-    if session.session_state == "ACTION_REQUIRED" and session.provider_decision != "resubmission_requested":
-        return None
-    return decrypt_text(session.provider_session_url_encrypted)
+
+# Documents with nothing on the back that Veriff needs.
+_NO_BACK_SIDE = ("passport", "pan_card")
+_MAX_PHOTO_BYTES = 10 * 1024 * 1024
+_MIN_PHOTO_BYTES = 5 * 1024
+
+
+def back_side_required(document_type: str) -> bool:
+    return bool(document_type) and document_type not in _NO_BACK_SIDE
+
+
+def captured_contexts(session: IdentityVerification) -> list[str]:
+    return list((session.match_results or {}).get("captured") or [])
+
+
+def _photo_type(content: bytes) -> str | None:
+    if content[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if content[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    return None
+
+
+def _hosted_provider(db: Session, session: IdentityVerification) -> providers.IdentityProvider:
+    from app.services.identity.golive import resolve_provider
+
+    provider = resolve_provider(db, session.provider_code)
+    if provider is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, describe(["PROVIDER_UNAVAILABLE"])["message"])
+    return provider
+
+
+def capture_photo(db: Session, user: UserAccount, session: IdentityVerification, *, context: str,
+                  content: bytes, document_type: str = "", correlation_id: str = "") -> IdentityVerification:
+    """One photo from Zoiko's capture screen, relayed straight to Veriff's
+    media API. Only which photos were sent is recorded -- never the image."""
+    if not capture_open(session):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This verification isn't taking photos right now")
+    if context not in providers.CAPTURE_CONTEXTS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"context must be one of {providers.CAPTURE_CONTEXTS}")
+    if len(content) > _MAX_PHOTO_BYTES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This photo is too large. Try again with your camera.")
+    content_type = _photo_type(content)
+    if content_type is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Use a JPG or PNG photo taken with your camera.")
+    if len(content) < _MIN_PHOTO_BYTES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, describe(["DOCUMENT_UNREADABLE"])["message"])
+    profile = get_or_create_profile(db, session.party_id)
+    if context == providers.DOCUMENT_FRONT:
+        pack = policy.get_pack(db, profile.country_code)
+        if document_type not in (pack.accepted_document_types or []):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "This document can't be used for this verification. Choose another accepted identity document.",
+            )
+    elif not session.document_type and context == providers.DOCUMENT_BACK:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Photograph the front of your document first")
+
+    provider = _hosted_provider(db, session)
+    try:
+        provider.upload_media(session.provider_session_id, context, content, content_type)
+    except providers.ProviderUnavailable:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, describe(["PROVIDER_UNAVAILABLE"])["message"])
+
+    if session.session_state == "ACTION_REQUIRED":
+        # A resubmission Veriff asked for: a fresh set of photos.
+        _transition(session, "IN_PROGRESS")
+        session.reason_codes = []
+        session.match_results = {**(session.match_results or {}), "captured": []}
+        _set_profile_state(profile, "IN_PROGRESS")
+    if context == providers.DOCUMENT_FRONT:
+        from app.models.identity_verification import DOCUMENT_CATEGORY_BY_TYPE
+
+        session.document_type = document_type
+        session.document_category = DOCUMENT_CATEGORY_BY_TYPE.get(document_type, "identity")
+    captured = [c for c in captured_contexts(session) if c != context] + [context]
+    session.match_results = {**(session.match_results or {}), "captured": captured}
+    session.updated_at = _now()
+    _event(db, "IDENTITY_EVIDENCE_CAPTURED", profile, session, actor_kind="user", actor_id=str(user.id),
+           correlation_id=correlation_id)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def complete_capture(db: Session, user: UserAccount, session: IdentityVerification, *,
+                     correlation_id: str = "") -> IdentityVerification:
+    """All photos are in: Veriff starts deciding. The result arrives by the
+    decision webhook (or the decision API) -- never from this request."""
+    if not capture_open(session) or session.session_state != "IN_PROGRESS":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This verification isn't taking photos right now")
+    captured = set(captured_contexts(session))
+    needed = [providers.DOCUMENT_FRONT, providers.FACE]
+    if back_side_required(session.document_type):
+        needed.insert(1, providers.DOCUMENT_BACK)
+    missing = [c for c in needed if c not in captured]
+    if missing:
+        labels = {providers.DOCUMENT_FRONT: "the front of your document", providers.DOCUMENT_BACK: "the back of your document",
+                  providers.FACE: "a selfie"}
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Still needed: " + ", ".join(labels[c] for c in missing))
+    provider = _hosted_provider(db, session)
+    try:
+        provider.submit_session(session.provider_session_id)
+    except providers.ProviderUnavailable:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, describe(["PROVIDER_UNAVAILABLE"])["message"])
+    profile = get_or_create_profile(db, session.party_id)
+    _transition(session, "PROCESSING")
+    session.submitted_at = _now()
+    _set_profile_state(profile, "PROCESSING")
+    _event(db, "IDENTITY_VERIFICATION_SUBMITTED", profile, session, actor_kind="user", actor_id=str(user.id),
+           previous_state="IN_PROGRESS", new_state="PROCESSING", correlation_id=correlation_id)
+    db.commit()
+    db.refresh(session)
+    return session
 
 
 _RESTARTABLE = ("SESSION_EXPIRED", "SESSION_ABANDONED", "PROVIDER_UNAVAILABLE", "PROVIDER_DECLINED")
@@ -930,7 +881,7 @@ def restart(db: Session, user: UserAccount, session: IdentityVerification, *, co
         db.flush()
     _set_profile_state(profile, "NOT_STARTED")
     db.flush()
-    return start_session(db, user, method=session.method_type if session.method_type != "MANUAL" else "DOCUMENT",
+    return start_session(db, user, method="DOCUMENT",
                          role_context=session.role_context, correlation_id=correlation_id)
 
 
@@ -961,7 +912,9 @@ def refresh_from_provider(db: Session, user: UserAccount, session: IdentityVerif
     and checking this simply returns the current status."""
     if session.party_id != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view your own identity verifications")
-    if session.session_state not in ("IN_PROGRESS", "PROCESSING") or not session.provider_session_url_encrypted:
+    awaiting_resubmission = (session.session_state == "ACTION_REQUIRED"
+                             and session.provider_decision == "resubmission_requested")
+    if (session.session_state not in ("IN_PROGRESS", "PROCESSING") and not awaiting_resubmission)             or not session.provider_session_url_encrypted:
         return session
     last = (session.match_results or {}).get("user_refreshed_at")
     if last and datetime.fromisoformat(last) > _now() - _USER_REFRESH_INTERVAL:
@@ -979,8 +932,12 @@ def reconcile_stale_sessions(db: Session) -> int:
     from app.core.config import settings
 
     cutoff = _now() - timedelta(minutes=settings.veriff_reconcile_after_minutes)
+    from sqlalchemy import and_, or_
+
     stale = list(db.scalars(select(IdentityVerification).where(
-        IdentityVerification.session_state.in_(("IN_PROGRESS", "PROCESSING")),
+        or_(IdentityVerification.session_state.in_(("IN_PROGRESS", "PROCESSING")),
+            and_(IdentityVerification.session_state == "ACTION_REQUIRED",
+                 IdentityVerification.provider_decision == "resubmission_requested")),
         IdentityVerification.provider_session_id != "",
         IdentityVerification.provider_session_url_encrypted.is_not(None),
         IdentityVerification.updated_at <= cutoff,
@@ -997,19 +954,51 @@ def reconcile_stale_sessions(db: Session) -> int:
 
 # -- provider webhooks (ZR-IDENTITY-001 Section 8.3; ZR-IDV-ADR-001 Section 8) ----
 
+def webhook_ip_allowed(provider_code: str, client_ip: str) -> bool:
+    """ZR-IDV-ADR-001 Section 8 IP controls: when an allow-list is configured
+    for Veriff, the caller must be inside it. An addition to the HMAC check,
+    never a replacement. No list = no IP restriction."""
+    import ipaddress
+
+    if provider_code != "veriff" or not settings.veriff_webhook_allowed_ips.strip():
+        return True
+    try:
+        address = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    for entry in settings.veriff_webhook_allowed_ips.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if address in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            logger.warning("identity webhook: ignoring invalid VERIFF_WEBHOOK_ALLOWED_IPS entry")
+    return False
+
+
 def ingest_webhook(db: Session, provider_code: str, headers: dict[str, str], body: bytes, *,
-                   kind: str = "decision", correlation_id: str = "") -> dict:
+                   kind: str = "decision", client_ip: str = "", correlation_id: str = "") -> dict:
     """Authenticate first (on the exact raw bytes), then durably record each
-    event, then process it. Delivery is at-least-once and unordered: a
-    duplicate is acknowledged and not reprocessed; an event that fails to
-    process stays "accepted" for the sweeper (process_pending_webhook_events)
-    and the delivery is still acknowledged."""
+    event and acknowledge. Processing happens afterwards
+    (process_webhook_events, run as a background task by the route, with
+    process_pending_webhook_events as the sweeper). Delivery is
+    at-least-once and unordered: a duplicate is acknowledged and not
+    reprocessed. Returns the new event ids under "event_ids"."""
     from app.core.field_encryption import encrypt_text
 
     provider = providers.get_provider(provider_code)
     if provider is None or not provider.supports_webhooks:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown identity provider")
     digest = hashlib.sha256(body).hexdigest()
+    if not webhook_ip_allowed(provider.code, client_ip):
+        db.add(IdentityProviderEvent(
+            provider_code=provider.code, provider_event_id=f"rejected:{secrets.token_hex(8)}",
+            event_type=f"{kind}.ip_rejected", payload_sha256=digest, status="rejected",
+        ))
+        db.commit()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Webhook source not allowed")
     if not provider.verify_webhook(headers, body):
         db.add(IdentityProviderEvent(
             provider_code=provider.code, provider_event_id=f"rejected:{secrets.token_hex(8)}",
@@ -1022,7 +1011,7 @@ def ingest_webhook(db: Session, provider_code: str, headers: dict[str, str], bod
     except (ValueError, TypeError, KeyError):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Malformed webhook body")
 
-    accepted, duplicates, processed = 0, 0, 0
+    accepted, duplicates, event_ids = 0, 0, []
     for event in events:
         if not event.provider_event_id:
             continue
@@ -1048,9 +1037,8 @@ def ingest_webhook(db: Session, provider_code: str, headers: dict[str, str], bod
         db.add(row)
         db.commit()
         accepted += 1
-        if _process_event_row(db, row, correlation_id=correlation_id):
-            processed += 1
-    return {"accepted": accepted, "duplicates": duplicates, "processed": processed}
+        event_ids.append(row.id)
+    return {"accepted": accepted, "duplicates": duplicates, "event_ids": event_ids}
 
 
 def _session_for_event(db: Session, provider_code: str, event: providers.WebhookEvent) -> IdentityVerification | None:
@@ -1105,6 +1093,17 @@ def _process_event_row(db: Session, row: IdentityProviderEvent, *, correlation_i
         return False
 
 
+def process_webhook_events(db: Session, event_ids: list[int], *, correlation_id: str = "") -> int:
+    """Processes just-accepted webhook events (the route's background task).
+    Anything not processed here stays "accepted" for the sweeper."""
+    processed = 0
+    for event_id in event_ids:
+        row = db.get(IdentityProviderEvent, event_id)
+        if row is not None and row.status == "accepted" and _process_event_row(db, row, correlation_id=correlation_id):
+            processed += 1
+    return processed
+
+
 def process_pending_webhook_events(db: Session) -> int:
     """Scheduled job: retry accepted-but-unprocessed webhook events."""
     rows = list(db.scalars(select(IdentityProviderEvent).where(IdentityProviderEvent.status == "accepted")
@@ -1114,8 +1113,11 @@ def process_pending_webhook_events(db: Session) -> int:
 
 def process_webhook(db: Session, provider_code: str, headers: dict[str, str], body: bytes,
                     correlation_id: str = "") -> dict:
-    """Generic signed-webhook provider entry point (same ingest pipeline)."""
-    return ingest_webhook(db, provider_code, headers, body, kind="decision", correlation_id=correlation_id)
+    """Ingest and process in one call (same pipeline) -- for callers without
+    a background task runner."""
+    result = ingest_webhook(db, provider_code, headers, body, kind="decision", correlation_id=correlation_id)
+    process_webhook_events(db, result.pop("event_ids"), correlation_id=correlation_id)
+    return result
 
 
 # -- privacy: erasure across Zoiko and the provider (ZR-IDV-ADR-001 Section 12) --
@@ -1231,15 +1233,12 @@ def metrics(db: Session, *, days: int = 30) -> dict:
     started = list(db.scalars(select(IdentityVerification).where(IdentityVerification.created_at >= since)))
     submitted = [s for s in sessions if s.submitted_at is not None]
     verified = [s for s in submitted if s.session_state in ("VERIFIED", "REVERIFICATION_REQUIRED")]
-    reviewed = [s for s in submitted if s.verifier_admin_id is not None or s.method_type == "MANUAL"
-                or "ESCALATED" in (s.reason_codes or [])]
 
     def hours(s: IdentityVerification) -> float | None:
         start, end = _as_utc(s.submitted_at), _as_utc(s.decided_at)
         return (end - start).total_seconds() / 3600 if start and end else None
 
-    automated_times = [h for s in submitted if s.verifier_admin_id is None and (h := hours(s)) is not None]
-    manual_times = [h for s in submitted if s.verifier_admin_id is not None and (h := hours(s)) is not None]
+    decision_times = [h for s in submitted if (h := hours(s)) is not None]
 
     reason_counts: dict[str, int] = {}
     for s in sessions:
@@ -1268,17 +1267,11 @@ def metrics(db: Session, *, days: int = 30) -> dict:
         "submitted": len(submitted),
         "verified": len(verified),
         "start_to_verified_rate": rate(len(verified), len(started)),
-        "manual_review_rate": rate(len(reviewed), len(submitted)),
         "action_required_recovery_rate": rate(len(recovered), len(action_parties)),
         "provider_error_rate": rate(provider_errors, len(started)),
-        "time_to_decision_hours": {
-            "automated": {"median": _percentile(automated_times, 50), "p90": _percentile(automated_times, 90)},
-            "manual": {"median": _percentile(manual_times, 50), "p90": _percentile(manual_times, 90)},
-        },
+        "time_to_decision_hours": {"median": _percentile(decision_times, 50), "p90": _percentile(decision_times, 90)},
         "by_method": by_method,
         "reason_codes": dict(sorted(reason_counts.items(), key=lambda kv: -kv[1])),
-        "pending_review": db.scalar(select(func.count(IdentityVerification.id)).where(
-            IdentityVerification.session_state == "PENDING_REVIEW")) or 0,
         **_provider_metrics(db, since, sessions),
     }
 
@@ -1299,6 +1292,7 @@ def _provider_metrics(db: Session, since: datetime, sessions: list[IdentityVerif
     duplicates = sum(e.duplicate_count for e in valid)
     stale_cutoff = _now() - timedelta(minutes=settings.veriff_reconcile_after_minutes)
     return {
+        "provider_cost": _provider_cost(sessions),
         "provider_outcomes": outcomes,
         "provider_sessions_created": sum(1 for s in hosted if s.provider_session_id),
         "webhook_auth_failures": sum(1 for e in events if e.status == "rejected"),
@@ -1310,4 +1304,25 @@ def _provider_metrics(db: Session, since: datetime, sessions: list[IdentityVerif
         "reconciled_sessions": sum(1 for s in sessions if (s.match_results or {}).get("reconciled_at")),
         "stale_sessions": sum(1 for s in hosted if s.session_state in ("IN_PROGRESS", "PROCESSING")
                               and _as_utc(s.updated_at) and _as_utc(s.updated_at) <= stale_cutoff),
+    }
+
+
+def _provider_cost(sessions: list[IdentityVerification]) -> dict | None:
+    """ADR Section 14: provider cost per completed verification and per
+    approved account, from the contracted price per Veriff session
+    (VERIFF_COST_PER_SESSION). None until a price is configured."""
+    price = settings.veriff_cost_per_session
+    if not price or price <= 0:
+        return None
+    billed = [s for s in sessions if s.provider_code == "veriff" and s.provider_session_id]
+    completed = [s for s in billed if s.provider_decision in _DECISION_RANK and s.provider_decision != "review"]
+    approved_accounts = {s.party_id for s in billed if s.provider_decision == "approved"}
+    total = round(price * len(billed), 2)
+    return {
+        "currency": settings.veriff_cost_currency,
+        "per_session": price,
+        "sessions": len(billed),
+        "total": total,
+        "per_completed_verification": round(total / len(completed), 2) if completed else None,
+        "per_approved_account": round(total / len(approved_accounts), 2) if approved_accounts else None,
     }
