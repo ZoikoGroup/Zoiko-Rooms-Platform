@@ -24,7 +24,7 @@ import {
   updateHostedProperty,
   updateHostedRoom,
 } from "@/lib/user-api";
-import { ListARoomWizard } from "@/components/user/ListARoomWizard";
+import { ListARoomWizard, submitOutcomeMessage } from "@/components/user/ListARoomWizard";
 import { PropertyVerificationWizard } from "@/components/user/PropertyVerificationWizard";
 import { AuthorityVerificationWizard } from "@/components/user/AuthorityVerificationWizard";
 import {
@@ -446,6 +446,12 @@ export function HostingPropertiesManager() {
         title={propertyForm?.id === null ? "Add a property" : "Edit property"}
       >
         <form onSubmit={handlePropertySubmit} className="space-y-4">
+          {propertyForm && propertyForm.id !== null && (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-500/20">
+              Changing the address or city means the property and your authority to list it must be verified again,
+              and listings can&apos;t go live until they are.
+            </p>
+          )}
           <Field label="Address">
             <input
               value={propertyForm?.address ?? ""}
@@ -559,6 +565,10 @@ export function HostingPropertiesManager() {
             propertyId={verifyProperty.id}
             propertyLabel={verifyProperty.label}
             onClose={() => { setVerifyProperty(null); void load(); }}
+            onContinueToAuthority={() => {
+              setAuthorityProperty({ id: verifyProperty.id, label: verifyProperty.label });
+              setVerifyProperty(null);
+            }}
           />
         </Modal>
       )}
@@ -567,14 +577,11 @@ export function HostingPropertiesManager() {
         open={wizardOpen}
         onClose={() => setWizardOpen(false)}
         contact={{ name: user?.fullName ?? "", phone: user?.phone ?? "", email: user?.email ?? "" }}
-        onCreated={async (submitted) => {
+        onCreated={async (outcome) => {
           setWizardOpen(false);
           await load();
-          showToast(
-            submitted
-              ? "Listing submitted for review — a Zoiko admin will approve or reject it."
-              : "Draft listing created — find it under My Listings when you're ready to submit it for review."
-          );
+          const { text, tone } = submitOutcomeMessage(outcome);
+          showToast(text, tone);
         }}
       />
 

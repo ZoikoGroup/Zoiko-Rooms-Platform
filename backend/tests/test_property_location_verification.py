@@ -268,15 +268,18 @@ class TestMapControl:
         flow.start(); flow.address(); flow.confirm_address()
         r = flow.location("adjust", latitude=LAT + 0.00009, longitude=LNG, reason="Marker was on the road, not the entrance")
         body = r.json()
-        assert body["pinStatus"] == "ADJUSTED" and 5 < body["pinMovedMeters"] < 15
+        assert body["pinStatus"] == "ADJUSTED" and "pinMovedMeters" not in body  # thresholds stay internal
         v = db_session.get(PropertyLocationVerification, body["id"])
+        assert 5 < v.pin_moved_meters < 15
         assert (v.original_latitude, v.original_longitude) == (LAT, LNG)  # never overwritten
+        assert len(v.pin_adjust_history) == 1 and v.pin_adjust_history[0]["reason"].startswith("Marker was")
 
     def test_a_2km_drag_must_be_corrected(self, client, db_session, host, provider, uploads):
         flow = _flow(client, host)
         flow.start(); flow.address(); flow.confirm_address()
         body = flow.location("adjust", latitude=LAT + 0.018, longitude=LNG, reason="moved").json()
-        assert body["pinStatus"] == "REVIEW_REQUIRED" and body["pinMovedMeters"] > 1900
+        assert body["pinStatus"] == "REVIEW_REQUIRED"
+        assert db_session.get(PropertyLocationVerification, body["id"]).pin_moved_meters > 1900
         flow.unit(); flow.evidence()
         body = flow.submit().json()
         assert body["state"] == "ACTION_REQUIRED" and "PIN_MOVED_TOO_FAR" in body["reasonCodes"]
@@ -395,7 +398,12 @@ class TestInvalidationExpiryConcurrency:
     def test_a_material_address_edit_invalidates_and_keeps_history(self, client, db_session, host, provider, uploads):
         body = _flow(client, host).happy_path()
         user, prop, room = host
+        db_session.refresh(prop)
+        stale = client.put(f"/api/users/hosting/properties/{prop.id}", cookies=auth_user_cookie(user),
+                           json={"address": "77 New Street", "city": "Madhira", "jurisdictionCode": "IN"})
+        assert stale.status_code == 428  # a confirmed address needs the version the client read
         r = client.put(f"/api/users/hosting/properties/{prop.id}", cookies=auth_user_cookie(user),
+                       headers={"If-Match": str(prop.location_version)},
                        json={"address": "77 New Street", "city": "Madhira", "jurisdictionCode": "IN"})
         assert r.status_code == 200, r.text
         v = db_session.get(PropertyLocationVerification, body["id"])

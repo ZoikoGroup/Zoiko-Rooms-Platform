@@ -32,17 +32,28 @@ export interface AuthorityRequirement {
   accepted_examples: string[];
   required: boolean;
   owner_confirmation: boolean;
+  /** Phrases an accepted document for this country contains (matched by text layer / OCR). */
+  keywords: string[];
+  /** The accepted documents, each with the phrases that identify it. */
+  documents: AuthorityDocumentRule[];
   status: "MISSING" | "READY" | "NEEDS_REPLACEMENT" | "AWAITING_CONFIRMATION";
   evidence_ids: number[];
   confirmation_pending: boolean;
   confirmed: boolean;
+  /** Trusted registry / connected sources the server offers for this requirement. */
+  sources: { code: string; source_type: "REGISTRY" | "CONNECTOR"; label: string }[];
+}
+
+export interface AuthorityDocumentRule {
+  label: string;
+  keywords: string[];
 }
 
 export interface AuthorityEvidence {
   id: number;
   requirementId: string;
   evidenceType: string;
-  sourceType: "UPLOAD" | "OWNER_CONFIRMATION";
+  sourceType: "UPLOAD" | "OWNER_CONFIRMATION" | "REGISTRY" | "CONNECTOR";
   issuer: string;
   documentReference: string;
   issuedAt: string | null;
@@ -51,6 +62,10 @@ export interface AuthorityEvidence {
   contentType: string;
   fileSize: number;
   processingStatus: string;
+  /** Which listed document the upload was recognised as (null = not read yet). */
+  detectedDocument: string | null;
+  /** false = readable, but not one of the listed documents. */
+  recognised: boolean | null;
   available: boolean;
   createdAt: string;
 }
@@ -99,6 +114,9 @@ export interface AuthorityVerification {
   reasonCodes: string[];
   reason: { message: string; cta: string };
   requirements: AuthorityRequirement[];
+  /** Section 4.3 outcomes shown on the review screen: true = match,
+   *  false = doesn't match, null = not checked yet. */
+  matchResults: Record<string, boolean | null>;
   evidence: AuthorityEvidence[];
   confirmations: AuthorityConfirmation[];
   allowedActions: AllowedAction[];
@@ -225,6 +243,45 @@ export function uploadAuthorityEvidence(v: AuthorityVerification, requirementId:
   });
 }
 
+export function checkAuthoritySource(v: AuthorityVerification, requirementId: string, sourceCode: string,
+  reference: string) {
+  return apiClientFetch<AuthorityVerification>(`${BASE}/${v.id}/source-checks`, {
+    method: "POST", headers: versioned(v), body: JSON.stringify({ requirementId, sourceCode, reference }),
+  });
+}
+
+/** Section 10.3 Verification Center row: exception-management data only. */
+export interface AuthoritySummary {
+  id: number;
+  propertyId: number;
+  propertyLabel: string;
+  propertyCity: string;
+  relationshipType: RelationshipType;
+  state: AuthorityState;
+  expiresAt: string | null;
+  reason: { message: string; cta: string };
+  allowedActions: AllowedAction[];
+}
+
+export function listMyAuthority() {
+  return apiClientFetch<AuthoritySummary[]>(BASE);
+}
+
+/** Short relationship names for tables (relationshipLabel is the first-person form). */
+export const relationshipShort: Record<RelationshipType, string> = {
+  OWNER: "Owner",
+  CO_OWNER: "Co-owner",
+  REPRESENTATIVE: "Owner (entity)",
+  AGENT: "Agent",
+  PROPERTY_MANAGER: "Property manager",
+  TENANT_SUBLETTER: "Tenant / subletter",
+};
+
+/** Section 10.1-10.2: healthy authority is quiet; only these states surface. */
+export function isAuthorityException(state: AuthorityState): boolean {
+  return state !== "VERIFIED" && state !== "SUPERSEDED";
+}
+
 export function removeAuthorityEvidence(v: AuthorityVerification, evidenceId: number) {
   return apiClientFetch<AuthorityVerification>(`${BASE}/${v.id}/evidence/${evidenceId}`, {
     method: "DELETE", headers: versioned(v),
@@ -309,6 +366,7 @@ export interface AuthorityQueueItem {
   reasonCodes: string[];
   awaitingSecondApproval: boolean;
   isReconsideration: boolean;
+  assignedAdminId: number | null;
   submittedAt: string | null;
   createdAt: string;
 }
@@ -318,13 +376,16 @@ export interface AuthorityCase extends Omit<AuthorityVerification, "evidence"> {
   verifiedLegalName: string;
   property: { id: number; address: string; city: string; postalCode: string; verified: boolean };
   evidence: (AuthorityEvidence & { readable: boolean | null; propertyMatched: boolean | null; nameMatched: boolean | null;
-    principalMatched: boolean | null; reusedElsewhere: boolean; tamperSignal: boolean })[];
+    principalMatched: boolean | null; reusedElsewhere: boolean; tamperSignal: boolean; scanStatus: string;
+    textSource: string; ocrConfidence: number | null; typeMatched: boolean | null })[];
   matchResults: Record<string, boolean | null>;
   reviewReasonCodes: string[];
   reviewNote: string;
   reconsiderationNote: string;
   awaitingSecondApproval: boolean;
   firstApproverAdminId: number | null;
+  assignedAdminId: number | null;
+  assignedAt: string | null;
   otherClaims: { id: number; partyId: number; relationshipType: RelationshipType; state: AuthorityState; createdAt: string }[];
   events: { type: string; previousState: string | null; newState: string | null; actorKind: string; createdAt: string }[];
 }
@@ -349,6 +410,18 @@ export function reviewAuthority(c: { id: number; version: number }, decision: st
   });
 }
 
+export function assignAuthorityCase(id: number, release = false) {
+  return apiClientFetch<AuthorityVerification>(`${ADMIN}/${id}/assign`, {
+    method: "POST", body: JSON.stringify({ release }),
+  });
+}
+
+export function recordOwnershipChange(propertyId: number) {
+  return apiClientFetch<{ propertyId: number; reopened: number }>(`${ADMIN}/properties/${propertyId}/ownership-change`, {
+    method: "POST",
+  });
+}
+
 export function adminRevokeAuthority(id: number, reasonCode: string) {
   return apiClientFetch<AuthorityVerification>(`${ADMIN}/${id}/revoke`, {
     method: "POST", body: JSON.stringify({ reasonCode }),
@@ -370,5 +443,58 @@ export function listPendingOrganizations() {
 export function decideOrganization(id: number, approve: boolean) {
   return apiClientFetch<Organization>(`${ADMIN}/organizations/${id}/decision`, {
     method: "POST", body: JSON.stringify({ approve }),
+  });
+}
+
+// -- Authority Regulatory Packs (Section 4) -------------------------------------------
+
+export interface AuthorityPackRequirement {
+  requirement_id: string;
+  evidence_class: string;
+  title: string;
+  purpose: string;
+  accepted_examples: string[];
+  keywords?: string[];
+  documents: AuthorityDocumentRule[];
+  required: boolean;
+  owner_confirmation: boolean;
+}
+
+export interface AuthorityPack {
+  id: number;
+  countryCode: string;
+  countryName: string;
+  version: number;
+  requirements: Record<AuthorityRoute, AuthorityPackRequirement[]>;
+  terminology: Record<string, string>;
+  subletConsentRequired: boolean;
+  coOwnerConsentRequired: boolean;
+  parallelIdentityIntake: boolean;
+  defaultValidityDays: number;
+  expiringSoonDays: number;
+  evidenceRetentionDays: number | null;
+  listingControl: "SUSPEND" | "NONE";
+}
+
+export type AuthorityPackChanges = Partial<{
+  countryName: string;
+  requirements: Record<AuthorityRoute, AuthorityPackRequirement[]>;
+  subletConsentRequired: boolean;
+  coOwnerConsentRequired: boolean;
+  parallelIdentityIntake: boolean;
+  defaultValidityDays: number;
+  expiringSoonDays: number;
+  evidenceRetentionDays: number | null;
+  listingControl: "SUSPEND" | "NONE";
+}>;
+
+export function listAuthorityPacks() {
+  return apiClientFetch<AuthorityPack[]>(`${ADMIN}/packs`);
+}
+
+/** Saves a NEW pack version (the previous one is kept as history). */
+export function updateAuthorityPack(id: number, changes: AuthorityPackChanges) {
+  return apiClientFetch<{ id: number; version: number }>(`${ADMIN}/packs/${id}`, {
+    method: "PUT", body: JSON.stringify(changes),
   });
 }

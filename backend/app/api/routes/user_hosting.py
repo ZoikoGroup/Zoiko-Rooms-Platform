@@ -320,6 +320,17 @@ def update_user_property(
     version the client last read -- a stale client gets 409 instead of
     silently overwriting a newer address."""
     prop = _get_property_or_404(db, property_id, user)
+    from app.crud.property_verification import invalidate_for_address_change, is_material_address_change
+
+    material = is_material_address_change(
+        {"address": prop.address, "city": prop.city, "landmark": prop.landmark, "jurisdiction_code": prop.jurisdiction_code},
+        {"address": payload.address, "city": payload.city, "landmark": payload.landmark,
+         "jurisdiction_code": payload.jurisdiction_code})
+    confirmed = bool(prop.canonical_formatted_address) or prop.latitude_private is not None
+    if material and confirmed and not if_match:
+        # A confirmed address can only be replaced by a client that read it.
+        raise HTTPException(status.HTTP_428_PRECONDITION_REQUIRED,
+                            "Reload the property before changing its confirmed address")
     if if_match:
         try:
             expected = int(if_match.strip().strip('"'))
@@ -328,8 +339,6 @@ def update_user_property(
         if expected != prop.location_version:
             raise HTTPException(status.HTTP_409_CONFLICT,
                                 "This property's address changed in another window. Reload to see the latest version.")
-
-    from app.crud.property_verification import invalidate_for_address_change, is_material_address_change
 
     before = {"address": prop.address, "city": prop.city, "landmark": prop.landmark,
               "jurisdiction_code": prop.jurisdiction_code}
@@ -355,6 +364,9 @@ def update_user_property(
         invalidated += reopen_for_address_change(db, prop.id, correlation_id=get_correlation_id(request))
         # The canonical structured address no longer describes this property.
         prop.canonical_formatted_address = ""
+        prop.address_line_1 = prop.address_line_2 = prop.subpremise = prop.locality = ""
+        prop.administrative_area = prop.postal_code = prop.address_local = ""
+        prop.location_precision = prop.geocode_status = prop.pin_status = ""
         prop.latitude_private = prop.longitude_private = None
         prop.location_version += 1
     db.commit()
@@ -1037,25 +1049,11 @@ async def declare_hosted_property_verification(
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """A multipart request (not JSON) since it always carries a real
-    evidence file now -- see core/property_verification_uploads.py for
-    content validation and storage. Previously evidence_ref (free text)
-    was the only thing ever recorded, with no real document behind it."""
-    room = get_room(db, room_id)
-    if not room:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
-    stored_filename, original_filename, content_type, file_size, sha256_hash = await save_property_verification_document(file)
-    record = property_verification_crud.declare_property_verification(
-        db, user, room, evidence_ref=evidence_ref,
-        stored_filename=stored_filename, original_filename=original_filename,
-        content_type=content_type, file_size=file_size, sha256_hash=sha256_hash,
-    )
-    emit_event(
-        db, "property_verification.declared", "property_verification", str(record.id),
-        {"roomId": room_id}, correlation_id=get_correlation_id(request),
-    )
-    db.commit()
-    return record
+    """Retired by ZR-PROPERTY-VERIFY-001: a per-room upload auto-verified on
+    a map hit alone, with no unit, pin or attestation step. Properties are
+    verified once per property through /api/users/property-verifications."""
+    raise HTTPException(status.HTTP_410_GONE,
+                        "Property verification is now done once per property -- use Verify property on the property")
 
 
 @router.get("/rooms/{room_id}/property-verifications/{verification_id}/document")

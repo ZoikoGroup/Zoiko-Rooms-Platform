@@ -10,6 +10,9 @@
 export type BrowserMapProvider = "google" | "mapbox" | "here" | "none";
 
 export const GOOGLE_MAPS_BROWSER_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY ?? "";
+/** Advanced markers need a Map ID. Google's DEMO_MAP_ID works for development;
+ *  set your own (Cloud Console > Map management) for production styling. */
+export const GOOGLE_MAPS_MAP_ID = process.env.NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID || "DEMO_MAP_ID";
 export const MAPBOX_BROWSER_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
 export const HERE_BROWSER_KEY = process.env.NEXT_PUBLIC_HERE_API_KEY ?? "";
 

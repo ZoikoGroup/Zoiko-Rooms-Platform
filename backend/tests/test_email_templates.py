@@ -34,6 +34,9 @@ def _body(message, subtype):
 
 
 ALL_SENDERS = [
+    ("ZR-EML-VER-002", lambda: mailer.send_authority_status_email(
+        "a@x.com", "Ravi", status_display="Action required", variant="action-required",
+        message="Add the evidence still required for your role.", property_label="Property #6", verification_id=9)),
     ("ZR-EML-ID-002", lambda: mailer.send_welcome_email("a@x.com", "Ravi Kumar")),
     ("ZR-EML-ID-006", lambda: mailer.send_password_reset_email("a@x.com", "https://app/reset?t=1", 30, "Ravi")),
     ("ZR-EML-ID-003", lambda: mailer.send_payout_beneficiary_verification_code_email("a@x.com", "Ravi", "482913", 15)),

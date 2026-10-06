@@ -267,6 +267,11 @@ def mark_reverification_required(db: Session, profile: IdentityProfile, reason: 
     _event(db, "IDENTITY_REVERIFICATION_REQUIRED", profile, current, reason_codes=[reason],
            previous_state=previous, new_state=profile.state, correlation_id=correlation_id)
     db.flush()
+    # ZR-AUTHORITY-002 Section 13.1: listing authority rests on this identity.
+    from app.services.authority_service import reopen_for_identity_event
+
+    reopen_for_identity_event(db, profile.party_id, reason, correlation_id=correlation_id)
+    db.flush()
 
 
 def on_account_recovery(db: Session, user: UserAccount) -> None:

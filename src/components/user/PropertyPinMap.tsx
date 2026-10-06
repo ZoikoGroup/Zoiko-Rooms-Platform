@@ -4,7 +4,7 @@ import "leaflet/dist/leaflet.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import { Circle, CircleMarker, MapContainer, Marker, TileLayer, useMap, useMapEvents } from "react-leaflet";
-import { browserMapProvider, loadGoogleMaps, rasterTiles } from "@/lib/map-provider";
+import { GOOGLE_MAPS_MAP_ID, browserMapProvider, loadGoogleMaps, rasterTiles } from "@/lib/map-provider";
 
 const markerIcon = L.icon({
   iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
@@ -26,6 +26,8 @@ interface MapProps {
   policyMeters?: number;
   onMove?: (p: Point) => void;
   height?: number;
+  /** Starting zoom (default 18, building level). */
+  zoom?: number;
 }
 
 /** True when a browser map is configured (otherwise the wizard relies on its
@@ -51,27 +53,33 @@ export function PropertyPinMap(props: MapProps) {
   return <RasterPinMap {...props} />;
 }
 
-function GooglePinMap({ original, marker, adjustable, policyMeters, onMove, height = 300 }: MapProps) {
+function GooglePinMap({ original, marker, adjustable, policyMeters, onMove, height = 300, zoom = 18 }: MapProps) {
   const container = useRef<HTMLDivElement>(null);
   const map = useRef<google.maps.Map | null>(null);
-  const pin = useRef<google.maps.Marker | null>(null);
-  const originDot = useRef<google.maps.Marker | null>(null);
+  // Advanced markers (google.maps.Marker is deprecated).
+  const pin = useRef<google.maps.marker.AdvancedMarkerElement | null>(null);
+  const originDot = useRef<google.maps.marker.AdvancedMarkerElement | null>(null);
+  const markerLib = useRef<google.maps.MarkerLibrary | null>(null);
   const radius = useRef<google.maps.Circle | null>(null);
   const listeners = useRef<google.maps.MapsEventListener[]>([]);
   const moveRef = useRef(onMove);
   const [failed, setFailed] = useState(false);
+  const [ready, setReady] = useState(false);
   useEffect(() => { moveRef.current = onMove; }, [onMove]);
 
   useEffect(() => {
     let cancelled = false;
-    loadGoogleMaps().then((maps) => {
+    loadGoogleMaps().then(async (maps) => {
+      const lib = (await maps.importLibrary("marker")) as google.maps.MarkerLibrary;
       if (cancelled || !container.current || map.current) return;
+      markerLib.current = lib;
       map.current = new maps.Map(container.current, {
-        center: { lat: marker.latitude, lng: marker.longitude }, zoom: 18, mapTypeId: "hybrid",
+        center: { lat: marker.latitude, lng: marker.longitude }, zoom, mapTypeId: "hybrid", mapId: GOOGLE_MAPS_MAP_ID,
         streetViewControl: false, fullscreenControl: false, clickableIcons: false,
       });
-      pin.current = new maps.Marker({ map: map.current, position: { lat: marker.latitude, lng: marker.longitude },
+      pin.current = new lib.AdvancedMarkerElement({ map: map.current, position: { lat: marker.latitude, lng: marker.longitude },
         title: "Property marker" });
+      setReady(true); // draw the overlays now that the map exists
     }).catch(() => setFailed(true));
     return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -79,17 +87,23 @@ function GooglePinMap({ original, marker, adjustable, policyMeters, onMove, heig
   // Keep the overlays in step with props.
   useEffect(() => {
     const m = map.current;
-    if (!m || !pin.current || typeof google === "undefined") return;
+    const lib = markerLib.current;
+    const marker_ = pin.current;
+    if (!ready || !m || !marker_ || !lib) return;
     const position = { lat: marker.latitude, lng: marker.longitude };
-    pin.current.setPosition(position);
-    pin.current.setDraggable(adjustable);
+    marker_.position = position;
+    marker_.gmpDraggable = adjustable;
     if (!m.getBounds()?.contains(position)) m.panTo(position);
 
     listeners.current.forEach((l) => l.remove());
     listeners.current = [];
     if (adjustable) {
-      listeners.current.push(pin.current.addListener("dragend", (e: google.maps.MapMouseEvent) => {
-        if (e.latLng) moveRef.current?.({ latitude: e.latLng.lat(), longitude: e.latLng.lng() });
+      listeners.current.push(marker_.addListener("dragend", () => {
+        const at = marker_.position;
+        if (!at) return;
+        const lat = typeof at.lat === "function" ? at.lat() : at.lat;
+        const lng = typeof at.lng === "function" ? at.lng() : at.lng;
+        moveRef.current?.({ latitude: lat, longitude: lng });
       }));
       listeners.current.push(m.addListener("click", (e: google.maps.MapMouseEvent) => {
         if (e.latLng) moveRef.current?.({ latitude: e.latLng.lat(), longitude: e.latLng.lng() });
@@ -99,10 +113,12 @@ function GooglePinMap({ original, marker, adjustable, policyMeters, onMove, heig
     if (original) {
       const at = { lat: original.latitude, lng: original.longitude };
       if (!originDot.current) {
-        originDot.current = new google.maps.Marker({ map: m, position: at, clickable: false, icon: {
-          path: google.maps.SymbolPath.CIRCLE, scale: 6, fillColor: "#94a3b8", fillOpacity: 0.9,
-          strokeColor: "#64748b", strokeWeight: 2 } });
-      } else originDot.current.setPosition(at);
+        // The provider's original result: a faint dot that never moves.
+        const dot = document.createElement("div");
+        dot.style.cssText = "width:12px;height:12px;border-radius:9999px;background:#94a3b8;border:2px solid #64748b;";
+        dot.setAttribute("aria-hidden", "true");
+        originDot.current = new lib.AdvancedMarkerElement({ map: m, position: at, content: dot, title: "Map result" });
+      } else originDot.current.position = at;
       if (adjustable && policyMeters) {
         if (!radius.current) {
           radius.current = new google.maps.Circle({ map: m, center: at, radius: policyMeters, clickable: false,
@@ -110,7 +126,7 @@ function GooglePinMap({ original, marker, adjustable, policyMeters, onMove, heig
         } else { radius.current.setCenter(at); radius.current.setRadius(policyMeters); radius.current.setMap(m); }
       } else radius.current?.setMap(null);
     } else {
-      originDot.current?.setMap(null);
+      if (originDot.current) originDot.current.map = null;
       originDot.current = null;
       radius.current?.setMap(null);
     }

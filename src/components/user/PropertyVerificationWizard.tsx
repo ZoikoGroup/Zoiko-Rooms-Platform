@@ -5,7 +5,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BadgeCheck, CheckCircle2, Circle, Clock, FileText,
-  MapPin, Search, ShieldCheck, Trash2, Upload, XCircle,
+  LocateFixed, MapPin, Search, ShieldCheck, Trash2, Upload, XCircle,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -13,11 +13,12 @@ import { Field, inputClass } from "@/components/user/ui";
 import { errorMessage } from "@/lib/user-api";
 import { formatDate } from "@/lib/utils";
 import { browserMapProvider } from "@/lib/map-provider";
+import { decodeDigipin, encodeDigipin } from "@/lib/digipin";
 import {
   AddressSuggestion, EvidenceType, GeoPoint, PropertyKind, PropertyPolicy, PropertyVerificationSession, StructuredAddress,
   confidenceLabel, confirmPropertyAddress, confirmPropertyLocation, evidenceTypeLabel, getPropertyPolicy,
   getPropertyVerificationForProperty, propertyEvidenceUrl, propertyStateLabel, propertyStateTone, removePropertyEvidence,
-  answerPropertyDuplicate, restartPropertyVerification, retrieveAddress, setPropertyAddress, setPropertyUnit,
+  answerPropertyDuplicate, geocodePlace, restartPropertyVerification, reverseLocation, retrieveAddress, setPropertyAddress, setPropertyUnit,
   startPropertyVerification,
   submitPropertyVerification, suggestAddresses, uploadPropertyEvidence,
 } from "@/lib/property-verification";
@@ -47,22 +48,24 @@ const COUNTRY_CENTER: Record<string, GeoPoint> = {
   US: { latitude: 39.8283, longitude: -98.5795 },
 };
 type AddressFieldKey = "addressLine1" | "addressLine2" | "locality" | "administrativeArea" | "postalCode";
+const FIELD_KEYS: Record<string, AddressFieldKey> = {
+  address_line_1: "addressLine1", address_line_2: "addressLine2", locality: "locality",
+  administrative_area: "administrativeArea", postal_code: "postalCode",
+};
 const DEFAULT_LABELS: Record<AddressFieldKey, string> = {
   addressLine1: "Address line 1", addressLine2: "Address line 2 (unit / building / locality)",
   locality: "City / locality", administrativeArea: "Region / state", postalCode: "Postal code",
 };
-/** Section 17: field names follow the country's own addressing. */
-const COUNTRY_LABELS: Record<string, Partial<Record<AddressFieldKey, string>>> = {
-  GB: { addressLine1: "House number / name and street", addressLine2: "Flat, building or area",
-        locality: "Town / city", administrativeArea: "County", postalCode: "Postcode" },
-  US: { addressLine1: "Street address", addressLine2: "Apt, suite or unit", locality: "City",
-        administrativeArea: "State", postalCode: "ZIP code" },
-  IN: { addressLine1: "House / door number and street or village", addressLine2: "Area / locality",
-        locality: "Town / city", administrativeArea: "State", postalCode: "PIN code" },
-};
-function fieldLabel(country: string, key: AddressFieldKey): string {
-  return COUNTRY_LABELS[(country || "").toUpperCase()]?.[key] ?? DEFAULT_LABELS[key];
+/** Section 17: the country's own field order and names, from its pack. */
+function addressFields(policy: PropertyPolicy | null): { key: AddressFieldKey; label: string }[] {
+  const order = policy?.addressFieldOrder?.length ? policy.addressFieldOrder : Object.keys(FIELD_KEYS);
+  return order.filter((f) => FIELD_KEYS[f]).map((f) => ({
+    key: FIELD_KEYS[f], label: policy?.addressLabels?.[f] ?? DEFAULT_LABELS[FIELD_KEYS[f]],
+  }));
 }
+/** Address / location step notes worth showing while the step is open (Section 15 copy). */
+const STEP_NOTES = ["ADDRESS_PARTIAL", "GEOCODE_AMBIGUOUS", "LOW_LOCATION_CONFIDENCE", "ADDRESS_COMPONENTS_CONFLICT",
+  "ADDRESS_NOT_FOUND", "PROVIDER_UNAVAILABLE", "HOUSE_NUMBER_NOT_ON_MAP"];
 
 function newKey() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
@@ -92,11 +95,13 @@ function meters(a: GeoPoint, b: GeoPoint) {
   return 2 * r * Math.asin(Math.sqrt(h));
 }
 
-export function PropertyVerificationWizard({ propertyId, propertyLabel, onClose, onChanged }: {
+export function PropertyVerificationWizard({ propertyId, propertyLabel, onClose, onChanged, onContinueToAuthority }: {
   propertyId: number;
   propertyLabel: string;
   onClose: () => void;
   onChanged?: () => void;
+  /** Screen 7 hand-off: open this property's authority verification. */
+  onContinueToAuthority?: () => void;
 }) {
   const [session, setSession] = useState<PropertyVerificationSession | null>(null);
   const [policy, setPolicy] = useState<PropertyPolicy | null>(null);
@@ -105,6 +110,9 @@ export function PropertyVerificationWizard({ propertyId, propertyLabel, onClose,
   const [errors, setErrors] = useState<string[]>([]);
   const [loaded, setLoaded] = useState(false);
   const startKey = useRef(newKey());
+  // Location-first start: the point the host chose on step 1 becomes the
+  // marker's starting position on step 3 (they don't place it twice).
+  const [startPoint, setStartPoint] = useState<{ point: GeoPoint; reason: string } | null>(null);
   const submitKey = useRef(newKey());
   const headingRef = useRef<HTMLHeadingElement>(null);
 
@@ -178,9 +186,13 @@ export function PropertyVerificationWizard({ propertyId, propertyLabel, onClose,
       {session?.state === "ACTION_REQUIRED" && !showOutcome && session.message && (
         <Info title="What needs fixing" tone="warn">{session.message}</Info>
       )}
+      {session?.state === "IN_PROGRESS" && (step === 2 || step === 3) && session.message
+        && session.reasonCodes.some((c) => STEP_NOTES.includes(c)) && (
+        <Info title="Please check" tone="warn">{session.message}</Info>
+      )}
 
       {showOutcome && session ? (
-        <Outcome session={session} busy={busy} onClose={onClose}
+        <Outcome session={session} busy={busy} onClose={onClose} onContinueToAuthority={onContinueToAuthority}
                  onFix={(target) => setStep(target)}
                  onRestart={() => run(() => restartPropertyVerification(session), 1)} />
       ) : step === 0 ? (
@@ -188,13 +200,13 @@ export function PropertyVerificationWizard({ propertyId, propertyLabel, onClose,
                onStart={() => session ? setStep(resumeStep(session)) :
                  run(() => startPropertyVerification(propertyId, startKey.current), 1)} busy={busy} />
       ) : session && step === 1 ? (
-        <FindAddress session={session} policy={policy} busy={busy} onBack={() => setStep(0)}
+        <FindAddress session={session} policy={policy} busy={busy} onBack={() => setStep(0)} onPoint={setStartPoint}
                      onSubmit={(address, mode, placeId) => run(() => setPropertyAddress(session, address, mode, placeId), 2)} />
       ) : session && step === 2 ? (
-        <ConfirmAddress session={session} busy={busy} onBack={() => setStep(1)}
+        <ConfirmAddress session={session} policy={policy} busy={busy} onBack={() => setStep(1)}
                         onConfirm={(useSuggestion) => run(() => confirmPropertyAddress(session, useSuggestion), 3)} />
       ) : session && step === 3 ? (
-        <ConfirmLocation session={session} policy={policy} busy={busy} onBack={() => setStep(2)}
+        <ConfirmLocation session={session} busy={busy} onBack={() => setStep(2)} startPoint={startPoint}
                          onWrongAddress={() => setStep(1)}
                          onConfirm={() => run(() => confirmPropertyLocation(session, { action: "confirm" }), 4)}
                          onAdjust={(p, reason) => run(() => confirmPropertyLocation(session, { action: "adjust", ...p, reason }), 4)} />
@@ -280,9 +292,10 @@ function Intro({ label, state, busy, onStart, onExit }: {
 
 // -- Screen 1 --------------------------------------------------------------------
 
-function FindAddress({ session, policy, busy, onBack, onSubmit }: {
+function FindAddress({ session, policy, busy, onBack, onSubmit, onPoint }: {
   session: PropertyVerificationSession; policy: PropertyPolicy | null; busy: boolean; onBack: () => void;
   onSubmit: (address: StructuredAddress, mode: "SELECTED" | "MANUAL", placeId: string) => void;
+  onPoint: (start: { point: GeoPoint; reason: string } | null) => void;
 }) {
   const country = session.countryCode || policy?.countryCode || "";
   const [manual, setManual] = useState(!policy?.autocomplete);
@@ -295,24 +308,42 @@ function FindAddress({ session, policy, busy, onBack, onSubmit }: {
   const [mode, setMode] = useState<"SELECTED" | "MANUAL">("MANUAL");
   const [placeId, setPlaceId] = useState("");
   const sessionToken = useRef(newKey());
+  // Cost / rate control: one search per pause, never the same text twice, and
+  // no more searches once a shorter version of this text found nothing.
+  const lastSearched = useRef("");
+  const emptyPrefix = useRef<string | null>(null);
   const listId = useId();
   const required = new Set((policy?.requiredAddressFields ?? []).map((f) => f.replace(/_(\w)/g, (_, c) => c.toUpperCase())));
 
   useEffect(() => { setManual(!policy?.autocomplete); }, [policy?.autocomplete]);
 
   useEffect(() => {
-    if (manual || query.trim().length < 3) { setSuggestions([]); return; }
+    const text = query.trim().toLowerCase().slice(0, 120);
+    if (manual || text.length < 3) { setSuggestions([]); return; }
+    if (text === lastSearched.current) return;
+    if (emptyPrefix.current && text.startsWith(emptyPrefix.current)) {
+      // Adding words to a search that found nothing won't find it either.
+      setSuggestions([]);
+      setSearchNote("This address isn't on the map -- enter it manually below (you'll place the marker yourself).");
+      return;
+    }
     const timer = setTimeout(async () => {
+      lastSearched.current = text;
       try {
-        const r = await suggestAddresses(query, country, sessionToken.current);
+        const r = await suggestAddresses(query.trim().slice(0, 120), country, sessionToken.current);
         setSuggestions(r.suggestions);
         setActive(-1);
-        setSearchNote(r.suggestions.length ? `${r.suggestions.length} results available` : "No results -- try a different search or enter the address manually.");
+        emptyPrefix.current = r.suggestions.length ? null : text;
+        setSearchNote(r.suggestions.length ? `${r.suggestions.length} results available`
+          : "No results -- many house numbers aren't on the map. Enter the address manually below.");
       } catch (err) {
         setSuggestions([]);
-        setSearchNote(errorMessage(err, "Location search is temporarily unavailable. Enter the address manually."));
+        const message = errorMessage(err, "");
+        setSearchNote(/too many/i.test(message)
+          ? "Searching paused for a moment -- keep typing, or enter the address manually."
+          : "Location search is temporarily unavailable. Enter the address manually.");
       }
-    }, 300);
+    }, 500);
     return () => clearTimeout(timer);
   }, [query, manual, country]);
 
@@ -379,6 +410,15 @@ function FindAddress({ session, policy, busy, onBack, onSubmit }: {
         </div>
       )}
 
+      <LocationFirst session={session} country={session.countryCode || policy?.countryCode || ""}
+                     onFound={(found, point, reason) => {
+                       setAddress(fullAddress({ ...EMPTY, ...found, countryCode: session.countryCode || policy?.countryCode || "" }));
+                       setMode("MANUAL");
+                       setPlaceId("");
+                       setManual(true);
+                       onPoint({ point, reason });
+                     }} />
+
       {!manual ? (
         <p className="text-sm text-slate-500">Can&apos;t find the address?{" "}
           <button type="button" className="font-semibold text-primary-700 underline dark:text-primary-300" onClick={() => setManual(true)}>Enter address manually</button>
@@ -388,8 +428,8 @@ function FindAddress({ session, policy, busy, onBack, onSubmit }: {
           {!policy?.autocomplete && (
             <p className="text-xs text-slate-500">Enter the address as it appears on official documents.</p>
           )}
-          {(["addressLine1", "addressLine2", "locality", "administrativeArea", "postalCode"] as const).map((k) => (
-            <Field key={k} label={`${fieldLabel(country, k)}${required.has(k) ? "" : " (optional)"}`}>
+          {addressFields(policy).map(({ key: k, label }) => (
+            <Field key={k} label={`${label}${required.has(k) || /optional/i.test(label) ? "" : " (optional)"}`}>
               <input className={inputClass} dir="auto" value={address[k]} onChange={set(k)} required={required.has(k)}
                      autoComplete={{ addressLine1: "address-line1", addressLine2: "address-line2", locality: "address-level2",
                        administrativeArea: "address-level1", postalCode: "postal-code" }[k]} />
@@ -414,18 +454,16 @@ function FindAddress({ session, policy, busy, onBack, onSubmit }: {
 
 // -- Screen 2 --------------------------------------------------------------------
 
-function ConfirmAddress({ session, busy, onBack, onConfirm }: {
-  session: PropertyVerificationSession; busy: boolean; onBack: () => void; onConfirm: (useSuggestion: boolean) => void;
+function ConfirmAddress({ session, policy, busy, onBack, onConfirm }: {
+  session: PropertyVerificationSession; policy: PropertyPolicy | null; busy: boolean; onBack: () => void;
+  onConfirm: (useSuggestion: boolean) => void;
 }) {
   const [reviewing, setReviewing] = useState(false);
   const c = session.canonicalAddress;
   const s = session.suggestedAddress;
   const rows: [string, string | undefined][] = [
-    [fieldLabel(c.countryCode ?? "", "addressLine1"), c.addressLine1],
-    [fieldLabel(c.countryCode ?? "", "addressLine2"), c.addressLine2],
-    [fieldLabel(c.countryCode ?? "", "locality"), c.locality],
-    [fieldLabel(c.countryCode ?? "", "administrativeArea"), c.administrativeArea],
-    [fieldLabel(c.countryCode ?? "", "postalCode"), c.postalCode], ["Country", c.countryCode],
+    ...addressFields(policy).map(({ key, label }) => [label, c[key]] as [string, string | undefined]),
+    ["Country", c.countryCode],
   ];
   return (
     <div className="space-y-4">
@@ -468,32 +506,286 @@ function ConfirmAddress({ session, busy, onBack, onConfirm }: {
   );
 }
 
+// -- Screen 1: location-first start ------------------------------------------------
+
+/** Start from where the property is, not from typing: the phone's location
+ *  (host at the property) or a tap on a satellite map. The address at that
+ *  point pre-fills the form -- the host checks it and adds the door number --
+ *  and the point becomes the marker's start on the location step. */
+function LocationFirst({ session, country, onFound }: {
+  session: PropertyVerificationSession; country: string;
+  onFound: (address: StructuredAddress, point: GeoPoint, reason: string) => void;
+}) {
+  const [locating, setLocating] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const [pin, setPin] = useState<GeoPoint>(COUNTRY_CENTER[country] ?? { latitude: 20, longitude: 0 });
+  const [pinned, setPinned] = useState(false);
+  const [note, setNote] = useState("");
+  const canLocate = typeof navigator !== "undefined" && "geolocation" in navigator;
+  const hasMap = browserMapProvider() !== "none";
+
+  async function fill(point: GeoPoint, reason: string) {
+    try {
+      const r = await reverseLocation(point);
+      if (!r.found || !r.address) {
+        setNote("We found the spot but no address there -- enter the address manually below.");
+        onFound({ ...EMPTY, countryCode: country }, point, reason);
+        return;
+      }
+      onFound(r.address, point, reason);
+      setNote("We filled in the address at this spot. Check every line and add your house / door number exactly as on your documents.");
+    } catch (err) {
+      setNote(errorMessage(err, "We couldn't look up that spot. Enter the address manually below."));
+    }
+  }
+
+  function useMyLocation() {
+    setLocating(true);
+    setNote("");
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const accuracy = Math.round(pos.coords.accuracy);
+        await fill({ latitude: pos.coords.latitude, longitude: pos.coords.longitude },
+          `Placed with my phone's location at the property (accurate to about ${accuracy} m)`);
+        setLocating(false);
+      },
+      () => { setLocating(false); setNote("We couldn't get your location. Allow location access, choose on the map, or search."); },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+    );
+  }
+
+  if (session.state !== "IN_PROGRESS" && session.state !== "ACTION_REQUIRED") return null;
+  return (
+    <div className="space-y-3 rounded-xl bg-primary-50 p-4 ring-1 ring-primary-200 dark:bg-primary-500/10 dark:ring-primary-500/20">
+      <p className="text-sm font-semibold text-primary-900 dark:text-white">Quickest: start from the property&apos;s location</p>
+      <div className="flex flex-wrap gap-2">
+        {canLocate && (
+          <Button size="sm" loading={locating} onClick={useMyLocation}>
+            <LocateFixed className="h-4 w-4" aria-hidden="true" /> Use my current location
+          </Button>
+        )}
+        {hasMap && (
+          <Button size="sm" variant="outline" onClick={() => setPicking((v) => !v)} aria-expanded={picking}>
+            <MapPin className="h-4 w-4" aria-hidden="true" /> {picking ? "Hide map" : "Choose on map"}
+          </Button>
+        )}
+      </div>
+      <p className="text-xs text-primary-800 dark:text-primary-200">
+        At the property? Use your current location. Elsewhere? Choose on the map -- zoom in and tap your building.
+      </p>
+      {picking && (
+        <div className="space-y-2">
+          <PropertyPinMap original={null} marker={pin} adjustable zoom={pinned ? 18 : 5}
+                          onMove={(p) => { setPin(p); setPinned(true); }} />
+          <Button size="sm" disabled={!pinned}
+                  onClick={() => { setPicking(false); void fill(pin, "I chose my building on the map"); }}>
+            Use this spot
+          </Button>
+          {!pinned && <p className="text-xs text-slate-500">Zoom in and tap your building to drop the marker.</p>}
+        </div>
+      )}
+      {note && <p className="text-xs text-slate-700 dark:text-slate-200" role="status">{note}</p>}
+    </div>
+  );
+}
+
 // -- Screen 3 --------------------------------------------------------------------
 
-function ConfirmLocation({ session, policy, busy, onBack, onWrongAddress, onConfirm, onAdjust }: {
-  session: PropertyVerificationSession; policy: PropertyPolicy | null; busy: boolean; onBack: () => void;
+const PLUS_CODE = /^[23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{0,3}$/i;
+
+/** Exact ways to place the marker when the map doesn't know the house:
+ *  the phone's own location (at the property), India Post's DIGIPIN, or a
+ *  Google Plus Code. Each only moves the marker -- the move is recorded and
+ *  checked like any other (the document still has to confirm the address). */
+function ExactPlacement({ session, onPlace }: {
+  session: PropertyVerificationSession; onPlace: (p: GeoPoint, reason: string) => void;
+}) {
+  const [code, setCode] = useState("");
+  const [note, setNote] = useState("");
+  const [locating, setLocating] = useState(false);
+  const [landmark, setLandmark] = useState("");
+  const [landmarks, setLandmarks] = useState<AddressSuggestion[]>([]);
+  const landmarkToken = useRef(newKey());
+
+  async function findLandmark() {
+    setNote("");
+    try {
+      const r = await suggestAddresses(landmark.trim(), session.countryCode, landmarkToken.current);
+      setLandmarks(r.suggestions.slice(0, 5));
+      if (!r.suggestions.length) setNote("No match -- try the landmark's name with the area, e.g. \"Rockcliff Apartments Bandlaguda\".");
+    } catch {
+      setNote("Landmark search is unavailable right now. Use the map, your location or a DIGIPIN.");
+    }
+  }
+
+  async function chooseLandmark(s: AddressSuggestion) {
+    try {
+      const r = await retrieveAddress(s.id, landmarkToken.current);
+      landmarkToken.current = newKey();
+      setLandmarks([]);
+      if (!r.location) { setNote("That place has no map position -- try another landmark."); return; }
+      onPlace(r.location, `Placed near ${s.text}, then moved onto the property`);
+      setNote(`Marker moved to ${s.text}. Now nudge or drag it onto your building.`);
+    } catch {
+      setNote("We couldn't load that place. Try another landmark.");
+    }
+  }
+  const canLocate = typeof navigator !== "undefined" && "geolocation" in navigator;
+
+  function useMyLocation() {
+    setLocating(true);
+    setNote("");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLocating(false);
+        const accuracy = Math.round(pos.coords.accuracy);
+        onPlace({ latitude: pos.coords.latitude, longitude: pos.coords.longitude },
+          `Placed with my phone's location at the property (accurate to about ${accuracy} m)`);
+        setNote(accuracy > 50 ? `Your phone's location is only accurate to about ${accuracy} m -- check the marker is on the building.`
+          : "Marker placed at your current location.");
+      },
+      () => { setLocating(false); setNote("We couldn't get your location. Allow location access, or use a DIGIPIN / Plus Code."); },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+    );
+  }
+
+  async function findCode() {
+    setNote("");
+    const value = code.trim();
+    const digipin = session.countryCode === "IN" ? decodeDigipin(value) : null;
+    if (digipin) {
+      onPlace(digipin, `Placed with the property's DIGIPIN ${value.toUpperCase()}`);
+      setNote("Marker placed at the DIGIPIN.");
+      return;
+    }
+    const plus = value.split(/\s+/)[0];
+    if (PLUS_CODE.test(plus)) {
+      try {
+        const r = await geocodePlace(value, session.canonicalAddress.locality ?? "", session.countryCode);
+        if (r.location) {
+          onPlace(r.location, `Placed with the property's Plus Code ${value.toUpperCase()}`);
+          setNote("Marker placed at the Plus Code.");
+          return;
+        }
+      } catch { /* fall through */ }
+      setNote("We couldn't find that Plus Code. Check it, or add the town after it (e.g. W8FP+3HR Madhira).");
+      return;
+    }
+    setNote(session.countryCode === "IN" ? "Enter a 10-character DIGIPIN (e.g. 4P3-JK8-52C9) or a Plus Code (e.g. W8FP+3HR)."
+      : "Enter a Plus Code (e.g. W8FP+3HR).");
+  }
+
+  return (
+    <div className="space-y-2 rounded-lg bg-white p-3 ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700">
+      <p className="text-xs font-semibold text-primary-900 dark:text-white">Place it exactly</p>
+      <div className="flex flex-wrap items-end gap-2">
+        {canLocate && (
+          <Button size="sm" variant="outline" loading={locating} onClick={useMyLocation}>
+            <LocateFixed className="h-4 w-4" aria-hidden="true" /> Use my current location
+          </Button>
+        )}
+        <label className="flex min-w-[14rem] flex-1 flex-col text-xs text-slate-600 dark:text-slate-300">
+          {session.countryCode === "IN" ? "DIGIPIN or Plus Code" : "Plus Code"}
+          <input className={inputClass} value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off"
+                 placeholder={session.countryCode === "IN" ? "e.g. 4P3-JK8-52C9 or W8FP+3HR" : "e.g. W8FP+3HR"} />
+        </label>
+        <Button size="sm" variant="outline" disabled={!code.trim()} onClick={() => void findCode()}>Find</Button>
+      </div>
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="flex min-w-[14rem] flex-1 flex-col text-xs text-slate-600 dark:text-slate-300">
+          Nearby landmark (e.g. an apartment block, temple or school next to the property)
+          <input className={inputClass} value={landmark} onChange={(e) => setLandmark(e.target.value)} autoComplete="off"
+                 placeholder="e.g. Rockcliff Apartments Bandlaguda" />
+        </label>
+        <Button size="sm" variant="outline" disabled={landmark.trim().length < 3} onClick={() => void findLandmark()}>Search</Button>
+      </div>
+      {landmarks.length > 0 && (
+        <ul className="space-y-1 text-xs" aria-label="Landmarks">
+          {landmarks.map((l) => (
+            <li key={l.id}>
+              <button type="button" className="text-left text-primary-700 underline dark:text-primary-300"
+                      onClick={() => void chooseLandmark(l)}>
+                {l.text}{l.secondary && <span className="text-slate-500"> -- {l.secondary}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="text-xs text-slate-500">
+        Use your current location only when you&apos;re at the property.
+        {session.countryCode === "IN" && " Your DIGIPIN is on India Post's \"Know Your DIGIPIN\" site."}
+      </p>
+      {note && <p className="text-xs text-slate-700 dark:text-slate-200" role="status">{note}</p>}
+    </div>
+  );
+}
+
+function ConfirmLocation({ session, busy, onBack, onWrongAddress, onConfirm, onAdjust, startPoint }: {
+  session: PropertyVerificationSession; busy: boolean; onBack: () => void;
   onWrongAddress: () => void; onConfirm: () => void; onAdjust: (p: GeoPoint, reason: string) => void;
+  startPoint?: { point: GeoPoint; reason: string } | null;
 }) {
   const original = session.originalLocation;
-  const start = session.confirmedLocation ?? original ?? COUNTRY_CENTER[session.countryCode] ?? { latitude: 20, longitude: 0 };
-  const [adjusting, setAdjusting] = useState(!original);
+  // A point the host already chose on step 1 (phone location / map tap) wins.
+  const chosen = !session.confirmedLocation && startPoint ? startPoint : null;
+  const start = session.confirmedLocation ?? chosen?.point ?? original ?? COUNTRY_CENTER[session.countryCode]
+    ?? { latitude: 20, longitude: 0 };
+  // The map's point is a nearby building when the house number isn't in its data.
+  const nearbyOnly = session.reasonCodes.includes("HOUSE_NUMBER_NOT_ON_MAP");
+  const [adjusting, setAdjusting] = useState(!original || nearbyOnly || Boolean(chosen));
   const [marker, setMarker] = useState<GeoPoint>(start);
-  const [reason, setReason] = useState(original ? "" : "The address couldn't be found on the map, so I placed the marker on the property.");
+  const [reason, setReason] = useState(chosen?.reason
+    ?? (original ? "" : "The address couldn't be found on the map, so I placed the marker on the property."));
   const moved = original ? Math.round(meters(original, marker)) : null;
-  const policyM = policy?.pinMoveReviewMeters ?? 50;
   const step = 5;
+  const [locating, setLocating] = useState(false);
+  const [gpsNote, setGpsNote] = useState("");
+  const canLocate = typeof navigator !== "undefined" && "geolocation" in navigator;
+
+  /** The host picks the point themselves: a tap / drag on the map. */
+  function placeOnMap(p: GeoPoint) {
+    setAdjusting(true);
+    setMarker(p);
+    if (!reason.trim()) setReason("I placed the marker on my building on the map.");
+  }
+
+  /** GPS -- for a host standing at the property. */
+  function useMyLocation() {
+    setLocating(true);
+    setGpsNote("");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLocating(false);
+        const accuracy = Math.round(pos.coords.accuracy);
+        setAdjusting(true);
+        setMarker({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+        setReason(`Placed with my phone's location at the property (accurate to about ${accuracy} m)`);
+        setGpsNote(accuracy > 50
+          ? `Your location is only accurate to about ${accuracy} m -- check the marker is on your building and drag it if not.`
+          : "Marker placed at your current location. Check it's on your building, then save.");
+      },
+      () => { setLocating(false); setGpsNote("We couldn't get your location. Allow location access in your browser, or tap your building on the map."); },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+    );
+  }
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-slate-500 dark:text-slate-400">The marker should identify the property, not a nearby landmark or neighborhood.</p>
+      {browserMapProvider() !== "none" && (
+        <p className="flex items-start gap-2 rounded-xl bg-primary-50 px-3 py-2 text-sm text-primary-800 ring-1 ring-primary-200 dark:bg-primary-500/10 dark:text-primary-200 dark:ring-primary-500/20">
+          <MapPin className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+          <span><strong>Tap the map or drag the marker onto your building.</strong> The map is a satellite view -- zoom in until you
+            can see your roof. At the property? Use your current location.</span>
+        </p>
+      )}
       {browserMapProvider() === "none" ? (
         <p className="rounded-xl bg-slate-50 p-3 text-sm text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
           The map isn&apos;t available here. Confirm the location below, or enter the property&apos;s coordinates
           (for example from your phone&apos;s map app) with Adjust marker.
         </p>
       ) : (
-        <PropertyPinMap original={original} marker={marker} adjustable={adjusting} policyMeters={policyM}
-                        onMove={adjusting ? setMarker : undefined} />
+        <PropertyPinMap original={original} marker={marker} adjustable onMove={placeOnMap} />
       )}
       <div className="text-sm text-slate-600 dark:text-slate-300" aria-live="polite">
         {original ? (
@@ -509,8 +801,10 @@ function ConfirmLocation({ session, policy, busy, onBack, onWrongAddress, onConf
           <p className="text-amber-700 dark:text-amber-300">We found the area, but not the exact property. Place the marker on the property.</p>
         )}
         <p>Address: {oneLine(session.canonicalAddress)}</p>
+        {gpsNote && <p className="font-medium text-primary-800 dark:text-primary-200">{gpsNote}</p>}
         {adjusting && moved !== null && (
-          <p>Marker moved {moved} m from the map result{moved > policyM ? " -- beyond this the property needs another verification step." : "."}</p>
+          <p>Marker moved {moved} m from the map result. Small corrections (for example to the entrance) are fine; a large
+            move or a move onto another address needs another verification step.</p>
         )}
       </div>
 
@@ -531,6 +825,10 @@ function ConfirmLocation({ session, policy, busy, onBack, onWrongAddress, onConf
             <CoordinateInput label="Longitude" value={marker.longitude} min={-180} max={180}
                              onChange={(v) => setMarker({ ...marker, longitude: v })} />
           </div>
+          <ExactPlacement session={session} onPlace={(p, why) => { setMarker(p); if (!reason.trim() || reason.startsWith("Placed with")) setReason(why); }} />
+          {session.countryCode === "IN" && (
+            <p className="text-xs text-slate-500">Marker DIGIPIN: <span className="font-mono">{encodeDigipin(marker.latitude, marker.longitude) ?? "--"}</span></p>
+          )}
           <Field label="Why does the marker need to move?">
             <input className={inputClass} value={reason} onChange={(e) => setReason(e.target.value)} maxLength={300}
                    placeholder="e.g. The marker is on the road, not the building entrance" />
@@ -542,8 +840,15 @@ function ConfirmLocation({ session, policy, busy, onBack, onWrongAddress, onConf
         </div>
       ) : (
         <div className="flex flex-col gap-2 sm:flex-row">
-          <Button loading={busy} onClick={onConfirm}><CheckCircle2 className="h-4 w-4" aria-hidden="true" /> This is correct</Button>
+          {!nearbyOnly && (
+            <Button loading={busy} onClick={onConfirm}><CheckCircle2 className="h-4 w-4" aria-hidden="true" /> This is correct</Button>
+          )}
           <Button variant="outline" onClick={() => setAdjusting(true)}><MapPin className="h-4 w-4" aria-hidden="true" /> Adjust marker</Button>
+          {canLocate && (
+            <Button variant="outline" loading={locating} onClick={useMyLocation}>
+              <LocateFixed className="h-4 w-4" aria-hidden="true" /> Use my current location
+            </Button>
+          )}
           <Button variant="ghost" onClick={onWrongAddress}>Address is wrong</Button>
         </div>
       )}
@@ -637,9 +942,9 @@ function UnitDetails({ session, policy, busy, onBack, onSubmit, onAnswerDuplicat
       <Field label="Building name (optional)"><input className={inputClass} dir="auto" value={building} onChange={(e) => setBuilding(e.target.value)} /></Field>
       <Field label={`Unit / flat / apartment${unitRequired ? "" : " (optional)"}`}
              hint={unitRequired ? "Required for apartments -- different units at one address are different properties." : undefined}>
-        <input className={inputClass} value={unit} onChange={(e) => setUnit(e.target.value)} required={unitRequired} />
+        <input className={inputClass} dir="auto" value={unit} onChange={(e) => setUnit(e.target.value)} required={unitRequired} />
       </Field>
-      <Field label="Floor (optional)"><input className={inputClass} value={floor} onChange={(e) => setFloor(e.target.value)} /></Field>
+      <Field label="Floor (optional)"><input className={inputClass} dir="auto" value={floor} onChange={(e) => setFloor(e.target.value)} /></Field>
       {session.possibleDuplicate && (
         <Info title="Existing Zoiko property match found" tone="warn">
           This address and unit look like a property already on Zoiko Rooms. Tell us whether it&apos;s the same property --
@@ -790,8 +1095,9 @@ function Item({ label, value }: { label: string; value: string }) {
 
 // -- Screen 7 --------------------------------------------------------------------
 
-function Outcome({ session, busy, onClose, onFix, onRestart }: {
+function Outcome({ session, busy, onClose, onFix, onRestart, onContinueToAuthority }: {
   session: PropertyVerificationSession; busy: boolean; onClose: () => void; onFix: (step: Step) => void; onRestart: () => void;
+  onContinueToAuthority?: () => void;
 }) {
   const s = session.state;
   const icon = useMemo(() => s === "VERIFIED" ? <BadgeCheck className="h-6 w-6 text-emerald-600" aria-hidden="true" />
@@ -819,7 +1125,9 @@ function Outcome({ session, busy, onClose, onFix, onRestart }: {
       <Actions>
         <Button variant="ghost" onClick={onClose}>{s === "MANUAL_REVIEW" ? "Go to dashboard" : "Close"}</Button>
         <div className="flex flex-col gap-2 sm:flex-row">
-          {s === "VERIFIED" && <Link href="/account/host/listings"><Button fullWidth>Continue to authority verification</Button></Link>}
+          {s === "VERIFIED" && (onContinueToAuthority
+            ? <Button fullWidth onClick={onContinueToAuthority}>Continue to authority verification</Button>
+            : <Link href="/account/host"><Button fullWidth>Continue to authority verification</Button></Link>)}
           {s === "ACTION_REQUIRED" && (
             <>
               <Button variant="outline" onClick={() => onFix(1)}>Review address</Button>

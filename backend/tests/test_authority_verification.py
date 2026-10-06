@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.crud.authority import get_valid_authority_for_room
 from app.models.authority_record import AuthorityRecord
-from app.models.authority_verification import AuthorityConfirmation, AuthorityVerification
+from app.models.authority_verification import AuthorityConfirmation, AuthorityEvidence, AuthorityVerification
 from app.models.domain_event import DomainEvent
 from app.models.listing import Listing
 from app.models.party import Party
@@ -42,6 +42,14 @@ def _pdf(*lines: str) -> bytes:
     return buffer.getvalue()
 
 
+def _png(width: int = 40, height: int = 40) -> bytes:
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("L", (width, height), 255).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 DEED = _pdf("SALE DEED", "Owner: Asha Rao", "Property: 12 Lake View Road, Hyderabad 500001")
 LEASE = _pdf("TENANCY AGREEMENT", "Tenant: Asha Rao", "Premises: 12 Lake View Road, Hyderabad 500001")
 MANDATE = _pdf("PROPERTY MANAGEMENT AGREEMENT", "Owner: Vikram Shah", "Agent: Asha Rao",
@@ -61,6 +69,17 @@ def env(tmp_path, monkeypatch):
 
     import app.core.mailer as mailer
     monkeypatch.setattr(mailer, "send_email", fake_send)
+    return state
+
+
+@pytest.fixture()
+def ocr(monkeypatch):
+    """A stand-in OCR engine: tests set what it 'reads' from an image."""
+    from app.services import document_ocr
+
+    state = {"available": True, "text": "", "confidence": 0.0}
+    monkeypatch.setattr(document_ocr, "is_available", lambda: state["available"])
+    monkeypatch.setattr(document_ocr, "ocr_document", lambda content, max_pages=4: (state["text"], state["confidence"]))
     return state
 
 
@@ -164,16 +183,90 @@ class TestOwnerRoute:
         f.submit()
         assert "PROPERTY_MISMATCH" in f.body["reasonCodes"]
 
-    def test_unreadable_image_goes_to_manual_review(self, client, db_session):
-        user, prop, _ = _host(db_session, "auth-image@test.com")
+    def test_photo_of_deed_is_read_by_ocr_and_auto_verified(self, client, db_session, ocr):
+        ocr["text"], ocr["confidence"] = "SALE DEED OWNER ASHA RAO 12 LAKE VIEW ROAD HYDERABAD 500001", 82.0
+        user, prop, _ = _host(db_session, "auth-ocr@test.com")
         f = Flow(client, user, prop)
         f.start()
-        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
         f._send("POST", f"{BASE}/{f.body['id']}/evidence", data={"requirementId": "OWNER_PROPERTY_RIGHT"},
-                files={"file": ("deed.png", png, "image/png")})
+                files={"file": ("deed.png", _png(), "image/png")})
+        f.submit()
+        assert f.body["state"] == "VERIFIED", f.body["reasonCodes"]
+        evidence = db_session.scalar(select(AuthorityEvidence))
+        assert evidence.text_source == "OCR" and evidence.type_matched is True
+
+    def test_unclear_scan_asks_for_a_clearer_copy_not_a_reviewer(self, client, db_session, ocr):
+        ocr["text"], ocr["confidence"] = "SALE DEED ASHA", 31.0
+        user, prop, _ = _host(db_session, "auth-blurry@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        f._send("POST", f"{BASE}/{f.body['id']}/evidence", data={"requirementId": "OWNER_PROPERTY_RIGHT"},
+                files={"file": ("deed.png", _png(), "image/png")})
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED"
+        assert "EVIDENCE_UNCLEAR" in f.body["reasonCodes"]
+
+    def test_without_an_ocr_engine_a_scan_falls_back_to_review(self, client, db_session, ocr):
+        ocr["available"] = False
+        user, prop, _ = _host(db_session, "auth-noocr@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        f._send("POST", f"{BASE}/{f.body['id']}/evidence", data={"requirementId": "OWNER_PROPERTY_RIGHT"},
+                files={"file": ("deed.png", _png(), "image/png")})
         f.submit()
         assert f.body["state"] == "MANUAL_REVIEW"
         assert "EVIDENCE_UNREADABLE" in f.body["reasonCodes"]
+
+    def test_wrong_kind_of_document_needs_action(self, client, db_session):
+        """Section 4.2: a utility bill naming the host and address is not
+        ownership evidence."""
+        user, prop, _ = _host(db_session, "auth-bill@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        f.upload("OWNER_PROPERTY_RIGHT", _pdf("ELECTRICITY BILL", "Consumer: Asha Rao",
+                                              "Supply address: 12 Lake View Road, Hyderabad 500001"))
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED"
+        assert "DOCUMENT_TYPE_UNRECOGNIZED" in f.body["reasonCodes"]
+
+    def test_requirements_carry_the_country_keywords(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-keywords@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        req = next(r for r in f.body["requirements"] if r["requirement_id"] == "OWNER_PROPERTY_RIGHT")
+        assert "sale deed" in req["keywords"] and "encumbrance certificate" in req["keywords"]
+
+    def test_unsafe_files_are_rejected_before_storage(self, client, db_session, tmp_path):
+        """Section 13: malformed images, decompression bombs and PDFs with
+        active content never reach storage or a reviewer."""
+        user, prop, _ = _host(db_session, "auth-unsafe@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        url = f"{BASE}/{f.body['id']}/evidence"
+        corrupt = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        scripted = DEED.replace(b"%%EOF", b"/JavaScript (app.alert(1))\n%%EOF")
+        for name, content in (("corrupt.png", corrupt), ("bomb.png", _png(9000, 9000)), ("script.pdf", scripted)):
+            r = client.post(url, cookies=auth_user_cookie(user), data={"requirementId": "OWNER_PROPERTY_RIGHT"},
+                            files={"file": (name, content, "application/octet-stream")})
+            assert r.status_code == 400, (name, r.text)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_scanner_verdicts(self, client, db_session, monkeypatch):
+        from app.core import upload_scan
+
+        monkeypatch.setattr(settings, "clamav_host", "clamd.internal")
+        user, prop, _ = _host(db_session, "auth-scan@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        url = f"{BASE}/{f.body['id']}/evidence"
+        monkeypatch.setattr(upload_scan, "clamav_scan", lambda content: "INFECTED")
+        r = client.post(url, cookies=auth_user_cookie(user), data={"requirementId": "OWNER_PROPERTY_RIGHT"},
+                        files={"file": ("deed.pdf", DEED, "application/pdf")})
+        assert r.status_code == 400
+        monkeypatch.setattr(upload_scan, "clamav_scan", lambda content: "ERROR")
+        f.upload("OWNER_PROPERTY_RIGHT", DEED)
+        f.submit()
+        assert f.body["state"] == "MANUAL_REVIEW" and "SCAN_INCOMPLETE" in f.body["reasonCodes"]
 
     def test_property_not_verified_holds_in_review(self, client, db_session, env):
         env["property"] = False
@@ -220,14 +313,33 @@ class TestAgentRoute:
         assert f.body["state"] == "VERIFIED", f.body["reasonCodes"]
         assert get_valid_authority_for_room(db_session, room.id) is not None
 
-    def test_agent_mandate_document_only_goes_to_review(self, client, db_session):
+    def test_mandate_naming_the_owner_is_verified_without_review(self, client, db_session):
         user, prop, _ = _host(db_session, "auth-agentdoc@test.com")
         f = Flow(client, user, prop)
         f.start("AGENT")
-        f.upload("AGENT_MANDATE", _pdf("MANDATE", "Agent: Asha Rao", "12 Lake View Road, Hyderabad 500001"))
+        f.upload("AGENT_MANDATE", MANDATE)
+        f.details(principalName="Vikram Shah")  # entered after the upload: matched at submit
         f.submit()
-        assert f.body["state"] == "MANUAL_REVIEW"
-        assert "DOCUMENT_ONLY_MANDATE" in f.body["reasonCodes"]
+        assert f.body["state"] == "VERIFIED", f.body["reasonCodes"]
+
+    def test_mandate_needs_the_owner_name(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-agentnoname@test.com")
+        f = Flow(client, user, prop)
+        f.start("AGENT")
+        f.upload("AGENT_MANDATE", MANDATE)
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED"
+        assert "PRINCIPAL_NAME_NEEDED" in f.body["reasonCodes"]
+
+    def test_mandate_from_someone_else_needs_action(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-agentwrongowner@test.com")
+        f = Flow(client, user, prop)
+        f.start("AGENT")
+        f.details(principalName="Meera Iyer")
+        f.upload("AGENT_MANDATE", MANDATE)
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED"
+        assert "PRINCIPAL_UNCONFIRMED" in f.body["reasonCodes"]
 
     def test_agent_without_advertise_scope_needs_action(self, client, db_session):
         user, prop, _ = _host(db_session, "auth-agentscope@test.com")
@@ -271,6 +383,18 @@ class TestSubletRoute:
         f.submit()
         assert f.body["state"] == "ACTION_REQUIRED"
         assert "SUBLET_PERMISSION_MISSING" in f.body["reasonCodes"]
+
+    def test_landlord_noc_naming_the_landlord_is_verified_without_review(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-noc@test.com")
+        f = Flow(client, user, prop)
+        f.start("TENANT_SUBLETTER")
+        f.details(principalName="Ravi Kumar")
+        f.upload("TENANT_OCCUPATION_RIGHT", LEASE)
+        f.upload("TENANT_SUBLET_PERMISSION", _pdf("NO OBJECTION CERTIFICATE", "Landlord: Ravi Kumar",
+                                                  "I permit my tenant Asha Rao to sublet a room at",
+                                                  "12 Lake View Road, Hyderabad 500001"))
+        f.submit()
+        assert f.body["state"] == "VERIFIED", f.body["reasonCodes"]
 
     def test_tenant_cannot_self_approve(self, client, db_session):
         user, prop, _ = _host(db_session, "auth-selfapprove@test.com")
@@ -326,12 +450,19 @@ class TestSubletRoute:
 
 
 def _to_review(client, db_session, email):
+    """A complete, matching agent chain through an organization nobody has
+    verified yet -- one of the cases that still needs a reviewer."""
     user, prop, room = _host(db_session, email)
+    org = client.post("/api/users/organizations", json={"name": f"Lettings {email}"},
+                      cookies=auth_user_cookie(user)).json()
     f = Flow(client, user, prop)
     f.start("AGENT")
-    f.upload("AGENT_MANDATE", _pdf("MANDATE", "Agent: Asha Rao", "12 Lake View Road, Hyderabad 500001"))
+    f.details(organizationId=org["id"], principalName="Vikram Shah")
+    f.upload("AGENT_MANDATE", MANDATE)
+    f.upload("AGENT_ORGANIZATION_LINK", _pdf("APPOINTMENT LETTER", "Asha Rao is appointed as letting manager"))
     f.submit()
-    assert f.body["state"] == "MANUAL_REVIEW"
+    assert f.body["state"] == "MANUAL_REVIEW", f.body["reasonCodes"]
+    assert f.body["reasonCodes"] == ["ORGANIZATION_UNVERIFIED"]
     return user, prop, room, f
 
 
@@ -525,3 +656,54 @@ class TestGateAndPrivacy:
         f.submit()
         r = client.get(f"/api/users/properties/{prop.id}/publication-eligibility", cookies=auth_user_cookie(user))
         assert r.json()["eligible"] is True
+
+
+# -- Section 8.2 HEIC uploads / O2 host review lines ----------------------------------
+
+
+def _heic() -> bytes:
+    from PIL import Image
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 40), (255, 255, 255)).save(buffer, format="HEIF")
+    return buffer.getvalue()
+
+
+class TestHostUploadAndReviewLines:
+    def test_heic_photo_is_converted_to_jpeg_and_read(self, client, db_session, ocr):
+        ocr["text"], ocr["confidence"] = "SALE DEED OWNER ASHA RAO 12 LAKE VIEW ROAD HYDERABAD 500001", 82.0
+        heic = _heic()
+        assert svc.is_heic(heic)
+        user, prop, _ = _host(db_session, "auth-heic@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        f._send("POST", f"{BASE}/{f.body['id']}/evidence", data={"requirementId": "OWNER_PROPERTY_RIGHT"},
+                files={"file": ("IMG_0001.HEIC", heic, "image/heic")})
+        evidence = f.body["evidence"][0]
+        assert evidence["contentType"] == "image/jpeg"
+        assert evidence["originalFilename"] == "IMG_0001.HEIC"
+        f.submit()
+        assert f.body["state"] == "VERIFIED"
+
+    def test_damaged_heic_is_refused_with_a_plain_message(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-badheic@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        broken = b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64
+        r = f._send("POST", f"{BASE}/{f.body['id']}/evidence", data={"requirementId": "OWNER_PROPERTY_RIGHT"},
+                    files={"file": ("bad.heic", broken, "image/heic")}, expect=None)
+        assert r.status_code == 400
+        assert "HEIC" in r.json()["detail"]
+
+    def test_host_sees_only_the_five_match_lines(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-matchlines@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        assert set(f.body["matchResults"]) == set(svc.HOST_MATCH_KEYS)
+        f.upload("OWNER_PROPERTY_RIGHT")
+        lines = f.body["matchResults"]
+        assert lines["property_match"] is True and lines["representative_match"] is True
+        # Section 11.1: integrity / reuse / tamper signals stay internal.
+        assert "source_integrity" not in lines and "unclear_documents" not in lines

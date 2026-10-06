@@ -65,6 +65,11 @@ from app.core.correlation import correlation_id_middleware
 import logging
 
 logger = logging.getLogger("uvicorn.error")
+# Google web-service calls carry the server key in the URL (?key=...);
+# httpx logs full request URLs at INFO, so keep it at WARNING
+# (ZR-PROPERTY-VERIFY-001 Section 4: never log secret credentials).
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 if settings.llm_provider == "groq" and not settings.groq_api_key:
     logger.warning(

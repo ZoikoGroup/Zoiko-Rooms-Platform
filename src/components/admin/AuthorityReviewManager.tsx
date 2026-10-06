@@ -1,15 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Building, CheckCircle2, FileText, History, KeyRound, XCircle } from "lucide-react";
+import { AlertTriangle, Building, CheckCircle2, Database, FileText, History, KeyRound, UserCheck, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { AuthorityPackEditor } from "@/components/admin/AuthorityPackEditor";
 import { errorMessage } from "@/lib/user-api";
 import { formatDate } from "@/lib/utils";
 import {
-  AuthorityCase, AuthorityQueueItem, Organization, adminAuthorityEvidenceUrl, adminRevokeAuthority,
-  authorityStateLabel, authorityStateTone, decideOrganization, getAuthorityCase, getAuthorityMetrics,
+  AuthorityCase, AuthorityQueueItem, Organization, adminAuthorityEvidenceUrl, adminRevokeAuthority, assignAuthorityCase,
+  recordOwnershipChange, authorityStateLabel, authorityStateTone, decideOrganization, getAuthorityCase, getAuthorityMetrics,
   getAuthorityReviewReasons, listAuthorityQueue, listPendingOrganizations, relationshipLabel, reviewAuthority, scopeLabel,
 } from "@/lib/authority-verification";
 
@@ -44,8 +45,10 @@ function Signal({ value, text }: { value: boolean | null | undefined; text: stri
  * ZR-AUTHORITY-002 Section 11 -- Trust & Safety authority review: the
  * verified identity, the property, the claimed relationship, evidence with
  * automated match signals and conflicting claims side by side. Decisions
- * need a standard reason code; conflicts and entity chains need a second,
- * different reviewer. Reviewers can't edit the host's evidence.
+ * need a standard reason code; conflicts, entity chains and integrity
+ * signals need a second, different reviewer. A case is held by one assigned
+ * reviewer at a time (Section 13); opening evidence or deciding takes an
+ * unassigned case. Reviewers can't edit the host's evidence.
  */
 export function AuthorityReviewManager() {
   const [filter, setFilter] = useState("MANUAL_REVIEW");
@@ -95,6 +98,8 @@ export function AuthorityReviewManager() {
         </dl>
       )}
 
+      <AuthorityPackEditor />
+
       {orgs.length > 0 && (
         <div className="space-y-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
           <p className="flex items-center gap-2 text-xs font-semibold text-slate-700 dark:text-slate-200">
@@ -140,6 +145,7 @@ export function AuthorityReviewManager() {
                   <span className="text-xs text-slate-500">{label(item.relationshipType)} · {item.countryCode || "--"}</span>
                   {item.awaitingSecondApproval && <Badge tone="warning">Awaiting second approval</Badge>}
                   {item.isReconsideration && <Badge tone="primary">Reconsideration</Badge>}
+                  {item.assignedAdminId !== null && <Badge tone="neutral">Assigned to reviewer #{item.assignedAdminId}</Badge>}
                 </span>
                 <span className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
                   {item.reasonCodes.slice(0, 3).map((c) => <span key={c} className="rounded bg-slate-100 px-1.5 py-0.5 dark:bg-slate-800">{label(c)}</span>)}
@@ -171,10 +177,41 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     getAuthorityCase(id).then(setC).catch((err) => setError(errorMessage(err, "Could not load the case.")));
-    getAuthorityReviewReasons().then(setReasons).catch(() => setReasons(null));
   }, [id]);
+
+  useEffect(() => {
+    reload();
+    getAuthorityReviewReasons().then(setReasons).catch(() => setReasons(null));
+  }, [reload]);
+
+  async function assign(release: boolean) {
+    if (!c) return;
+    setBusy(true);
+    setError("");
+    try {
+      await assignAuthorityCase(c.id, release);
+      reload();
+    } catch (err) {
+      setError(errorMessage(err, "Could not change the assignment."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function ownershipChanged() {
+    if (!c || !window.confirm("Record an ownership change for this property? Owner and agent authority for it will be withdrawn and its live listings paused.")) return;
+    setBusy(true);
+    try {
+      const r = await recordOwnershipChange(c.property.id);
+      onDecided(`Ownership change recorded -- ${r.reopened} authority record(s) reopened`);
+    } catch (err) {
+      setError(errorMessage(err, "Could not record the ownership change."));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => { setReasonCode(reasons?.[decision]?.[0]?.code ?? ""); }, [decision, reasons]);
 
@@ -232,6 +269,19 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
               {c.reasonCodes.map((code) => <span key={code} className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">{label(code)}</span>)}
             </p>
           )}
+          {c.state === "MANUAL_REVIEW" && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
+              <span className="flex items-center gap-2">
+                <UserCheck className="h-4 w-4" aria-hidden="true" />
+                {c.assignedAdminId === null ? "Unassigned -- opening evidence or deciding assigns it to you"
+                  : `Assigned to reviewer #${c.assignedAdminId}${c.assignedAt ? ` since ${formatDate(c.assignedAt)}` : ""}`}
+              </span>
+              <span className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => assign(false)} disabled={busy}>Assign to me</Button>
+                {c.assignedAdminId !== null && <Button size="sm" variant="ghost" onClick={() => assign(true)} disabled={busy}>Release</Button>}
+              </span>
+            </div>
+          )}
           {c.reconsiderationNote && <p className="rounded-lg bg-primary-50 p-3 text-xs dark:bg-primary-500/10">Host&apos;s reconsideration note: {c.reconsiderationNote}</p>}
 
           <div className="space-y-2">
@@ -245,16 +295,25 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
                          href={adminAuthorityEvidenceUrl(c.id, e.id)}>
                         <FileText className="h-4 w-4" aria-hidden="true" /> {e.originalFilename}
                       </a>
+                    ) : e.sourceType === "REGISTRY" || e.sourceType === "CONNECTOR" ? (
+                      <span className="flex items-center gap-2 font-semibold"><Database className="h-4 w-4" aria-hidden="true" />
+                        {e.issuer} record {e.documentReference}</span>
                     ) : <span className="font-semibold">{e.sourceType === "OWNER_CONFIRMATION" ? `Confirmed by ${e.issuer}` : e.originalFilename}</span>}
                     <span className="text-xs text-slate-500">{label(e.requirementId)} · {e.processingStatus.toLowerCase()}</span>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-3 text-xs">
-                    <Signal value={e.readable} text="Readable" />
+                    <Signal value={e.readable} text={e.textSource === "OCR" ? `Readable (OCR ${e.ocrConfidence ?? "--"}%)` : "Readable"} />
+                    <Signal value={e.typeMatched} text="Accepted document type" />
                     <Signal value={e.propertyMatched} text="Property matches" />
                     <Signal value={e.nameMatched} text="Name matches" />
                     <Signal value={e.principalMatched} text="Principal matches" />
                     {e.reusedElsewhere && <span className="text-accent-700">Reused on another claim</span>}
                     {e.tamperSignal && <span className="text-accent-700">Possible edit signal (weak)</span>}
+                    {e.sourceType === "UPLOAD" && (
+                      <span className={e.scanStatus === "ERROR" ? "text-accent-700" : "text-slate-500"}>
+                        Malware scan: {e.scanStatus === "CLEAN" ? "clean" : e.scanStatus === "ERROR" ? "could not complete" : "not configured"}
+                      </span>
+                    )}
                   </div>
                 </li>
               ))}
@@ -315,6 +374,9 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
               <Button variant="accent" onClick={revoke} disabled={busy}>Revoke authority</Button>
             </div>
           )}
+          <div className="flex justify-end">
+            <Button size="sm" variant="ghost" onClick={ownershipChanged} disabled={busy}>Record ownership change for this property</Button>
+          </div>
           {error && <p className="text-sm text-accent-700" role="alert">{error}</p>}
         </div>
       )}

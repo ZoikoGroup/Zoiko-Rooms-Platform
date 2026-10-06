@@ -54,7 +54,6 @@ export interface PropertyVerificationSession {
   originalLocation: GeoPoint | null;
   confirmedLocation: GeoPoint | null;
   pinStatus: PinStatus;
-  pinMovedMeters: number | null;
   pinReverseGeocode: string;
   propertyKind: "" | PropertyKind;
   buildingName: string;
@@ -90,7 +89,9 @@ export interface PropertyPolicy {
   requiredAddressFields: string[];
   acceptedEvidenceTypes: EvidenceType[];
   unitRequiredFor: PropertyKind[];
-  pinMoveReviewMeters: number;
+  /** Section 17: the country's address field order (snake_case) and local field names. */
+  addressFieldOrder: string[];
+  addressLabels: Record<string, string>;
   provider: string;
   autocomplete: boolean;
 }
@@ -126,10 +127,21 @@ export function startPropertyVerification(propertyId: number, idempotencyKey: st
   });
 }
 
+/** Only the structured fields -- a pre-filled address can carry display-only
+ *  extras (e.g. `formatted`) that the API rejects. */
+function addressPayload(a: StructuredAddress) {
+  return {
+    addressLine1: a.addressLine1 ?? "", addressLine2: a.addressLine2 ?? "", subpremise: a.subpremise ?? "",
+    locality: a.locality ?? "", administrativeArea: a.administrativeArea ?? "", postalCode: a.postalCode ?? "",
+    countryCode: a.countryCode ?? "",
+  };
+}
+
 export function setPropertyAddress(session: PropertyVerificationSession, address: StructuredAddress,
                                    entryMode: "SELECTED" | "MANUAL", providerPlaceId = "") {
   return apiClientFetch<PropertyVerificationSession>(`${BASE}/${session.id}/address`, {
-    method: "PUT", headers: versioned(session), body: JSON.stringify({ address, entryMode, providerPlaceId }),
+    method: "PUT", headers: versioned(session),
+    body: JSON.stringify({ address: addressPayload(address), entryMode, providerPlaceId }),
   });
 }
 
@@ -200,8 +212,25 @@ export function suggestAddresses(query: string, country: string, sessionToken: s
   });
 }
 
+/** The address at a point -- the host's phone location or a spot tapped on the map. */
+export function reverseLocation(point: GeoPoint) {
+  return apiClientFetch<{ found: boolean; address?: StructuredAddress }>("/api/location/reverse", {
+    method: "POST", body: JSON.stringify(point),
+  });
+}
+
+/** Resolve a free-form place (e.g. a Plus Code "W8FP+3HR Madhira") to a point. */
+export function geocodePlace(query: string, locality: string, countryCode: string) {
+  return apiClientFetch<{ geocodeStatus: string; location?: { latitude: number; longitude: number } }>(
+    "/api/location/geocode", {
+      method: "POST",
+      body: JSON.stringify({ address: { addressLine1: query, locality, countryCode } }),
+    });
+}
+
 export function retrieveAddress(id: string, sessionToken: string) {
-  return apiClientFetch<{ address: StructuredAddress; provider: string; providerPlaceId: string }>("/api/location/retrieve", {
+  return apiClientFetch<{ address: StructuredAddress; provider: string; providerPlaceId: string;
+    location: { latitude: number; longitude: number } | null }>("/api/location/retrieve", {
     method: "POST", body: JSON.stringify({ id, sessionToken }),
   });
 }
@@ -218,8 +247,19 @@ export interface PropertyReviewQueueItem {
   reasonCodes: string[];
   possibleDuplicate: boolean;
   awaitingSecondApproval: boolean;
+  assignedAdminId: number | null;
   submittedAt: string | null;
   createdAt: string;
+}
+
+export interface PinAdjustment {
+  at: string;
+  latitude: number;
+  longitude: number;
+  movedMeters: number | null;
+  reverseGeocode: string;
+  reason: string;
+  reviewRequired: boolean;
 }
 
 export interface PropertyReviewCase extends PropertyVerificationSession {
@@ -229,6 +269,11 @@ export interface PropertyReviewCase extends PropertyVerificationSession {
   provider: string;
   locationPrecision: string;
   pinMovePolicyMeters: number;
+  pinMovedMeters: number | null;
+  pinAdjustHistory: PinAdjustment[];
+  assignedAdminId: number | null;
+  assignedAt: string | null;
+  addressLocal: string;
   pinAdjustReason: string;
   pinAdjustCount: number;
   duplicateOfPropertyId: number | null;
@@ -237,6 +282,7 @@ export interface PropertyReviewCase extends PropertyVerificationSession {
   evidenceDetail: {
     id: number; evidenceType: EvidenceType; originalFilename: string; contentType: string; readable: boolean;
     addressMatched: boolean | null; unitMatched: boolean | null; reusedElsewhere: boolean; scanStatus: string; purged: boolean;
+    tamperSignal: boolean;
     textSource: "PDF_TEXT" | "OCR" | "NONE"; ocrConfidence: number | null; quality: string;
     postalMatched: boolean | null; ownerNameMatched: boolean | null; documentTypeMatched: boolean | null;
     documentYear: number | null; referenceNumber: string; signals: string[];
@@ -259,6 +305,13 @@ export function getPropertyReviewReasons() {
 export function reviewPropertyVerification(id: number, decision: ReviewDecision, reasonCode: string, note: string) {
   return apiClientFetch<PropertyVerificationSession>(`/api/property-verifications/${id}/review`, {
     method: "POST", body: JSON.stringify({ decision, reasonCode, note }),
+  });
+}
+
+/** Section 16: take (or release) a case -- one reviewer holds it at a time. */
+export function assignPropertyReviewCase(id: number, release = false) {
+  return apiClientFetch<{ id: number; assignedAdminId: number | null }>(`/api/property-verifications/${id}/assign`, {
+    method: "POST", body: JSON.stringify({ release }),
   });
 }
 
@@ -301,3 +354,26 @@ export const evidenceTypeLabel: Record<EvidenceType, string> = {
 };
 
 export const confidenceLabel: Record<string, string> = { EXACT: "Exact", HIGH: "High", MEDIUM: "Medium", LOW: "Low" };
+
+// -- Admin: map provider health ----------------------------------------------------
+
+export interface LocationApiHealth {
+  api: string;
+  usedFor?: string;
+  ok: boolean;
+  reason: string;
+  message?: string;
+  fix?: string;
+}
+
+export interface LocationHealth {
+  primary: string;
+  google: LocationApiHealth[];
+  /** Configured backup providers in use; empty = Google only. */
+  fallbacks: string[];
+}
+
+/** Which Google Maps Platform APIs the server key can use right now (super admin). */
+export function getLocationHealth() {
+  return apiClientFetch<LocationHealth>("/api/admin/location/health");
+}

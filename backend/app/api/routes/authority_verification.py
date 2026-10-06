@@ -63,6 +63,12 @@ class ConfirmationRequestIn(CamelModel):
     recipient_name: str = ""
 
 
+class SourceCheckIn(CamelModel):
+    requirement_id: str
+    source_code: str
+    reference: str
+
+
 class SubmitIn(CamelModel):
     attested: bool = False
 
@@ -85,6 +91,10 @@ class ReviewIn(CamelModel):
     decision: str
     reason_code: str
     note: str = ""
+
+
+class AssignIn(CamelModel):
+    release: bool = False
 
 
 class OrganizationDecisionIn(CamelModel):
@@ -129,6 +139,9 @@ def evidence_read(e: AuthorityEvidence) -> dict:
             "sourceType": e.source_type, "issuer": e.issuer, "documentReference": e.document_reference,
             "issuedAt": e.issued_at, "expiresAt": e.expires_at, "originalFilename": e.original_filename,
             "contentType": e.content_type, "fileSize": e.file_size, "processingStatus": e.processing_status,
+            # Which listed document OCR / the text layer recognised (None = not read yet).
+            "detectedDocument": e.detected_document or None,
+            "recognised": e.type_matched if e.source_type == "UPLOAD" else True,
             "available": bool(e.stored_filename), "createdAt": e.created_at}
 
 
@@ -150,6 +163,7 @@ def verification_read(db: Session, v: AuthorityVerification) -> dict:
         "revokedAt": v.revoked_at, "revocationReasonCode": v.revocation_reason_code,
         "reasonCodes": list(v.reason_codes or []), "reason": svc.describe(v.reason_codes or []),
         "requirements": svc.requirements(db, v),
+        "matchResults": svc.host_match_results(db, v),
         "evidence": [evidence_read(e) for e in v.evidence if e.processing_status != "REPLACED"],
         "confirmations": [confirmation_read(c) for c in v.confirmations],
         "allowedActions": svc.allowed_actions(db, v), "previousId": v.previous_id,
@@ -189,6 +203,30 @@ def get_policy(country: str = "", db: Session = Depends(get_db), user: UserAccou
             "subletConsentRequired": pack.sublet_consent_required,
             "coOwnerConsentRequired": pack.co_owner_consent_required, "relationshipTypes": list(RELATIONSHIP_TYPES),
             "scopeCodes": list(SCOPE_CODES)}
+
+
+@router.get("/authority-verifications")
+def list_mine(db: Session = Depends(get_db), user: UserAccount = Depends(get_current_user)):
+    """Section 10.3 Verification Center: the host's current authority
+    assertion per property and relationship (exception management only --
+    no evidence or requirement detail)."""
+    if not user.party_id:
+        return []
+    rows = db.scalars(select(AuthorityVerification).where(
+        AuthorityVerification.party_id == user.party_id, AuthorityVerification.state != "SUPERSEDED",
+    ).order_by(AuthorityVerification.id.desc()))
+    seen, out = set(), []
+    for v in rows:
+        key = (v.property_id, v.relationship_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        prop = db.get(Property, v.property_id)
+        out.append({"id": v.id, "propertyId": v.property_id, "propertyLabel": prop.address or prop.city,
+                    "propertyCity": prop.city, "relationshipType": v.relationship_type,
+                    "state": svc.effective_state(v), "expiresAt": v.expires_at,
+                    "reason": svc.describe(v.reason_codes or []), "allowedActions": svc.allowed_actions(db, v)})
+    return out
 
 
 @router.get("/properties/{property_id}/authority-verifications")
@@ -243,6 +281,19 @@ async def post_evidence(verification_id: int, request: Request, requirement_id: 
                      original_filename=file.filename or "document", issuer=issuer,
                      document_reference=document_reference, issued_at=issued_at or None,
                      expires_at=expires_at or None, replaces_id=replaces_id, expected_version=_version(if_match),
+                     correlation_id=get_correlation_id(request))
+    db.refresh(v)
+    return verification_read(db, v)
+
+
+@router.post("/authority-verifications/{verification_id}/source-checks", status_code=status.HTTP_201_CREATED)
+def post_source_check(verification_id: int, payload: SourceCheckIn, request: Request,
+                      if_match: str | None = Header(default=None, alias="If-Match"),
+                      db: Session = Depends(get_db), user: UserAccount = Depends(get_current_user)):
+    """Sections 5.2 / 6.3 / 7.3: check a registry or connected source instead of uploading."""
+    v = svc.get_owned(db, user, verification_id)
+    svc.check_source(db, user, v, requirement_id=payload.requirement_id, source_code=payload.source_code,
+                     reference=payload.reference, expected_version=_version(if_match),
                      correlation_id=get_correlation_id(request))
     db.refresh(v)
     return verification_read(db, v)
@@ -350,7 +401,8 @@ def list_queue(state: str = "MANUAL_REVIEW", db: Session = Depends(get_db)):
              "relationshipType": v.relationship_type, "route": svc.route_for(v), "countryCode": v.country_code,
              "reasonCodes": list(v.reason_codes or []),
              "awaitingSecondApproval": v.first_approver_admin_id is not None and v.state == "MANUAL_REVIEW",
-             "isReconsideration": v.is_reconsideration, "submittedAt": v.submitted_at, "createdAt": v.created_at}
+             "isReconsideration": v.is_reconsideration, "assignedAdminId": v.assigned_admin_id,
+             "submittedAt": v.submitted_at, "createdAt": v.created_at}
             for v in db.scalars(query.limit(200))]
 
 
@@ -386,6 +438,17 @@ def admin_decide_organization(organization_id: int, payload: OrganizationDecisio
     return organization_read(org)
 
 
+@admin_router.post("/properties/{property_id}/ownership-change")
+def admin_ownership_change(property_id: int, request: Request, db: Session = Depends(get_db),
+                           admin: AdminUser = Depends(require_super_admin)):
+    """Section 9.2: record a property transfer / ownership-change signal."""
+    count = svc.reopen_for_ownership_change(db, admin, property_id, correlation_id=get_correlation_id(request))
+    log_audit_event(db, admin, "authority_verification.ownership_change", "property", str(property_id),
+                    get_correlation_id(request), reason=f"reopened:{count}")
+    db.commit()
+    return {"propertyId": property_id, "reopened": count}
+
+
 @admin_router.get("/packs")
 def list_packs(db: Session = Depends(get_db)):
     svc.ensure_default_packs(db)
@@ -393,7 +456,7 @@ def list_packs(db: Session = Depends(get_db)):
     rows = db.scalars(select(AuthorityRegulatoryPack).where(AuthorityRegulatoryPack.active.is_(True))
                       .order_by(AuthorityRegulatoryPack.country_code))
     return [{"id": p.id, "countryCode": p.country_code, "countryName": p.country_name, "version": p.version,
-             "requirements": p.requirements, "terminology": p.terminology,
+             "requirements": svc.pack_requirements_view(p), "terminology": p.terminology,
              "subletConsentRequired": p.sublet_consent_required, "coOwnerConsentRequired": p.co_owner_consent_required,
              "parallelIdentityIntake": p.parallel_identity_intake, "defaultValidityDays": p.default_validity_days,
              "expiringSoonDays": p.expiring_soon_days, "evidenceRetentionDays": p.evidence_retention_days,
@@ -429,7 +492,9 @@ def admin_case(verification_id: int, db: Session = Depends(get_db)):
                                                   DomainEvent.resource_id == str(v.id)).order_by(DomainEvent.id))
     evidence = [{**evidence_read(e), "readable": e.readable, "propertyMatched": e.property_matched,
                  "nameMatched": e.name_matched, "principalMatched": e.principal_matched,
-                 "reusedElsewhere": e.reused_elsewhere, "tamperSignal": e.tamper_signal} for e in v.evidence]
+                 "reusedElsewhere": e.reused_elsewhere, "tamperSignal": e.tamper_signal,
+                 "scanStatus": e.scan_status, "textSource": e.text_source, "ocrConfidence": e.ocr_confidence,
+                 "typeMatched": e.type_matched} for e in v.evidence]
     return {
         **verification_read(db, v), "evidence": evidence, "partyId": v.party_id,
         "verifiedLegalName": svc._verified_legal_name(db, v.party_id),
@@ -438,7 +503,8 @@ def admin_case(verification_id: int, db: Session = Depends(get_db)):
         "matchResults": v.match_results or {}, "reviewReasonCodes": list(v.review_reason_codes or []),
         "reviewNote": v.review_note, "reconsiderationNote": v.reconsideration_note,
         "awaitingSecondApproval": v.first_approver_admin_id is not None and v.state == "MANUAL_REVIEW",
-        "firstApproverAdminId": v.first_approver_admin_id,
+        "firstApproverAdminId": v.first_approver_admin_id, "assignedAdminId": v.assigned_admin_id,
+        "assignedAt": v.assigned_at,
         "otherClaims": [{"id": o.id, "partyId": o.party_id, "relationshipType": o.relationship_type,
                          "state": svc.effective_state(o), "createdAt": o.created_at} for o in others],
         "events": [{"type": e.event_type, "previousState": e.previous_state, "newState": e.new_state,
@@ -452,10 +518,24 @@ def admin_evidence(verification_id: int, evidence_id: int, request: Request, db:
     v = db.get(AuthorityVerification, verification_id)
     if v is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Authority verification not found")
+    svc.require_assignment(db, admin, v, correlation_id=get_correlation_id(request))
     log_audit_event(db, admin, "authority_evidence.view", "authority_evidence", str(evidence_id),
                     get_correlation_id(request))
     db.commit()
     return _evidence_response(v, evidence_id)
+
+
+@admin_router.post("/{verification_id}/assign")
+def admin_assign(verification_id: int, payload: AssignIn, request: Request, db: Session = Depends(get_db),
+                 admin: AdminUser = Depends(require_super_admin)):
+    v = db.get(AuthorityVerification, verification_id)
+    if v is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Authority verification not found")
+    v = svc.assign(db, admin, v, release=payload.release, correlation_id=get_correlation_id(request))
+    log_audit_event(db, admin, "authority_verification.release" if payload.release else "authority_verification.assign",
+                    svc.RESOURCE, str(v.id), get_correlation_id(request))
+    db.commit()
+    return verification_read(db, v)
 
 
 @admin_router.post("/{verification_id}/review")

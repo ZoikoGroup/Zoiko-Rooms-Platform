@@ -135,6 +135,13 @@ class Settings(BaseSettings):
     property_location_upload_dir: str = "secure_uploads/property_location"
     # ZR-AUTHORITY-002 authority evidence (encrypted at rest, never publicly mounted).
     authority_upload_dir: str = "secure_uploads/authority"
+    # Optional ClamAV daemon (clamd, TCP INSTREAM) for evidence uploads
+    # (core/upload_scan.py). Unset = structural checks only, scan_status
+    # NOT_SCANNED; a configured scanner that can't answer marks ERROR and the
+    # evidence goes to a reviewer.
+    clamav_host: str = ""
+    clamav_port: int = 3310
+    clamav_timeout_seconds: float = 10.0
 
     # ZR-ENG-CLR-004 Section 13.1/AC-08: executed agreement PDFs, stored once
     # per AgreementVersion and never regenerated/overwritten -- same

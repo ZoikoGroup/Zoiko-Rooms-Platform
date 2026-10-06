@@ -30,7 +30,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.core.config import settings
 from app.crud.events import emit_event
@@ -60,7 +60,11 @@ REASONS: dict[str, tuple[str, str]] = {
     "REQUIREMENT_MISSING": ("Add the evidence still required for your role.", "Add evidence"),
     "PROPERTY_MISMATCH": ("We could not confirm that this document refers to this property.", "Add evidence"),
     "NAME_MISMATCH": ("The person named in the evidence doesn't match your verified identity.", "Add evidence"),
-    "PRINCIPAL_UNCONFIRMED": ("We could not confirm the owner or principal named in the evidence.", "Add evidence"),
+    "PRINCIPAL_UNCONFIRMED": ("The owner or landlord named on the document doesn't match the name you entered. Check the name, or ask them to confirm.", "Add evidence"),
+    "PRINCIPAL_NAME_NEEDED": ("Enter the owner's or landlord's name exactly as it appears on the document.", "Edit details"),
+    "EVIDENCE_UNCLEAR": ("We couldn't read this document clearly. Upload the original PDF or a sharp photo of every page -- flat, well lit, no glare.", "Replace evidence"),
+    "DOCUMENT_NOT_OFFICIAL": ("This document says it's a sample or not an official document. Upload the real, issued document.", "Replace evidence"),
+    "DOCUMENT_TYPE_UNRECOGNIZED": ("This doesn't look like one of the documents accepted for this step in your country. Upload one of the accepted documents listed.", "Replace evidence"),
     "SCOPE_INSUFFICIENT": ("We could not confirm that this document grants authority to advertise this property.", "Add evidence"),
     "SUBLET_PERMISSION_MISSING": ("Your tenancy alone may not permit subletting. Add the landlord's permission.", "Add consent"),
     "AUTHORITY_DATES_INVALID": ("The authority dates aren't current. Add a current mandate or permission.", "Add evidence"),
@@ -68,6 +72,7 @@ REASONS: dict[str, tuple[str, str]] = {
     "EVIDENCE_UNREADABLE": ("We need to review your evidence. You can leave this page; we'll update the status here.", "View status"),
     "EVIDENCE_REUSED": ("We need to review your evidence. You can leave this page; we'll update the status here.", "View status"),
     "TAMPER_SIGNAL": ("We need to review your evidence. You can leave this page; we'll update the status here.", "View status"),
+    "SCAN_INCOMPLETE": ("We need to review your evidence. You can leave this page; we'll update the status here.", "View status"),
     "CONFLICTING_AUTHORITY": ("We need to review this property's authority. You can leave this page.", "View status"),
     "ORGANIZATION_UNVERIFIED": ("We need to verify the organization you act for. You can leave this page.", "View status"),
     "PROPERTY_NOT_VERIFIED": ("Your authority is ready; final approval waits for the property verification.", "Verify property"),
@@ -91,6 +96,7 @@ REASONS: dict[str, tuple[str, str]] = {
     "REVOKED_BY_TRUST_SAFETY": ("Authority for this property has been withdrawn.", "Review status"),
     "OWNERSHIP_CHANGED": ("The property's ownership changed, so authority must be verified again.", "Renew verification"),
     "PROPERTY_ADDRESS_CHANGED": ("The property's address changed, so your authority must be verified again for the new address.", "Renew verification"),
+    "IDENTITY_REVERIFICATION": ("Your identity needs to be verified again, so your authority for this property must be renewed.", "Renew verification"),
 }
 REVIEW_REASONS = {
     "APPROVE": ("REVIEW_APPROVED_DOCUMENTS", "REVIEW_APPROVED_CONFIRMATION"),
@@ -98,7 +104,7 @@ REVIEW_REASONS = {
     "REJECT": ("REVIEW_CANNOT_ESTABLISH", "REVIEW_NOT_ENTITLED"),
 }
 REVOCATION_REASONS = ("REVOKED_BY_PRINCIPAL", "REVOKED_BY_HOST", "REVOKED_BY_TRUST_SAFETY", "OWNERSHIP_CHANGED",
-                      "PROPERTY_ADDRESS_CHANGED")
+                      "PROPERTY_ADDRESS_CHANGED", "IDENTITY_REVERIFICATION")
 
 
 def describe(codes: list[str]) -> dict:
@@ -110,45 +116,231 @@ def describe(codes: list[str]) -> dict:
 
 # -- Authority Regulatory Packs (Section 4) ----------------------------------------
 
-def _req(requirement_id, evidence_class, title, purpose, examples, *, required=True, owner_confirmation=False):
+def _req(requirement_id, evidence_class, title, purpose, documents, *, required=True, owner_confirmation=False):
+    docs = [{"label": label, "keywords": list(keywords)} for label, keywords in documents]
     return {"requirement_id": requirement_id, "evidence_class": evidence_class, "title": title, "purpose": purpose,
-            "accepted_examples": examples, "required": required, "owner_confirmation": owner_confirmation}
+            "documents": docs, "accepted_examples": [d["label"] for d in docs],
+            "keywords": _union(d["keywords"] for d in docs),
+            "required": required, "owner_confirmation": owner_confirmation}
+
+
+def _union(keyword_lists) -> list[str]:
+    return list(dict.fromkeys(k for keywords in keyword_lists for k in keywords))
+
+
+_SUBLET_WORDS = ("sublet", "sub let", "sub-let", "sublease", "sub lease", "sub-lease", "subtenant", "sub tenant",
+                 "sub-tenant", "underlet")
+
+# Section 4: the documents each country accepts for each requirement, and
+# the phrases that identify each one in the document's own text (PDF text
+# layer or OCR). The host sees the list; an upload is recognised as the
+# first document whose phrase appears (all words of it) -- so a utility bill
+# can't pass as a deed, or a plain tenancy as permission to sublet. Packs may
+# override this per requirement ("documents"); "*" is the fallback.
+DOCUMENT_CATALOG: dict[str, dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] = {
+    "IN": {
+        "OWNER_PROPERTY_RIGHT": (
+            ("Sale deed", ("sale deed", "conveyance deed", "deed of sale", "title deed")),
+            ("Gift / partition / settlement deed", ("gift deed", "partition deed", "settlement deed", "release deed")),
+            ("Encumbrance certificate", ("encumbrance certificate", "encumbrance")),
+            ("Property tax receipt", ("property tax", "house tax", "municipal tax")),
+            ("Khata / Patta / mutation record", ("khata", "patta", "mutation", "pahani", "record of rights",
+                                                 "adangal", "jamabandi", "7 12 extract")),
+            ("Allotment / possession letter", ("allotment letter", "possession letter")),
+        ),
+        "OWNER_ENTITY_AUTHORITY": (
+            ("Board resolution", ("board resolution",)),
+            ("Trust deed", ("trust deed",)),
+            ("Letters of administration / probate / succession certificate",
+             ("letters of administration", "probate", "succession certificate")),
+            ("Authorised signatory letter", ("authorised signatory", "authorized signatory")),
+        ),
+        "CO_OWNER_CONSENT": (
+            ("Co-owner's consent letter / NOC", ("consent", "no objection", "noc")),
+        ),
+        "AGENT_MANDATE": (
+            ("Power of attorney", ("power of attorney",)),
+            ("Owner's authority letter", ("authority letter", "letter of authority", "authorisation letter",
+                                          "authorization letter")),
+            ("Property-management agreement", ("management agreement",)),
+            ("Agency agreement / mandate", ("agency agreement", "mandate")),
+        ),
+        "AGENT_ORGANIZATION_LINK": (
+            ("Appointment / offer letter", ("appointment letter", "offer letter")),
+            ("Employment letter / employee ID", ("employment", "employee")),
+            ("Authorised signatory letter", ("authorised signatory", "authorized signatory")),
+        ),
+        "TENANT_OCCUPATION_RIGHT": (
+            ("Rent / lease agreement", ("rental agreement", "rent agreement", "lease agreement", "lease deed",
+                                        "tenancy agreement")),
+            ("Leave and licence agreement", ("leave and license", "leave and licence", "licensee")),
+        ),
+        # A general NOC isn't permission to sublet: the document must say so.
+        "TENANT_SUBLET_PERMISSION": (
+            ("Landlord's NOC / consent to sublet", _SUBLET_WORDS),
+        ),
+    },
+    "GB": {
+        "OWNER_PROPERTY_RIGHT": (
+            ("HM Land Registry title register / official copy", ("title register", "land registry", "title number",
+                                                                 "proprietorship register", "registered proprietor")),
+            ("Transfer deed (TR1)", ("transfer deed", "tr1", "transfer of whole")),
+            ("Conveyance (unregistered land)", ("conveyance",)),
+        ),
+        "OWNER_ENTITY_AUTHORITY": (
+            ("Board resolution", ("board resolution",)),
+            ("Trust deed", ("trust deed",)),
+            ("Grant of probate / letters of administration", ("grant of probate", "letters of administration")),
+            ("Director appointment", ("director",)),
+        ),
+        "CO_OWNER_CONSENT": (
+            ("Co-owner's written consent", ("consent", "permission", "agree")),
+        ),
+        "AGENT_MANDATE": (
+            ("Letting / management agreement", ("letting agreement", "management agreement", "agency agreement",
+                                                "instruction to let")),
+            ("Agent's terms of business signed by the landlord", ("terms of business",)),
+            ("Power of attorney", ("power of attorney",)),
+        ),
+        "AGENT_ORGANIZATION_LINK": (
+            ("Appointment letter / contract of employment", ("appointment letter", "contract of employment",
+                                                             "employment")),
+            ("Director appointment", ("director",)),
+        ),
+        "TENANT_OCCUPATION_RIGHT": (
+            ("Assured shorthold tenancy agreement", ("assured shorthold", "tenancy agreement")),
+            ("Lease", ("lease",)),
+            ("Licence to occupy", ("licence to occupy", "license to occupy")),
+        ),
+        "TENANT_SUBLET_PERMISSION": (
+            ("Landlord's written consent to sublet / underlet",
+             _SUBLET_WORDS + ("consent to sublet", "permission to sublet")),
+        ),
+    },
+    "US": {
+        "OWNER_PROPERTY_RIGHT": (
+            ("Recorded deed (grant / warranty / quitclaim)", ("grant deed", "warranty deed", "quitclaim deed", "deed")),
+            ("County assessor / property tax record", ("assessor", "parcel number", "property tax", "tax bill")),
+            ("Title insurance policy", ("title insurance",)),
+        ),
+        "OWNER_ENTITY_AUTHORITY": (
+            ("LLC operating agreement / resolution", ("operating agreement", "resolution",
+                                                      "certificate of incumbency")),
+            ("Trust certificate", ("trust",)),
+            ("Letters testamentary", ("letters testamentary",)),
+        ),
+        "CO_OWNER_CONSENT": (
+            ("Co-owner's written consent", ("consent", "agree", "authorize")),
+        ),
+        "AGENT_MANDATE": (
+            ("Property management agreement", ("property management agreement", "management agreement")),
+            ("Exclusive leasing / listing agreement", ("listing agreement", "leasing agreement", "exclusive right")),
+            ("Power of attorney", ("power of attorney",)),
+        ),
+        "AGENT_ORGANIZATION_LINK": (
+            ("Offer / employment letter", ("offer letter", "employment")),
+            ("Broker / contractor agreement", ("broker", "independent contractor")),
+        ),
+        "TENANT_OCCUPATION_RIGHT": (
+            ("Residential lease agreement", ("lease agreement", "residential lease", "rental agreement", "lease")),
+        ),
+        "TENANT_SUBLET_PERMISSION": (
+            ("Landlord's written consent to sublease", ("sublet", "sublease", "sub-lease", "sub lease", "subtenant",
+                                                        "sub-tenant")),
+        ),
+    },
+    "*": {
+        "OWNER_PROPERTY_RIGHT": (
+            ("Title / land registry extract", ("land registry", "title", "proprietor")),
+            ("Deed", ("deed",)),
+            ("Property tax record", ("property tax",)),
+            ("Court, estate or trust record", ("ownership", "estate", "court")),
+        ),
+        "OWNER_ENTITY_AUTHORITY": (
+            ("Board resolution", ("resolution",)),
+            ("Trust deed", ("trust",)),
+            ("Letters of administration", ("administration",)),
+            ("Authorised signatory letter", ("authorized signatory", "authorised signatory")),
+        ),
+        "CO_OWNER_CONSENT": (
+            ("Co-owner's written consent", ("consent", "no objection", "agree")),
+        ),
+        "AGENT_MANDATE": (
+            ("Power of attorney", ("power of attorney",)),
+            ("Agency / letting / management agreement", ("management agreement", "agency agreement",
+                                                         "letting agreement", "leasing agreement")),
+            ("Signed owner mandate / authority letter", ("mandate", "letter of authority", "authority letter",
+                                                         "authorization letter", "authorisation letter")),
+        ),
+        "AGENT_ORGANIZATION_LINK": (
+            ("Appointment / employment letter", ("appointment", "employment", "employee")),
+            ("Director appointment", ("director",)),
+        ),
+        "TENANT_OCCUPATION_RIGHT": (
+            ("Tenancy / lease agreement", ("lease", "tenancy", "rental agreement", "rent agreement")),
+            ("Licence to occupy", ("licence", "license")),
+        ),
+        "TENANT_SUBLET_PERMISSION": (
+            ("Landlord's written consent to sublet", _SUBLET_WORDS),
+        ),
+    },
+}
+
+
+def default_documents(country: str, requirement_id: str) -> list[dict]:
+    table = DOCUMENT_CATALOG.get((country or "").upper()) or DOCUMENT_CATALOG["*"]
+    entries = table.get(requirement_id) or DOCUMENT_CATALOG["*"].get(requirement_id, ())
+    return [{"label": label, "keywords": list(keywords)} for label, keywords in entries]
+
+
+def default_keywords(country: str, requirement_id: str) -> list[str]:
+    return _union(d["keywords"] for d in default_documents(country, requirement_id))
+
+
+def requirement_documents(req: dict, country: str) -> list[dict]:
+    """The pack's own document list, else the country defaults."""
+    return req.get("documents") or default_documents(country, req["requirement_id"])
+
+
+def detect_document(text: str, documents: list[dict], tolerant: bool = False) -> str | None:
+    """The first listed document whose identifying phrase is in the text."""
+    for doc in documents:
+        if doc.get("keywords") and _keywords_in_text(text, doc["keywords"], tolerant):
+            return doc["label"]
+    return None
 
 
 def _routes(country: str) -> dict:
-    owner_examples = {
-        "GB": ["HM Land Registry title register", "Transfer deed", "Council tax account in your name (with title)"],
-        "IN": ["Sale deed", "Encumbrance certificate", "Property tax receipt with mutation record", "Khata / Patta"],
-        "US": ["Recorded deed", "County assessor / tax record", "Title insurance policy"],
-    }.get(country, ["Title / land registry extract", "Deed", "Court, estate or trust record"])
+    def docs(rid):
+        return [(d["label"], d["keywords"]) for d in default_documents(country, rid)]
+
     return {
         "OWNER": [
             _req("OWNER_PROPERTY_RIGHT", "PROPERTY_RIGHT", "Property right / ownership",
                  "Shows you own (or hold a right in) this property. An address document alone does not prove ownership.",
-                 owner_examples),
+                 docs("OWNER_PROPERTY_RIGHT")),
             _req("OWNER_ENTITY_AUTHORITY", "ORGANIZATION_LINK", "Authority to act for the owning company / trust",
                  "Needed only when the property is owned by a company, trust or estate.",
-                 ["Board resolution", "Trust deed naming you", "Letter of administration"], required=False),
+                 docs("OWNER_ENTITY_AUTHORITY"), required=False),
             _req("CO_OWNER_CONSENT", "SUBLET_PERMISSION", "Co-owner consent",
-                 "Where required, your co-owner(s) agree to the listing.", ["Signed co-owner consent"],
+                 "Where required, your co-owner(s) agree to the listing.", docs("CO_OWNER_CONSENT"),
                  required=False, owner_confirmation=True),
         ],
         "AGENT": [
             _req("AGENT_MANDATE", "MANDATE", "Owner / principal mandate for this property",
                  "Shows the owner or authorized principal permits you to advertise and rent this property.",
-                 ["Agency / letting agreement", "Property-management agreement", "Signed owner mandate", "Power of attorney"],
-                 owner_confirmation=True),
+                 docs("AGENT_MANDATE"), owner_confirmation=True),
             _req("AGENT_ORGANIZATION_LINK", "ORGANIZATION_LINK", "Your role at the organization",
                  "Needed only when you act through a company. A company registration is not a property mandate.",
-                 ["Employment / appointment letter", "Company profile naming you"], required=False),
+                 docs("AGENT_ORGANIZATION_LINK"), required=False),
         ],
         "SUBLET": [
             _req("TENANT_OCCUPATION_RIGHT", "OCCUPATION_RIGHT", "Current right to occupy",
                  "Shows you currently hold a tenancy, lease or license for this property.",
-                 ["Current tenancy / lease agreement", "License to occupy"]),
+                 docs("TENANT_OCCUPATION_RIGHT")),
             _req("TENANT_SUBLET_PERMISSION", "SUBLET_PERMISSION", "Permission to sublet",
                  "Your tenancy alone may not permit subletting. Shows the landlord or authorized agent allows it.",
-                 ["Landlord / agent written consent", "Lease clause permitting subletting"], owner_confirmation=True),
+                 docs("TENANT_SUBLET_PERMISSION"), owner_confirmation=True),
         ],
     }
 
@@ -181,6 +373,58 @@ def get_pack(db: Session, country_code: str) -> AuthorityRegulatoryPack:
         AuthorityRegulatoryPack.country_code == "*", AuthorityRegulatoryPack.active.is_(True)))
 
 
+def pack_requirements_view(pack: AuthorityRegulatoryPack) -> dict:
+    """The pack's requirements with each one's document list resolved."""
+    return {route: [{**r, "documents": requirement_documents(r, pack.country_code)} for r in reqs]
+            for route, reqs in (pack.requirements or {}).items()}
+
+
+def _validated_documents(rid: str, documents) -> list[dict]:
+    if not isinstance(documents, list) or not 1 <= len(documents) <= 20:
+        raise ValueError(f"{rid}: list 1 to 20 accepted documents")
+    out = []
+    for doc in documents:
+        label = str((doc or {}).get("label", "")).strip() if isinstance(doc, dict) else ""
+        keywords = doc.get("keywords") if isinstance(doc, dict) else None
+        if not label or len(label) > 120:
+            raise ValueError(f"{rid}: every document needs a name (up to 120 characters)")
+        if (not isinstance(keywords, list) or not keywords or len(keywords) > 30
+                or not all(isinstance(k, str) and k.strip() and len(k) <= 120 for k in keywords)):
+            raise ValueError(f"{rid} / {label}: 1 to 30 identifying phrases are needed to recognise the document")
+        out.append({"label": label, "keywords": list(dict.fromkeys(k.strip().lower() for k in keywords))})
+    return out
+
+
+def _validated_requirements(new: dict, current: dict, country: str) -> dict:
+    """Trust & Safety may change a requirement's wording, its accepted
+    documents (name + identifying phrases each) and whether it's required /
+    offers owner confirmation -- not add, drop or rename requirements, which
+    the decision logic relies on."""
+    if not isinstance(new, dict) or set(new) != set(current or {}):
+        raise ValueError("requirements must keep the routes OWNER, AGENT and SUBLET")
+    out = {}
+    for route, reqs in new.items():
+        known = [r["requirement_id"] for r in current[route]]
+        if not isinstance(reqs, list) or [r.get("requirement_id") for r in reqs if isinstance(r, dict)] != known:
+            raise ValueError(f"{route} must keep its requirements, in order: {', '.join(known)}")
+        cleaned = []
+        for req, old in zip(reqs, current[route]):
+            documents = _validated_documents(old["requirement_id"],
+                                             req.get("documents", requirement_documents(old, country)))
+            cleaned.append({
+                **old,
+                "title": str(req.get("title", old["title"])).strip()[:120] or old["title"],
+                "purpose": str(req.get("purpose", old["purpose"])).strip()[:400] or old["purpose"],
+                "documents": documents,
+                "accepted_examples": [d["label"] for d in documents],
+                "keywords": _union(d["keywords"] for d in documents),
+                "required": bool(req.get("required", old["required"])),
+                "owner_confirmation": bool(req.get("owner_confirmation", old["owner_confirmation"])),
+            })
+        out[route] = cleaned
+    return out
+
+
 def update_pack(db: Session, pack: AuthorityRegulatoryPack, changes: dict) -> AuthorityRegulatoryPack:
     editable = ("country_name", "requirements", "terminology", "sublet_consent_required", "co_owner_consent_required",
                 "parallel_identity_intake", "default_validity_days", "expiring_soon_days", "evidence_retention_days",
@@ -190,6 +434,14 @@ def update_pack(db: Session, pack: AuthorityRegulatoryPack, changes: dict) -> Au
         raise ValueError(f"Not editable: {sorted(unknown)}")
     if "listing_control" in changes and changes["listing_control"] not in ("SUSPEND", "NONE"):
         raise ValueError("listing_control must be SUSPEND or NONE")
+    if "requirements" in changes:
+        changes = {**changes, "requirements": _validated_requirements(changes["requirements"], pack.requirements, pack.country_code)}
+    for field, low, high in (("default_validity_days", 30, 1825), ("expiring_soon_days", 1, 180)):
+        if field in changes and not (isinstance(changes[field], int) and low <= changes[field] <= high):
+            raise ValueError(f"{field} must be between {low} and {high}")
+    retention = changes.get("evidence_retention_days")
+    if retention is not None and not (isinstance(retention, int) and retention >= 30):
+        raise ValueError("evidence_retention_days must be at least 30 (or empty to keep evidence)")
     data = {f: getattr(pack, f) for f in editable}
     data.update(changes)
     pack.active = False
@@ -269,6 +521,19 @@ def _set_state(db: Session, v: AuthorityVerification, new_state: str) -> str:
     return previous
 
 
+def _expiring_soon_days(db: Session | None, country_code: str) -> int:
+    """The pack's renewal threshold, read without seeding (this runs on every
+    status read)."""
+    if db is None:
+        return 30
+    for code in ((country_code or "").upper(), "*"):
+        days = db.scalar(select(AuthorityRegulatoryPack.expiring_soon_days).where(
+            AuthorityRegulatoryPack.country_code == code, AuthorityRegulatoryPack.active.is_(True)))
+        if days is not None:
+            return days
+    return 30
+
+
 def effective_state(v: AuthorityVerification | None, now: datetime | None = None) -> str:
     if v is None:
         return "NOT_STARTED"
@@ -277,13 +542,15 @@ def effective_state(v: AuthorityVerification | None, now: datetime | None = None
         expires = _utc(v.expires_at)
         if expires <= now:
             return "EXPIRED"
-        if expires - now <= timedelta(days=30):
+        if expires - now <= timedelta(days=_expiring_soon_days(object_session(v), v.country_code)):
             return "EXPIRING_SOON"
     return v.state
 
 
 def country_for(prop: Property) -> str:
-    return prop.country_code or JURISDICTION_COUNTRY.get(prop.jurisdiction_code, "")
+    from app.services.location import country_for_jurisdiction
+
+    return prop.country_code or country_for_jurisdiction(prop.jurisdiction_code)
 
 
 def get_owned_property(db: Session, user: UserAccount, property_id: int) -> Property:
@@ -381,7 +648,11 @@ def requirements(db: Session, v: AuthorityVerification) -> list[dict]:
             req_status = "AWAITING_CONFIRMATION"
         else:
             req_status = "MISSING"
-        out.append({**req, "required": required, "status": req_status,
+        sources = [{"code": a.code, "source_type": a.source_type, "label": a.label}
+                   for a in sources_for(v.country_code, req["evidence_class"])]
+        documents = requirement_documents(req, pack.country_code)
+        out.append({**req, "documents": documents, "accepted_examples": [d["label"] for d in documents],
+                    "keywords": _union(d["keywords"] for d in documents), "required": required, "status": req_status, "sources": sources,
                     "evidence_ids": [e.id for e in items], "confirmation_pending": pending, "confirmed": confirmed})
     return out
 
@@ -591,21 +862,151 @@ def _tamper_signal(content: bytes, content_type: str) -> bool:
     return content.count(b"%%EOF") > 1 or any(e.lower() in head.lower() for e in editors)
 
 
-def _property_in_text(text: str, prop: Property) -> bool:
+# A text layer shorter than this is a scan with a stray label, not a document.
+MIN_TEXT_LAYER_CHARS = 20
+# Below this mean Tesseract word confidence an OCR read is too unreliable to
+# match on; the host is asked for a clearer copy (same bar as property evidence).
+OCR_MIN_CONFIDENCE = 55.0
+
+
+def document_text(content: bytes, content_type: str) -> tuple[str, str, float | None]:
+    """-> (text, source, ocr confidence). Source: PDF_TEXT (a digital PDF's
+    text layer), OCR (Tesseract on a photo / scan, first pages of a PDF),
+    OCR_UNAVAILABLE (no OCR engine on this server) or NONE (OCR failed)."""
+    text = _pdf_text(content, content_type)
+    if len(text.strip()) >= MIN_TEXT_LAYER_CHARS:
+        return text, "PDF_TEXT", None
+    try:
+        from app.services import document_ocr
+
+        if not document_ocr.is_available():
+            return "", "OCR_UNAVAILABLE", None
+        ocr_text, confidence = document_ocr.ocr_document(content)
+        return ocr_text, "OCR", round(confidence, 1)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).info("authority evidence OCR failed", exc_info=True)
+        return "", "NONE", None
+
+
+def _readable(text: str, source: str, confidence: float | None) -> bool:
+    if not text.strip():
+        return False
+    return source == "PDF_TEXT" or (source == "OCR" and (confidence or 0) >= OCR_MIN_CONFIDENCE)
+
+
+def _has(words: set[str], token: str, tolerant: bool) -> bool:
+    from app.services.property_document_analysis import _token_present
+
+    return _token_present(token, words, tolerant)
+
+
+def _property_in_text(text: str, prop: Property, tolerant: bool = False) -> bool:
+    """The document names this property: its postal code (when known) plus
+    either most of the address line, or -- the same rule as property
+    verification -- the house / door number and a place name, ignoring
+    landmark words the host added ("2-599 Muthyalamma temple" matches a
+    receipt for "2-599 MADUPALLY, MADHIRA ... 507203")."""
+    from app.services.property_document_analysis import identity_matches
+
     body = _norm(text)
+    if not body:
+        return False
+    postal = (prop.postal_code or "").replace(" ", "").lower()
+    if postal and postal not in body.replace(" ", ""):
+        return False
+    words = set(body.split())
     line1 = _norm(prop.address_line_1 or prop.address)
     tokens = [t for t in line1.split() if len(t) > 1 or t.isdigit()]
-    if not body or not tokens:
-        return False
-    hits = sum(1 for t in tokens if t in body.split())
-    postal = (prop.postal_code or "").replace(" ", "").lower()
-    return hits / len(tokens) >= 0.75 and (not postal or postal in body.replace(" ", ""))
+    if tokens and sum(1 for t in tokens if _has(words, t, tolerant)) / len(tokens) >= 0.75:
+        return True
+    address = {"address_line_1": prop.address_line_1 or prop.address, "address_line_2": prop.address_line_2 or "",
+               "locality": prop.locality or prop.city or "", "postal_code": prop.postal_code or "",
+               "country_code": prop.country_code or ""}
+    return identity_matches(text, address, tolerant)
 
 
-def _name_in_text(text: str, name: str) -> bool:
+def _name_in_text(text: str, name: str, tolerant: bool = False) -> bool:
+    """Every part of the name appears -- as its own word, or joined to
+    another part the way documents often write it ("ANIL KUMAR" ->
+    "ANILKUMAR"), in any order. A joined word counts only when it's made
+    entirely of the name's own parts, so "RAO" isn't found in "RAOBERT"."""
     parts = [p for p in _norm(name).split() if len(p) > 1]
-    body = _norm(text).split()
-    return bool(parts) and all(p in body for p in parts)
+    words = set(_norm(text).split())
+
+    def composed(word: str) -> bool:
+        """word is two or more of the name's parts written together."""
+        def rest(w: str, used: int) -> bool:
+            if not w:
+                return used >= 2
+            return any(w.startswith(p) and rest(w[len(p):], used + 1) for p in parts)
+        return rest(word, 0)
+
+    joined = [w for w in words if len(w) > 3 and composed(w)]
+
+    def found(part: str) -> bool:
+        return _has(words, part, tolerant) or any(part in w for w in joined)
+
+    return bool(parts) and all(found(p) for p in parts)
+
+
+# A document that says it isn't real can't establish anything, whatever it
+# names. Phrases, not single words: "void" or "sample" alone appear in
+# genuine deeds ("null and void", "soil sample").
+NOT_OFFICIAL_MARKERS = (
+    # ("specimen signature" is normal on a power of attorney, so only these.)
+    "sample receipt", "sample document", "sample copy", "sample certificate", "sample agreement",
+    "specimen copy", "specimen document", "specimen only",
+    "not an official document", "not an official", "not valid for any", "not valid for legal",
+    "testing purposes", "test document", "demonstration purposes", "demo purposes", "dummy document",
+    "for illustration only", "illustrative purposes",
+)
+
+
+def _not_official(text: str) -> bool:
+    body = " ".join(_norm(text).split())
+    return any(" ".join(_norm(marker).split()) in body for marker in NOT_OFFICIAL_MARKERS)
+
+
+def _keywords_in_text(text: str, keywords: list[str], tolerant: bool = False) -> bool:
+    """Any one accepted-document phrase appears (every word of it)."""
+    words = set(_norm(text).split())
+    for phrase in keywords:
+        tokens = [t for t in _norm(phrase).split() if t]
+        if tokens and all(_has(words, t, tolerant and len(t) >= 5) for t in tokens):
+            return True
+    return False
+
+
+HEIC_BRANDS = (b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1")
+
+
+def is_heic(content: bytes) -> bool:
+    return content[4:8] == b"ftyp" and content[8:12] in HEIC_BRANDS
+
+
+def heic_to_jpeg(content: bytes) -> bytes:
+    """Section 8.2 accepts HEIC (iPhone photos). It's converted to JPEG once,
+    on upload, so OCR, metadata stripping and the reviewer's viewer all work
+    on an ordinary image. Anything that isn't HEIC passes through untouched."""
+    if not is_heic(content):
+        return content
+    try:
+        import io
+
+        from PIL import Image
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+        image = Image.open(io.BytesIO(content))
+        image.load()
+        out = io.BytesIO()
+        image.convert("RGB").save(out, format="JPEG", quality=92)
+        return out.getvalue()
+    except Exception:  # missing library or a damaged file
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "We couldn't read this HEIC photo -- upload it as a JPG or PDF instead")
 
 
 def add_evidence(db: Session, user: UserAccount, v: AuthorityVerification, *, requirement_id: str, content: bytes,
@@ -626,10 +1027,14 @@ def add_evidence(db: Session, user: UserAccount, v: AuthorityVerification, *, re
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "The uploaded file is empty")
     if len(content) > settings.property_verification_document_max_size_mb * 1024 * 1024:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"File exceeds the {settings.property_verification_document_max_size_mb}MB limit")
+    content = heic_to_jpeg(content)
     sniffed = _sniff(content)
     if not sniffed:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unsupported file -- upload a PDF, JPG or PNG")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unsupported file -- upload a PDF, JPG, PNG or HEIC")
     extension, content_type = sniffed
+    from app.core import upload_scan
+
+    scan_status = upload_scan.inspect(content, content_type)  # Section 13: rejects unsafe files
     tamper = _tamper_signal(content, content_type)
     content = _strip_image_metadata(content, extension)
     if sum(1 for e in v.evidence if e.processing_status != "REPLACED") >= 15:
@@ -647,22 +1052,15 @@ def add_evidence(db: Session, user: UserAccount, v: AuthorityVerification, *, re
         AuthorityEvidence.file_hash == file_hash,
         (AuthorityVerification.property_id != v.property_id) | (AuthorityVerification.party_id != v.party_id),
     )) or 0
-    text = _pdf_text(content, content_type)
-    prop = db.get(Property, v.property_id)
-    readable = bool(text.strip())
-    my_name = _verified_legal_name(db, v.party_id)
-    principal = principal_name(v)
     evidence = AuthorityEvidence(
         verification_id=v.id, requirement_id=requirement_id, evidence_type=reqs[requirement_id]["evidence_class"],
         source_type="UPLOAD", issuer=issuer.strip()[:200], document_reference=document_reference.strip()[:200],
         issued_at=_parse_dt(issued_at), expires_at=_parse_dt(expires_at), stored_filename=stored,
         original_filename=Path(original_filename or "document").name[:255], content_type=content_type,
-        file_size=len(content), file_hash=file_hash, readable=readable,
-        property_matched=_property_in_text(text, prop) if readable else None,
-        name_matched=_name_in_text(text, my_name) if readable and my_name else None,
-        principal_matched=_name_in_text(text, principal) if readable and principal else None,
-        reused_elsewhere=reused > 0, tamper_signal=tamper, processing_status="READY",
+        file_size=len(content), file_hash=file_hash, reused_elsewhere=reused > 0, tamper_signal=tamper,
+        processing_status="READY", scan_status=scan_status,
     )
+    _analyze(db, v, evidence, content, reqs[requirement_id]["documents"])
     db.add(evidence)
     db.flush()
     if replaced is not None:
@@ -684,13 +1082,90 @@ def remove_evidence(db: Session, user: UserAccount, v: AuthorityVerification, ev
     _check_version(v, expected_version)
     _editable(v)
     evidence = db.get(AuthorityEvidence, evidence_id)
-    if evidence is None or evidence.verification_id != v.id or evidence.source_type != "UPLOAD":
+    if evidence is None or evidence.verification_id != v.id or evidence.source_type == "OWNER_CONFIRMATION":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
     if evidence.stored_filename:
         (Path(settings.authority_upload_dir) / evidence.stored_filename).unlink(missing_ok=True)
+    _event(db, "AUTHORITY_EVIDENCE_REMOVED", v, actor=user,
+           extra={"evidenceId": evidence.id, "requirementId": evidence.requirement_id, "fileHash": evidence.file_hash})
     db.delete(evidence)
     _touch(v)
     db.commit()
+
+
+# -- trusted sources: registry / connected property-management system (Section 4.1) --
+
+class SourceAdapter:
+    """A trusted digital source (land registry API, property-management
+    system). Register an implementation in SOURCE_ADAPTERS; requirements
+    then offer it to hosts in that country (Sections 5.2 O1, 6.3 A2, 7.3 S1).
+
+    lookup() returns {"found": bool, "issuer": str, "reference": str,
+    "property_matched": bool | None, "holder_name": str,
+    "principal_name": str, "expires_at": datetime | None}."""
+
+    code = ""
+    source_type = "REGISTRY"  # REGISTRY | CONNECTOR
+    countries: tuple[str, ...] = ()
+    evidence_classes: tuple[str, ...] = ()
+    label = ""
+
+    def lookup(self, prop: Property, reference: str, evidence_class: str) -> dict:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+SOURCE_ADAPTERS: dict[str, SourceAdapter] = {}
+
+
+def sources_for(country: str, evidence_class: str) -> list[SourceAdapter]:
+    return [a for a in SOURCE_ADAPTERS.values()
+            if evidence_class in a.evidence_classes and (country or "").upper() in a.countries]
+
+
+def check_source(db: Session, user: UserAccount, v: AuthorityVerification, *, requirement_id: str, source_code: str,
+                 reference: str, expected_version: int | None = None, correlation_id: str = "") -> AuthorityEvidence:
+    """Query a trusted source and record its answer as SOURCE_ASSERTION-backed
+    evidence for the requirement. The result is matched like any other
+    evidence -- a source hit for a different person or property doesn't
+    verify anything."""
+    _check_version(v, expected_version)
+    _editable(v)
+    reqs = {r["requirement_id"]: r for r in requirements(db, v)}
+    req = reqs.get(requirement_id)
+    adapter = SOURCE_ADAPTERS.get(source_code)
+    if req is None or adapter is None or adapter not in sources_for(v.country_code, req["evidence_class"]):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That source isn't available for this requirement")
+    if not reference.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Enter the record reference")
+    prop = db.get(Property, v.property_id)
+    try:
+        result = adapter.lookup(prop, reference.strip()[:200], req["evidence_class"])
+    except Exception:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "That source isn't responding right now -- try again later or upload a document instead")
+    if not result.get("found"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No record was found for that reference")
+    my_name = _verified_legal_name(db, v.party_id)
+    holder = result.get("holder_name") or ""
+    principal = principal_name(v)
+    evidence = AuthorityEvidence(
+        verification_id=v.id, requirement_id=requirement_id, evidence_type=req["evidence_class"],
+        source_type=adapter.source_type, issuer=(result.get("issuer") or adapter.label)[:200],
+        document_reference=(result.get("reference") or reference)[:200], expires_at=_utc(result.get("expires_at")),
+        readable=True, property_matched=result.get("property_matched"),
+        name_matched=_name_in_text(holder, my_name) if holder and my_name else None,
+        principal_matched=_name_in_text(result.get("principal_name") or "", principal) if principal else None,
+        processing_status="READY", scan_status="CLEAN",
+    )
+    db.add(evidence)
+    db.flush()
+    _event(db, "AUTHORITY_EVIDENCE_UPLOADED", v, actor=user, correlation_id=correlation_id,
+           extra={"evidenceId": evidence.id, "requirementId": requirement_id, "sourceType": adapter.source_type,
+                  "source": adapter.code})
+    _touch(v)
+    db.commit()
+    db.refresh(evidence)
+    return evidence
 
 
 # -- owner / landlord confirmation (Sections 6.2 step 7, 7.3, 13) ------------------
@@ -842,6 +1317,17 @@ def respond_to_confirmation(db: Session, token: str, *, code: str, decision: str
 
 # -- submit & automated decision (Sections 4.3, 11.1) ------------------------------
 
+HOST_MATCH_KEYS = ("property_match", "representative_match", "principal_match", "scope_match", "validity_result")
+
+
+def host_match_results(db: Session, v: AuthorityVerification) -> dict:
+    """The O2 / A3 / S3 review lines the host sees (match / no match /
+    not checked yet). Only the five Section 4.3 outcomes -- never integrity,
+    reuse or tamper signals (Section 11.1: no internal risk signals)."""
+    model = _match_model(db, v)
+    return {key: model.get(key) for key in HOST_MATCH_KEYS}
+
+
 def _match_model(db: Session, v: AuthorityVerification) -> dict:
     live = [e for e in v.evidence if e.processing_status == "READY"]
     route = route_for(v)
@@ -869,7 +1355,77 @@ def _match_model(db: Session, v: AuthorityVerification) -> dict:
     return {"property_match": property_match, "representative_match": representative, "principal_match": principal,
             "scope_match": scope, "validity_result": validity and not evidence_expired,
             "source_integrity": integrity, "owner_confirmation": bool(confirmed),
-            "unreadable_documents": any(not e.readable for e in live if e.source_type == "UPLOAD")}
+            # OCR ran (or the PDF had text) but the read was too poor to match on.
+            "unclear_documents": any(not e.readable and e.text_source != "OCR_UNAVAILABLE"
+                                     for e in live if e.source_type == "UPLOAD"),
+            # This server has no OCR engine -- infrastructure, not the host's fault.
+            "ocr_unavailable": any(e.text_source == "OCR_UNAVAILABLE" for e in live if e.source_type == "UPLOAD")}
+
+
+def _wrong_document_types(v: AuthorityVerification, reqs: list[dict]) -> list[str]:
+    """Requirements whose readable uploads are none of the documents the
+    country accepts for them (no pack keyword in the text), and that nothing
+    else (a confirmation or trusted source) satisfies."""
+    wrong = []
+    for req in reqs:
+        items = [e for e in v.evidence if e.requirement_id == req["requirement_id"] and e.processing_status == "READY"]
+        uploads = [e for e in items if e.source_type == "UPLOAD" and e.readable]
+        if not uploads or any(e.source_type != "UPLOAD" for e in items) or req.get("confirmed"):
+            continue
+        if not any(e.type_matched is not False for e in uploads):
+            wrong.append(req["requirement_id"])
+    return wrong
+
+
+def _analyze(db: Session, v: AuthorityVerification, e: AuthorityEvidence, content: bytes, documents: list[dict]) -> None:
+    """Read the document (text layer, else OCR) and record what it matches --
+    only the outcomes are kept, never the extracted text (Section 13)."""
+    text, source, confidence = document_text(content, e.content_type)
+    readable = _readable(text, source, confidence)
+    tolerant = source == "OCR"
+    my_name = _verified_legal_name(db, v.party_id)
+    principal = principal_name(v)
+    e.text_source, e.ocr_confidence, e.readable = source, confidence, readable
+    # Which listed document this is (Section 4), identified from its own text.
+    e.detected_document = (detect_document(text, documents, tolerant) or "")[:120] if readable else ""
+    e.type_matched = bool(e.detected_document) if readable and documents else None
+    e.not_official = readable and _not_official(text)
+    e.property_matched = _property_in_text(text, db.get(Property, v.property_id), tolerant) if readable else None
+    e.name_matched = _name_in_text(text, my_name, tolerant) if readable and my_name else None
+    e.principal_matched = _name_in_text(text, principal, tolerant) if readable and principal else None
+
+
+def _reanalyze_stale_uploads(db: Session, v: AuthorityVerification, reqs: list[dict]) -> None:
+    """Uploads read before OCR / document-type checks existed (text_source
+    blank), while this server had no OCR engine, or whose name didn't match
+    are read again -- so an old result doesn't stick after the matching
+    improves (e.g. joined names like "ANILKUMAR")."""
+    documents = {r["requirement_id"]: r["documents"] for r in reqs}
+    for e in v.evidence:
+        stale = e.text_source in ("", "OCR_UNAVAILABLE", "NONE") or (
+            e.readable and (e.name_matched is False or e.property_matched is False))
+        if e.source_type != "UPLOAD" or e.processing_status != "READY" or not stale:
+            continue
+        content = read_evidence(e)
+        if content is not None:
+            _analyze(db, v, e, content, documents.get(e.requirement_id, []))
+
+
+def _refresh_principal_matches(db: Session, v: AuthorityVerification) -> None:
+    """The principal's name is often entered after the upload: match the
+    stored documents against it now (re-read, never kept as text)."""
+    principal = principal_name(v)
+    if not principal:
+        return
+    for e in v.evidence:
+        if (e.source_type != "UPLOAD" or e.processing_status != "READY" or not e.readable
+                or e.principal_matched is not None or e.evidence_type not in ("MANDATE", "SUBLET_PERMISSION")):
+            continue
+        content = read_evidence(e)
+        if content is None:
+            continue
+        text, source, _confidence = document_text(content, e.content_type)
+        e.principal_matched = _name_in_text(text, principal, source == "OCR")
 
 
 def _conflicts(db: Session, v: AuthorityVerification) -> bool:
@@ -884,6 +1440,8 @@ def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
     complete, matching, current, uncontested chain; it escalates anything it
     can't safely decide and asks for evidence where a fix is clear."""
     pack = get_pack(db, v.country_code)
+    _reanalyze_stale_uploads(db, v, requirements(db, v))
+    _refresh_principal_matches(db, v)
     m = _match_model(db, v)
     v.match_results = m
     route = route_for(v)
@@ -902,22 +1460,39 @@ def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
         action.append("PROPERTY_MISMATCH")
     if m["representative_match"] is False:
         action.append("NAME_MISMATCH")
-    if m["unreadable_documents"] or m["property_match"] is None or m["representative_match"] is None:
-        review.append("EVIDENCE_UNREADABLE")
+    # Sections 4 / 11.1: the document is read (text layer or OCR) and must be
+    # an accepted document for this country that names the property and the
+    # verified person. A poor read or the wrong document is the host's to fix
+    # -- it never waits on a reviewer.
+    if m["unclear_documents"]:
+        action.append("EVIDENCE_UNCLEAR")
+    if _wrong_document_types(v, reqs):
+        action.append("DOCUMENT_TYPE_UNRECOGNIZED")
+    if any(e.not_official for e in v.evidence if e.processing_status == "READY" and e.source_type == "UPLOAD"):
+        action.append("DOCUMENT_NOT_OFFICIAL")
+    if m["ocr_unavailable"]:
+        review.append("EVIDENCE_UNREADABLE")  # no OCR engine on this server
+    elif not m["unclear_documents"] and (m["property_match"] is None or m["representative_match"] is None):
+        review.append("EVIDENCE_UNREADABLE")  # e.g. no verified legal name to match against
     if not m["source_integrity"]:
         review.append("EVIDENCE_REUSED" if any(e.reused_elsewhere for e in v.evidence) else "TAMPER_SIGNAL")
+    if any(e.scan_status == "ERROR" for e in v.evidence if e.processing_status == "READY"):
+        review.append("SCAN_INCOMPLETE")
     if _conflicts(db, v):
         review.append("CONFLICTING_AUTHORITY")
     if v.acting_capacity == "ORGANIZATION" and (v.organization is None or v.organization.status != "VERIFIED"):
         review.append("ORGANIZATION_UNVERIFIED")
     if v.relationship_type == "REPRESENTATIVE":
         review.append("ENTITY_CHAIN")
-    if route == "AGENT" and not m["owner_confirmation"] and m["principal_match"] is not True:
-        review.append("DOCUMENT_ONLY_MANDATE")
-    if route == "SUBLET" and pack.sublet_consent_required and not m["owner_confirmation"]:
-        # A tenant can't self-evidence permission: a consent document or lease
-        # clause is checked by a person unless the landlord confirmed it.
-        review.append("PRINCIPAL_UNCONFIRMED")
+    # Agent mandate / sublet permission: without the owner's or landlord's own
+    # confirmation, the document itself must name the principal the host
+    # identified (a tenant can't self-evidence permission -- Section 13.1).
+    needs_principal = route == "AGENT" or (route == "SUBLET" and pack.sublet_consent_required)
+    if needs_principal and not m["owner_confirmation"] and not m["unclear_documents"]:
+        if not principal_name(v):
+            action.append("PRINCIPAL_NAME_NEEDED")
+        elif m["principal_match"] is not True:
+            action.append("PRINCIPAL_UNCONFIRMED")
     if not _property_verified(db, v.property_id):
         review.append("PROPERTY_NOT_VERIFIED")
     if v.is_reconsideration:
@@ -926,7 +1501,10 @@ def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
         return "ACTION_REQUIRED", "AV-X", list(dict.fromkeys(action + review))
     if review:
         return "MANUAL_REVIEW", "AV-0", list(dict.fromkeys(review))
-    return "VERIFIED", "AV-1", []
+    # Section 2.3: two independent sources -- a matching document plus an
+    # authenticated principal confirmation -- is enhanced assurance.
+    has_document = any(e.source_type == "UPLOAD" and e.processing_status == "READY" for e in v.evidence)
+    return "VERIFIED", "AV-2" if has_document and m["owner_confirmation"] else "AV-1", []
 
 
 def submit(db: Session, user: UserAccount, v: AuthorityVerification, *, attested: bool,
@@ -956,7 +1534,8 @@ def submit(db: Session, user: UserAccount, v: AuthorityVerification, *, attested
         _set_state(db, v, "MANUAL_REVIEW")
         _event(db, "AUTHORITY_MANUAL_REVIEW_STARTED", v, actor=user, reason_codes=codes, previous_state="SUBMITTED",
                new_state="MANUAL_REVIEW", correlation_id=correlation_id)
-        _notify(db, v, "Authority verification in review", REASONS.get(codes[0], ("We're reviewing your authority.",))[0])
+        _notify(db, v, "Authority verification in review", REASONS.get(codes[0], ("We're reviewing your authority.",))[0],
+                email_status="In review", email_variant="submitted")
         _notify_reviewers(db, v)
     else:
         _set_state(db, v, "ACTION_REQUIRED")
@@ -964,7 +1543,8 @@ def submit(db: Session, user: UserAccount, v: AuthorityVerification, *, attested
         v.decided_at = now
         _event(db, "AUTHORITY_ACTION_REQUIRED", v, actor=user, reason_codes=codes, previous_state="SUBMITTED",
                new_state="ACTION_REQUIRED", correlation_id=correlation_id)
-        _notify(db, v, "Authority action required", describe(codes)["message"])
+        _notify(db, v, "Authority action required", describe(codes)["message"], email_status="Action required",
+                email_variant="action-required")
     _touch(v)
     db.commit()
     db.refresh(v)
@@ -996,15 +1576,33 @@ def _approve(db: Session, v: AuthorityVerification, *, assurance: str, actor, co
         _touch(old)
         _event(db, "AUTHORITY_SUPERSEDED", old, previous_state=prev, new_state="SUPERSEDED", correlation_id=correlation_id,
                extra={"supersededBy": v.id})
-    _notify(db, v, "Listing authority verified", "Your authority to list this property has been verified.")
+    _notify(db, v, "Listing authority verified", "Your authority to list this property has been verified.",
+            email_status="Verified", email_variant="approved")
 
 
-def _notify(db: Session, v: AuthorityVerification, title: str, message: str) -> None:
+def _notify(db: Session, v: AuthorityVerification, title: str, message: str, *, email_status: str = "",
+            email_variant: str = "") -> None:
+    """In-app notice, plus the ZR-EML-VER-002 email for the Section 15.3
+    states (submitted, action required, approved, expiring, expired, revoked)."""
     from app.crud import notification as notif_crud
 
     notif_crud.notify_user_by_party(db, v.party_id, title=title, message=message,
                                     notification_type="authority.status", related_entity_type=RESOURCE,
                                     related_entity_id=str(v.id))
+    if not email_status:
+        return
+    from app.core.mailer import send_authority_status_email
+    from app.crud.user import get_user_by_party_id
+
+    user = get_user_by_party_id(db, v.party_id)
+    if user is None:
+        return
+    prop = db.get(Property, v.property_id)
+    expires = _utc(v.expires_at)
+    send_authority_status_email(
+        user.email, user.full_name, status_display=email_status, variant=email_variant, message=message,
+        property_label=f"{prop.address or prop.city} · Property #{prop.id}", verification_id=v.id,
+        valid_until=f"{expires:%d %b %Y}" if expires and v.state == "VERIFIED" else "")
 
 
 def _notify_reviewers(db: Session, v: AuthorityVerification) -> None:
@@ -1019,12 +1617,58 @@ def _notify_reviewers(db: Session, v: AuthorityVerification) -> None:
 
 # -- review / revoke / renew / reconsider (Sections 9.2, 11) ------------------------
 
+def assign(db: Session, admin: AdminUser, v: AuthorityVerification, *, release: bool = False,
+           correlation_id: str = "") -> AuthorityVerification:
+    """Section 13: least-privilege reviewer access. A reviewer takes (or
+    hands back) a case; taking one held by someone else reassigns it, which
+    is audited like every other assignment."""
+    if admin.role != "super_admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
+    if release:
+        if v.assigned_admin_id not in (None, admin.id):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Only the assigned reviewer can release this case")
+        v.assigned_admin_id, v.assigned_at = None, None
+        _event(db, "AUTHORITY_REVIEW_RELEASED", v, actor=admin, correlation_id=correlation_id)
+    else:
+        if v.state != "MANUAL_REVIEW":
+            raise HTTPException(status.HTTP_409_CONFLICT, "Only a case in review can be assigned")
+        previous = v.assigned_admin_id
+        v.assigned_admin_id, v.assigned_at = admin.id, _now()
+        _event(db, "AUTHORITY_REVIEW_ASSIGNED", v, actor=admin, correlation_id=correlation_id,
+               extra={"reassignedFrom": previous} if previous and previous != admin.id else None)
+    _touch(v)
+    db.commit()
+    db.refresh(v)
+    return v
+
+
+def require_assignment(db: Session, admin: AdminUser, v: AuthorityVerification, *, correlation_id: str = "") -> None:
+    """Opening evidence or deciding needs the case. An unassigned case in
+    review is taken by the reviewer who opens it."""
+    if v.assigned_admin_id == admin.id:
+        return
+    if v.assigned_admin_id is not None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This case is assigned to another reviewer -- reassign it to yourself first")
+    if v.state == "MANUAL_REVIEW":
+        assign(db, admin, v, correlation_id=correlation_id)
+        return
+    raise HTTPException(status.HTTP_403_FORBIDDEN, "Evidence is only available for a case assigned to you")
+
+
+# Section 11.2: "two-person review may be required by policy / risk tier".
+TWO_PERSON_CODES = ("CONFLICTING_AUTHORITY", "ENTITY_CHAIN", "EVIDENCE_REUSED", "TAMPER_SIGNAL")
+
+
 def review(db: Session, admin: AdminUser, v: AuthorityVerification, *, decision: str, reason_code: str,
            note: str = "", expected_version: int | None = None, correlation_id: str = "") -> AuthorityVerification:
     if admin.role != "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
     _check_version(v, expected_version)
     decision = decision.upper()
+    if decision == "APPROVE" and v.first_approver_admin_id is not None and v.first_approver_admin_id == admin.id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "A second, different reviewer must approve this authority")
+    if v.state == "MANUAL_REVIEW":
+        require_assignment(db, admin, v, correlation_id=correlation_id)
     if decision not in REVIEW_DECISIONS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"decision must be one of {REVIEW_DECISIONS}")
     if reason_code not in REVIEW_REASONS[decision]:
@@ -1036,10 +1680,12 @@ def review(db: Session, admin: AdminUser, v: AuthorityVerification, *, decision:
     v.review_reason_codes = list(dict.fromkeys([*(v.review_reason_codes or []), reason_code]))
     v.last_reviewed_at = _now()
     if decision == "APPROVE":
-        # Two-person review for conflicting claims and entity chains (Section 11.2).
-        needs_two = any(c in (v.reason_codes or []) for c in ("CONFLICTING_AUTHORITY", "ENTITY_CHAIN"))
+        # Two-person review for conflicting claims, entity chains and
+        # integrity signals (Section 11.2).
+        needs_two = any(c in (v.reason_codes or []) for c in TWO_PERSON_CODES)
         if needs_two and v.first_approver_admin_id is None:
             v.first_approver_admin_id = admin.id
+            v.assigned_admin_id, v.assigned_at = None, None  # free for the second reviewer
             _event(db, "AUTHORITY_REVIEW_FIRST_APPROVAL", v, actor=admin, reason_codes=[reason_code],
                    correlation_id=correlation_id)
             _touch(v)
@@ -1055,7 +1701,8 @@ def review(db: Session, admin: AdminUser, v: AuthorityVerification, *, decision:
         v.reason_codes = [reason_code]
         _event(db, "AUTHORITY_REJECTED", v, actor=admin, reason_codes=[reason_code], previous_state="MANUAL_REVIEW",
                new_state="REJECTED", correlation_id=correlation_id)
-        _notify(db, v, "Could not verify authority", describe([reason_code])["message"])
+        _notify(db, v, "Could not verify authority", describe([reason_code])["message"],
+                email_status="Could not verify", email_variant="rejected")
     else:
         _set_state(db, v, "ACTION_REQUIRED")
         v.assurance_level = "AV-X"
@@ -1063,7 +1710,8 @@ def review(db: Session, admin: AdminUser, v: AuthorityVerification, *, decision:
         v.reason_codes = [reason_code]
         _event(db, "AUTHORITY_ACTION_REQUIRED", v, actor=admin, reason_codes=[reason_code], previous_state="MANUAL_REVIEW",
                new_state="ACTION_REQUIRED", correlation_id=correlation_id)
-        _notify(db, v, "Authority action required", describe([reason_code])["message"])
+        _notify(db, v, "Authority action required", describe([reason_code])["message"],
+                email_status="Action required", email_variant="action-required")
     _touch(v)
     db.commit()
     db.refresh(v)
@@ -1099,7 +1747,7 @@ def _revoke(db: Session, v: AuthorityVerification, *, reason_code: str, actor, c
     db.flush()
     suspended = _listing_control(db, v, "Listing authority withdrawn")
     _notify(db, v, "Authority withdrawn", describe([reason_code])["message"] +
-            (f" {suspended} listing(s) paused." if suspended else ""))
+            (f" {suspended} listing(s) paused." if suspended else ""), email_status="Withdrawn", email_variant="revoked")
 
 
 def revoke(db: Session, actor: UserAccount | AdminUser, v: AuthorityVerification, *, reason_code: str,
@@ -1134,6 +1782,10 @@ def renew(db: Session, user: UserAccount, v: AuthorityVerification, *, reconside
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a rejected verification can be reconsidered")
     if not reconsider and state not in ("VERIFIED", "EXPIRING_SOON", "EXPIRED", "REVOKED"):
         raise HTTPException(status.HTTP_409_CONFLICT, "This authority can't be renewed now")
+    # Section 3.2: identity first, for a renewal too (e.g. after an
+    # account-recovery re-verification withdrew this authority).
+    if not get_pack(db, v.country_code).parallel_identity_intake and not _identity_verified(db, v.party_id):
+        raise HTTPException(status.HTTP_409_CONFLICT, REASONS["IDENTITY_REQUIRED"][0])
     new = AuthorityVerification(
         property_id=v.property_id, party_id=v.party_id, account_user_id=user.id, organization_id=v.organization_id,
         relationship_type=v.relationship_type, acting_capacity=v.acting_capacity, room_scope_ids=list(v.room_scope_ids or []),
@@ -1153,27 +1805,63 @@ def renew(db: Session, user: UserAccount, v: AuthorityVerification, *, reconside
 
 # -- jobs --------------------------------------------------------------------------
 
-def reopen_for_address_change(db: Session, property_id: int, *, correlation_id: str = "") -> int:
-    """ZR-PROPERTY-VERIFY-001 Section 13.3: a material address change reopens
-    authority -- verified authority for the old address doesn't silently
-    transfer. Verified records are revoked (renewable, history kept); open
-    ones go back to the host to re-check."""
+def _reopen(db: Session, query, reason_code: str, *, actor=None, correlation_id: str = "") -> int:
+    """Verified records are revoked (renewable, history kept); submitted /
+    in-review ones go back to the host to re-check."""
     count = 0
-    for v in db.scalars(select(AuthorityVerification).where(
-            AuthorityVerification.property_id == property_id, AuthorityVerification.state.in_(ACTIVE_STATES))):
+    for v in db.scalars(query.where(AuthorityVerification.state.in_(ACTIVE_STATES))):
         if v.state == "VERIFIED":
-            _revoke(db, v, reason_code="PROPERTY_ADDRESS_CHANGED", actor=None, correlation_id=correlation_id)
+            _revoke(db, v, reason_code=reason_code, actor=actor, correlation_id=correlation_id)
         elif v.state in ("SUBMITTED", "MANUAL_REVIEW"):
             previous = v.state
             v.state = "ACTION_REQUIRED"
-            v.reason_codes = ["PROPERTY_ADDRESS_CHANGED"]
-            _event(db, "AUTHORITY_ACTION_REQUIRED", v, reason_codes=["PROPERTY_ADDRESS_CHANGED"],
+            v.reason_codes = [reason_code]
+            _event(db, "AUTHORITY_ACTION_REQUIRED", v, reason_codes=[reason_code], actor=actor,
                    previous_state=previous, new_state="ACTION_REQUIRED", correlation_id=correlation_id)
+            _notify(db, v, "Authority action required", describe([reason_code])["message"],
+                    email_status="Action required", email_variant="action-required")
         else:
             continue
         _touch(v)
         count += 1
     return count
+
+
+def reopen_for_address_change(db: Session, property_id: int, *, correlation_id: str = "") -> int:
+    """ZR-PROPERTY-VERIFY-001 Section 13.3: a material address change reopens
+    authority -- verified authority for the old address doesn't silently
+    transfer."""
+    return _reopen(db, select(AuthorityVerification).where(AuthorityVerification.property_id == property_id),
+                   "PROPERTY_ADDRESS_CHANGED", correlation_id=correlation_id)
+
+
+def reopen_for_ownership_change(db: Session, admin: AdminUser, property_id: int, *, correlation_id: str = "") -> int:
+    """Section 9.2: a property transfer / ownership-change signal invalidates
+    Owner and Agent authority before nominal expiry. A tenant's sublet
+    authority rests on their tenancy, which a sale doesn't end by itself, so
+    it is left for Trust & Safety to review separately."""
+    if admin.role != "super_admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
+    if db.get(Property, property_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Property not found")
+    owner_or_agent = [r for r, route in ROUTE_FOR_RELATIONSHIP.items() if route in ("OWNER", "AGENT")]
+    count = _reopen(db, select(AuthorityVerification).where(
+        AuthorityVerification.property_id == property_id,
+        AuthorityVerification.relationship_type.in_(owner_or_agent)),
+        "OWNERSHIP_CHANGED", actor=admin, correlation_id=correlation_id)
+    db.commit()
+    return count
+
+
+def reopen_for_identity_event(db: Session, party_id: int, identity_reason: str, *, correlation_id: str = "") -> int:
+    """Section 13.1 (account takeover): account recovery, a legal-name change
+    or invalidated identity evidence breaks the representative / owner match
+    every authority assertion of this person rests on, so it must be
+    re-established. Periodic identity renewal alone does not."""
+    if identity_reason == "PERIODIC_RENEWAL":
+        return 0
+    return _reopen(db, select(AuthorityVerification).where(AuthorityVerification.party_id == party_id),
+                   "IDENTITY_REVERIFICATION", correlation_id=correlation_id)
 
 
 def sweep_expiry(db: Session) -> dict:
@@ -1192,12 +1880,15 @@ def sweep_expiry(db: Session) -> dict:
                    new_state="EXPIRED")
             db.flush()
             _listing_control(db, v, "Listing authority expired")
-            _notify(db, v, "Authority expired", REASONS["AUTHORITY_EXPIRED"][0])
+            _notify(db, v, "Authority expired", REASONS["AUTHORITY_EXPIRED"][0], email_status="Expired",
+                    email_variant="expired")
             expired += 1
         elif expires - now <= timedelta(days=pack.expiring_soon_days) and v.expiring_notified_at is None:
             v.expiring_notified_at = now
             _event(db, "AUTHORITY_EXPIRING", v, extra={"expiresAt": expires.isoformat()})
-            _notify(db, v, "Authority expiring soon", f"Your authority for this property expires on {expires:%d %b %Y}. Renew it to keep listing.")
+            _notify(db, v, "Authority expiring soon",
+                    f"Your authority for this property expires on {expires:%d %b %Y}. Renew it to keep listing.",
+                    email_status="Expiring soon", email_variant="expiring")
             expiring += 1
     db.commit()
     return {"expiring": expiring, "expired": expired}
@@ -1262,7 +1953,7 @@ def metrics(db: Session, *, days: int = 30) -> dict:
     return {
         "period_days": days, "started": len(rows), "submitted": len(submitted),
         "verified": sum(1 for v in rows if v.verified_at),
-        "auto_approval_rate": rate(sum(1 for v in submitted if v.assurance_level == "AV-1"), len(submitted)),
+        "auto_approval_rate": rate(sum(1 for v in submitted if v.verified_at and not v.reviewer_admin_id), len(submitted)),
         "manual_review_rate": rate(sum(1 for v in submitted if v.reviewer_admin_id or v.state == "MANUAL_REVIEW"), len(submitted)),
         "pending_review": db.scalar(select(func.count(AuthorityVerification.id)).where(
             AuthorityVerification.state == "MANUAL_REVIEW")) or 0,

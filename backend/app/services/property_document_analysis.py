@@ -166,6 +166,45 @@ def _phrase_in(text: str, phrase: str, tolerant: bool) -> bool:
     return hits / len(tokens) >= 0.75
 
 
+# Words that describe where a property is relative to something else. Hosts
+# write them in the address ("2-599, near Muthyalamma temple"); official
+# documents almost never carry them, so they're not required to match.
+LANDMARK_WORDS = {
+    "near", "beside", "besides", "behind", "opp", "opposite", "next", "adjacent", "adj", "front", "back", "side",
+    "temple", "mandir", "church", "mosque", "masjid", "gurudwara", "school", "college", "hospital", "bank", "office",
+    "apartment", "apartments", "appartment", "complex", "tower", "towers", "building", "block", "lane", "road",
+    "street", "cross", "main", "colony", "nagar", "layout", "village", "post", "landmark", "the", "and", "of",
+}
+
+
+def identity_matches(text: str, address: dict, tolerant: bool = False) -> bool:
+    """The document identifies the property when it carries what makes the
+    address unique -- not every word the host typed:
+
+    - the house / door number (2-599 = 2599 = "2 - 599"), when one was given;
+    - at least one place name -- street, colony, village or city -- allowing
+      spelling variants ("Madupalli" / "Madupally") on OCR'd text.
+    Landmark words ("near ... temple", "beside ... apartment") are ignored.
+    The postal code is checked separately by the caller."""
+    from app.services.location import CanonicalAddress, _number_tokens, house_numbers
+
+    entered = CanonicalAddress.from_dict(address)
+    numbers = house_numbers(entered)
+    if numbers and not numbers & _number_tokens(text):
+        return False
+    words = set(_norm(text).split())
+    names = []
+    for field in ("address_line_1", "address_line_2", "locality"):
+        for token in _norm(address.get(field) or "").split():
+            lowered = token.lower()
+            if len(token) >= 4 and token.isalpha() and lowered not in LANDMARK_WORDS:
+                names.append(token)
+    if not names:
+        return bool(numbers)
+    hits = [t for t in dict.fromkeys(names) if _token_present(t, words, True if len(t) >= 6 else tolerant)]
+    return len(hits) >= (1 if numbers else min(2, len(set(names))))
+
+
 def analyze(content: bytes, content_type: str, *, evidence_type: str, canonical_address: dict, unit: str = "",
             owner_name: str = "") -> DocumentAnalysis:
     result = DocumentAnalysis()
@@ -197,7 +236,8 @@ def analyze(content: bytes, content_type: str, *, evidence_type: str, canonical_
     postal = re.sub(r"\s", "", canonical_address.get("postal_code") or "").upper()
     compact = re.sub(r"\s", "", body)
     result.postal_matched = (postal in compact) if postal else None
-    line_ok = _phrase_in(body, line1, tolerant) if line1 else False
+    line_ok = (_phrase_in(body, line1, tolerant) if line1 else False) or \
+        identity_matches(text, canonical_address, tolerant)
     result.address_matched = bool(line_ok and (result.postal_matched is not False))
     if unit:
         u = _norm(unit)

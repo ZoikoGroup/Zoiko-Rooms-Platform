@@ -27,6 +27,21 @@ import { Field, inputClass } from "@/components/user/ui";
 import { useUserSession } from "@/components/user/UserSessionContext";
 
 const MAX_LISTING_IMAGES = 10;
+
+/** What happened when the host submitted: approval is automatic once every
+ *  verification is complete, so the listing is live, waiting only for the
+ *  Listing Fee, or (when something is still missing) saved as a draft. */
+export type SubmitOutcome = { submitted: boolean; state: string; note?: string };
+
+export function submitOutcomeMessage(outcome: SubmitOutcome): { text: string; tone: "success" | "error" } {
+  if (outcome.state === "PUBLISHED") return { text: "Every check passed -- your listing is live.", tone: "success" };
+  if (outcome.state === "APPROVED") {
+    return { text: "Every check passed -- pay the Listing Fee and your listing goes live straight away.", tone: "success" };
+  }
+  if (outcome.state === "REVIEW") return { text: "Submitted -- this market reviews listings before they go live.", tone: "success" };
+  if (outcome.note) return { text: `Saved as a draft. ${outcome.note}`, tone: "error" };
+  return { text: "Draft listing created -- submit it from My Listings when you're ready.", tone: "success" };
+}
 const SUPPORTED_CURRENCIES = ["INR", "GBP", "USD", "EUR", "CAD", "AUD", "AED", "SGD", "NZD"];
 const STEPS = ["Property", "Room", "Listing", "Photos", "Review"] as const;
 
@@ -81,7 +96,8 @@ function emptyDetails(contact: { name: string; phone: string; email: string }): 
  *  management (and listing editing) are untouched -- this is an additional,
  *  friendlier entry point on top of the same backend endpoints, not a
  *  replacement. Review offers "Save as Draft" (create only, same as before) or
- *  "Submit for Review" (create, then immediately ask an admin to review it). */
+ *  "Submit" (create, then submit -- approved automatically when identity,
+ *  property and authority verification are complete). */
 export function ListARoomWizard({
   open,
   onClose,
@@ -90,9 +106,8 @@ export function ListARoomWizard({
 }: {
   open: boolean;
   onClose: () => void;
-  /** submitted is true when the host chose "Submit for Review" on the Review
-   *  step, false when they chose "Save as Draft". */
-  onCreated: (submitted: boolean) => void;
+  /** The listing's state after "Submit" (or DRAFT for "Save as Draft"). */
+  onCreated: (outcome: SubmitOutcome) => void;
   contact: { name: string; phone: string; email: string };
 }) {
   const [step, setStep] = useState(0);
@@ -270,10 +285,17 @@ export function ListARoomWizard({
         contactEmail: details.contactEmail.trim(),
       };
       const created = await createHostedListing(payload);
+      let outcome: SubmitOutcome = { submitted: submitForReview, state: "DRAFT" };
       if (submitForReview) {
-        await submitHostedListingForReview(created.id);
+        // The listing exists now; a refused submit (verification still
+        // missing) leaves it as a draft rather than failing the whole wizard.
+        try {
+          outcome = { submitted: true, state: (await submitHostedListingForReview(created.id)).state };
+        } catch (err) {
+          outcome = { submitted: true, state: "DRAFT", note: errorMessage(err, "It couldn't be submitted yet.") };
+        }
       }
-      onCreated(submitForReview);
+      onCreated(outcome);
     } catch (err) {
       setError(errorMessage(err, "Could not create the listing."));
     } finally {
@@ -616,14 +638,15 @@ export function ListARoomWizard({
             {step === 4 && (
               <div className="space-y-4">
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Review your listing before saving. You can save it as a draft and come back later, or submit it
-                  for a Zoiko admin to review and publish.
+                  Review your listing before saving. You can save it as a draft and come back later, or submit it.
+                  Once your identity, property and authority are verified it&apos;s approved automatically and goes
+                  live as soon as the Listing Fee is paid.
                 </p>
 
                 {identityVerified ? (
                   <div className="flex items-start gap-2 rounded-xl bg-emerald-50 px-4 py-3 text-xs text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20">
                     <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span>Your identity is verified — this listing can be published once a Zoiko admin approves it.</span>
+                    <span>Your identity is verified — once the property and your authority to let it are verified, this listing is approved automatically.</span>
                   </div>
                 ) : (
                   <div className="flex flex-col gap-2 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-700 ring-1 ring-amber-200 sm:flex-row sm:items-center sm:justify-between dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20">
@@ -713,7 +736,7 @@ export function ListARoomWizard({
                 <FileEdit className="h-4 w-4" /> Save as Draft
               </Button>
               <Button type="button" onClick={() => handleFinish(true)} loading={submitting}>
-                <Send className="h-4 w-4" /> Submit for Review
+                <Send className="h-4 w-4" /> Submit
               </Button>
             </div>
           )}

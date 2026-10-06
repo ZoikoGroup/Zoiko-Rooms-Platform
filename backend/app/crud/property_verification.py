@@ -54,7 +54,9 @@ def get_property_verification_or_404(db: Session, verification_id: int) -> Prope
 def get_valid_property_verification_for_room(db: Session, room_id: int):
     """The publish / status gate. ZR-PROPERTY-VERIFY-001: a property-level
     verification (services/property_location_service.py) covers every room
-    of the property; older per-room records still count until they lapse."""
+    of the property. An older per-room record counts only when a reviewer
+    verified it (P0 #2: a map hit alone never makes a property verified) and
+    until it lapses."""
     from app.services.property_location_service import valid_for_property
 
     room = db.get(Room, room_id)
@@ -69,6 +71,7 @@ def get_valid_property_verification_for_room(db: Session, room_id: int):
         .where(
             PropertyVerification.room_id == room_id,
             PropertyVerification.status == "verified",
+            PropertyVerification.verifier_admin_id.is_not(None),
             (PropertyVerification.expires_at.is_(None)) | (PropertyVerification.expires_at > now),
         )
         .order_by(PropertyVerification.id.desc())

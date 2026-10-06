@@ -577,6 +577,8 @@ def resume_listing(db: Session, listing: Listing) -> Listing:
     named command for the same transition, kept as a thinner, more specific
     action."""
     _guard_listing_transition(listing, "resumed", ("PAUSED",))
+    # Authority may have expired or been withdrawn while paused (ZR-AUTHORITY-002 Section 2.4).
+    _require_publication_gates(db, listing)
     listing.state = "PUBLISHED"
     listing.paused_at = None
     db.commit()
@@ -701,6 +703,29 @@ def check_publish_eligibility(db: Session, listing: Listing) -> list[str]:
     return reasons
 
 
+def publication_gate_failures(db: Session, listing: Listing) -> list[str]:
+    """ZR-AUTHORITY-002 Section 2.4 / P0 #10: identity, property and listing
+    authority are independent server-authoritative gates, re-evaluated on
+    every publish / republish / resume -- a stale badge, cached browser state
+    or an earlier approval never confers publication rights."""
+    from app.crud.authority import get_valid_authority_for_room
+
+    failures: list[str] = []
+    if not get_verified_identity_for_party(db, listing.room.property.owner_party_id):
+        failures.append("Provider identity verification is not approved")
+    if not get_valid_property_verification_for_room(db, listing.room_id):
+        failures.append("Property verification is not approved")
+    if not get_valid_authority_for_room(db, listing.room_id):
+        failures.append("Listing authority is not verified, or has expired or been withdrawn")
+    return failures
+
+
+def _require_publication_gates(db: Session, listing: Listing) -> None:
+    failures = publication_gate_failures(db, listing)
+    if failures:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This listing can't be published yet: " + "; ".join(failures))
+
+
 def _require_listing_fee_paid_if_applicable(db: Session, listing: Listing) -> None:
     """ZR-PAY-002 Section 8.3/A7: 'Listing fee' is one of the checkmarks
     required for 'Eligible for publication' -- once a jurisdiction has a
@@ -739,13 +764,26 @@ def _require_listing_fee_paid_if_applicable(db: Session, listing: Listing) -> No
 
 
 def submit_listing_for_review(db: Session, listing: Listing) -> Listing:
-    """USER-facing: DRAFT or REJECTED -> REVIEW. Publishing itself is always an
-    explicit admin/super-admin decision from here on -- a USER can only ask for
-    review, never publish directly."""
+    """USER-facing submit. By default publication is automatic: a host who has
+    completed identity, property and authority verification (and whose
+    listing meets the market's rules) gets a system approval here, and the
+    listing goes live now -- or as soon as the Listing Fee is paid. Anything
+    missing is returned to the host to finish; no admin approval step.
+    A market can opt back into admin review (publication.requires_approval)."""
     if listing.room_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Listing must be linked to a room before it can be submitted")
     if listing.state not in ("DRAFT", "REJECTED", "CHANGES_REQUESTED"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"A listing in state {listing.state} cannot be submitted for review")
+    automatic = not get_policy(listing.market_release, "publication.requires_approval")
+    if automatic:
+        from app.crud.listing_fee import listing_fee_checkout_blockers
+
+        # Everything except the fee (paid after approval), checked before any
+        # state change so a refused submit leaves the listing as it was.
+        blockers = list(dict.fromkeys(listing_fee_checkout_blockers(db, listing)
+                                      + publication_gate_failures(db, listing)))
+        if blockers:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Finish these before submitting: " + "; ".join(blockers))
 
     listing.rejection_reason = ""
     listing.state = "REVIEW"
@@ -766,12 +804,9 @@ def submit_listing_for_review(db: Session, listing: Listing) -> Listing:
     db.commit()
     db.refresh(listing)
 
-    # ZR-ENG-CLR-001 Rule 3/Section 14 policy key publication.requires_approval:
-    # "Future low-risk automation may approve through the same auditable
-    # approval object." The platform default is True (every market goes to
-    # admin review), so this branch only fires for a market release that
-    # explicitly overrides it to False.
-    if not get_policy(listing.market_release, "publication.requires_approval"):
+    # ZR-ENG-CLR-001 Rule 3/Section 14: "low-risk automation may approve
+    # through the same auditable approval object" -- the default.
+    if automatic:
         return _auto_approve_and_publish_low_risk_market(db, listing)
 
     notification_crud.notify_all_admins(
@@ -786,18 +821,17 @@ def submit_listing_for_review(db: Session, listing: Listing) -> Listing:
 
 
 def _auto_approve_and_publish_low_risk_market(db: Session, listing: Listing) -> Listing:
-    """Section 14: the publication.requires_approval=False path. Goes through
-    the exact same ListingApproval / current_public_version_id / PUBLISHED
-    transition a human admin decision would (see approve_listing/
-    publish_listing) -- just system-attributed (reviewer_authority_scope=
-    'system', actor=None) instead of admin-attributed, and both decisions
-    still get their own distinct audit + domain events (5.1: 'Approval and
-    publication must be distinct events even if executed milliseconds
-    apart'), same as publish_listing's own implicit-approval case.
+    """The automatic path. Goes through the exact same ListingApproval /
+    current_public_version_id / PUBLISHED transition a human admin decision
+    would (see approve_listing / publish_listing) -- system-attributed
+    (reviewer_authority_scope='system', actor=None), and approval and
+    publication still get their own distinct audit + domain events (5.1).
 
-    Also subject to the same Listing Fee gate as publish_listing (ZR-PAY-002
-    A7) -- an auto-approved low-risk market must not bypass it either."""
-    _require_listing_fee_paid_if_applicable(db, listing)
+    Identity / property / authority gates are re-checked here (ZR-AUTHORITY-002
+    Section 2.4). When a Listing Fee is owed the listing waits in APPROVED and
+    publishes on its own once the fee is paid (crud/listing_fee.py:
+    _publish_approved_listing_after_fee) -- it never bypasses the fee."""
+    _require_publication_gates(db, listing)
 
     version = listing.current_draft_version
     version.approval_status = "APPROVED"
@@ -805,10 +839,31 @@ def _auto_approve_and_publish_low_risk_market(db: Session, listing: Listing) -> 
     db.add(ListingApproval(
         listing_version_id=version.id,
         decision="APPROVED",
-        decision_reason_code="publication_requires_approval_false",
+        decision_reason_code="all_verifications_passed",
         reviewer_authority_scope="system",
     ))
     listing.current_public_version_id = version.id
+    try:
+        _require_listing_fee_paid_if_applicable(db, listing)
+    except HTTPException:
+        # Approved; the fee is the last step and publishing follows payment.
+        listing.state = "APPROVED"
+        db.commit()
+        db.refresh(listing)
+        log_audit_event(db, None, "listing.approve", "listing", listing.id, reason="all_verifications_passed",
+                        before_state="REVIEW", after_state="APPROVED",
+                        object_version=str(listing.current_public_version_id))
+        emit_event(db, "listing.approved", "listing", listing.id,
+                   {"listing_version_id": listing.current_public_version_id})
+        user = get_user_by_party_id(db, listing.party_id)
+        if user:
+            notification_crud.notify_user(
+                db, user.id, title="Listing approved -- pay the Listing Fee to go live",
+                message=f'Your listing "{listing.name}" passed every check and was approved automatically. '
+                        "Pay the Listing Fee from My Listings and it goes live straight away.",
+                notification_type="listing.approved", related_entity_type="listing", related_entity_id=listing.id)
+        db.commit()
+        return listing
     listing.state = "PUBLISHED"
     if listing.published_at is None:
         listing.published_at = datetime.now(timezone.utc)
@@ -816,14 +871,14 @@ def _auto_approve_and_publish_low_risk_market(db: Session, listing: Listing) -> 
     db.refresh(listing)
 
     log_audit_event(
-        db, None, "listing.approve", "listing", listing.id, reason="publication_requires_approval_false",
+        db, None, "listing.approve", "listing", listing.id, reason="all_verifications_passed",
         before_state="REVIEW", after_state="APPROVED", object_version=str(listing.current_public_version_id),
     )
     emit_event(
         db, "listing.approved", "listing", listing.id, {"listing_version_id": listing.current_public_version_id},
     )
     log_audit_event(
-        db, None, "listing.publish", "listing", listing.id, reason="publication_requires_approval_false",
+        db, None, "listing.publish", "listing", listing.id, reason="all_verifications_passed",
         before_state="APPROVED", after_state="PUBLISHED", object_version=str(listing.current_public_version_id),
     )
     emit_event(db, "listing.published", "listing", listing.id, {"room_id": listing.room_id})
@@ -833,10 +888,11 @@ def _auto_approve_and_publish_low_risk_market(db: Session, listing: Listing) -> 
         notification_crud.notify_user(
             db, user.id,
             title="Listing approved and published",
-            message=f'Your listing "{listing.name}" has been automatically approved and published for this market.',
+            message=f'Your listing "{listing.name}" passed every check and is now live.',
             notification_type="listing.published",
             related_entity_type="listing", related_entity_id=listing.id,
         )
+    notify_listing_auto_published(db, listing)
     # Unconditional -- the two log_audit_event calls and emit_event calls above
     # must persist even when this listing's party has no linked user account
     # (get_user_by_party_id returns None), not only when a notification fires.
@@ -847,6 +903,20 @@ def _auto_approve_and_publish_low_risk_market(db: Session, listing: Listing) -> 
             listing_id=listing.id, market_name=listing.city, min_stay_nights=listing.min_stay_nights,
         )
     return listing
+
+
+def notify_listing_auto_published(db: Session, listing: Listing) -> None:
+    """No admin approves before go-live, so every automatic publish is
+    surfaced to super admins -- they can suspend or quarantine it from the
+    admin listings screen if anything looks wrong. Caller commits."""
+    notification_crud.notify_all_super_admins(
+        db,
+        title="Listing went live automatically",
+        message=f'"{listing.name}" passed identity, property and authority verification and is now live. '
+                "Suspend or quarantine it from Listings if anything looks wrong.",
+        notification_type="listing.auto_published",
+        related_entity_type="listing", related_entity_id=listing.id,
+    )
 
 
 def _record_approval_decision(
@@ -874,7 +944,8 @@ def approve_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
     """Admin/super-admin only (enforced at the route level). REVIEW -> APPROVED.
     The approval decision is recorded independently of publish_listing -- an
     APPROVED listing that later gets paused stays approved, so re-publishing it
-    never has to re-run (or re-pass) any compliance check. No notification is
+    never re-runs content review -- but it does re-check the identity /
+    property / authority gates (see publish_listing). No notification is
     sent here; the USER-facing "approved and published" notification fires once,
     from publish_listing, which is how the review UI's combined "Approve &
     Publish" action actually reaches the user (see PropertiesManager.tsx).
@@ -896,6 +967,23 @@ def approve_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
 
     db.commit()
     db.refresh(listing)
+
+    # Approval is recorded, but publication waits for the identity / property /
+    # authority gates (ZR-AUTHORITY-002 Section 2.4).
+    failures = publication_gate_failures(db, listing)
+    if failures:
+        user = get_user_by_party_id(db, listing.party_id)
+        if user:
+            notification_crud.notify_user(
+                db, user.id,
+                title="Listing approved -- finish verification to go live",
+                message=f'Your listing "{listing.name}" was approved, but it can\'t be published until: '
+                        + "; ".join(failures) + ".",
+                notification_type="listing.approved",
+                related_entity_type="listing", related_entity_id=listing.id,
+            )
+            db.commit()
+        return listing
 
     # Next step is the Listing Fee: the host pays it and the listing then
     # publishes automatically (crud/listing_fee.py:_complete_payment_success).
@@ -920,13 +1008,13 @@ def approve_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
 
 
 def publish_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
-    """Admin/super-admin only (enforced at the route level). check_publish_eligibility's
-    other signals (authority/occupancy/identity) are informational -- deliberately NOT
-    consulted here; the admin's decision to approve is the final authority for those,
-    not an automated compliance gate. The Listing Fee is the one exception: see
-    _require_listing_fee_paid_if_applicable (ZR-PAY-002 A7/8.3 -- it is a real
-    publication requirement once a jurisdiction has a configured fee, not just an
-    advisory signal). Works from any non-published state that has a room (DRAFT for
+    """Admin/super-admin only (enforced at the route level). Identity, property
+    verification and listing authority are hard gates re-checked here on every
+    publish (ZR-AUTHORITY-002 Section 2.4 / P0 #10 -- an admin's approval can't
+    stand in for them), as is the Listing Fee (ZR-PAY-002 A7/8.3, see
+    _require_listing_fee_paid_if_applicable). check_publish_eligibility's other
+    signals (occupancy, minimum stay, market release) stay informational for the
+    reviewer. Works from any non-published state that has a room (DRAFT for
     an admin's own quick-publish, APPROVED for the normal review flow, PAUSED to
     resume a previously-approved listing).
 
@@ -950,6 +1038,7 @@ def publish_listing(db: Session, listing: Listing, admin: AdminUser) -> Listing:
             f"Only a super admin can republish a {listing.state.lower()} listing",
         )
 
+    _require_publication_gates(db, listing)
     _require_listing_fee_paid_if_applicable(db, listing)
 
     version = listing.current_draft_version or _create_new_version(db, listing)

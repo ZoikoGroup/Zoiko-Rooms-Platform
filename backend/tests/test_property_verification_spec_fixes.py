@@ -76,7 +76,8 @@ class TestAddressChangeInvalidates:
     def _update(self, client, user, room, **changes):
         body = {"address": room.property.address, "city": room.property.city, "landmark": room.property.landmark,
                 "jurisdictionCode": room.property.jurisdiction_code, **changes}
-        return client.put(f"/api/users/hosting/properties/{room.property_id}", json=body, cookies=auth_user_cookie(user))
+        return client.put(f"/api/users/hosting/properties/{room.property_id}", json=body, cookies=auth_user_cookie(user),
+                          headers={"If-Match": str(room.property.location_version)})
 
     def test_a_new_address_revokes_the_verification_and_keeps_history(self, client, db_session, host_room):
         user, room, record = self._verified(db_session, host_room)

@@ -29,7 +29,7 @@ class TestGetPolicyDefaults:
     def test_no_market_release_uses_platform_default(self):
         assert get_policy(None, "booking.acceptance_hold_duration_hours") == settings.offer_acceptance_confirmation_hours
         assert get_policy(None, "payment.checkout_lock_duration_minutes") == settings.payment_checkout_lock_minutes
-        assert get_policy(None, "publication.requires_approval") is True
+        assert get_policy(None, "publication.requires_approval") is True  # suite pins admin review (conftest)
         assert get_policy(None, "visibility.failed_gate_behavior") == "hide"
 
     def test_market_release_with_no_overrides_uses_platform_default(self):

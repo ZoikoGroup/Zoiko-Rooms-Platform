@@ -278,6 +278,30 @@ def _send_identity_status(
     ))
 
 
+def send_authority_status_email(
+    to_email: str, full_name: str, *, status_display: str, variant: str, message: str,
+    property_label: str, verification_id: int, valid_until: str = "",
+) -> None:
+    """ZR-EML-VER-002 (ZR-AUTHORITY-002 Section 15.3): submitted / action
+    required / approved / expiring / expired / revoked. Never carries
+    evidence, reviewer notes or risk signals."""
+    reference = fmt.reference("AV", verification_id)
+    facts = [("Property", property_label), ("Status", status_display)]
+    if valid_until:
+        facts.append(("Valid until", valid_until))
+    facts.append(("Reference", reference))
+    deliver(to_email, Message(
+        spec=registry.get("ZR-EML-VER-002"), variant=variant,
+        dedupe_key=f"VER-002:{reference}:{variant}",
+        related_entity_type="authority_verification", related_entity_id=str(verification_id),
+        subject_vars={"authority_status_display": status_display},
+        heading=f"Listing authority: {status_display}", first_name=fmt.first_name(full_name),
+        intro=[message], facts=facts,
+        outro=["Open Properties & Rooms to see the status and any next step. Do not email documents to Zoiko Rooms."],
+        cta_url=_url("/account/host"),
+    ))
+
+
 def send_identity_verification_approved_email(to_email: str, full_name: str, verification_id: int | None = None) -> None:
     _send_identity_status(to_email, full_name, status_display="approved", variant="approved",
                           still_required="Nothing further for identity",

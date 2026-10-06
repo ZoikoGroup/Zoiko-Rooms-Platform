@@ -44,6 +44,9 @@ class Property(Base):
     postal_code: Mapped[str] = mapped_column(String(20), default="", server_default="")
     country_code: Mapped[str] = mapped_column(String(2), default="", server_default="")  # ISO 3166-1 alpha-2
     canonical_formatted_address: Mapped[str] = mapped_column(String(600), default="", server_default="")
+    # Section 20 transliteration: the address as the host wrote it (local
+    # script), kept when it differs from the provider-normalized form.
+    address_local: Mapped[str] = mapped_column(String(600), default="", server_default="")
     property_kind: Mapped[str] = mapped_column(String(12), default="", server_default="")
     building_name: Mapped[str] = mapped_column(String(200), default="", server_default="")
     floor: Mapped[str] = mapped_column(String(20), default="", server_default="")

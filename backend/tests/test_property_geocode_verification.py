@@ -111,7 +111,10 @@ class TestGeocodingService:
         seen = {}
 
         def fake_request(method, url, **k):
-            seen["url"] = url
+            # Address Validation first; the house-number check may follow up
+            # with a geocode lookup, so keep every URL.
+            seen.setdefault("urls", []).append(url)
+            seen["url"] = seen["urls"][0]
             return _FakeResponse(payload)
 
         monkeypatch.setattr(httpx, "request", fake_request)
