@@ -26,12 +26,13 @@ from app.models.market_release import MarketRelease
 _DEFAULTS: dict[str, Any] = {
     "booking.acceptance_hold_duration_hours": lambda: settings.offer_acceptance_confirmation_hours,
     "payment.checkout_lock_duration_minutes": lambda: settings.payment_checkout_lock_minutes,
-    # Rule 3: every market requires an admin/super-admin review before a
-    # listing goes live. After approval the host pays the Listing Fee and
-    # the listing publishes automatically (crud/listing_fee.py:
-    # _complete_payment_success). A market release can still override this
-    # to False to auto-approve+publish via _auto_approve_and_publish_low_risk_market.
-    "publication.requires_approval": lambda: True,
+    # Publication is automatic: a listing whose host has completed identity,
+    # property and authority verification (and meets the listing rules) is
+    # approved by the system at submit and goes live -- straight away, or as
+    # soon as the Listing Fee is paid. Super admins are notified and can
+    # suspend / quarantine a live listing at any time. A market release may
+    # override this to True to send every listing to admin review instead.
+    "publication.requires_approval": lambda: False,
     # Same status: readable/settable, not yet consulted -- no call site in
     # this codebase currently branches public-visibility behavior on a
     # failed jurisdiction gate beyond "not bookable" (Rule 1's own

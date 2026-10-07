@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { formatDate } from "@/lib/utils";
 import {
-  PropertyReviewCase, PropertyReviewQueueItem, ReviewDecision, evidenceTypeLabel, getPropertyReviewCase,
+  LocationHealth, PropertyReviewCase, assignPropertyReviewCase, PropertyReviewQueueItem, ReviewDecision, evidenceTypeLabel, getLocationHealth,
+  getPropertyReviewCase,
   getPropertyReviewReasons, getPropertyVerificationMetrics, listPropertyReviewQueue, propertyEvidenceUrl,
   propertyStateLabel, propertyStateTone, reviewPropertyVerification,
 } from "@/lib/property-verification";
@@ -38,6 +39,66 @@ function label(code: string) {
  * cases need a second, different reviewer (four-eyes); reviewers can't edit
  * the host's property data.
  */
+/** Live check of the Google Maps Platform APIs behind address search,
+ *  validation and pin placement -- run on demand (each run makes a few
+ *  requests), with Google's reason and the fix when one is blocked. */
+function ProviderHealth() {
+  const [health, setHealth] = useState<LocationHealth | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState("");
+
+  async function check() {
+    setChecking(true);
+    setError("");
+    try {
+      setHealth(await getLocationHealth());
+    } catch {
+      setError("Could not run the check -- super admin access is required.");
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  const allOk = health?.google.every((g) => g.ok);
+  return (
+    <details className="rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
+      <summary className="cursor-pointer font-semibold text-slate-700 dark:text-slate-200">
+        Map provider status{health && (allOk ? " -- all Google APIs working" : " -- action needed")}
+      </summary>
+      <div className="mt-3 space-y-2">
+        <Button size="sm" variant="outline" onClick={check} loading={checking} disabled={checking}>
+          {health ? "Check again" : "Check Google APIs"}
+        </Button>
+        {error && <p className="text-accent-700" role="alert">{error}</p>}
+        {health && (
+          <ul className="space-y-2" aria-live="polite">
+            {health.google.map((g) => (
+              <li key={g.api} className="flex items-start gap-2">
+                {g.ok ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden="true" />
+                  : <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-accent-600" aria-hidden="true" />}
+                <span>
+                  <span className="font-semibold">{g.api}</span>
+                  {g.usedFor && <span className="text-slate-500"> -- {g.usedFor}</span>}
+                  <span className="sr-only">{g.ok ? " working" : " not working"}</span>
+                  {!g.ok && (
+                    <span className="mt-0.5 block text-slate-600 dark:text-slate-300">
+                      {g.reason && <span className="font-mono">{g.reason}</span>} {g.fix}
+                    </span>
+                  )}
+                </span>
+              </li>
+            ))}
+            <li className="text-slate-500">
+              {health.fallbacks.length === 0 ? "Google only -- no backup provider is used."
+                : `Backup providers in use: ${health.fallbacks.join(", ")}.`}
+            </li>
+          </ul>
+        )}
+      </div>
+    </details>
+  );
+}
+
 export function PropertyLocationReviewManager() {
   const [filter, setFilter] = useState("MANUAL_REVIEW");
   const [queue, setQueue] = useState<PropertyReviewQueueItem[]>([]);
@@ -70,6 +131,8 @@ export function PropertyLocationReviewManager() {
         <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Property &amp; location verification</h2>
         <span className="text-xs text-slate-400">ZR-PROPERTY-VERIFY-001 review queue</span>
       </div>
+
+      <ProviderHealth />
 
       {metrics && <Metrics data={metrics} />}
 
@@ -129,6 +192,9 @@ function Metrics({ data }: { data: Record<string, unknown> }) {
     ["Pin adjustment rate", pct(data.pin_adjustment_rate)],
     ["Median pin move", data.median_pin_move_meters != null ? `${data.median_pin_move_meters} m` : "--"],
     ["Duplicate flags", String(data.duplicate_flags ?? 0)],
+    ["Correction accepted", pct(data.correction_acceptance_rate)],
+    ["Recovered after a fix", pct(data.action_required_recovery_rate)],
+    ["Review turnaround", data.median_review_turnaround_hours != null ? `${data.median_review_turnaround_hours} h` : "--"],
     ["Location provider", String(data.provider ?? "--")],
   ];
   return (
@@ -154,10 +220,26 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     getPropertyReviewCase(id).then(setRecord).catch(() => setError("Could not load this case."));
-    getPropertyReviewReasons().then(setReasons).catch(() => undefined);
   }, [id]);
+  useEffect(() => {
+    reload();
+    getPropertyReviewReasons().then(setReasons).catch(() => undefined);
+  }, [reload]);
+
+  async function assign(release: boolean) {
+    setBusy(true);
+    setError("");
+    try {
+      await assignPropertyReviewCase(id, release);
+      reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not change the assignment");
+    } finally {
+      setBusy(false);
+    }
+  }
   useEffect(() => { setReasonCode(reasons?.[decision]?.[0]?.code ?? ""); }, [decision, reasons]);
 
   async function submit() {
@@ -188,12 +270,26 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
             <Row k="State" v={propertyStateLabel[r.state]} />
           </dl>
 
+          {r.state === "MANUAL_REVIEW" && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
+              <span>
+                {r.assignedAdminId == null ? "Unassigned -- opening evidence or deciding assigns it to you"
+                  : `Assigned to reviewer #${r.assignedAdminId}${r.assignedAt ? ` since ${formatDate(r.assignedAt)}` : ""}`}
+              </span>
+              <span className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => assign(false)} disabled={busy}>Assign to me</Button>
+                {r.assignedAdminId != null && <Button size="sm" variant="ghost" onClick={() => assign(true)} disabled={busy}>Release</Button>}
+              </span>
+            </div>
+          )}
+
           <div className="grid gap-5 lg:grid-cols-2">
             <div className="space-y-2">
               <h3 className="text-sm font-semibold text-primary-900 dark:text-white">Address &amp; location</h3>
               <dl className="space-y-1 text-sm">
                 <Row k="Submitted" v={line(r.submittedAddress)} inline />
                 <Row k="Canonical" v={line(r.canonicalAddress)} inline />
+                {r.addressLocal && <Row k="As written (local script)" v={r.addressLocal} inline />}
                 <Row k="Entry" v={r.entryMode === "SELECTED" ? "Selected from search" : "Entered manually"} inline />
                 <Row k="Provider" v={r.provider || "--"} inline />
                 <Row k="Precision" v={r.locationPrecision ? label(r.locationPrecision) : "Not found"} inline />
@@ -202,6 +298,10 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
                   : `${r.pinMovedMeters} m · ${withinPolicy ? "within" : "beyond"} policy (${r.pinMovePolicyMeters} m)`} />
                 {r.pinAdjustReason && <Row k="Host's reason" v={r.pinAdjustReason} inline />}
                 {r.pinReverseGeocode && <Row k="Pin resolves to" v={r.pinReverseGeocode} inline />}
+                {r.pinAdjustHistory.length > 1 && (
+                  <Row k="All adjustments" inline v={r.pinAdjustHistory.map((h, i) =>
+                    `${i + 1}. ${h.movedMeters != null ? `${h.movedMeters} m` : "by hand"}${h.reviewRequired ? " (review)" : ""} -- ${h.reason}`).join("; ")} />
+                )}
                 <Row k="Unit" v={[label(r.propertyKind || "--"), r.unit, r.buildingName, r.floor && `floor ${r.floor}`].filter(Boolean).join(" · ")} inline />
                 {r.duplicateOfPropertyId && <Row k="Possible duplicate of" v={`Property #${r.duplicateOfPropertyId}`} inline />}
               </dl>
@@ -231,6 +331,8 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
                       {e.documentTypeMatched != null && <Signal ok={e.documentTypeMatched} text={e.documentTypeMatched ? "Looks like the chosen type" : "Type unclear"} />}
                       {e.signals.includes("EVIDENCE_OUTDATED") && <Signal ok={false} text={`Outdated (${e.documentYear})`} />}
                       {e.reusedElsewhere && <Signal ok={false} text="Used for another property" />}
+                      {e.tamperSignal && <Signal ok={false} text="Possible edit signal (weak)" />}
+                      {e.scanStatus === "ERROR" && <Signal ok={false} text="Malware scan could not complete" />}
                       <span className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-500 dark:bg-slate-800">Scan: {label(e.scanStatus)}</span>
                       <span className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-500 dark:bg-slate-800">
                         Read from: {e.textSource === "PDF_TEXT" ? "PDF text" : e.textSource === "OCR" ? `OCR (${e.ocrConfidence ?? "?"}% confidence)` : "not read"}

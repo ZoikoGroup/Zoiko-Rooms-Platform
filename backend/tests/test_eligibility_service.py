@@ -47,7 +47,10 @@ def _make_room_with_good_standing(db: Session, admin) -> tuple[Room, MarketRelea
     # PropertyVerification -- checks unique to the Listing Service's
     # admin-review screen, not part of the shared gate.
     db.add(IdentityVerification(party_id=owner_party.id, document_type="passport", status="verified"))
-    db.add(PropertyVerification(party_id=owner_party.id, room_id=room.id, evidence_ref="deed.pdf", status="verified"))
+    # A legacy per-room record counts only when a reviewer verified it
+    # (ZR-PROPERTY-VERIFY-001 P0 #2).
+    db.add(PropertyVerification(party_id=owner_party.id, room_id=room.id, evidence_ref="deed.pdf", status="verified",
+                                verifier_admin_id=admin.id))
     db.flush()
     return room, market_release
 

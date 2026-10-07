@@ -936,8 +936,9 @@ def _complete_payment_success(db: Session, payment: ListingFeePayment, *, correl
 
 
 def _publish_approved_listing_after_fee(db: Session, payment: ListingFeePayment, *, correlation_id: str = "") -> None:
-    """The fee is the last step: an admin/super admin has already reviewed and
-    approved the listing, so once it's paid the listing goes live on its own
+    """The fee is the last step: the listing is already approved (automatically
+    after every verification passed, or by an admin in a review market), so
+    once it's paid the listing goes live on its own
     (system-attributed, same publish_listing path an admin's click uses).
     Only fires for an APPROVED listing -- never lifts a suspension/quarantine,
     and is a no-op if it's already published. A failure here never undoes the
@@ -963,6 +964,9 @@ def _publish_approved_listing_after_fee(db: Session, payment: ListingFeePayment,
         db, "listing.published", "listing", listing.id, {"listing_version_id": listing.current_public_version_id},
         correlation_id=correlation_id, idempotency_key=f"listing.published:{listing.id}:fee:{payment.id}",
     )
+    from app.crud.listing import notify_listing_auto_published
+
+    notify_listing_auto_published(db, listing)
     db.commit()
 
 

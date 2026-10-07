@@ -41,7 +41,8 @@ class TestAddressChangeAndConcurrency:
                                   pack_version=1, state="VERIFIED", expires_at=datetime.now(timezone.utc) + timedelta(days=90))
         db_session.add(v)
         db_session.commit()
-        r = self._put(client, user, prop, "99 Completely Different Road")
+        db_session.refresh(prop)
+        r = self._put(client, user, prop, "99 Completely Different Road", **{"If-Match": str(prop.location_version)})
         assert r.status_code == 200, r.text
         db_session.refresh(v)
         assert v.state == "REVOKED" and v.revocation_reason_code == "PROPERTY_ADDRESS_CHANGED"
@@ -136,7 +137,7 @@ class TestDuplicateAnswerAndSignals:
         db_session.commit()
         user, prop, _room = host
         body = Flow(client, user, prop).happy_path()
-        assert body["state"] == "ACTION_REQUIRED"
+        assert body["state"] == "MANUAL_REVIEW"  # a reviewer resolves conflicting properties (Section 14)
         assert "NEARBY_PROPERTY_CONFLICT" in body["reasonCodes"]
 
 

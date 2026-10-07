@@ -44,6 +44,9 @@ class AddressIn(CamelModel):
     administrative_area: str = ""
     postal_code: str = ""
     country_code: str = ""
+    # Display-only one-line form a client may echo back from a saved
+    # address; ignored -- the server rebuilds it from the components.
+    formatted: str = ""
 
 
 class StartIn(CamelModel):
@@ -93,6 +96,11 @@ class LocationAddressIn(CamelModel):
     address: AddressIn
 
 
+class ReverseIn(CamelModel):
+    latitude: float
+    longitude: float
+
+
 class ReviewIn(CamelModel):
     decision: str
     reason_code: str
@@ -109,6 +117,12 @@ class PackUpdateIn(CamelModel):
     validity_days: int | None = None
     expiring_soon_days: int | None = None
     evidence_retention_days: int | None = None
+    address_field_order: list[str] | None = None
+    address_labels: dict[str, str] | None = None
+
+
+class AssignIn(CamelModel):
+    release: bool = False
 
 
 # -- serializers -----------------------------------------------------------------
@@ -144,7 +158,9 @@ def session_read(v: PropertyLocationVerification) -> dict:
         "geocodeStatus": v.geocode_status, "locationConfidence": _CONFIDENCE.get(v.location_precision, ""),
         "originalLocation": _point(v.original_latitude, v.original_longitude),
         "confirmedLocation": _point(v.confirmed_latitude, v.confirmed_longitude),
-        "pinStatus": v.pin_status, "pinMovedMeters": v.pin_moved_meters, "pinReverseGeocode": v.pin_reverse_geocode,
+        # The host sees what the marker now points at -- not the distance
+        # thresholds that trigger review (Section 8 "do not expose scores").
+        "pinStatus": v.pin_status, "pinReverseGeocode": v.pin_reverse_geocode,
         "propertyKind": v.property_kind, "buildingName": v.building_name, "unit": v.unit, "floor": v.floor,
         "possibleDuplicate": bool(v.duplicate_of_property_id),
         "duplicateHostAnswer": v.duplicate_host_answer, "duplicateHostNote": v.duplicate_host_note,
@@ -172,7 +188,23 @@ def pack_read(pack: PropertyRegulatoryPack) -> dict:
         "unitRequiredFor": list(pack.unit_required_for or []), "pinMoveReviewMeters": pack.pin_move_review_meters,
         "publicLocationDecimals": pack.public_location_decimals, "validityDays": pack.validity_days,
         "expiringSoonDays": pack.expiring_soon_days, "evidenceRetentionDays": pack.evidence_retention_days,
+        **address_form(pack),
     }
+
+
+def address_form(pack: PropertyRegulatoryPack) -> dict:
+    """Section 17: the order and local names of the address fields."""
+    defaults = svc._LABELS.get(pack.country_code) or svc._LABELS["*"]
+    return {"addressFieldOrder": list(pack.address_field_order or svc._DEFAULT_ORDER),
+            "addressLabels": {**defaults, **(pack.address_labels or {})}}
+
+
+def host_policy(pack: PropertyRegulatoryPack) -> dict:
+    """What the host's form needs -- no review thresholds or retention."""
+    return {"countryCode": pack.country_code, "countryName": pack.country_name, "version": pack.version,
+            "requiredAddressFields": list(pack.required_address_fields or []),
+            "acceptedEvidenceTypes": list(pack.accepted_evidence_types or []),
+            "unitRequiredFor": list(pack.unit_required_for or []), **address_form(pack)}
 
 
 def _version(if_match: str | None) -> int | None:
@@ -203,7 +235,7 @@ def post_start(payload: StartIn, request: Request,
 def get_policy(country: str = "", db: Session = Depends(get_db)):
     pack = svc.get_pack(db, country)
     db.commit()
-    return {**pack_read(pack), **loc.capabilities()}
+    return {**host_policy(pack), **loc.capabilities()}
 
 
 @router.get("/properties/{property_id}")
@@ -258,10 +290,15 @@ def post_confirm_location(verification_id: int, payload: ConfirmLocationIn, requ
                           if_match: str | None = Header(default=None, alias="If-Match"),
                           user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     import hashlib
+    import hmac
+
+    from app.core.config import settings
 
     v = svc.get_owned_verification(db, user, verification_id)
     client_ip = request.client.host if request.client else ""
-    device = {"ipHash": hashlib.sha256(client_ip.encode()).hexdigest()[:16] if client_ip else "",
+    # Keyed hash: the network address can't be recovered by brute force.
+    ip_hash = hmac.new(settings.jwt_secret.encode(), client_ip.encode(), hashlib.sha256).hexdigest()[:32] if client_ip else ""
+    device = {"ipHash": ip_hash,
               "userAgent": request.headers.get("user-agent", "")[:200]}
     return session_read(svc.confirm_location(
         db, user, v, action=payload.action.lower(), latitude=payload.latitude, longitude=payload.longitude,
@@ -361,19 +398,31 @@ def _evidence_response(db: Session, v: PropertyLocationVerification, evidence_id
 
 location_router = APIRouter(prefix="/api/location", tags=["location"], dependencies=[Depends(get_current_user)])
 
-_SUGGEST_LIMIT, _SUGGEST_WINDOW = 30, 60.0
+_SUGGEST_LIMIT, _SUGGEST_WINDOW = 60, 60.0
+_LOOKUP_LIMIT, _LOOKUP_WINDOW = 20, 300.0
 _suggest_hits: dict[int, deque] = defaultdict(deque)
+_lookup_hits: dict[int, deque] = defaultdict(deque)
+
+
+def _hit(store: dict[int, deque], user: UserAccount, limit: int, window: float, message: str) -> None:
+    now = time.monotonic()
+    hits = store[user.id]
+    while hits and now - hits[0] > window:
+        hits.popleft()
+    if len(hits) >= limit:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, message)
+    hits.append(now)
 
 
 def _throttle(user: UserAccount) -> None:
     """Section 12.3: suggestions are throttled per user (anti-scraping / cost)."""
-    now = time.monotonic()
-    hits = _suggest_hits[user.id]
-    while hits and now - hits[0] > _SUGGEST_WINDOW:
-        hits.popleft()
-    if len(hits) >= _SUGGEST_LIMIT:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many address searches -- wait a moment")
-    hits.append(now)
+    _hit(_suggest_hits, user, _SUGGEST_LIMIT, _SUGGEST_WINDOW, "Too many address searches -- wait a moment")
+
+
+def _throttle_lookup(user: UserAccount) -> None:
+    """Section 14 "public location harvesting": validate / geocode return
+    precise coordinates, so they're rate-limited more tightly."""
+    _hit(_lookup_hits, user, _LOOKUP_LIMIT, _LOOKUP_WINDOW, "Too many address checks -- wait a few minutes")
 
 
 @location_router.get("/capabilities")
@@ -396,14 +445,35 @@ def post_suggestions(payload: SuggestIn, user: UserAccount = Depends(get_current
 def post_retrieve(payload: RetrieveIn, user: UserAccount = Depends(get_current_user)):
     _throttle(user)
     try:
-        address, _location, provider = loc.retrieve(payload.id, payload.session_token)
+        address, location, provider = loc.retrieve(payload.id, payload.session_token)
     except loc.LocationUnavailable:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, svc.describe(["PROVIDER_UNAVAILABLE"])["message"])
-    return {"address": _addr(address.as_dict()), "provider": provider, "providerPlaceId": payload.id}
+    # The point is used only to move the host's own marker near a landmark
+    # they chose ("beside Rockcliff Apartments") -- it's never the property.
+    return {"address": _addr(address.as_dict()), "provider": provider, "providerPlaceId": payload.id,
+            "location": _point(location.latitude, location.longitude) if location else None}
+
+
+@location_router.post("/reverse")
+def post_reverse(payload: ReverseIn, user: UserAccount = Depends(get_current_user)):
+    """Location-first start (Screen 1): the address at the host's own point --
+    their phone's location or a spot they tapped on the map -- to pre-fill
+    the address form. The host still checks it and adds the door number."""
+    _throttle_lookup(user)
+    if not (-90 <= payload.latitude <= 90 and -180 <= payload.longitude <= 180):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That isn't a valid location")
+    try:
+        address, provider = loc.reverse(payload.latitude, payload.longitude)
+    except loc.LocationUnavailable:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, svc.describe(["PROVIDER_UNAVAILABLE"])["message"])
+    if address is None:
+        return {"found": False}
+    return {"found": True, "address": _addr(address.as_dict()), "provider": provider}
 
 
 @location_router.post("/validate-address")
-def post_validate(payload: LocationAddressIn):
+def post_validate(payload: LocationAddressIn, user: UserAccount = Depends(get_current_user)):
+    _throttle_lookup(user)
     try:
         result = loc.validate(loc.CanonicalAddress.from_dict(payload.address.model_dump()))
     except loc.LocationUnavailable:
@@ -413,7 +483,8 @@ def post_validate(payload: LocationAddressIn):
 
 
 @location_router.post("/geocode")
-def post_geocode(payload: LocationAddressIn):
+def post_geocode(payload: LocationAddressIn, user: UserAccount = Depends(get_current_user)):
+    _throttle_lookup(user)
     try:
         location, provider = loc.geocode(loc.CanonicalAddress.from_dict(payload.address.model_dump()))
     except loc.LocationUnavailable:
@@ -451,6 +522,13 @@ def post_admin_geocode(payload: AdminSearchIn):
             "formatted": result.canonical.formatted or result.canonical.one_line(), "provider": result.provider}
 
 
+@admin_location_router.get("/health", dependencies=[Depends(require_super_admin)])
+def get_location_health():
+    """Which Google Maps Platform APIs the server key can use right now (and
+    why not, with the fix), plus configured fallbacks. Never returns keys."""
+    return loc.diagnose()
+
+
 # -- Trust & Safety ---------------------------------------------------------------
 
 admin_router = APIRouter(prefix="/api/property-verifications", tags=["property-verification-admin"],
@@ -468,6 +546,7 @@ def list_queue(state: str = "MANUAL_REVIEW", db: Session = Depends(get_db)):
     return [{"id": v.id, "propertyId": v.property_id, "state": svc.effective_state(v), "countryCode": v.country_code,
              "reasonCodes": list(v.reason_codes or []), "possibleDuplicate": bool(v.duplicate_of_property_id),
              "awaitingSecondApproval": v.first_approver_admin_id is not None and v.state == "MANUAL_REVIEW",
+             "assignedAdminId": v.assigned_admin_id,
              "submittedAt": v.submitted_at, "createdAt": v.created_at} for v in rows]
 
 
@@ -524,7 +603,10 @@ def get_case(verification_id: int, db: Session = Depends(get_db)):
         "jurisdiction": prop.jurisdiction_code if prop else "",
         "hostIdentityVerified": get_verified_identity_for_party(db, v.party_id) is not None,
         "provider": v.provider, "locationPrecision": v.location_precision,
-        "pinMovePolicyMeters": pack.pin_move_review_meters,
+        "pinMovePolicyMeters": pack.pin_move_review_meters, "pinMovedMeters": v.pin_moved_meters,
+        "pinAdjustHistory": list(v.pin_adjust_history or []),
+        "assignedAdminId": v.assigned_admin_id, "assignedAt": v.assigned_at,
+        "addressLocal": (prop.address_local if prop else ""),
         "pinAdjustReason": v.pin_adjust_reason, "pinAdjustCount": v.pin_adjust_count,
         "duplicateOfPropertyId": v.duplicate_of_property_id,
         "duplicateHostAnswer": v.duplicate_host_answer, "duplicateHostNote": v.duplicate_host_note,
@@ -536,6 +618,7 @@ def get_case(verification_id: int, db: Session = Depends(get_db)):
                             "contentType": e.content_type, "readable": e.readable, "addressMatched": e.address_matched,
                             "unitMatched": e.unit_matched, "reusedElsewhere": e.reused_elsewhere,
                             "scanStatus": e.scan_status, "purged": e.purged_at is not None,
+                            "tamperSignal": e.tamper_signal,
                             "textSource": e.text_source, "ocrConfidence": e.ocr_confidence, "quality": e.quality,
                             "postalMatched": e.postal_matched, "ownerNameMatched": e.owner_name_matched,
                             "documentTypeMatched": e.document_type_matched, "documentYear": e.document_year,
@@ -545,6 +628,19 @@ def get_case(verification_id: int, db: Session = Depends(get_db)):
                      "previousState": e.previous_state, "newState": e.new_state,
                      "reasonCodes": (e.payload or {}).get("reasonCodes", [])} for e in events],
     }
+
+
+@admin_router.post("/{verification_id}/assign")
+def post_assign(verification_id: int, payload: AssignIn, request: Request,
+                admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db)):
+    v = db.get(PropertyLocationVerification, verification_id)
+    if v is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Property verification not found")
+    v = svc.assign(db, admin, v, release=payload.release, correlation_id=get_correlation_id(request))
+    log_audit_event(db, admin, "property_location_verification." + ("release" if payload.release else "assign"),
+                    svc.RESOURCE, str(v.id), get_correlation_id(request))
+    db.commit()
+    return {"id": v.id, "assignedAdminId": v.assigned_admin_id, "assignedAt": v.assigned_at, "version": v.version}
 
 
 @admin_router.post("/{verification_id}/review")
@@ -567,6 +663,7 @@ def get_admin_evidence(verification_id: int, evidence_id: int, request: Request,
     v = db.get(PropertyLocationVerification, verification_id)
     if v is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Property verification not found")
+    svc.require_assignment(db, admin, v, correlation_id=get_correlation_id(request))
     log_audit_event(db, admin, "property_location_verification.evidence_viewed", svc.RESOURCE, str(v.id),
                     get_correlation_id(request), reason=f"evidence:{evidence_id}")
     db.commit()

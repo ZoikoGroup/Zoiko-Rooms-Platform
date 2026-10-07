@@ -181,3 +181,27 @@ class TestUkAndUsDocuments:
         _fake_ocr(monkeypatch, f"COUNTY ASSESSOR TAX YEAR {YEAR} 1600 PENNSYLVANIA AVENUE NW WASHINGTON DC 20500-0003")
         a = pda.analyze(b"x", "image/png", evidence_type="PROPERTY_TAX_RECORD", canonical_address=US_ADDRESS)
         assert a.postal_matched and a.address_matched
+
+
+class TestIdentityAddressMatch:
+    """A document identifies the property by house number + place name (+ the
+    postal code, checked separately) -- landmarks the host added aren't on
+    official documents and aren't required."""
+    DOC = "PROPERTY TAX RECEIPT PROPERTY ADDRESS: 2-599 MADUPALLY, MADHIRA, TELANGANA, 507203, IN"
+
+    def _address(self, **changes):
+        return {"address_line_1": "2-599 Muthyalamma temple", "address_line_2": "Madupalli", "locality": "Madupalli",
+                "administrative_area": "Telangana", "postal_code": "507203", "country_code": "IN", **changes}
+
+    def test_landmark_words_are_not_required(self):
+        from app.services.property_document_analysis import identity_matches
+        assert identity_matches(self.DOC, self._address(), tolerant=True)
+
+    def test_house_number_must_match(self):
+        from app.services.property_document_analysis import identity_matches
+        assert not identity_matches(self.DOC, self._address(address_line_1="9-999 Muthyalamma temple"), True)
+
+    def test_a_place_name_must_match(self):
+        from app.services.property_document_analysis import identity_matches
+        assert not identity_matches(self.DOC, self._address(address_line_2="Kukatpally", locality="Hyderabad",
+                                                            address_line_1="2-599 Gandhi Road"), True)

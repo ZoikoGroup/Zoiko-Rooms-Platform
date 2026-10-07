@@ -36,6 +36,11 @@ def _route(monkeypatch, handler):
 
 
 def _keys(monkeypatch, google="", mapbox="", here=""):
+    # The adapter's fallback behaviour is under test here, independent of a
+    # deployment's .env (which may run Google only).
+    monkeypatch.setattr(settings, "location_fallback_enabled", True)
+    monkeypatch.setattr(settings, "location_fallback_providers", "mapbox,here")
+    monkeypatch.setattr(settings, "location_provider", "google")
     monkeypatch.setattr(settings, "google_maps_api_key", google)
     monkeypatch.setattr(settings, "mapbox_access_token", mapbox)
     monkeypatch.setattr(settings, "here_api_key", here)
@@ -143,3 +148,125 @@ def test_address_validation_unsupported_country_falls_back_to_geocoding(monkeypa
     result = loc.validate(ADDRESS)
     assert result.provider == "google" and result.status == "PARTIAL"
     assert result.location.precision == "ROOFTOP" and result.canonical.address_line_1 == "2-599 Madupally"
+
+
+def test_google_reverse_refusal_is_an_outage_not_no_address(monkeypatch):
+    """A refused reverse geocode (API not enabled / key blocked) must surface
+    as unavailable -- not as "nothing at this pin"."""
+    _keys(monkeypatch, google="g-key")
+    monkeypatch.setattr(settings, "location_fallback_enabled", False)
+    _route(monkeypatch, lambda url, kw: _Resp({"status": "REQUEST_DENIED", "results": [],
+                                               "error_message": "This API is not activated"}))
+    with pytest.raises(loc.LocationUnavailable):
+        loc.reverse(16.92, 80.36)
+
+
+def test_health_check_names_each_blocked_google_api_and_the_fix(monkeypatch):
+    _keys(monkeypatch, google="g-key")
+    monkeypatch.setattr(settings, "location_fallback_enabled", False)
+
+    def handler(url, kw):
+        if "places.googleapis.com" in url:
+            return _Resp({"error": {"status": "PERMISSION_DENIED", "message": "blocked",
+                                    "details": [{"reason": "API_KEY_SERVICE_BLOCKED"}]}}, status_code=403)
+        if "geocode" in url:
+            return _Resp({"status": "REQUEST_DENIED", "error_message": "This API is not activated"})
+        return _Resp(GOOGLE_PREMISE)
+
+    _route(monkeypatch, handler)
+    health = loc.diagnose()
+    rows = {r["api"]: r for r in health["google"]}
+    assert rows["Address Validation API"]["ok"] is True
+    assert rows["Places API (New)"]["reason"] == "API_KEY_SERVICE_BLOCKED"
+    assert "API restrictions" in rows["Places API (New)"]["fix"]
+    assert rows["Geocoding API"]["reason"] == "REQUEST_DENIED" and "Enable" in rows["Geocoding API"]["fix"]
+    assert health["fallbacks"] == []  # Google only
+    assert "g-key" not in str(health)
+
+
+def test_health_check_without_a_key(monkeypatch):
+    _keys(monkeypatch)
+    health = loc.diagnose()
+    assert health["google"][0]["reason"] == "NOT_CONFIGURED"
+
+
+def test_a_premise_with_a_different_house_number_is_only_the_area(monkeypatch):
+    """Google snaps an unknown Indian door number ("2-599") to the nearest
+    building it knows ("15-2") and still calls it ROOFTOP -- that point is
+    only the area, not the property."""
+    _keys(monkeypatch, google="g")
+    nearby = {"status": "OK", "results": [{
+        "geometry": {"location": {"lat": 16.9227, "lng": 80.3363}, "location_type": "ROOFTOP"},
+        "types": ["premise"], "place_id": "g-near", "formatted_address": "W8FP+3HR, 15-2, Madupalli, Telangana 507203, India",
+        "address_components": [{"long_name": "15-2", "types": ["premise"]}]}]}
+
+    def handler(url, kw):
+        if "addressvalidation" in url:
+            return _Resp({"result": {
+                "verdict": {"addressComplete": True, "validationGranularity": "PREMISE", "geocodeGranularity": "PREMISE"},
+                "address": {"postalAddress": {"regionCode": "IN", "addressLines": ["2-599"], "postalCode": "507203"}},
+                "geocode": {"location": {"latitude": 16.9227, "longitude": 80.3363}, "placeId": "g-near"}}})
+        return _Resp(nearby)
+
+    _route(monkeypatch, handler)
+    result = loc.validate(ADDRESS)
+    assert result.location.precision == "APPROXIMATE" and result.location.house_number_matched is False
+
+
+def test_the_right_house_number_keeps_rooftop(monkeypatch):
+    _keys(monkeypatch, google="g")
+    _route(monkeypatch, lambda url, kw: _Resp({"status": "OK", "results": [{
+        "geometry": {"location": {"lat": 16.92, "lng": 80.36}, "location_type": "ROOFTOP"}, "types": ["premise"],
+        "place_id": "g3", "formatted_address": "2-599, Madupally, Madhira 507203",
+        "address_components": [{"long_name": "2-599", "types": ["premise"]}]}]}))
+    location = loc.geocode(ADDRESS)[0]
+    assert location.precision == "ROOFTOP" and location.house_number_matched is True
+
+
+def test_country_from_any_region_code():
+    c = loc.country_for_jurisdiction
+    assert [c("IN"), c("England"), c("GB-SCT"), c("Northern Ireland"), c("US-NY"), c("CA-ON"), c("DE")] == \
+        ["IN", "GB", "GB", "GB", "US", "CA", "DE"]
+    assert c("") == "" and c("Atlantis") == ""
+
+
+def test_postal_area_is_coarse_enough_for_fine_grained_codes():
+    a = loc.postal_area
+    assert a("NW1 6XE", "GB") == "NW1" and a("10001-1234", "US") == "10001" and a("K1A 0B1", "CA") == "K1A"
+    assert a("507203", "IN") == "507203"
+
+
+def test_house_number_line_is_kept_when_google_reorders_it(monkeypatch):
+    """Google returned "Kalimandir" as line 1 and moved "4-2-182, ... Bank
+    Colony" to line 2 -- the property's first line must keep its number."""
+    _keys(monkeypatch, google="g")
+    entered = loc.CanonicalAddress(address_line_1="4-2-182, Bank Colony, Kalimandir",
+                                   address_line_2="Beside Rockliff Apartment", locality="Bandlaguda Jagir",
+                                   administrative_area="Telangana", postal_code="500086", country_code="IN")
+    _route(monkeypatch, lambda url, kw: _Resp({"result": {
+        "verdict": {"addressComplete": False, "validationGranularity": "OTHER", "geocodeGranularity": "OTHER"},
+        "address": {"postalAddress": {"regionCode": "IN", "postalCode": "500086", "locality": "Bandlaguda Jagir",
+                                      "addressLines": ["Kalimandir", "4-2-182, beside Rockliff Apartment, Bank Colony"]}}}}))
+    result = loc.validate(entered)
+    assert result.canonical.address_line_1 == "4-2-182, Bank Colony, Kalimandir"
+    assert result.canonical.locality == "Bandlaguda Jagir" and result.canonical.postal_code == "500086"
+
+
+def test_an_unconfirmed_address_is_kept_as_entered_and_google_only_suggests(monkeypatch):
+    """Google couldn't confirm "2-599 ..., Madhira" (UNRESOLVED) but returned
+    locality "Madupalli" -- that must not silently replace what the host
+    entered; it's offered as a correction instead."""
+    _keys(monkeypatch, google="g")
+    entered = loc.CanonicalAddress(address_line_1="2-599 Muthyalamma temple", address_line_2="Madupalli",
+                                   locality="Madhira", administrative_area="Telangana", postal_code="507203",
+                                   country_code="IN")
+    _route(monkeypatch, lambda url, kw: _Resp({"result": {
+        "verdict": {"addressComplete": False, "validationGranularity": "OTHER", "geocodeGranularity": "OTHER"},
+        "address": {"formattedAddress": "Muthyalamma temple, 2-599, Madupalli, Madhira, Telangana 507203, India",
+                    "postalAddress": {"regionCode": "IN", "postalCode": "507203", "locality": "Madupalli",
+                                      "administrativeArea": "Telangana",
+                                      "addressLines": ["2-599 Muthyalamma temple", "Madupalli"]}}}}))
+    result = loc.validate(entered)
+    assert result.status == "UNRESOLVED"
+    assert result.canonical.locality == "Madhira" and result.canonical.address_line_1 == "2-599 Muthyalamma temple"
+    assert result.suggestion is not None and result.suggestion.locality == "Madupalli"

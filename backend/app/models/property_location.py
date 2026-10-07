@@ -65,6 +65,10 @@ class PropertyRegulatoryPack(Base):
     validity_days: Mapped[int] = mapped_column(Integer, default=365, nullable=False)
     expiring_soon_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     evidence_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Section 17 localization: the order address fields are asked in, and
+    # their local names (e.g. "Postcode", "PIN code", "ZIP code").
+    address_field_order: Mapped[list] = mapped_column(JSON, default=list)
+    address_labels: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -118,6 +122,9 @@ class PropertyLocationVerification(Base):
     # Section 6.4: device/session metadata recorded with each pin adjustment
     # (hashed network address + user agent; never raw IPs).
     pin_adjust_device: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Every adjustment, never overwritten: [{at, latitude, longitude,
+    # movedMeters, reverseGeocode, reason, device}] (Section 6.4).
+    pin_adjust_history: Mapped[list] = mapped_column(JSON, default=list)
 
     # Provider reference (Section 12.1 provider_refs; storage class per terms).
     provider: Mapped[str] = mapped_column(String(20), default="")
@@ -139,6 +146,10 @@ class PropertyLocationVerification(Base):
     first_approver_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     review_reason_code: Mapped[str] = mapped_column(String(40), default="")
     review_note: Mapped[str] = mapped_column(String(1000), default="")
+    # Section 16: least privilege -- one assigned reviewer holds the case.
+    assigned_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expiring_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     idempotency_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
     submit_idempotency_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -149,7 +160,14 @@ class PropertyLocationVerification(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     property: Mapped["Property"] = relationship()
+    # Current evidence. A host's removed upload is soft-deleted (file gone,
+    # hash and history kept so reuse is still detected -- Section 14).
     evidence: Mapped[list["PropertyLocationEvidence"]] = relationship(
+        primaryjoin="and_(PropertyLocationVerification.id == PropertyLocationEvidence.verification_id, "
+                    "PropertyLocationEvidence.removed_at.is_(None))",
+        viewonly=True, order_by="PropertyLocationEvidence.id",
+    )
+    all_evidence: Mapped[list["PropertyLocationEvidence"]] = relationship(
         back_populates="verification", cascade="all, delete-orphan", order_by="PropertyLocationEvidence.id",
     )
 
@@ -173,6 +191,10 @@ class PropertyLocationEvidence(Base):
     sha256: Mapped[str] = mapped_column(String(64), default="", index=True)
     # NOT_SCANNED until a malware-scanning provider is configured.
     scan_status: Mapped[str] = mapped_column(String(20), default="NOT_SCANNED")
+    # Weak edit signal (online PDF editors, incremental saves) -- a review
+    # input, never an accusation (Section 14).
+    tamper_signal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     readable: Mapped[bool] = mapped_column(Boolean, default=False)
     address_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     unit_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -193,4 +215,4 @@ class PropertyLocationEvidence(Base):
     purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    verification: Mapped[PropertyLocationVerification] = relationship(back_populates="evidence")
+    verification: Mapped[PropertyLocationVerification] = relationship(back_populates="all_evidence")

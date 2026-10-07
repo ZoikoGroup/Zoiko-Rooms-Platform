@@ -30,7 +30,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.core.config import settings
 from app.crud.events import emit_event
@@ -56,12 +56,16 @@ JURISDICTION_COUNTRY = {"England": "GB", "GB-ENG": "GB", "GB-WLS": "GB", "GB-SCT
 
 REASONS: dict[str, tuple[str, str]] = {
     # code: (user-facing message, CTA)
-    "NEARBY_PROPERTY_CONFLICT": ("Another property is registered at almost the same spot. Check the marker is on your property and add your unit / flat number.", "Fix location"),
+    "NEARBY_PROPERTY_CONFLICT": ("Another property is registered at almost the same spot. We need to review the property information. You can leave this page; we'll update the status here.", "Go to dashboard"),
+    "DUPLICATE_REVIEW": ("This property looks like one already on Zoiko Rooms. We need to review it. You can leave this page; we'll update the status here.", "Go to dashboard"),
+    "EVIDENCE_REVIEW": ("We need to review your property evidence. You can leave this page; we'll update the status here.", "Go to dashboard"),
+    "PREVIOUSLY_REJECTED": ("We need to review this property information. You can leave this page; we'll update the status here.", "Go to dashboard"),
     "POSTAL_CODE_INVALID": ("The postal code doesn't look right for this country. Check the address.", "Review address"),
     "SAME_PROPERTY_DECLARED": ("You said this is the same property as an existing listing, so it can't be verified again as a new property.", "Contact support"),
     "ADDRESS_NOT_FOUND": ("We couldn't find this address automatically. Enter it manually and we'll verify it another way.", "Enter manually"),
     "ADDRESS_PARTIAL": ("We could only partly confirm this address. We'll check the property information.", "View status"),
     "GEOCODE_AMBIGUOUS": ("We found more than one possible location. Choose the correct property.", "Choose address"),
+    "HOUSE_NUMBER_NOT_ON_MAP": ("The map knows your street and area, but not your house number -- the marker is on a nearby building. Choose Adjust marker and place it on your property (you can use your phone's location, a DIGIPIN or a Plus Code).", "Adjust marker"),
     "LOW_LOCATION_CONFIDENCE": ("We found the area, but not the exact property. We'll confirm it with your evidence.", "View status"),
     "PIN_MOVED_TOO_FAR": ("The marker is too far from the address. Move it back onto your property (small corrections are fine).", "Fix location"),
     "UNIT_MISSING": ("Add the apartment, flat, or unit number so we can identify the correct property.", "Add unit"),
@@ -72,12 +76,13 @@ REASONS: dict[str, tuple[str, str]] = {
     "EVIDENCE_TYPE_UNCLEAR": ("This document doesn't look like the type you chose. Choose the right type or upload a property tax bill, registry or title record.", "Replace document"),
     "EVIDENCE_UNREADABLE": ("We couldn't read your document. Upload the PDF from the official website or a clear photo of the full document.", "Upload document"),
     "SUPPLEMENTARY_EVIDENCE_ONLY": ("A utility bill alone can't confirm the property. Add a property tax bill, registry record, title deed or building record.", "Add evidence"),
-    "EVIDENCE_REUSED": ("This document is already used for another property. Upload this property's own document.", "Replace document"),
+    "EVIDENCE_REUSED": ("We need to review your property evidence. You can leave this page; we'll update the status here.", "Go to dashboard"),
     "POSSIBLE_DUPLICATE": ("This property looks like one already on Zoiko Rooms. Answer the duplicate question on the property details step.", "Answer question"),
     "PROVIDER_UNAVAILABLE": ("Location search is temporarily unavailable. Your progress is saved. Try again or enter the address manually.", "Try again"),
     "SECOND_APPROVAL_REQUIRED": ("We need to review this property information. You can leave this page; we'll update the status here.", "Go to dashboard"),
     "ADDRESS_CHANGED": ("The property address changed, so the property needs to be verified again.", "Reverify property"),
     "VERIFICATION_EXPIRED": ("This property's verification has expired. Renew it to keep listing.", "Renew verification"),
+    "ADDRESS_COMPONENTS_CONFLICT": ("The city, region and postal code don't match each other. Check the address or use the suggested correction.", "Review address"),
     # reviewer codes (Section 16)
     "REVIEW_ADDRESS_MATCHES": ("Address and property checks are complete.", ""),
     "REVIEW_EVIDENCE_CORROBORATED": ("Address and property checks are complete.", ""),
@@ -105,27 +110,46 @@ def describe(codes: list[str]) -> dict:
 
 # -- Property Regulatory Packs (Section 9) ---------------------------------------
 
+# Section 17: field order and local field names per country.
+_DEFAULT_ORDER = ["address_line_1", "address_line_2", "locality", "administrative_area", "postal_code"]
+_LABELS = {
+    "*": {"address_line_1": "Address line 1", "address_line_2": "Address line 2", "locality": "City / locality",
+          "administrative_area": "Region / state", "postal_code": "Postal code"},
+    "GB": {"address_line_1": "Address line 1", "address_line_2": "Address line 2", "locality": "Town / city",
+           "administrative_area": "County (optional)", "postal_code": "Postcode"},
+    "IN": {"address_line_1": "House / flat no., street", "address_line_2": "Area / locality / village",
+           "locality": "City / town", "administrative_area": "State", "postal_code": "PIN code"},
+    "US": {"address_line_1": "Street address", "address_line_2": "Apt, suite, unit (optional)", "locality": "City",
+           "administrative_area": "State", "postal_code": "ZIP code"},
+}
+# Evidence files are deleted this long after the decision (Section 13 retention).
+_RETENTION_DAYS = 730
+
 _BASE_EVIDENCE = ["LAND_REGISTRY_RECORD", "PROPERTY_TAX_RECORD", "BUILDING_UNIT_RECORD", "TITLE_DEED",
                   "MORTGAGE_INSURANCE_STATEMENT", "UTILITY_BILL"]
 _SEED_PACKS = (
     {"country_code": "*", "country_name": "Other countries",
      "required_address_fields": ["address_line_1", "locality", "country_code"],
-     "accepted_evidence_types": _BASE_EVIDENCE, "unit_required_for": ["APARTMENT"], "pin_move_review_meters": 75},
+     "accepted_evidence_types": _BASE_EVIDENCE, "unit_required_for": ["APARTMENT"], "pin_move_review_meters": 75,
+     "address_field_order": _DEFAULT_ORDER, "address_labels": _LABELS["*"], "evidence_retention_days": _RETENTION_DAYS},
     {"country_code": "GB", "country_name": "United Kingdom",
      "required_address_fields": ["address_line_1", "locality", "postal_code", "country_code"],
      "accepted_evidence_types": ["LAND_REGISTRY_RECORD", "PROPERTY_TAX_RECORD", "TITLE_DEED", "BUILDING_UNIT_RECORD",
                                  "MORTGAGE_INSURANCE_STATEMENT", "UTILITY_BILL"],
-     "unit_required_for": ["APARTMENT"], "pin_move_review_meters": 50},
+     "unit_required_for": ["APARTMENT"], "pin_move_review_meters": 50,
+     "address_field_order": _DEFAULT_ORDER, "address_labels": _LABELS["GB"], "evidence_retention_days": _RETENTION_DAYS},
     {"country_code": "IN", "country_name": "India",
      "required_address_fields": ["address_line_1", "locality", "administrative_area", "postal_code", "country_code"],
      "accepted_evidence_types": ["LAND_REGISTRY_RECORD", "PROPERTY_TAX_RECORD", "TITLE_DEED", "BUILDING_UNIT_RECORD",
                                  "MORTGAGE_INSURANCE_STATEMENT", "UTILITY_BILL"],
-     "unit_required_for": ["APARTMENT"], "pin_move_review_meters": 100},
+     "unit_required_for": ["APARTMENT"], "pin_move_review_meters": 100,
+     "address_field_order": _DEFAULT_ORDER, "address_labels": _LABELS["IN"], "evidence_retention_days": _RETENTION_DAYS},
     {"country_code": "US", "country_name": "United States",
      "required_address_fields": ["address_line_1", "locality", "administrative_area", "postal_code", "country_code"],
      "accepted_evidence_types": ["PROPERTY_TAX_RECORD", "TITLE_DEED", "BUILDING_UNIT_RECORD",
                                  "MORTGAGE_INSURANCE_STATEMENT", "UTILITY_BILL"],
-     "unit_required_for": ["APARTMENT"], "pin_move_review_meters": 50},
+     "unit_required_for": ["APARTMENT"], "pin_move_review_meters": 50,
+     "address_field_order": _DEFAULT_ORDER, "address_labels": _LABELS["US"], "evidence_retention_days": _RETENTION_DAYS},
 )
 
 
@@ -149,7 +173,7 @@ def get_pack(db: Session, country_code: str) -> PropertyRegulatoryPack:
 def update_pack(db: Session, pack: PropertyRegulatoryPack, changes: dict) -> PropertyRegulatoryPack:
     editable = ("country_name", "required_address_fields", "accepted_evidence_types", "unit_required_for",
                 "pin_move_review_meters", "public_location_decimals", "validity_days", "expiring_soon_days",
-                "evidence_retention_days")
+                "evidence_retention_days", "address_field_order", "address_labels")
     unknown = set(changes) - set(editable)
     if unknown:
         raise ValueError(f"Not editable: {sorted(unknown)}")
@@ -159,6 +183,12 @@ def update_pack(db: Session, pack: PropertyRegulatoryPack, changes: dict) -> Pro
         raise ValueError("Unknown property kind")
     if "public_location_decimals" in changes and not 0 <= int(changes["public_location_decimals"]) <= 3:
         raise ValueError("public_location_decimals must be 0-3 (3 is ~110 m)")
+    if "address_field_order" in changes and sorted(changes["address_field_order"]) != sorted(_DEFAULT_ORDER):
+        raise ValueError(f"address_field_order must list exactly {', '.join(_DEFAULT_ORDER)}")
+    if "address_labels" in changes and (set(changes["address_labels"]) - set(_DEFAULT_ORDER)
+                                        or not all(isinstance(x, str) and 0 < len(x) <= 60
+                                                   for x in changes["address_labels"].values())):
+        raise ValueError("address_labels: names (up to 60 characters) for the address fields only")
     data = {f: getattr(pack, f) for f in editable}
     data.update(changes)
     pack.active = False
@@ -169,7 +199,7 @@ def update_pack(db: Session, pack: PropertyRegulatoryPack, changes: dict) -> Pro
 
 
 def country_for_property(prop: Property) -> str:
-    return prop.country_code or JURISDICTION_COUNTRY.get(prop.jurisdiction_code, "")
+    return prop.country_code or loc.country_for_jurisdiction(prop.jurisdiction_code)
 
 
 # -- helpers ----------------------------------------------------------------------
@@ -215,8 +245,12 @@ def _touch(v: PropertyLocationVerification) -> None:
 
 
 def _check_version(v: PropertyLocationVerification, expected: int | None) -> None:
-    """Section 13.3: a stale client never silently overwrites newer data."""
-    if expected is not None and expected != v.version:
+    """Section 13.3: a stale client never silently overwrites newer data --
+    every write must say which version it read."""
+    if expected is None:
+        raise HTTPException(status.HTTP_428_PRECONDITION_REQUIRED,
+                            "Reload this verification and try again (If-Match is required)")
+    if expected != v.version:
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "This verification changed in another window. Reload to see the latest version.")
 
@@ -236,10 +270,21 @@ def effective_state(v: PropertyLocationVerification | None, now: datetime | None
         expires = _utc(v.expires_at)
         if expires <= now:
             return "EXPIRED"
-        pack_days = 30
-        if expires - now <= timedelta(days=pack_days):
+        if expires - now <= timedelta(days=_expiring_soon_days(object_session(v), v.country_code)):
             return "EXPIRING_SOON"
     return v.state
+
+
+def _expiring_soon_days(db: Session | None, country_code: str) -> int:
+    """The pack's renewal threshold, read without seeding (runs on every status read)."""
+    if db is None:
+        return 30
+    for code in ((country_code or "").upper(), "*"):
+        days = db.scalar(select(PropertyRegulatoryPack.expiring_soon_days).where(
+            PropertyRegulatoryPack.country_code == code, PropertyRegulatoryPack.active.is_(True)))
+        if days is not None:
+            return days
+    return 30
 
 
 def get_owned_property(db: Session, user: UserAccount, property_id: int) -> Property:
@@ -337,7 +382,7 @@ def set_address(db: Session, user: UserAccount, v: PropertyLocationVerification,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "entryMode must be SELECTED or MANUAL")
     prop = db.get(Property, v.property_id)
     submitted = _clean_address(address)
-    expected_country = JURISDICTION_COUNTRY.get(prop.jurisdiction_code, "")
+    expected_country = loc.country_for_jurisdiction(prop.jurisdiction_code)
     if expected_country and submitted["country_code"] and submitted["country_code"] != expected_country:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             f"This property is listed in {loc.COUNTRY_NAMES.get(expected_country, expected_country)}, "
@@ -359,7 +404,7 @@ def set_address(db: Session, user: UserAccount, v: PropertyLocationVerification,
     v.address_confirmed_at = None
     v.pin_status = ""
     v.confirmed_latitude = v.confirmed_longitude = None
-    v.reason_codes = [c for c in (v.reason_codes or []) if c not in ("ADDRESS_NOT_FOUND", "PROVIDER_UNAVAILABLE")]
+    v.reason_codes = [c for c in (v.reason_codes or []) if c not in _LOCATION_STEP_CODES]
     _event(db, "ADDRESS_SELECTED" if entry_mode == "SELECTED" else "ADDRESS_MANUALLY_ENTERED", v, actor=user,
            correlation_id=correlation_id)
 
@@ -389,6 +434,14 @@ def set_address(db: Session, user: UserAccount, v: PropertyLocationVerification,
     v.suggested_address = result.suggestion.as_dict() if result.suggestion else {}
     v.provider = result.provider
     v.provider_checked_at = _now()
+    step_codes = []
+    if result.status == "PARTIAL":
+        step_codes.append("ADDRESS_PARTIAL")
+    if result.suggestion and _components_conflict(canonical, v.suggested_address):
+        # Section 20 "wrong city/country combination": the region / postal
+        # code contradict each other -- the host must correct it.
+        step_codes.append("ADDRESS_COMPONENTS_CONFLICT")
+    v.reason_codes = list(dict.fromkeys([*(v.reason_codes or []), *step_codes]))
     _event(db, "ADDRESS_VALIDATED", v, actor=user, correlation_id=correlation_id,
            extra={"addressStatus": result.status, "provider": result.provider, "correctionSuggested": bool(result.suggestion)})
     _apply_geocode(db, v, result.location, user=user, correlation_id=correlation_id)
@@ -396,6 +449,32 @@ def set_address(db: Session, user: UserAccount, v: PropertyLocationVerification,
     db.commit()
     db.refresh(v)
     return v
+
+
+# Reason codes that describe the current address / location step; they're
+# recomputed whenever the address is entered again.
+_LOCATION_STEP_CODES = ("ADDRESS_NOT_FOUND", "PROVIDER_UNAVAILABLE", "ADDRESS_PARTIAL", "GEOCODE_AMBIGUOUS",
+                        "LOW_LOCATION_CONFIDENCE", "ADDRESS_COMPONENTS_CONFLICT", "HOUSE_NUMBER_NOT_ON_MAP")
+# When the map has no house-level point, the host places the marker on the
+# property, and the map's point is only a starting place: a street-level point
+# can be ~1.5 km off; an area-level one (a neighbourhood / village centre) can
+# be several km off -- e.g. "Kalimandir, Bandlaguda Jagir" sits ~2 km from a
+# house in that colony. Within these, the same-postal-area check and the
+# document decide; beyond them the move needs review.
+STREET_PIN_MOVE_METERS = 1500
+APPROXIMATE_PIN_MOVE_METERS = 10_000
+# A nudge this small (e.g. to the front door) never counts as "another address".
+SMALL_PIN_MOVE_METERS = 25
+
+
+def _components_conflict(entered: dict, suggested: dict) -> bool:
+    """The provider replaced the region or postal code -- not just a spelling
+    fix -- so what was entered contradicts itself."""
+    for field in ("administrative_area", "postal_code"):
+        a, b = _norm(entered.get(field)), _norm(suggested.get(field))
+        if a and b and a.replace(" ", "") != b.replace(" ", ""):
+            return True
+    return False
 
 
 def _apply_geocode(db: Session, v: PropertyLocationVerification, location: loc.CanonicalLocation | None, *,
@@ -412,13 +491,24 @@ def _apply_geocode(db: Session, v: PropertyLocationVerification, location: loc.C
         v.original_latitude = v.original_longitude = None
         if "PROVIDER_UNAVAILABLE" not in (v.reason_codes or []):
             v.reason_codes = list(dict.fromkeys([*(v.reason_codes or []), "ADDRESS_NOT_FOUND"]))
-        _event(db, "GEOCODE_AMBIGUOUS", v, actor=user, correlation_id=correlation_id, reason_codes=["NOT_FOUND"])
+        _event(db, "GEOCODE_NOT_FOUND", v, actor=user, correlation_id=correlation_id, reason_codes=["NOT_FOUND"])
         return
     v.geocode_status = location.geocode_status
     v.location_precision = location.precision
     v.original_latitude, v.original_longitude = location.latitude, location.longitude
     if location.place_id and not v.provider_place_id:
         v.provider_place_id = location.place_id[:300]
+    codes = [c for c in (v.reason_codes or [])
+             if c not in ("GEOCODE_AMBIGUOUS", "LOW_LOCATION_CONFIDENCE", "HOUSE_NUMBER_NOT_ON_MAP")]
+    if location.geocode_status == "AMBIGUOUS":
+        codes.append("GEOCODE_AMBIGUOUS")
+    elif location.house_number_matched is False:
+        # The provider snapped to a nearby building (Indian door numbers are
+        # often missing from map data) -- the host must place the marker.
+        codes.append("HOUSE_NUMBER_NOT_ON_MAP")
+    elif location.precision not in loc.AUTO_ACCEPT_PRECISIONS:
+        codes.append("LOW_LOCATION_CONFIDENCE")
+    v.reason_codes = codes
     _event(db, "GEOCODE_RESOLVED" if location.geocode_status == "RESOLVED" else "GEOCODE_AMBIGUOUS", v, actor=user,
            correlation_id=correlation_id, extra={"precision": location.precision})
 
@@ -431,6 +521,7 @@ def confirm_address(db: Session, user: UserAccount, v: PropertyLocationVerificat
     _editable(v)
     if not v.canonical_address:
         raise HTTPException(status.HTTP_409_CONFLICT, "Find the property address first")
+    offered = bool(v.suggested_address)
     if use_suggestion:
         if not v.suggested_address:
             raise HTTPException(status.HTTP_409_CONFLICT, "There is no suggested correction to accept")
@@ -438,8 +529,12 @@ def confirm_address(db: Session, user: UserAccount, v: PropertyLocationVerificat
         v.suggested_address = {}
         if v.address_status == "PARTIAL":
             v.address_status = "VALIDATED"
+        v.reason_codes = [c for c in (v.reason_codes or []) if c not in ("ADDRESS_COMPONENTS_CONFLICT", "ADDRESS_PARTIAL")]
         _apply_geocode(db, v, None, user=user, correlation_id=correlation_id)
     v.address_confirmed_at = _now()
+    # Section 18 "address-validation correction acceptance rate".
+    _event(db, "ADDRESS_CONFIRMED", v, actor=user, correlation_id=correlation_id,
+           extra={"correctionOffered": offered, "correctionAccepted": bool(use_suggestion)})
     _touch(v)
     db.commit()
     db.refresh(v)
@@ -465,6 +560,9 @@ def confirm_location(db: Session, user: UserAccount, v: PropertyLocationVerifica
         if v.original_latitude is None:
             raise HTTPException(status.HTTP_409_CONFLICT,
                                 "We couldn't place this address on the map. Place the marker on the property instead.")
+        if "HOUSE_NUMBER_NOT_ON_MAP" in (v.reason_codes or []):
+            # The point is another building; "This is correct" would record it as the property.
+            raise HTTPException(status.HTTP_409_CONFLICT, REASONS["HOUSE_NUMBER_NOT_ON_MAP"][0])
         v.confirmed_latitude, v.confirmed_longitude = v.original_latitude, v.original_longitude
         v.pin_moved_meters = 0.0
         v.pin_status = "AUTO_CONFIRMED" if v.location_precision in loc.AUTO_ACCEPT_PRECISIONS and \
@@ -487,7 +585,16 @@ def confirm_location(db: Session, user: UserAccount, v: PropertyLocationVerifica
             review = True  # placed by hand with no provider result to compare against
         else:
             v.pin_moved_meters = round(loc.distance_meters(v.original_latitude, v.original_longitude, latitude, longitude), 1)
-            review = v.pin_moved_meters > pack.pin_move_review_meters
+            # A house-level map point allows only small corrections; an
+            # area-level one (no house number on the map) is only a starting
+            # point, so the host may place the marker anywhere in the area.
+            if v.location_precision in loc.AUTO_ACCEPT_PRECISIONS:
+                allowed = pack.pin_move_review_meters
+            elif v.location_precision == "STREET":
+                allowed = max(pack.pin_move_review_meters, STREET_PIN_MOVE_METERS)
+            else:
+                allowed = max(pack.pin_move_review_meters, APPROXIMATE_PIN_MOVE_METERS)
+            review = v.pin_moved_meters > allowed
         try:
             reversed_address, _code = loc.reverse(latitude, longitude)
         except loc.LocationUnavailable:
@@ -495,16 +602,37 @@ def confirm_location(db: Session, user: UserAccount, v: PropertyLocationVerifica
         if reversed_address is not None:
             v.pin_reverse_geocode = reversed_address.formatted[:500] or reversed_address.one_line()[:500]
             canonical = v.canonical_address or {}
-            cross_address = (
-                (reversed_address.postal_code and canonical.get("postal_code")
-                 and reversed_address.postal_code.replace(" ", "").lower() != canonical["postal_code"].replace(" ", "").lower())
-                or (reversed_address.locality and canonical.get("locality")
+            # "Another address" = another postal area. Compared at area level
+            # per country (a UK postcode covers ~15 houses, so a few metres to
+            # the front door can cross one), and only for a real move or a
+            # hand-placed pin. Town / village names aren't compared when both
+            # postal codes are known: map data names the same place
+            # differently (e.g. "Madupalli" vs "Madhira").
+            country = canonical.get("country_code") or v.country_code
+            pin_area = loc.postal_area(reversed_address.postal_code, country)
+            our_area = loc.postal_area(canonical.get("postal_code"), country)
+            # Where postal codes are fine-grained, a few metres can cross one
+            # even at area level (e.g. 221B Baker Street sits on NW1 / W1U);
+            # area-level codes (India's PIN) count at any distance.
+            real_move = (country not in loc.FINE_GRAINED_POSTAL_COUNTRIES or v.pin_moved_meters is None
+                         or v.pin_moved_meters > SMALL_PIN_MOVE_METERS)
+            if pin_area and our_area:
+                cross_address = real_move and pin_area != our_area
+            else:
+                cross_address = real_move and bool(
+                    reversed_address.locality and canonical.get("locality")
                     and _norm(reversed_address.locality) != _norm(canonical["locality"]))
-            )
             review = review or bool(cross_address)
         if v.pin_adjust_count >= 4:
             review = True  # repeated edits are a signal (Section 8)
         v.pin_status = "REVIEW_REQUIRED" if review else "ADJUSTED"
+        # Every adjustment is kept (Section 6.4); the latest one never
+        # overwrites the earlier ones or the provider's original result.
+        v.pin_adjust_history = [*(v.pin_adjust_history or []), {
+            "at": _now().isoformat(), "latitude": float(latitude), "longitude": float(longitude),
+            "movedMeters": v.pin_moved_meters, "reverseGeocode": v.pin_reverse_geocode, "reason": v.pin_adjust_reason,
+            "reviewRequired": review, "device": device or {},
+        }][-20:]
         codes = [c for c in (v.reason_codes or []) if c != "PIN_MOVED_TOO_FAR"]
         v.reason_codes = codes + (["PIN_MOVED_TOO_FAR"] if review else [])
         _event(db, "PIN_ADJUSTED", v, actor=user, correlation_id=correlation_id,
@@ -683,6 +811,11 @@ def add_evidence(db: Session, user: UserAccount, v: PropertyLocationVerification
     if not sniffed:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unsupported file -- upload a PDF, JPG or PNG")
     extension, content_type = sniffed
+    from app.core import upload_scan
+    from app.services.authority_service import _tamper_signal
+
+    scan_status = upload_scan.inspect(content, content_type)  # Section 14 / P0 #11: unsafe files rejected
+    tamper = _tamper_signal(content, content_type)
     content = _strip_image_metadata(content, extension)
     if len(v.evidence) >= 10:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You can add up to 10 documents")
@@ -706,6 +839,7 @@ def add_evidence(db: Session, user: UserAccount, v: PropertyLocationVerification
         owner_name_matched=a.owner_name_matched, document_type_matched=a.document_type_matched,
         document_year=a.document_year, signals=a.signals,
         reference_number=(a.reference_number + (f" (council tax band {a.council_tax_band})" if a.council_tax_band else ""))[:40],
+        scan_status=scan_status, tamper_signal=tamper,
     )
     db.add(evidence)
     db.flush()
@@ -724,11 +858,15 @@ def remove_evidence(db: Session, user: UserAccount, v: PropertyLocationVerificat
     _check_version(v, expected_version)
     _editable(v)
     evidence = db.get(PropertyLocationEvidence, evidence_id)
-    if evidence is None or evidence.verification_id != v.id:
+    if evidence is None or evidence.verification_id != v.id or evidence.removed_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
     if evidence.stored_filename:
         (Path(settings.property_location_upload_dir) / evidence.stored_filename).unlink(missing_ok=True)
-    db.delete(evidence)
+    # Soft delete: the file goes, the hash and match results stay so the same
+    # document is still caught if it's reused elsewhere (Section 14).
+    evidence.stored_filename = None
+    evidence.removed_at = _now()
+    _event(db, "PROPERTY_EVIDENCE_REMOVED", v, actor=user, extra={"evidenceId": evidence.id})
     _touch(v)
     db.commit()
 
@@ -750,18 +888,22 @@ def decide(v: PropertyLocationVerification, pack: PropertyRegulatoryPack) -> tup
 
     Property existence is decided from the document evidence, read by OCR or
     from the PDF's own text (services/property_document_analysis.py). The
-    result is always automatic -- VERIFIED, or ACTION_REQUIRED with one clear
-    thing for the host to fix -- never a wait for a manual reviewer:
+    result of reading the document is always automatic -- VERIFIED, or
+    ACTION_REQUIRED with one clear thing for the host to fix -- never a wait for a reviewer.
+    Fraud / duplicate signals are different (Sections 14, 20): reused
+    evidence, a possible duplicate the host says is a different property, a
+    conflicting property at the same spot, an edited document or a property
+    rejected before go to MANUAL_REVIEW:
 
     - a clear, recent primary document (tax / registry / title / building
       record) of the chosen type that shows the confirmed address and postal
       code (and the unit, when one is given) verifies the property, even when
       the map provider couldn't place it precisely (Section 7.1: no
       auto-reject just because a provider lacks coverage);
-    - anything that can't be confirmed, or a fraud/duplicate signal, asks the
-      host for the specific fix.
+    - anything that can't be confirmed asks the host for the specific fix.
     """
     action: list[str] = []
+    review: list[str] = []
     evidence = list(v.evidence)
     primary = [e for e in evidence if e.evidence_type not in SUPPLEMENTARY_EVIDENCE_TYPES]
     good = [e for e in primary if e.quality != "POOR" and e.readable]
@@ -791,16 +933,24 @@ def decide(v: PropertyLocationVerification, pack: PropertyRegulatoryPack) -> tup
     if v.unit and typed and not any(e.unit_matched for e in typed):
         action.append("UNIT_NOT_CONFIRMED")
 
-    # -- fraud / duplicate signals: resolved by the host, automatically re-checked
+    # -- fraud / duplicate signals: a reviewer resolves them (Sections 14, 20)
     if any(e.reused_elsewhere for e in evidence):
-        action.append("EVIDENCE_REUSED")
+        review.append("EVIDENCE_REUSED")
+    if any(e.tamper_signal or e.scan_status == "ERROR" for e in evidence):
+        review.append("EVIDENCE_REVIEW")
     if v.duplicate_of_property_id:
         if v.duplicate_host_answer == "SAME_PROPERTY":
             action.append("SAME_PROPERTY_DECLARED")
-        elif v.duplicate_host_answer != "NOT_SAME_PROPERTY":
+        elif v.duplicate_host_answer == "NOT_SAME_PROPERTY":
+            review.append("DUPLICATE_REVIEW")  # the host's answer is checked, not trusted
+        else:
             action.append("POSSIBLE_DUPLICATE")
     if "NEARBY_PROPERTY_CONFLICT" in (v.reason_codes or []):
-        action.append("NEARBY_PROPERTY_CONFLICT")
+        review.append("NEARBY_PROPERTY_CONFLICT")
+    if "PREVIOUSLY_REJECTED" in (v.reason_codes or []):
+        review.append("PREVIOUSLY_REJECTED")
+    if "ADDRESS_COMPONENTS_CONFLICT" in (v.reason_codes or []):
+        action.append("ADDRESS_COMPONENTS_CONFLICT")
     # A marker dragged far from (or onto another address than) where the map
     # placed it (Section 14). A pin placed by hand because the map couldn't
     # find the address at all is allowed -- the document confirms it.
@@ -808,8 +958,42 @@ def decide(v: PropertyLocationVerification, pack: PropertyRegulatoryPack) -> tup
         action.append("PIN_MOVED_TOO_FAR")
 
     if action:
-        return "ACTION_REQUIRED", "INSUFFICIENT", list(dict.fromkeys(action))
+        return "ACTION_REQUIRED", "INSUFFICIENT", list(dict.fromkeys(action + review))
+    if review:
+        return "MANUAL_REVIEW", "INSUFFICIENT", list(dict.fromkeys(review))
     return "VERIFIED", "EVIDENCE_CONFIRMED", []
+
+
+def _reread_unmatched_evidence(db: Session, v: PropertyLocationVerification) -> None:
+    """Documents read against an earlier address, or before the matching
+    improved (e.g. landmark words were required), are read again so a
+    stale "doesn't match" doesn't stick. Only the outcomes are stored."""
+    from app.services.authority_service import _verified_legal_name
+    from app.services.property_document_analysis import analyze
+
+    for e in v.evidence:
+        if e.address_matched is not False or not e.stored_filename:
+            continue
+        content = read_evidence(e)
+        if content is None:
+            continue
+        a = analyze(content, e.content_type, evidence_type=e.evidence_type, canonical_address=v.canonical_address or {},
+                    unit=v.unit, owner_name=_verified_legal_name(db, v.party_id))
+        e.readable, e.address_matched, e.unit_matched = a.readable, a.address_matched, a.unit_matched
+        e.postal_matched, e.owner_name_matched, e.document_type_matched = (
+            a.postal_matched, a.owner_name_matched, a.document_type_matched)
+        e.quality, e.signals = a.quality, a.signals
+
+
+def _previously_rejected(db: Session, v: PropertyLocationVerification) -> bool:
+    """Section 8 historical consistency: this property / address + unit was
+    rejected by a reviewer before."""
+    query = select(func.count(PropertyLocationVerification.id)).where(
+        PropertyLocationVerification.id != v.id, PropertyLocationVerification.state == "REJECTED")
+    match = PropertyLocationVerification.property_id == v.property_id
+    if v.address_fingerprint:
+        match = match | (PropertyLocationVerification.address_fingerprint == v.address_fingerprint)
+    return (db.scalar(query.where(match)) or 0) > 0
 
 
 def submit(db: Session, user: UserAccount, v: PropertyLocationVerification, *, attested: bool,
@@ -834,10 +1018,12 @@ def submit(db: Session, user: UserAccount, v: PropertyLocationVerification, *, a
     if missing:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Before submitting, " + ", ".join(missing) + ".")
     pack = get_pack(db, v.country_code)
+    _reread_unmatched_evidence(db, v)
     _source_check(db, v, user, correlation_id)
     nearby = _nearby_conflict(db, v)
-    v.reason_codes = [c for c in (v.reason_codes or []) if c != "NEARBY_PROPERTY_CONFLICT"] + (
-        ["NEARBY_PROPERTY_CONFLICT"] if nearby else [])
+    rejected_before = _previously_rejected(db, v)
+    v.reason_codes = [c for c in (v.reason_codes or []) if c not in ("NEARBY_PROPERTY_CONFLICT", "PREVIOUSLY_REJECTED")] + (
+        ["NEARBY_PROPERTY_CONFLICT"] if nearby else []) + (["PREVIOUSLY_REJECTED"] if rejected_before else [])
     previous = v.state
     state, existence, codes = decide(v, pack)
     now = _now()
@@ -933,9 +1119,19 @@ def _write_canonical_to_property(db: Session, v: PropertyLocationVerification, *
                                "termsStorageClass": "PLACE_ID" if v.provider == "google" else "OPEN_DATA",
                                "checkedAt": (v.provider_checked_at or _now()).isoformat()}]
     prop.location_version += 1
+    # Section 20 transliteration: keep the host's own wording (local script)
+    # when the provider normalized it into a different form.
+    submitted = v.submitted_address or {}
+    local = ", ".join(x for x in (submitted.get("address_line_1"), submitted.get("address_line_2"),
+                                  submitted.get("locality")) if x)
+    prop.address_local = (local if local and _norm(local) != _norm(display + ", " + prop.city) else "")[:600]
     if changed:
+        from app.services.authority_service import reopen_for_address_change
+
         invalidate_for_address_change(db, prop.id, actor_user_id=user.id, correlation_id=correlation_id)
         invalidate_property(db, prop.id, reason="ADDRESS_CHANGED", except_id=v.id, correlation_id=correlation_id)
+        # Section 13.3: authority for the old address doesn't silently transfer.
+        reopen_for_address_change(db, prop.id, correlation_id=correlation_id)
 
 
 def invalidate_property(db: Session, property_id: int, *, reason: str = "ADDRESS_CHANGED", except_id: int | None = None,
@@ -961,6 +1157,48 @@ def invalidate_property(db: Session, property_id: int, *, reason: str = "ADDRESS
 
 # -- Trust & Safety review (Section 16) -------------------------------------------
 
+FOUR_EYES_CODES = ("EVIDENCE_REUSED", "EVIDENCE_REVIEW", "DUPLICATE_REVIEW", "NEARBY_PROPERTY_CONFLICT",
+                   "PREVIOUSLY_REJECTED")
+
+
+def assign(db: Session, admin: AdminUser, v: PropertyLocationVerification, *, release: bool = False,
+           correlation_id: str = "") -> PropertyLocationVerification:
+    """Section 16: least privilege -- one reviewer holds a case at a time;
+    taking a case someone else holds reassigns it (audited)."""
+    if admin.role != "super_admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
+    if release:
+        if v.assigned_admin_id not in (None, admin.id):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Only the assigned reviewer can release this case")
+        v.assigned_admin_id, v.assigned_at = None, None
+        _event(db, "PROPERTY_REVIEW_RELEASED", v, actor=admin, correlation_id=correlation_id)
+    else:
+        if v.state != "MANUAL_REVIEW":
+            raise HTTPException(status.HTTP_409_CONFLICT, "Only a case in review can be assigned")
+        previous = v.assigned_admin_id
+        v.assigned_admin_id, v.assigned_at = admin.id, _now()
+        _event(db, "PROPERTY_REVIEW_ASSIGNED", v, actor=admin, correlation_id=correlation_id,
+               extra={"reassignedFrom": previous} if previous and previous != admin.id else None)
+    _touch(v)
+    db.commit()
+    db.refresh(v)
+    return v
+
+
+def require_assignment(db: Session, admin: AdminUser, v: PropertyLocationVerification, *,
+                       correlation_id: str = "") -> None:
+    """Opening evidence or deciding needs the case; an unassigned case in
+    review is taken by the reviewer who opens it."""
+    if v.assigned_admin_id == admin.id:
+        return
+    if v.assigned_admin_id is not None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This case is assigned to another reviewer -- reassign it to yourself first")
+    if v.state == "MANUAL_REVIEW":
+        assign(db, admin, v, correlation_id=correlation_id)
+        return
+    raise HTTPException(status.HTTP_403_FORBIDDEN, "Evidence is only available for a case assigned to you")
+
+
 def review(db: Session, admin: AdminUser, v: PropertyLocationVerification, *, decision: str, reason_code: str,
            note: str = "", correlation_id: str = "") -> PropertyLocationVerification:
     if admin.role != "super_admin":
@@ -972,15 +1210,20 @@ def review(db: Session, admin: AdminUser, v: PropertyLocationVerification, *, de
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"reasonCode must be one of {REVIEW_REASONS[decision]}")
     if v.state != "MANUAL_REVIEW":
         raise HTTPException(status.HTTP_409_CONFLICT, f"This verification is {v.state} and can't be reviewed")
+    if decision == "APPROVE" and v.first_approver_admin_id is not None and v.first_approver_admin_id == admin.id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "A second, different reviewer must approve this property")
+    require_assignment(db, admin, v, correlation_id=correlation_id)
     previous = v.state
     v.reviewer_admin_id = admin.id
     v.review_reason_code = reason_code
     v.review_note = note.strip()[:1000]
     pack = get_pack(db, v.country_code)
     if decision == "APPROVE":
-        # Four-eyes for conflicted duplicate-property cases (Section 16).
-        if v.duplicate_of_property_id and v.first_approver_admin_id is None:
+        # Four-eyes for duplicate / fraud cases (Section 16 high-risk overrides).
+        needs_two = bool(v.duplicate_of_property_id) or any(c in (v.reason_codes or []) for c in FOUR_EYES_CODES)
+        if needs_two and v.first_approver_admin_id is None:
             v.first_approver_admin_id = admin.id
+            v.assigned_admin_id, v.assigned_at = None, None  # free for the second reviewer
             v.reason_codes = list(dict.fromkeys([*(v.reason_codes or []), "SECOND_APPROVAL_REQUIRED"]))
             _event(db, "PROPERTY_REVIEW_FIRST_APPROVAL", v, actor=admin, reason_codes=[reason_code],
                    previous_state=previous, new_state=v.state, correlation_id=correlation_id)
@@ -1028,16 +1271,60 @@ def restart(db: Session, user: UserAccount, v: PropertyLocationVerification, *, 
 # -- jobs ------------------------------------------------------------------------
 
 def sweep_expired(db: Session) -> int:
+    """Section 7: EXPIRED once the validity ends (live listings on the
+    property pause -- the publish gate no longer passes), and a one-time
+    "expiring soon" notice inside the pack's renewal window."""
+    from app.crud import notification as notif_crud
+
+    now = _now()
     rows = list(db.scalars(select(PropertyLocationVerification).where(
-        PropertyLocationVerification.state == "VERIFIED", PropertyLocationVerification.expires_at <= _now())))
+        PropertyLocationVerification.state == "VERIFIED", PropertyLocationVerification.expires_at.is_not(None))))
+    expired = 0
     for v in rows:
-        v.state = "EXPIRED"
-        v.reason_codes = ["VERIFICATION_EXPIRED"]
-        _touch(v)
-        _event(db, "PROPERTY_VERIFICATION_INVALIDATED", v, reason_codes=["VERIFICATION_EXPIRED"],
-               previous_state="VERIFIED", new_state="EXPIRED")
+        expires = _utc(v.expires_at)
+        if expires <= now:
+            v.state = "EXPIRED"
+            v.reason_codes = ["VERIFICATION_EXPIRED"]
+            _touch(v)
+            _event(db, "PROPERTY_VERIFICATION_EXPIRED", v, reason_codes=["VERIFICATION_EXPIRED"],
+                   previous_state="VERIFIED", new_state="EXPIRED")
+            db.flush()
+            paused = _pause_listings(db, v.property_id, "Property verification expired")
+            notif_crud.notify_user_by_party(
+                db, v.party_id, title="Property verification expired",
+                message=REASONS["VERIFICATION_EXPIRED"][0] + (f" {paused} listing(s) paused." if paused else ""),
+                notification_type="property_verification.expired", related_entity_type=RESOURCE,
+                related_entity_id=str(v.id))
+            expired += 1
+        elif (expires - now <= timedelta(days=_expiring_soon_days(db, v.country_code))
+              and v.expiring_notified_at is None):
+            v.expiring_notified_at = now
+            _event(db, "PROPERTY_VERIFICATION_EXPIRING", v, extra={"expiresAt": expires.isoformat()})
+            notif_crud.notify_user_by_party(
+                db, v.party_id, title="Property verification expiring soon",
+                message=f"Your property's verification expires on {expires:%d %b %Y}. Renew it to keep listing.",
+                notification_type="property_verification.expiring", related_entity_type=RESOURCE,
+                related_entity_id=str(v.id))
     db.commit()
-    return len(rows)
+    return expired
+
+
+def _pause_listings(db: Session, property_id: int, reason: str) -> int:
+    """Section 11.2: expired / invalidated verification blocks publication --
+    live listings on the property are suspended (the publish gate re-checks
+    before they can go live again)."""
+    from app.crud.listing import suspend_listing
+    from app.crud.property_verification import get_valid_property_verification_for_room
+    from app.models.listing import Listing
+    from app.models.room import Room
+
+    room_ids = list(db.scalars(select(Room.id).where(Room.property_id == property_id)))
+    count = 0
+    for listing in db.scalars(select(Listing).where(Listing.room_id.in_(room_ids), Listing.state == "PUBLISHED")):
+        if get_valid_property_verification_for_room(db, listing.room_id) is None:
+            suspend_listing(db, listing, reason)
+            count += 1
+    return count
 
 
 def purge_expired_evidence(db: Session) -> int:
@@ -1108,13 +1395,30 @@ def metrics(db: Session, *, days: int = 30) -> dict:
         row["provider_errors"] += int("PROVIDER_UNAVAILABLE" in (v.reason_codes or []))
         row["verified"] += int(v.verified_at is not None)
     duplicates_reviewed = [v for v in rows if v.duplicate_of_property_id and v.decided_at]
+    # Section 18: correction acceptance, from the ADDRESS_CONFIRMED events.
+    from app.models.domain_event import DomainEvent
+
+    confirmations = [e.payload or {} for e in db.scalars(select(DomainEvent).where(
+        DomainEvent.resource_type == RESOURCE, DomainEvent.event_type == "ADDRESS_CONFIRMED",
+        DomainEvent.occurred_at >= since))]
+    offered = [c for c in confirmations if c.get("correctionOffered")]
+    # Reviewer turnaround (hours from submission to the reviewer's decision).
+    turnaround = [(_utc(v.decided_at) - _utc(v.submitted_at)).total_seconds() / 3600
+                  for v in submitted if v.reviewer_admin_id and v.decided_at and v.submitted_at]
+    # Action-required recovery: sessions that needed a fix and then verified.
+    asked = [v for v in submitted if v.state == "ACTION_REQUIRED" or (
+        v.verified_at and db.scalar(select(func.count(DomainEvent.id)).where(
+            DomainEvent.resource_type == RESOURCE, DomainEvent.resource_id == str(v.id),
+            DomainEvent.event_type == "PROPERTY_ACTION_REQUIRED")))]
     return {
         "period_days": days,
         "started": len(rows),
         "submitted": len(submitted),
         "verified": sum(1 for v in rows if v.verified_at),
         "manual_entry_rate": rate(sum(1 for v in rows if v.entry_mode == "MANUAL"), sum(1 for v in rows if v.entry_mode)),
-        "correction_acceptance_rate": None,  # derived from events in the analytics warehouse
+        "correction_acceptance_rate": rate(sum(1 for c in offered if c.get("correctionAccepted")), len(offered)),
+        "median_review_turnaround_hours": round(median(turnaround), 1) if turnaround else None,
+        "action_required_recovery_rate": rate(sum(1 for v in asked if v.verified_at), len(asked)),
         "geocode_precision": precision,
         "pin_adjustment_rate": rate(len(adjusted), sum(1 for v in rows if v.pin_status)),
         "median_pin_move_meters": round(median(moves), 1) if moves else None,

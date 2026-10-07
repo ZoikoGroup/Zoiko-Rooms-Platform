@@ -208,14 +208,16 @@ class TestA7ListingFeeHardGateOnPublication:
         listing_id = r.json()["id"]
         listing = db_session.get(Listing, listing_id)
         listing.market_release_id = release.id
+        from app.crud.occupancy_classification import ensure_default_classification
+
+        ensure_default_classification(db_session, listing.room)
         db_session.commit()
 
         r = client.post(f"/api/users/hosting/listings/{listing_id}/submit-for-review", cookies=cookies)
-        assert r.status_code == 409, r.text
-        assert "listing fee" in r.json()["detail"].lower()
+        assert r.status_code == 200, r.text
 
         db_session.refresh(listing)
-        assert listing.state == "REVIEW"  # submission itself still succeeded; only auto-publish was blocked
+        assert listing.state == "APPROVED"  # approved automatically; waits for the fee, never published unpaid
 
 
 class TestA12WebhookIdempotency:

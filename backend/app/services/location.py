@@ -71,6 +71,9 @@ class CanonicalLocation:
     precision: str  # one of PRECISION_ORDER
     geocode_status: str = "RESOLVED"  # RESOLVED | AMBIGUOUS
     place_id: str = ""
+    # The house / door number the host gave is (True) or isn't (False) the
+    # one at this point; None when there's nothing to compare.
+    house_number_matched: bool | None = None
 
 
 @dataclass
@@ -92,6 +95,52 @@ class ValidationResult:
 
 COUNTRY_NAMES = {"GB": "United Kingdom", "IN": "India", "US": "United States", "IE": "Ireland", "AU": "Australia",
                  "CA": "Canada", "AE": "United Arab Emirates", "SG": "Singapore", "DE": "Germany", "FR": "France"}
+
+
+# Market / region codes that aren't ISO country codes.
+_REGION_COUNTRY = {"ENGLAND": "GB", "SCOTLAND": "GB", "WALES": "GB", "NORTHERN IRELAND": "GB", "UK": "GB",
+                   "UNITED KINGDOM": "GB", "GREAT BRITAIN": "GB", "INDIA": "IN", "USA": "US",
+                   "UNITED STATES": "US"}
+
+
+def country_for_jurisdiction(code: str | None) -> str:
+    """ISO 3166-1 country for a property's region / market code: an ISO code
+    ("DE"), an ISO 3166-2 subdivision ("US-NY", "GB-SCT", "CA-ON") or a UK
+    nation name ("England"). "" when it can't be told."""
+    import re
+
+    value = " ".join((code or "").strip().upper().replace("_", " ").split())
+    if value in _REGION_COUNTRY:
+        return _REGION_COUNTRY[value]
+    if re.fullmatch(r"[A-Z]{2}", value):
+        return value
+    if re.fullmatch(r"[A-Z]{2}-[A-Z0-9]{1,3}", value):
+        return value[:2]
+    return ""
+
+
+# Postal codes that name a street segment / handful of buildings rather than an area.
+FINE_GRAINED_POSTAL_COUNTRIES = ("GB", "US", "CA", "IE", "NL", "PT", "JP", "SG")
+
+
+def postal_area(postal_code: str | None, country: str | None) -> str:
+    """The postal code at "area" level, for deciding whether a moved marker
+    landed at another address. Fine-grained codes would flag a move of a few
+    metres: a UK postcode covers ~15 houses (compare the outward code, "NW1"),
+    a US ZIP+4 a block face (compare the 5-digit ZIP), Canada's FSA ("K1A")."""
+    code = (postal_code or "").upper().replace(" ", "")
+    country = (country or "").upper()
+    if not code:
+        return ""
+    if country == "GB":
+        return code[:-3] if len(code) > 3 else code  # outward code
+    if country == "US":
+        return code[:5]
+    if country == "CA":
+        return code[:3]
+    if country in ("IE",):
+        return code[:3]  # Eircode routing key
+    return code
 
 
 def distance_meters(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -138,8 +187,10 @@ class GoogleLocationProvider(LocationProvider):
         except httpx.HTTPError as exc:
             raise LocationUnavailable(f"google request failed: {type(exc).__name__}") from exc
         if response.status_code >= 400:
-            logger.warning("location: google %s returned HTTP %s", url.split("?")[0].rsplit("/", 1)[-1], response.status_code)
-            raise LocationUnavailable(f"google returned HTTP {response.status_code}")
+            reason, message = _google_error(response)
+            logger.warning("location: google %s returned HTTP %s %s %s", url.split("?")[0].rsplit("/", 1)[-1],
+                           response.status_code, reason, message[:200])
+            raise LocationUnavailable(f"google returned HTTP {response.status_code} {reason}".strip())
         try:
             return response.json()
         except ValueError as exc:
@@ -204,6 +255,15 @@ class GoogleLocationProvider(LocationProvider):
         postal = (result.get("address") or {}).get("postalAddress") or {}
         formatted = (result.get("address") or {}).get("formattedAddress", "")
         std_lines = postal.get("addressLines") or []
+        # Google drops or reorders address parts it can't confirm -- for
+        # Indian addresses often the door number and colony ("4-2-182, Bank
+        # Colony, Kalimandir" came back as line 1 "Kalimandir"). The house
+        # number is the property's identity: if Google's first line no longer
+        # carries the number the host's first line had, keep the host's own
+        # lines and take only the city / state / postal code from Google.
+        entered_numbers = _number_tokens(address.address_line_1) - {(address.postal_code or "").replace(" ", "").lower()}
+        if not std_lines or (entered_numbers and not entered_numbers & _number_tokens(std_lines[0])):
+            std_lines = [line for line in (address.address_line_1, address.address_line_2) if line]
         canonical = CanonicalAddress(
             address_line_1=std_lines[0] if std_lines else address.address_line_1,
             address_line_2=", ".join(std_lines[1:]) if len(std_lines) > 1 else address.address_line_2,
@@ -223,7 +283,22 @@ class GoogleLocationProvider(LocationProvider):
         else:
             status = "UNRESOLVED"
         changed = verdict.get("hasReplacedComponents") or verdict.get("hasInferredComponents") or verdict.get("hasSpellCorrectedComponents")
-        suggestion = canonical if changed and _differs(address, canonical) else None
+        if status != "VALIDATED":
+            # Google couldn't fully confirm this address, so it doesn't get to
+            # rewrite it: keep exactly what the host entered (filling only the
+            # fields they left empty), and offer Google's version as a
+            # correction they can accept on the confirm step. Silently swapping
+            # "Madhira" for "Madupalli" changed the property's address.
+            google_version = canonical
+            canonical = CanonicalAddress(**{
+                **{k: v for k, v in google_version.as_dict().items() if k != "formatted"},
+                **{k: v for k, v in address.as_dict().items() if v and k != "formatted"},
+            })
+            canonical.formatted = canonical.one_line()
+            changed = changed or _differs(canonical, google_version)
+            suggestion = google_version if changed and _differs(canonical, google_version) else None
+        else:
+            suggestion = canonical if changed and _differs(address, canonical) else None
         geo = result.get("geocode") or {}
         location = None
         if (geo.get("location") or {}).get("latitude") is not None:
@@ -231,7 +306,9 @@ class GoogleLocationProvider(LocationProvider):
                 float(geo["location"]["latitude"]), float(geo["location"]["longitude"]),
                 _google_granularity_precision(verdict.get("geocodeGranularity", "")), place_id=geo.get("placeId", ""),
             )
-        return ValidationResult(status, canonical if suggestion is None else address, suggestion, location,
+            self._check_house_number(address, location)
+        keep = canonical if (suggestion is None or status != "VALIDATED") else address
+        return ValidationResult(status, keep, suggestion, location,
                                 provider=self.code)
 
     def _validate_by_geocode(self, address: CanonicalAddress) -> ValidationResult:
@@ -250,21 +327,101 @@ class GoogleLocationProvider(LocationProvider):
         if status == "ZERO_RESULTS":
             return None
         if status != "OK" or not data.get("results"):
+            logger.warning("location: google geocoding status %s %s", status, (data.get("error_message") or "")[:200])
             raise LocationUnavailable(f"google geocoding status {status}")
         results = data["results"]
         top = results[0]
         loc = top["geometry"]["location"]
         ambiguous = len(results) > 1 and bool(top.get("partial_match"))
-        return CanonicalLocation(float(loc["lat"]), float(loc["lng"]), _google_location_type(top),
-                                 "AMBIGUOUS" if ambiguous else "RESOLVED", place_id=top.get("place_id", ""))
+        location = CanonicalLocation(float(loc["lat"]), float(loc["lng"]), _google_location_type(top),
+                                     "AMBIGUOUS" if ambiguous else "RESOLVED", place_id=top.get("place_id", ""))
+        _apply_house_number(address, location, _google_result_numbers(top))
+        return location
+
+    def _check_house_number(self, address: CanonicalAddress, location: CanonicalLocation) -> None:
+        """Address Validation can call a result PREMISE when it has snapped
+        to the nearest building it knows (common for Indian door numbers such
+        as "2-599"). Look up what's actually at that place and downgrade the
+        precision when its number isn't the one entered."""
+        if location.precision not in AUTO_ACCEPT_PRECISIONS or not location.place_id or not house_numbers(address):
+            return
+        try:
+            data = self._call("GET", "https://maps.googleapis.com/maps/api/geocode/json",
+                              params={"place_id": location.place_id, "key": self._key})
+        except LocationUnavailable:
+            return  # can't tell -- leave the provider's precision
+        top = (data.get("results") or [None])[0]
+        if top:
+            _apply_house_number(address, location, _google_result_numbers(top))
 
     def reverse(self, latitude: float, longitude: float) -> CanonicalAddress | None:
         data = self._call("GET", "https://maps.googleapis.com/maps/api/geocode/json",
                           params={"latlng": f"{latitude},{longitude}", "key": self._key})
-        if data.get("status") == "ZERO_RESULTS" or not data.get("results"):
+        status = data.get("status")
+        if status not in ("OK", "ZERO_RESULTS"):
+            # REQUEST_DENIED / OVER_QUERY_LIMIT etc. are outages, not "nothing
+            # here" -- raise so the chain falls back to the next provider.
+            logger.warning("location: google reverse geocoding status %s %s", status,
+                           (data.get("error_message") or "")[:200])
+            raise LocationUnavailable(f"google reverse geocoding status {status}")
+        if status == "ZERO_RESULTS" or not data.get("results"):
             return None
         top = data["results"][0]
         return _google_components(top.get("address_components", []), top.get("formatted_address", ""))
+
+
+def _google_error(response) -> tuple[str, str]:
+    """(reason, message) from a Google error body, e.g. API_KEY_SERVICE_BLOCKED
+    / SERVICE_DISABLED -- never the key itself."""
+    try:
+        error = response.json().get("error") or {}
+    except ValueError:
+        return "", ""
+    reason = next((d.get("reason") for d in error.get("details") or [] if d.get("reason")), "") or error.get("status", "")
+    return reason, error.get("message", "")
+
+
+# -- house / door number check ---------------------------------------------------
+
+def _number_tokens(text: str) -> set[str]:
+    """House / door / flat number-like tokens: anything with a digit, e.g.
+    "2-599", "15/2", "8B" -- normalized so "2 - 599" and "2-599" agree."""
+    import re
+
+    text = re.sub(r"\s*([-/])\s*", r"\1", (text or "").lower())
+    out = set()
+    for token in re.split(r"[\s,;#]+", text):
+        token = token.strip(".()")
+        if any(ch.isdigit() for ch in token) and len(token) <= 15:
+            out.add(token)
+            out.add(re.sub(r"[-/]", "", token))
+    return out
+
+
+def house_numbers(address: CanonicalAddress) -> set[str]:
+    """Numbers the host gave for the building itself (postal codes excluded)."""
+    numbers = _number_tokens(f"{address.subpremise} {address.address_line_1}")
+    postal = (address.postal_code or "").replace(" ", "").lower()
+    return {n for n in numbers if n != postal}
+
+
+def _google_result_numbers(result: dict) -> set[str]:
+    parts = [c.get("long_name", "") for c in result.get("address_components", [])
+             if set(c.get("types", [])) & {"street_number", "premise", "subpremise"}]
+    return _number_tokens(" ".join(parts) + " " + (result.get("formatted_address") or "").split(",")[0]
+                          + " " + ((result.get("formatted_address") or "").split(",")[1:2] or [""])[0])
+
+
+def _apply_house_number(address: CanonicalAddress, location: CanonicalLocation, found: set[str]) -> None:
+    wanted = house_numbers(address)
+    if not wanted or not found or location.precision not in AUTO_ACCEPT_PRECISIONS:
+        return  # nothing to compare -- the provider gave no number for this point
+    if wanted & found:
+        location.house_number_matched = True
+    else:
+        # The point is a nearby building, not this one: it only tells us the area.
+        location.house_number_matched = False
+        location.precision = "APPROXIMATE"
 
 
 def _google_components(components: list[dict], formatted: str) -> CanonicalAddress:
@@ -694,6 +851,67 @@ def geocode(address: CanonicalAddress) -> tuple[CanonicalLocation | None, str]:
 
 def reverse(latitude: float, longitude: float) -> tuple[CanonicalAddress | None, str]:
     return _with_fallback("reverse", latitude, longitude)
+
+
+_GOOGLE_FIX = {
+    "SERVICE_DISABLED": "Enable this API in Google Cloud Console (APIs & Services > Library) for the key's project.",
+    "REQUEST_DENIED": "Enable this API in Google Cloud Console (APIs & Services > Library) for the key's project.",
+    "API_KEY_SERVICE_BLOCKED": "The key's API restrictions don't include this API: add it under Credentials > the server key > API restrictions.",
+    "API_KEY_INVALID": "The key is not valid -- check GOOGLE_MAPS_API_KEY.",
+    "API_KEY_IP_ADDRESS_BLOCKED": "The key's IP restriction doesn't include this server's address.",
+    "BILLING_DISABLED": "Enable billing on the Google Cloud project.",
+    "OVER_QUERY_LIMIT": "Quota exceeded -- raise the quota or wait for it to reset.",
+    "RESOURCE_EXHAUSTED": "Quota exceeded -- raise the quota or wait for it to reset.",
+}
+
+
+def diagnose() -> dict:
+    """Admin health check: one tiny request to each Google API the server
+    key needs, and which fallbacks are configured. Uses a few billable
+    requests per run (well inside the free monthly allowance)."""
+    fallbacks = [p.code for p in provider_chain()[1:]]
+    out: dict = {"primary": (settings.location_provider or "google").lower(), "google": [], "fallbacks": fallbacks}
+    key = settings.google_maps_api_key
+    if not key:
+        out["google"] = [{"api": "All", "ok": False, "reason": "NOT_CONFIGURED",
+                          "fix": "Set GOOGLE_MAPS_API_KEY in backend/.env and restart the backend."}]
+        return out
+    timeout = settings.geocoding_timeout_seconds
+    probes = (
+        ("Places API (New)", "address suggestions while typing",
+         "POST", "https://places.googleapis.com/v1/places:autocomplete",
+         {"json": {"input": "London"}, "headers": {"X-Goog-Api-Key": key}}),
+        ("Address Validation API", "checking the address is real",
+         "POST", "https://addressvalidation.googleapis.com/v1:validateAddress",
+         {"params": {"key": key}, "json": {"address": {"regionCode": "GB", "addressLines": ["10 Downing Street"],
+                                                      "locality": "London"}}}),
+        ("Geocoding API", "map position of an address and of a moved pin",
+         "GET", "https://maps.googleapis.com/maps/api/geocode/json",
+         {"params": {"address": "London", "key": key}}),
+    )
+    for api, used_for, method, url, kwargs in probes:
+        row = {"api": api, "usedFor": used_for, "ok": False, "reason": "", "message": ""}
+        try:
+            response = httpx.request(method, url, timeout=timeout, **kwargs)
+        except httpx.HTTPError as exc:
+            row.update(reason="NETWORK", message=type(exc).__name__)
+        else:
+            if response.status_code >= 400:
+                row["reason"], row["message"] = _google_error(response)
+            else:
+                try:
+                    body = response.json() or {}
+                except ValueError:
+                    body = {}
+                status = body.get("status")
+                if status and status not in ("OK", "ZERO_RESULTS"):
+                    row.update(reason=status, message=body.get("error_message", ""))
+                else:
+                    row["ok"] = True
+        if not row["ok"]:
+            row["fix"] = _GOOGLE_FIX.get(row["reason"], "See the message from Google.")
+        out["google"].append(row)
+    return out
 
 
 def capabilities() -> dict:

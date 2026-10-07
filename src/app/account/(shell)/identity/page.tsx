@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { AuthorityExceptionCenter } from "@/components/user/AuthorityExceptionCenter";
 import { IdentityVerificationWizard } from "@/components/user/IdentityVerificationWizard";
 import { VerificationStatusSummary } from "@/components/user/VerificationStatusSummary";
 
@@ -19,6 +20,7 @@ export default function IdentityPage() {
         <IdentityVerificationWizard />
       </Suspense>
       <VerificationStatusSummary />
+      <AuthorityExceptionCenter />
     </div>
   );
 }

@@ -65,6 +65,11 @@ def _isolate_from_real_provider_credentials(monkeypatch):
     monkeypatch.setenv("MAPBOX_ACCESS_TOKEN", " ")
     monkeypatch.setattr(settings, "here_api_key", "")
     monkeypatch.setenv("HERE_API_KEY", " ")
+    # A deployment may run Google only (LOCATION_FALLBACK_ENABLED=false); tests
+    # use the code defaults and opt into what they exercise.
+    monkeypatch.setattr(settings, "location_provider", "google")
+    monkeypatch.setattr(settings, "location_fallback_enabled", True)
+    monkeypatch.setattr(settings, "location_fallback_providers", "mapbox,here")
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +118,19 @@ def _legacy_payment_capabilities(request, monkeypatch):
     monkeypatch.setattr(settings, "listing_fee_fail_closed", False)
     monkeypatch.setattr(settings, "payment_receipt_authority_required", False)
     monkeypatch.setitem(policy._DEFAULTS, "payment.external_handoff_approved", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def _admin_review_publication(request, monkeypatch):
+    """Publication is automatic by default (policy publication.requires_approval
+    = False). Most of this suite predates that and drives the admin review
+    flow (submit -> REVIEW -> approve -> publish), so it keeps admin review
+    on. Tests marked @pytest.mark.automatic_publication use the real default."""
+    if request.node.get_closest_marker("automatic_publication"):
+        return
+    from app.services import policy
+
+    monkeypatch.setitem(policy._DEFAULTS, "publication.requires_approval", lambda: True)
 
 
 @pytest.fixture(autouse=True)
@@ -360,6 +378,32 @@ def _make_user(db: Session, *, email: str = "user@test.com") -> UserAccount:
     db.add(user)
     db.flush()
     return user
+
+
+def make_room_publishable(db: Session, room) -> None:
+    """Satisfies the publication gates (ZR-AUTHORITY-002 Section 2.4) for a
+    test that is about something else: a verified identity for the listing
+    party, a verified property and current VERIFIED listing authority."""
+    from app.crud.identity_verification import get_verified_identity_for_party
+    from app.models.authority_verification import AuthorityVerification
+    from app.models.identity_verification import IdentityVerification
+    from app.models.property import Property
+    from app.models.property_location import PropertyLocationVerification
+    from app.services.authority_service import valid_for_room
+    from app.services.property_location_service import valid_for_property
+
+    prop = db.get(Property, room.property_id)
+    party_id = prop.owner_party_id
+    if get_verified_identity_for_party(db, party_id) is None:
+        db.add(IdentityVerification(party_id=party_id, document_type="passport", status="verified"))
+    if valid_for_property(db, prop.id) is None:
+        db.add(PropertyLocationVerification(property_id=prop.id, party_id=party_id, state="VERIFIED"))
+    if valid_for_room(db, room.id) is None:
+        now = dt.datetime.now(dt.timezone.utc)
+        db.add(AuthorityVerification(property_id=prop.id, party_id=party_id, relationship_type="OWNER",
+                                     state="VERIFIED", assurance_level="AV-1", scope_codes=["ADVERTISE", "RENT"],
+                                     verified_at=now, expires_at=now + dt.timedelta(days=365)))
+    db.commit()
 
 
 def _make_room_owned_by(db: Session, party) -> "Room":

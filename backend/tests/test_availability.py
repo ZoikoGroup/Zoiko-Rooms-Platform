@@ -19,7 +19,7 @@ from app.models.party import Party
 from app.models.property import Property
 from app.models.room import Room
 from app.models.user_account import UserAccount
-from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
+from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie, make_room_publishable
 
 LISTING_PAYLOAD = {
     "name": "Sunny Room in Koramangala",
@@ -61,6 +61,7 @@ def _make_host_with_room(db: Session, *, email: str = "host@test.com") -> tuple[
     db.add(room)
     db.flush()
     db.commit()
+    make_room_publishable(db, room)  # identity / property / authority publication gates
 
     return user, prop, room.id
 

@@ -10,7 +10,7 @@ independent server-authoritative states."""
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -137,6 +137,9 @@ class AuthorityVerification(Base):
     expiring_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     reviewer_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    # Section 13: the reviewer currently holding the case.
+    assigned_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     first_approver_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     review_note: Mapped[str] = mapped_column(String(1000), default="")
     # Renewal / reconsideration chain (Section 9.2: never overwrite history).
@@ -184,6 +187,17 @@ class AuthorityEvidence(Base):
     processing_status: Mapped[str] = mapped_column(String(20), default="PROCESSING", nullable=False)
     scan_status: Mapped[str] = mapped_column(String(20), default="NOT_SCANNED")
     readable: Mapped[bool] = mapped_column(Boolean, default=False)
+    # How the text was read: PDF_TEXT | OCR | OCR_UNAVAILABLE | NONE. The text
+    # itself is never stored -- only these match results.
+    text_source: Mapped[str] = mapped_column(String(20), default="")
+    ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The document is the kind the requirement accepts in this country
+    # (its pack keywords appear in the text).
+    type_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Which of the requirement's listed documents it was recognised as.
+    detected_document: Mapped[str] = mapped_column(String(120), default="")
+    # The document says it's a sample / specimen / not an official document.
+    not_official: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     property_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     name_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # representative / owner name
     principal_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
