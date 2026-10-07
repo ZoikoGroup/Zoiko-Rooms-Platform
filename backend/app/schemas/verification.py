@@ -3,20 +3,6 @@ from datetime import datetime
 from app.schemas.common import CamelModel
 
 
-class OccupancyEligibilityCheckCreate(CamelModel):
-    party_id: int
-    jurisdiction_code: str
-    method: str
-    share_code: str = ""
-
-
-class OccupancyEligibilityDecisionCreate(CamelModel):
-    result_status: str
-    reason_note: str = ""
-    evidence_ref: str = ""
-    follow_up_days: int | None = None
-
-
 # AC-18: "Each requirement records... sharing." These are fixed, code-
 # enforced facts about who can see what -- not admin-editable data, since
 # the actual disclosure boundary is already hardcoded into which routes

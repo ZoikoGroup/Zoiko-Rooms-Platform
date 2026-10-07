@@ -490,6 +490,7 @@ export const occupancyEligibilityStatusTone = {
 } as const;
 
 export const occupancyEligibilityMethodLabel = {
+  IDENTITY_DOCUMENT: "Automatic (identity verified)",
   DIGITAL_SHARE_CODE: "Digital share code",
   MANUAL_DOCUMENT_CHECK: "Manual document check",
 } as const;

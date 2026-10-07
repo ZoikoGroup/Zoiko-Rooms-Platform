@@ -1938,7 +1938,8 @@ export interface NotificationPreference {
 
 // --- Verification (ZR-ENG-CLR-012) ---
 
-export type OccupancyEligibilityMethod = "DIGITAL_SHARE_CODE" | "MANUAL_DOCUMENT_CHECK";
+export type OccupancyEligibilityMethod = "IDENTITY_DOCUMENT" | "DIGITAL_SHARE_CODE" | "MANUAL_DOCUMENT_CHECK";
+
 export type OccupancyEligibilityStatus =
   | "IN_PROGRESS"
   | "PASS"
@@ -2109,6 +2110,8 @@ export interface MarketPolicyPack {
   occupancyEligibilityRequired: boolean;
   occupancyEligibilityMethodNote: string;
   occupancyEligibilityFollowUpDays: number | null;
+  occupancyEligibilityAutoPassCountries: string[];
+  occupancyEligibilityDocumentKeywords: string[];
   identityEvidenceRetentionDays: number;
   requiredPropertyComplianceCodes: string[];
   identityRequiredAtApplication: boolean;

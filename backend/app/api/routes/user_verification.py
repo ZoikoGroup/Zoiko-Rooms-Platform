@@ -89,7 +89,7 @@ def get_my_verification_status(user: UserAccount = Depends(get_current_user), db
             explanation=f"Confirms your right to occupy a property in {check.jurisdiction_code} before move-in.",
             sharing_scope=OCCUPANCY_ELIGIBILITY_SHARING_SCOPE,
             retention_note=_retention_note(db, check.jurisdiction_code),
-            alternative_method_note="Available via a digital share code or a manual document check -- whichever suits you.",
+            alternative_method_note="Completed automatically once your identity is verified -- nothing else to submit.",
         )
         for check in list_occupancy_eligibility_checks_for_party(db, user.party_id)
     ]
