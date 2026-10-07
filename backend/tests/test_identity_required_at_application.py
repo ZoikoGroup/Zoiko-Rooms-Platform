@@ -1,9 +1,6 @@
-"""ZR-ENG-CLR-012 AC-03: "Application can proceed before full ID completion
-unless the active market pack explicitly requires an earlier gate."
-Progressive verification is the default -- most listings (no jurisdiction,
-or a jurisdiction pack that hasn't opted in) never require identity before
-application; only a jurisdiction pack with identity_required_at_application
-=True blocks an unverified renter at this stage."""
+"""Applying for a room needs a verified identity in every region, whatever
+the market pack's identity_required_at_application says (product decision,
+2026-10-07). Browsing rooms needs nothing."""
 
 from __future__ import annotations
 
@@ -44,7 +41,7 @@ def _england_policy_pack(db: Session, *, identity_required: bool) -> MarketPolic
 
 
 class TestIdentityRequiredAtApplication:
-    def test_unverified_renter_can_apply_when_no_policy_pack_configured(self, client, db_session: Session):
+    def test_unverified_renter_blocked_when_no_policy_pack_configured(self, client, db_session: Session):
         listing_id, _room_id = _make_listing_with_room(db_session)
         renter = _unverified_renter(db_session, email="ida-01@test.com")
         r = client.post(
@@ -52,9 +49,10 @@ class TestIdentityRequiredAtApplication:
             json={"listingId": listing_id, "message": "test", "desiredMoveIn": None},
             cookies=auth_user_cookie(renter),
         )
-        assert r.status_code == 201, r.text
+        assert r.status_code == 403, r.text
+        assert "Verify your identity" in r.json()["detail"]
 
-    def test_unverified_renter_can_apply_when_jurisdiction_does_not_opt_in(self, client, db_session: Session):
+    def test_unverified_renter_blocked_even_when_jurisdiction_does_not_opt_in(self, client, db_session: Session):
         listing_id, _room_id = _make_listing_with_room(db_session)
         _make_agreement_eligible(db_session, listing_id)
         _england_policy_pack(db_session, identity_required=False)
@@ -64,7 +62,7 @@ class TestIdentityRequiredAtApplication:
             json={"listingId": listing_id, "message": "test", "desiredMoveIn": None},
             cookies=auth_user_cookie(renter),
         )
-        assert r.status_code == 201, r.text
+        assert r.status_code == 403, r.text
 
     def test_unverified_renter_blocked_when_jurisdiction_opts_in(self, client, db_session: Session):
         listing_id, _room_id = _make_listing_with_room(db_session)
