@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Building, CheckCircle2, Database, FileText, History, KeyRound, UserCheck, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Database, FileText, History, KeyRound, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -9,23 +9,19 @@ import { AuthorityPackEditor } from "@/components/admin/AuthorityPackEditor";
 import { errorMessage } from "@/lib/user-api";
 import { formatDate } from "@/lib/utils";
 import {
-  AuthorityCase, AuthorityQueueItem, Organization, adminAuthorityEvidenceUrl, adminRevokeAuthority, assignAuthorityCase,
-  recordOwnershipChange, authorityStateLabel, authorityStateTone, decideOrganization, getAuthorityCase, getAuthorityMetrics,
-  getAuthorityReviewReasons, listAuthorityQueue, listPendingOrganizations, relationshipLabel, reviewAuthority, scopeLabel,
+  AuthorityCase, AuthorityQueueItem, adminAuthorityEvidenceUrl, adminRevokeAuthority, recordOwnershipChange,
+  authorityStateLabel, authorityStateTone, getAuthorityCase, getAuthorityMetrics, listAuthorityQueue, relationshipLabel,
+  scopeLabel,
 } from "@/lib/authority-verification";
 
 const FILTERS = [
-  { value: "MANUAL_REVIEW", label: "In review" },
+  { value: "all", label: "All" },
+  { value: "SUBMITTED", label: "Waiting" },
   { value: "ACTION_REQUIRED", label: "Action required" },
   { value: "VERIFIED", label: "Verified" },
   { value: "REJECTED", label: "Rejected" },
   { value: "REVOKED", label: "Revoked" },
-  { value: "all", label: "All" },
 ];
-type Decision = "APPROVE" | "REQUEST_EVIDENCE" | "REJECT";
-const DECISION_LABEL: Record<Decision, string> = {
-  APPROVE: "Approve authority", REQUEST_EVIDENCE: "Request more evidence", REJECT: "Reject",
-};
 const REVOKE_REASONS = ["REVOKED_BY_TRUST_SAFETY", "REVOKED_BY_PRINCIPAL", "OWNERSHIP_CHANGED"];
 
 function label(code: string) {
@@ -42,18 +38,15 @@ function Signal({ value, text }: { value: boolean | null | undefined; text: stri
 }
 
 /**
- * ZR-AUTHORITY-002 Section 11 -- Trust & Safety authority review: the
- * verified identity, the property, the claimed relationship, evidence with
- * automated match signals and conflicting claims side by side. Decisions
- * need a standard reason code; conflicts, entity chains and integrity
- * signals need a second, different reviewer. A case is held by one assigned
- * reviewer at a time (Section 13); opening evidence or deciding takes an
- * unassigned case. Reviewers can't edit the host's evidence.
+ * ZR-AUTHORITY-002 -- Trust & Safety view of listing authority. Every case
+ * is decided automatically from the documents (no manual review queue):
+ * this shows the verified identity, the property, the claimed relationship,
+ * evidence with its automated match signals and other claims, and keeps the
+ * enforcement actions -- revoke and recording an ownership change.
  */
 export function AuthorityReviewManager() {
-  const [filter, setFilter] = useState("MANUAL_REVIEW");
+  const [filter, setFilter] = useState("all");
   const [queue, setQueue] = useState<AuthorityQueueItem[]>([]);
-  const [orgs, setOrgs] = useState<Organization[]>([]);
   const [metrics, setMetrics] = useState<Record<string, unknown> | null>(null);
   const [openId, setOpenId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -63,7 +56,6 @@ export function AuthorityReviewManager() {
     setLoading(true);
     try {
       setQueue(await listAuthorityQueue(filter));
-      setOrgs(await listPendingOrganizations().catch(() => []));
       setMetrics(await getAuthorityMetrics(30).catch(() => null));
     } finally {
       setLoading(false);
@@ -82,12 +74,12 @@ export function AuthorityReviewManager() {
       <div className="flex items-center gap-2">
         <KeyRound className="h-5 w-5 text-primary-700 dark:text-primary-300" aria-hidden="true" />
         <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Listing authority verification</h2>
-        <span className="text-xs text-slate-400">ZR-AUTHORITY-002 review queue</span>
+        <span className="text-xs text-slate-400">ZR-AUTHORITY-002 · decided automatically</span>
       </div>
 
       {metrics && (
         <dl className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
-          {(["started", "submitted", "verified", "pending_review", "auto_approval_rate"] as const).map((k) => (
+          {(["started", "submitted", "verified", "waiting", "auto_approval_rate"] as const).map((k) => (
             <div key={k} className="rounded-lg bg-slate-50 p-2 dark:bg-slate-800/60">
               <dt className="text-slate-400">{label(k)}</dt>
               <dd className="font-semibold text-primary-900 dark:text-white">
@@ -99,26 +91,6 @@ export function AuthorityReviewManager() {
       )}
 
       <AuthorityPackEditor />
-
-      {orgs.length > 0 && (
-        <div className="space-y-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
-          <p className="flex items-center gap-2 text-xs font-semibold text-slate-700 dark:text-slate-200">
-            <Building className="h-4 w-4" aria-hidden="true" /> Organizations awaiting verification
-          </p>
-          <ul className="space-y-1 text-sm">
-            {orgs.map((o) => (
-              <li key={o.id} className="flex flex-wrap items-center justify-between gap-2">
-                <span>{o.name} {o.registrationNumber && <span className="text-xs text-slate-500">· {o.registrationNumber}</span>}
-                  {o.countryCode && <span className="text-xs text-slate-500"> · {o.countryCode}</span>}</span>
-                <span className="flex gap-2">
-                  <Button size="sm" variant="outline" onClick={() => decideOrganization(o.id, true).then(() => { notify("Organization verified"); void load(); })}>Verify</Button>
-                  <Button size="sm" variant="ghost" onClick={() => decideOrganization(o.id, false).then(() => { notify("Organization rejected"); void load(); })}>Reject</Button>
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       <div className="flex flex-wrap gap-2" role="tablist" aria-label="Filter authority verifications">
         {FILTERS.map((f) => (
@@ -143,9 +115,7 @@ export function AuthorityReviewManager() {
                   <Badge tone={authorityStateTone(item.state)} dot>{authorityStateLabel[item.state]}</Badge>
                   <span className="text-sm text-primary-900 dark:text-white">Property #{item.propertyId}</span>
                   <span className="text-xs text-slate-500">{label(item.relationshipType)} · {item.countryCode || "--"}</span>
-                  {item.awaitingSecondApproval && <Badge tone="warning">Awaiting second approval</Badge>}
                   {item.isReconsideration && <Badge tone="primary">Reconsideration</Badge>}
-                  {item.assignedAdminId !== null && <Badge tone="neutral">Assigned to reviewer #{item.assignedAdminId}</Badge>}
                 </span>
                 <span className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
                   {item.reasonCodes.slice(0, 3).map((c) => <span key={c} className="rounded bg-slate-100 px-1.5 py-0.5 dark:bg-slate-800">{label(c)}</span>)}
@@ -169,36 +139,13 @@ export function AuthorityReviewManager() {
 
 function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void; onDecided: (message: string) => void }) {
   const [c, setC] = useState<AuthorityCase | null>(null);
-  const [reasons, setReasons] = useState<Record<Decision, { code: string; message: string }[]> | null>(null);
-  const [decision, setDecision] = useState<Decision>("APPROVE");
-  const [reasonCode, setReasonCode] = useState("");
-  const [note, setNote] = useState("");
   const [revokeCode, setRevokeCode] = useState(REVOKE_REASONS[0]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const reload = useCallback(() => {
+  useEffect(() => {
     getAuthorityCase(id).then(setC).catch((err) => setError(errorMessage(err, "Could not load the case.")));
   }, [id]);
-
-  useEffect(() => {
-    reload();
-    getAuthorityReviewReasons().then(setReasons).catch(() => setReasons(null));
-  }, [reload]);
-
-  async function assign(release: boolean) {
-    if (!c) return;
-    setBusy(true);
-    setError("");
-    try {
-      await assignAuthorityCase(c.id, release);
-      reload();
-    } catch (err) {
-      setError(errorMessage(err, "Could not change the assignment."));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function ownershipChanged() {
     if (!c || !window.confirm("Record an ownership change for this property? Owner and agent authority for it will be withdrawn and its live listings paused.")) return;
@@ -208,22 +155,6 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
       onDecided(`Ownership change recorded -- ${r.reopened} authority record(s) reopened`);
     } catch (err) {
       setError(errorMessage(err, "Could not record the ownership change."));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  useEffect(() => { setReasonCode(reasons?.[decision]?.[0]?.code ?? ""); }, [decision, reasons]);
-
-  async function decide() {
-    if (!c) return;
-    setBusy(true);
-    setError("");
-    try {
-      const r = await reviewAuthority(c, decision, reasonCode, note);
-      onDecided(r.state === "MANUAL_REVIEW" ? "First approval recorded -- a second reviewer must approve" : `Decision recorded: ${authorityStateLabel[r.state]}`);
-    } catch (err) {
-      setError(errorMessage(err, "Could not record the decision."));
     } finally {
       setBusy(false);
     }
@@ -268,19 +199,6 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
               <AlertTriangle className="h-4 w-4 text-amber-600" aria-hidden="true" />
               {c.reasonCodes.map((code) => <span key={code} className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">{label(code)}</span>)}
             </p>
-          )}
-          {c.state === "MANUAL_REVIEW" && (
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/60">
-              <span className="flex items-center gap-2">
-                <UserCheck className="h-4 w-4" aria-hidden="true" />
-                {c.assignedAdminId === null ? "Unassigned -- opening evidence or deciding assigns it to you"
-                  : `Assigned to reviewer #${c.assignedAdminId}${c.assignedAt ? ` since ${formatDate(c.assignedAt)}` : ""}`}
-              </span>
-              <span className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => assign(false)} disabled={busy}>Assign to me</Button>
-                {c.assignedAdminId !== null && <Button size="sm" variant="ghost" onClick={() => assign(true)} disabled={busy}>Release</Button>}
-              </span>
-            </div>
           )}
           {c.reconsiderationNote && <p className="rounded-lg bg-primary-50 p-3 text-xs dark:bg-primary-500/10">Host&apos;s reconsideration note: {c.reconsiderationNote}</p>}
 
@@ -344,26 +262,6 @@ function CaseModal({ id, onClose, onDecided }: { id: number; onClose: () => void
               {c.events.map((e, i) => <li key={i}>{formatDate(e.createdAt)} · {label(e.type)}{e.newState && ` → ${e.newState}`} · {e.actorKind}</li>)}
             </ul>
           </details>
-
-          {c.state === "MANUAL_REVIEW" && reasons && (
-            <div className="space-y-3 rounded-xl border border-slate-200 p-4 dark:border-slate-700">
-              {c.awaitingSecondApproval && <Badge tone="warning">First approval recorded -- needs a different reviewer</Badge>}
-              <div className="flex flex-wrap gap-3">
-                {(Object.keys(DECISION_LABEL) as Decision[]).map((d) => (
-                  <label key={d} className="flex items-center gap-2">
-                    <input type="radio" name="decision" checked={decision === d} onChange={() => setDecision(d)} /> {DECISION_LABEL[d]}
-                  </label>
-                ))}
-              </div>
-              <select className="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800" value={reasonCode}
-                      onChange={(e) => setReasonCode(e.target.value)} aria-label="Reason code">
-                {reasons[decision].map((r) => <option key={r.code} value={r.code}>{label(r.code)} -- {r.message}</option>)}
-              </select>
-              <textarea className="w-full rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-800" rows={2}
-                        placeholder="Internal note (never shown to the host)" value={note} onChange={(e) => setNote(e.target.value)} />
-              <Button onClick={decide} loading={busy} disabled={busy || !reasonCode}>Record decision</Button>
-            </div>
-          )}
 
           {(c.state === "VERIFIED" || c.state === "EXPIRING_SOON") && (
             <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 p-4 dark:border-slate-700">

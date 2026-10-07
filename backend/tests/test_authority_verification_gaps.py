@@ -1,7 +1,6 @@
 """ZR-AUTHORITY-002 gaps closed after the first build: the server-side
 publication gate (Section 2.4 / P0 #10 / 15.3), ownership-change and
 identity-event triggers (Sections 9.2, 13.1), the pack's renewal threshold,
-reviewer case assignment and risk-tier four-eyes (Sections 11.2, 13),
 trusted registry / connector sources (Sections 4.1, 5.2, 6.3, 7.3), AV-2
 assurance (Section 2.3), status emails (Section 15.3) and audited evidence
 removal."""
@@ -20,7 +19,7 @@ from app.models.party import Party
 from app.services import authority_service as svc
 from tests.conftest import _make_admin, auth_admin_cookie, auth_user_cookie, make_room_publishable
 from tests.test_authority_verification import (  # noqa: F401 -- env is an autouse fixture
-    BASE, LEASE, LEGAL_NAME, MANDATE, Flow, _code_and_token, _host, _pdf, _to_review, env,
+    BASE, LEASE, LEGAL_NAME, MANDATE, Flow, _code_and_token, _host, _pdf, env,
 )
 
 
@@ -129,38 +128,6 @@ class TestTriggers:
         v.expires_at = datetime.now(timezone.utc) + timedelta(days=5)
         db_session.commit()
         assert svc.effective_state(v) == "EXPIRING_SOON"
-
-
-class TestCaseAssignment:
-    def test_case_is_locked_to_its_reviewer(self, client, db_session):
-        user, prop, room, f = _to_review(client, db_session, "assign-host@test.com")
-        a1 = _make_admin(db_session, email="assign-1@test.com", role="super_admin")
-        a2 = _make_admin(db_session, email="assign-2@test.com", role="super_admin")
-        vid = f.body["id"]
-        doc = f"/api/authority-verifications/{vid}/evidence/{f.body['evidence'][0]['id']}/document"
-        assert client.post(f"/api/authority-verifications/{vid}/assign", json={},
-                           cookies=auth_admin_cookie(a1)).status_code == 200
-        assert client.get(doc, cookies=auth_admin_cookie(a1)).status_code == 200
-        assert client.get(doc, cookies=auth_admin_cookie(a2)).status_code == 403
-        body = {"decision": "APPROVE", "reasonCode": "REVIEW_APPROVED_DOCUMENTS"}
-        r = client.post(f"/api/authority-verifications/{vid}/review", json=body, cookies=auth_admin_cookie(a2))
-        assert r.status_code == 403
-        client.post(f"/api/authority-verifications/{vid}/assign", json={}, cookies=auth_admin_cookie(a2))
-        r = client.post(f"/api/authority-verifications/{vid}/review", json=body, cookies=auth_admin_cookie(a2))
-        assert r.status_code == 200 and r.json()["state"] == "VERIFIED"
-        assert _event_types(db_session, vid).count("AUTHORITY_REVIEW_ASSIGNED") == 2
-
-    def test_tamper_signal_needs_two_reviewers(self, client, db_session):
-        user, prop, room, f = _to_review(client, db_session, "tamper-4eyes@test.com")
-        v = db_session.get(AuthorityVerification, f.body["id"])
-        v.reason_codes = ["TAMPER_SIGNAL"]
-        db_session.commit()
-        a1 = _make_admin(db_session, email="tamper-1@test.com", role="super_admin")
-        a2 = _make_admin(db_session, email="tamper-2@test.com", role="super_admin")
-        body = {"decision": "APPROVE", "reasonCode": "REVIEW_APPROVED_DOCUMENTS"}
-        url = f"/api/authority-verifications/{v.id}/review"
-        assert client.post(url, json=body, cookies=auth_admin_cookie(a1)).json()["state"] == "MANUAL_REVIEW"
-        assert client.post(url, json=body, cookies=auth_admin_cookie(a2)).json()["state"] == "VERIFIED"
 
 
 class _FakeRegistry(svc.SourceAdapter):

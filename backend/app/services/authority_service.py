@@ -13,9 +13,14 @@ Doctrine enforced here:
   a current occupation right and permission to sublet (P0 #3-#5);
 - a tenant can't self-approve sublet permission; confirmations are
   authenticated (link + one-time code) and auditable (Section 13);
-- conflicting claims are preserved and reviewed -- never "last upload wins"
-  (Section 9.2); renewal and reconsideration create linked records;
-- VERIFIED is only ever set here, by policy or a reviewer (Section 12.4);
+- conflicting claims are preserved -- never "last upload wins" (Section
+  9.2); renewal and reconsideration create linked records;
+- every case is decided automatically from the documents (text layer or
+  OCR): VERIFIED, ACTION_REQUIRED (the host is shown why, corrects it and
+  submits again) or SUBMITTED while waiting on something outside the host's
+  evidence (property verification, OCR engine, malware scan). There is no
+  manual review queue and nothing is finally rejected; VERIFIED is only
+  ever set here (Section 12.4);
 - revocation / expiry apply the pack's listing control (Section 12.4 / P0 #9).
 """
 
@@ -36,7 +41,7 @@ from app.core.config import settings
 from app.crud.events import emit_event
 from app.models.admin_user import AdminUser
 from app.models.authority_verification import (
-    ACTIVE_STATES, CONFIRMATION_KINDS, RELATIONSHIP_TYPES, REVIEW_DECISIONS, ROUTE_FOR_RELATIONSHIP, SCOPE_CODES,
+    ACTIVE_STATES, CONFIRMATION_KINDS, RELATIONSHIP_TYPES, ROUTE_FOR_RELATIONSHIP, SCOPE_CODES,
     AuthorityConfirmation, AuthorityEvidence, AuthorityRegulatoryPack, AuthorityVerification, Organization,
 )
 from app.models.property import Property
@@ -44,7 +49,9 @@ from app.models.room import Room
 from app.models.user_account import UserAccount
 
 RESOURCE = "authority_verification"
-EDITABLE_STATES = ("COLLECTING", "ACTION_REQUIRED")
+# A REJECTED case (decided by a reviewer before review was automated) is
+# corrected and resubmitted by the host like ACTION_REQUIRED.
+EDITABLE_STATES = ("COLLECTING", "ACTION_REQUIRED", "REJECTED")
 OPEN_STATES = ("COLLECTING", "SUBMITTED", "MANUAL_REVIEW", "ACTION_REQUIRED")
 CONFIRMATION_TTL = timedelta(hours=72)
 CONFIRMATION_MAX_ATTEMPTS = 5
@@ -60,8 +67,10 @@ REASONS: dict[str, tuple[str, str]] = {
     "REQUIREMENT_MISSING": ("Add the evidence still required for your role.", "Add evidence"),
     "PROPERTY_MISMATCH": ("We could not confirm that this document refers to this property.", "Add evidence"),
     "NAME_MISMATCH": ("The person named in the evidence doesn't match your verified identity.", "Add evidence"),
-    "PRINCIPAL_UNCONFIRMED": ("The owner or landlord named on the document doesn't match the name you entered. Check the name, or ask them to confirm.", "Add evidence"),
-    "PRINCIPAL_NAME_NEEDED": ("Enter the owner's or landlord's name exactly as it appears on the document.", "Edit details"),
+    "PRINCIPAL_UNCONFIRMED": ("The owner, landlord, company, trust or estate named on the document doesn't match the name you entered. Check the name, or ask them to confirm.", "Add evidence"),
+    "PRINCIPAL_NAME_NEEDED": ("Enter the owner's, landlord's, company's, trust's or estate's name exactly as it appears on the document.", "Edit details"),
+    "PRINCIPAL_IS_YOU": ("The owner, landlord, company, trust or estate you entered is you. If you own this property, start again and choose Owner; otherwise enter their name.", "Edit details"),
+    "PRINCIPAL_NOT_ON_TITLE": ("The property document doesn't show the company, trust or estate you entered as the owner. Check the name, or upload the title that names it.", "Add evidence"),
     "EVIDENCE_UNCLEAR": ("We couldn't read this document clearly. Upload the original PDF or a sharp photo of every page -- flat, well lit, no glare.", "Replace evidence"),
     "DOCUMENT_NOT_OFFICIAL": ("This document says it's a sample or not an official document. Upload the real, issued document.", "Replace evidence"),
     "DOCUMENT_TYPE_UNRECOGNIZED": ("This doesn't look like one of the documents accepted for this step in your country. Upload one of the accepted documents listed.", "Replace evidence"),
@@ -69,21 +78,25 @@ REASONS: dict[str, tuple[str, str]] = {
     "SUBLET_PERMISSION_MISSING": ("Your tenancy alone may not permit subletting. Add the landlord's permission.", "Add consent"),
     "AUTHORITY_DATES_INVALID": ("The authority dates aren't current. Add a current mandate or permission.", "Add evidence"),
     "EVIDENCE_EXPIRED": ("A document has expired. Upload a current one.", "Replace evidence"),
-    "EVIDENCE_UNREADABLE": ("We need to review your evidence. You can leave this page; we'll update the status here.", "View status"),
-    "EVIDENCE_REUSED": ("We need to review your evidence. You can leave this page; we'll update the status here.", "View status"),
-    "TAMPER_SIGNAL": ("We need to review your evidence. You can leave this page; we'll update the status here.", "View status"),
-    "SCAN_INCOMPLETE": ("We need to review your evidence. You can leave this page; we'll update the status here.", "View status"),
-    "CONFLICTING_AUTHORITY": ("We need to review this property's authority. You can leave this page.", "View status"),
+    # Waiting on something outside the host's evidence: checked again automatically.
+    "EVIDENCE_UNREADABLE": ("We couldn't read your documents yet. We'll check them again automatically -- you can leave this page.", "View status"),
+    "SCAN_INCOMPLETE": ("Your files are still being security-scanned. We'll finish the check automatically -- you can leave this page.", "View status"),
+    "PROPERTY_NOT_VERIFIED": ("Your authority is ready; final approval happens automatically once the property is verified.", "Verify property"),
+    # Integrity: the host replaces the document with their own original.
+    "EVIDENCE_REUSED": ("This document is already used by another account or property. Upload your own original document.", "Replace evidence"),
+    "TAMPER_SIGNAL": ("This file looks edited after it was issued. Upload the original document as you received it -- the issuer's PDF or a fresh photo.", "Replace evidence"),
+    "CONFLICTING_AUTHORITY": ("Another account already holds verified authority for this property. If you're authorized, ask the owner to confirm you.", "Review status"),
+    "ORGANIZATION_UNCONFIRMED": ("Upload a document from the organization you act for that names you and the organization -- an appointment letter or director appointment.", "Add evidence"),
+    # Legacy codes on records decided before review was automated.
     "ORGANIZATION_UNVERIFIED": ("We need to verify the organization you act for. You can leave this page.", "View status"),
-    "PROPERTY_NOT_VERIFIED": ("Your authority is ready; final approval waits for the property verification.", "Verify property"),
-    "ENTITY_CHAIN": ("Company, trust or estate ownership needs an extra review. You can leave this page.", "View status"),
+    "ENTITY_CHAIN": ("Company, trust or estate ownership needs an extra check. You can leave this page.", "View status"),
     "CO_OWNER_CONSENT_MISSING": ("Your co-owner's consent is needed in this country.", "Request consent"),
-    "DOCUMENT_ONLY_MANDATE": ("We need to review the mandate. You can leave this page.", "View status"),
-    "RECONSIDERATION": ("Your request for reconsideration is with our team.", "View status"),
+    "DOCUMENT_ONLY_MANDATE": ("We need to check the mandate. You can leave this page.", "View status"),
+    "RECONSIDERATION": ("Your request for reconsideration is being checked.", "View status"),
     "AUTHORITY_EXPIRED": ("Your authority for this property has expired. Renew it to keep listing.", "Renew verification"),
     "AUTHORITY_REVOKED": ("Authority for this property has been withdrawn.", "Review status"),
     "CONFIRMATION_DECLINED": ("The owner or landlord declined the request.", "Review status"),
-    # reviewer codes (Section 11.2)
+    # reviewer codes on records decided before review was automated (Section 11.2)
     "REVIEW_APPROVED_DOCUMENTS": ("Your authority to list this property has been verified.", ""),
     "REVIEW_APPROVED_CONFIRMATION": ("Your authority to list this property has been verified.", ""),
     "REVIEW_MORE_EVIDENCE": ("We need another step to confirm your authority. Upload a current document that identifies the property.", "Add evidence"),
@@ -97,11 +110,6 @@ REASONS: dict[str, tuple[str, str]] = {
     "OWNERSHIP_CHANGED": ("The property's ownership changed, so authority must be verified again.", "Renew verification"),
     "PROPERTY_ADDRESS_CHANGED": ("The property's address changed, so your authority must be verified again for the new address.", "Renew verification"),
     "IDENTITY_REVERIFICATION": ("Your identity needs to be verified again, so your authority for this property must be renewed.", "Renew verification"),
-}
-REVIEW_REASONS = {
-    "APPROVE": ("REVIEW_APPROVED_DOCUMENTS", "REVIEW_APPROVED_CONFIRMATION"),
-    "REQUEST_EVIDENCE": ("REVIEW_MORE_EVIDENCE", "REVIEW_SCOPE_UNCLEAR", "REVIEW_GRANTOR_AUTHORITY"),
-    "REJECT": ("REVIEW_CANNOT_ESTABLISH", "REVIEW_NOT_ENTITLED"),
 }
 REVOCATION_REASONS = ("REVOKED_BY_PRINCIPAL", "REVOKED_BY_HOST", "REVOKED_BY_TRUST_SAFETY", "OWNERSHIP_CHANGED",
                       "PROPERTY_ADDRESS_CHANGED", "IDENTITY_REVERIFICATION")
@@ -502,15 +510,16 @@ def _check_version(v: AuthorityVerification, expected: int | None) -> None:
 def _editable(v: AuthorityVerification) -> None:
     if v.state not in EDITABLE_STATES:
         raise HTTPException(status.HTTP_409_CONFLICT, "This authority verification can't be changed now")
-    if v.state == "ACTION_REQUIRED":
+    if v.state in ("ACTION_REQUIRED", "REJECTED"):
         v.state = "COLLECTING"
 
 
 def _set_state(db: Session, v: AuthorityVerification, new_state: str) -> str:
     allowed = {
         "COLLECTING": {"SUBMITTED", "SUPERSEDED"},
-        "SUBMITTED": {"VERIFIED", "MANUAL_REVIEW", "ACTION_REQUIRED"},
-        "MANUAL_REVIEW": {"VERIFIED", "ACTION_REQUIRED", "REJECTED", "SUPERSEDED"},
+        "SUBMITTED": {"VERIFIED", "ACTION_REQUIRED"},
+        # Legacy cases from the retired review queue are decided automatically.
+        "MANUAL_REVIEW": {"SUBMITTED", "VERIFIED", "ACTION_REQUIRED", "SUPERSEDED"},
         "ACTION_REQUIRED": {"COLLECTING", "SUBMITTED", "SUPERSEDED"},
         "VERIFIED": {"EXPIRED", "REVOKED", "SUPERSEDED"},
     }
@@ -667,8 +676,6 @@ def allowed_actions(db: Session, v: AuthorityVerification) -> list[str]:
         actions += ["RENEW", "REVOKE"]
     if state == "EXPIRED":
         actions.append("RENEW")
-    if state == "REJECTED":
-        actions.append("REQUEST_RECONSIDERATION")
     if state in ("REVOKED",):
         actions.append("START_NEW")
     return actions
@@ -811,17 +818,6 @@ def create_organization(db: Session, user: UserAccount, *, name: str, registrati
 def list_organizations(db: Session, user: UserAccount) -> list[Organization]:
     return list(db.scalars(select(Organization).where(Organization.created_by_party_id == user.party_id)
                            .order_by(Organization.id)))
-
-
-def decide_organization(db: Session, admin: AdminUser, org: Organization, *, approve: bool) -> Organization:
-    if admin.role != "super_admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
-    org.status = "VERIFIED" if approve else "REJECTED"
-    org.verified_at = _now() if approve else None
-    org.verified_by_admin_id = admin.id
-    db.commit()
-    db.refresh(org)
-    return org
 
 
 # -- evidence ---------------------------------------------------------------------
@@ -988,7 +984,7 @@ def is_heic(content: bytes) -> bool:
 
 def heic_to_jpeg(content: bytes) -> bytes:
     """Section 8.2 accepts HEIC (iPhone photos). It's converted to JPEG once,
-    on upload, so OCR, metadata stripping and the reviewer's viewer all work
+    on upload, so OCR, metadata stripping and the evidence viewer all work
     on an ordinary image. Anything that isn't HEIC passes through untouched."""
     if not is_heic(content):
         return content
@@ -1340,7 +1336,16 @@ def _match_model(db: Session, v: AuthorityVerification) -> dict:
         return True if any(known) else (False if known else None)
 
     property_match = tri([e.property_matched for e in primary] + ([True] if confirmed else []))
-    if route == "OWNER":
+    principal_on_title = None
+    if v.relationship_type == "REPRESENTATIVE":
+        # Entity chain: the title names the company / trust / estate (the
+        # principal); the entity-authority document names that principal
+        # and the verified person acting for it.
+        entity = [e for e in live if e.requirement_id == "OWNER_ENTITY_AUTHORITY"]
+        representative = tri([e.name_matched for e in entity])
+        principal = tri([e.principal_matched for e in entity])
+        principal_on_title = tri([e.principal_matched for e in primary])
+    elif route == "OWNER":
         representative = tri([e.name_matched for e in primary])
         principal = representative  # the owner is the principal
     else:
@@ -1353,7 +1358,8 @@ def _match_model(db: Session, v: AuthorityVerification) -> dict:
     evidence_expired = any(e.expires_at and _utc(e.expires_at) <= now for e in live)
     integrity = not any(e.reused_elsewhere or e.tamper_signal for e in live)
     return {"property_match": property_match, "representative_match": representative, "principal_match": principal,
-            "scope_match": scope, "validity_result": validity and not evidence_expired,
+            "principal_on_title": principal_on_title, "scope_match": scope,
+            "validity_result": validity and not evidence_expired,
             "source_integrity": integrity, "owner_confirmation": bool(confirmed),
             # OCR ran (or the PDF had text) but the read was too poor to match on.
             "unclear_documents": any(not e.readable and e.text_source != "OCR_UNAVAILABLE"
@@ -1417,9 +1423,13 @@ def _refresh_principal_matches(db: Session, v: AuthorityVerification) -> None:
     principal = principal_name(v)
     if not principal:
         return
+    types = ("MANDATE", "SUBLET_PERMISSION")
+    if v.relationship_type == "REPRESENTATIVE":
+        types += ("PROPERTY_RIGHT", "ORGANIZATION_LINK")
     for e in v.evidence:
+        # Not yet matched, or matched against a name the host has since corrected.
         if (e.source_type != "UPLOAD" or e.processing_status != "READY" or not e.readable
-                or e.principal_matched is not None or e.evidence_type not in ("MANDATE", "SUBLET_PERMISSION")):
+                or e.principal_matched is True or e.evidence_type not in types):
             continue
         content = read_evidence(e)
         if content is None:
@@ -1429,23 +1439,76 @@ def _refresh_principal_matches(db: Session, v: AuthorityVerification) -> None:
 
 
 def _conflicts(db: Session, v: AuthorityVerification) -> bool:
-    """Another party claims authority over the same property (Section 9.2)."""
+    """Another party already holds current verified authority over the same
+    property (Section 9.2). Claims still being checked don't block: the
+    first one verified controls, and a later one has to be confirmed by the
+    owner."""
+    now = _now()
     return (db.scalar(select(func.count(AuthorityVerification.id)).where(
         AuthorityVerification.property_id == v.property_id, AuthorityVerification.party_id != v.party_id,
-        AuthorityVerification.state.in_(("SUBMITTED", "MANUAL_REVIEW", "VERIFIED")))) or 0) > 0
+        AuthorityVerification.state == "VERIFIED",
+        (AuthorityVerification.expires_at.is_(None)) | (AuthorityVerification.expires_at > now))) or 0) > 0
+
+
+def _principal_is_host(db: Session, v: AuthorityVerification) -> bool:
+    """The principal entered is the host's own verified name (same words,
+    any order)."""
+    principal, mine = _norm(principal_name(v)).split(), _norm(_verified_legal_name(db, v.party_id)).split()
+    return bool(principal) and sorted(principal) == sorted(mine)
+
+
+# Legal-form words left out when looking for an organization's name in a
+# document ("Lake Lettings Ltd" is "LAKE LETTINGS LIMITED" on a letterhead).
+_LEGAL_FORM_WORDS = {"ltd", "limited", "llp", "plc", "inc", "llc", "pvt", "private", "co", "company", "corp",
+                     "corporation", "the"}
+
+
+def _organization_core_name(name: str) -> str:
+    words = [w for w in _norm(name).split() if w not in _LEGAL_FORM_WORDS]
+    return " ".join(words) or _norm(name)
+
+
+def _organization_confirmed(db: Session, v: AuthorityVerification) -> bool:
+    """The organization the host acts through, from the documents alone: an
+    already verified organization is reused; otherwise a readable link
+    document (appointment letter, director appointment, board resolution)
+    must name both the verified person and the organization. Confirming it
+    here verifies the organization for reuse on the host's other properties."""
+    org = v.organization
+    if org is None:
+        return False
+    if org.status == "VERIFIED":
+        return True
+    core = _organization_core_name(org.name)
+    for e in v.evidence:
+        if (e.source_type != "UPLOAD" or e.processing_status != "READY" or not e.readable
+                or e.name_matched is not True or e.type_matched is False
+                or e.requirement_id not in ("AGENT_ORGANIZATION_LINK", "OWNER_ENTITY_AUTHORITY")):
+            continue
+        content = read_evidence(e)
+        if content is None:
+            continue
+        text, source, _confidence = document_text(content, e.content_type)
+        if _name_in_text(text, core, source == "OCR"):
+            org.status, org.verified_at = "VERIFIED", _now()
+            return True
+    return False
 
 
 def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
-    """-> (state, assurance level, reason codes). Automation approves only a
-    complete, matching, current, uncontested chain; it escalates anything it
-    can't safely decide and asks for evidence where a fix is clear."""
+    """-> (state, assurance level, reason codes). Fully automatic: approves
+    a complete, matching, current, uncontested chain read from the
+    documents; otherwise shows the host the specific fix (ACTION_REQUIRED --
+    never a final rejection); waits (stays SUBMITTED) only for things the
+    host can't fix -- property verification, the OCR engine, the malware
+    scanner. Nothing goes to a manual review queue."""
     pack = get_pack(db, v.country_code)
     _reanalyze_stale_uploads(db, v, requirements(db, v))
     _refresh_principal_matches(db, v)
     m = _match_model(db, v)
     v.match_results = m
     route = route_for(v)
-    action, review = [], []
+    action, waiting = [], []
     reqs = requirements(db, v)
     if any(r["required"] and r["status"] != "READY" for r in reqs):
         action.append("SUBLET_PERMISSION_MISSING" if route == "SUBLET" and any(
@@ -1462,8 +1525,7 @@ def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
         action.append("NAME_MISMATCH")
     # Sections 4 / 11.1: the document is read (text layer or OCR) and must be
     # an accepted document for this country that names the property and the
-    # verified person. A poor read or the wrong document is the host's to fix
-    # -- it never waits on a reviewer.
+    # verified person. A poor read or the wrong document is the host's to fix.
     if m["unclear_documents"]:
         action.append("EVIDENCE_UNCLEAR")
     if _wrong_document_types(v, reqs):
@@ -1471,19 +1533,29 @@ def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
     if any(e.not_official for e in v.evidence if e.processing_status == "READY" and e.source_type == "UPLOAD"):
         action.append("DOCUMENT_NOT_OFFICIAL")
     if m["ocr_unavailable"]:
-        review.append("EVIDENCE_UNREADABLE")  # no OCR engine on this server
+        waiting.append("EVIDENCE_UNREADABLE")  # no OCR engine on this server
     elif not m["unclear_documents"] and (m["property_match"] is None or m["representative_match"] is None):
-        review.append("EVIDENCE_UNREADABLE")  # e.g. no verified legal name to match against
-    if not m["source_integrity"]:
-        review.append("EVIDENCE_REUSED" if any(e.reused_elsewhere for e in v.evidence) else "TAMPER_SIGNAL")
+        waiting.append("EVIDENCE_UNREADABLE")  # e.g. no verified legal name to match against yet
     if any(e.scan_status == "ERROR" for e in v.evidence if e.processing_status == "READY"):
-        review.append("SCAN_INCOMPLETE")
-    if _conflicts(db, v):
-        review.append("CONFLICTING_AUTHORITY")
-    if v.acting_capacity == "ORGANIZATION" and (v.organization is None or v.organization.status != "VERIFIED"):
-        review.append("ORGANIZATION_UNVERIFIED")
-    if v.relationship_type == "REPRESENTATIVE":
-        review.append("ENTITY_CHAIN")
+        waiting.append("SCAN_INCOMPLETE")
+    if _conflicts(db, v) and not m["owner_confirmation"]:
+        action.append("CONFLICTING_AUTHORITY")
+    if v.acting_capacity == "ORGANIZATION" and not _organization_confirmed(db, v):
+        action.append("ORGANIZATION_UNCONFIRMED")
+    readable = not m["unclear_documents"] and not m["ocr_unavailable"]
+    # Acting for someone else (agent, tenant, representative): that someone
+    # can't be the host -- an owner uses the Owner route.
+    if (route != "OWNER" or v.relationship_type == "REPRESENTATIVE") and _principal_is_host(db, v):
+        action.append("PRINCIPAL_IS_YOU")
+    if v.relationship_type == "REPRESENTATIVE" and readable:
+        # Entity chain (company / trust / estate), checked from the documents.
+        if not principal_name(v):
+            action.append("PRINCIPAL_NAME_NEEDED")
+        else:
+            if m["principal_on_title"] is False:
+                action.append("PRINCIPAL_NOT_ON_TITLE")
+            if m["principal_match"] is False:
+                action.append("PRINCIPAL_UNCONFIRMED")
     # Agent mandate / sublet permission: without the owner's or landlord's own
     # confirmation, the document itself must name the principal the host
     # identified (a tenant can't self-evidence permission -- Section 13.1).
@@ -1494,17 +1566,53 @@ def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
         elif m["principal_match"] is not True:
             action.append("PRINCIPAL_UNCONFIRMED")
     if not _property_verified(db, v.property_id):
-        review.append("PROPERTY_NOT_VERIFIED")
-    if v.is_reconsideration:
-        review.append("RECONSIDERATION")
+        waiting.append("PROPERTY_NOT_VERIFIED")
+    if not m["source_integrity"]:
+        # The host replaces the document with their own original.
+        action.insert(0, "EVIDENCE_REUSED" if any(e.reused_elsewhere for e in v.evidence
+                                                  if e.processing_status == "READY") else "TAMPER_SIGNAL")
     if action:
-        return "ACTION_REQUIRED", "AV-X", list(dict.fromkeys(action + review))
-    if review:
-        return "MANUAL_REVIEW", "AV-0", list(dict.fromkeys(review))
+        return "ACTION_REQUIRED", "AV-X", list(dict.fromkeys(action + waiting))
+    if waiting:
+        return "SUBMITTED", "AV-0", list(dict.fromkeys(waiting))
     # Section 2.3: two independent sources -- a matching document plus an
     # authenticated principal confirmation -- is enhanced assurance.
     has_document = any(e.source_type == "UPLOAD" and e.processing_status == "READY" for e in v.evidence)
     return "VERIFIED", "AV-2" if has_document and m["owner_confirmation"] else "AV-1", []
+
+
+def _apply_decision(db: Session, v: AuthorityVerification, *, actor=None, correlation_id: str = "") -> str:
+    """Runs the automated decision and moves the case to its outcome. On a
+    re-check (no actor) nothing is recorded or sent unless the outcome
+    changed. Returns the resulting state."""
+    previous_state, previous_codes = v.state, list(v.reason_codes or [])
+    state, level, codes = decide(db, v)
+    if actor is None and state == previous_state and codes == previous_codes:
+        return state
+    _event(db, "AUTHORITY_AUTOMATED_CHECK_COMPLETED", v, actor=actor, correlation_id=correlation_id,
+           reason_codes=codes, extra={"outcome": state, "matchResults": {k: v.match_results.get(k) for k in (
+               "property_match", "representative_match", "principal_match", "scope_match", "validity_result")}})
+    v.reason_codes = codes
+    now = _now()
+    if state == "VERIFIED":
+        _approve(db, v, assurance=level, actor=actor, correlation_id=correlation_id)
+    elif state == "SUBMITTED":
+        if v.state != "SUBMITTED":  # a legacy case from the retired review queue
+            _set_state(db, v, "SUBMITTED")
+        v.assurance_level = level
+        _event(db, "AUTHORITY_CHECK_WAITING", v, actor=actor, reason_codes=codes, previous_state=previous_state,
+               new_state="SUBMITTED", correlation_id=correlation_id)
+        _notify(db, v, "Checking your authority", describe(codes)["message"],
+                email_status="Checking" if actor is not None else "", email_variant="submitted")
+    else:
+        _set_state(db, v, "ACTION_REQUIRED")
+        v.assurance_level = level
+        v.decided_at = now
+        _event(db, "AUTHORITY_ACTION_REQUIRED", v, actor=actor, reason_codes=codes, previous_state=previous_state,
+               new_state="ACTION_REQUIRED", correlation_id=correlation_id)
+        _notify(db, v, "Authority action required", describe(codes)["message"], email_status="Action required",
+                email_variant="action-required")
+    return state
 
 
 def submit(db: Session, user: UserAccount, v: AuthorityVerification, *, attested: bool,
@@ -1520,35 +1628,47 @@ def submit(db: Session, user: UserAccount, v: AuthorityVerification, *, attested
     if not any(e.processing_status == "READY" for e in v.evidence):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, REASONS["REQUIREMENT_MISSING"][0])
     _set_state(db, v, "SUBMITTED")
-    now = _now()
-    v.attested_at = v.submitted_at = now
+    v.attested_at = v.submitted_at = _now()
     v.submit_idempotency_key = idempotency_key
-    state, level, codes = decide(db, v)
-    _event(db, "AUTHORITY_AUTOMATED_CHECK_COMPLETED", v, actor=user, correlation_id=correlation_id,
-           reason_codes=codes, extra={"outcome": state, "matchResults": {k: v.match_results.get(k) for k in (
-               "property_match", "representative_match", "principal_match", "scope_match", "validity_result")}})
-    v.reason_codes = codes
-    if state == "VERIFIED":
-        _approve(db, v, assurance=level, actor=user, correlation_id=correlation_id)
-    elif state == "MANUAL_REVIEW":
-        _set_state(db, v, "MANUAL_REVIEW")
-        _event(db, "AUTHORITY_MANUAL_REVIEW_STARTED", v, actor=user, reason_codes=codes, previous_state="SUBMITTED",
-               new_state="MANUAL_REVIEW", correlation_id=correlation_id)
-        _notify(db, v, "Authority verification in review", REASONS.get(codes[0], ("We're reviewing your authority.",))[0],
-                email_status="In review", email_variant="submitted")
-        _notify_reviewers(db, v)
-    else:
-        _set_state(db, v, "ACTION_REQUIRED")
-        v.assurance_level = "AV-X"
-        v.decided_at = now
-        _event(db, "AUTHORITY_ACTION_REQUIRED", v, actor=user, reason_codes=codes, previous_state="SUBMITTED",
-               new_state="ACTION_REQUIRED", correlation_id=correlation_id)
-        _notify(db, v, "Authority action required", describe(codes)["message"], email_status="Action required",
-                email_variant="action-required")
+    _apply_decision(db, v, actor=user, correlation_id=correlation_id)
     _touch(v)
     db.commit()
     db.refresh(v)
     return v
+
+
+def _rescan_incomplete(v: AuthorityVerification) -> None:
+    """Uploads the malware scanner couldn't answer for are scanned again; an
+    infected file needs replacing."""
+    from app.core import upload_scan
+
+    for e in v.evidence:
+        if e.source_type != "UPLOAD" or e.processing_status != "READY" or e.scan_status != "ERROR":
+            continue
+        content = read_evidence(e)
+        if content is None:
+            continue
+        try:
+            e.scan_status = upload_scan.inspect(content, e.content_type)
+        except HTTPException:
+            e.scan_status, e.processing_status = "INFECTED", "NEEDS_REPLACEMENT"
+
+
+def recheck_pending(db: Session, *, property_id: int | None = None, correlation_id: str = "") -> int:
+    """Decides waiting cases again (and any left in the retired review
+    queue): run by the scheduler and as soon as a property is verified.
+    Returns how many changed state; the caller commits."""
+    query = select(AuthorityVerification).where(AuthorityVerification.state.in_(("SUBMITTED", "MANUAL_REVIEW")))
+    if property_id is not None:
+        query = query.where(AuthorityVerification.property_id == property_id)
+    changed = 0
+    for v in list(db.scalars(query.order_by(AuthorityVerification.id))):
+        previous = v.state
+        _rescan_incomplete(v)
+        if _apply_decision(db, v, correlation_id=correlation_id) != previous:
+            _touch(v)
+            changed += 1
+    return changed
 
 
 def _approve(db: Session, v: AuthorityVerification, *, assurance: str, actor, correlation_id: str = "") -> None:
@@ -1562,8 +1682,6 @@ def _approve(db: Session, v: AuthorityVerification, *, assurance: str, actor, co
     evidence_expiry = [_utc(e.expires_at) for e in v.evidence if e.expires_at and e.processing_status == "READY"]
     candidates = [d for d in [_utc(v.expires_at), *evidence_expiry] if d]
     v.expires_at = min(candidates) if candidates else now + timedelta(days=pack.default_validity_days)
-    if v.organization and v.organization.status != "VERIFIED" and isinstance(actor, AdminUser):
-        v.organization.status, v.organization.verified_at, v.organization.verified_by_admin_id = "VERIFIED", now, actor.id
     _event(db, "AUTHORITY_RENEWED" if v.previous_id else "AUTHORITY_APPROVED", v, actor=actor, previous_state=previous,
            new_state="VERIFIED", correlation_id=correlation_id, extra={"assuranceLevel": assurance})
     # Section 9: the newly approved assertion becomes controlling.
@@ -1605,118 +1723,7 @@ def _notify(db: Session, v: AuthorityVerification, title: str, message: str, *, 
         valid_until=f"{expires:%d %b %Y}" if expires and v.state == "VERIFIED" else "")
 
 
-def _notify_reviewers(db: Session, v: AuthorityVerification) -> None:
-    from app.crud import notification as notif_crud
-
-    notif_crud.notify_all_super_admins(
-        db, title="Authority verification needs review",
-        message=f"Authority verification #{v.id} (property #{v.property_id}, {v.relationship_type}) needs a reviewer.",
-        notification_type="authority.review", related_entity_type=RESOURCE, related_entity_id=str(v.id),
-    )
-
-
-# -- review / revoke / renew / reconsider (Sections 9.2, 11) ------------------------
-
-def assign(db: Session, admin: AdminUser, v: AuthorityVerification, *, release: bool = False,
-           correlation_id: str = "") -> AuthorityVerification:
-    """Section 13: least-privilege reviewer access. A reviewer takes (or
-    hands back) a case; taking one held by someone else reassigns it, which
-    is audited like every other assignment."""
-    if admin.role != "super_admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
-    if release:
-        if v.assigned_admin_id not in (None, admin.id):
-            raise HTTPException(status.HTTP_409_CONFLICT, "Only the assigned reviewer can release this case")
-        v.assigned_admin_id, v.assigned_at = None, None
-        _event(db, "AUTHORITY_REVIEW_RELEASED", v, actor=admin, correlation_id=correlation_id)
-    else:
-        if v.state != "MANUAL_REVIEW":
-            raise HTTPException(status.HTTP_409_CONFLICT, "Only a case in review can be assigned")
-        previous = v.assigned_admin_id
-        v.assigned_admin_id, v.assigned_at = admin.id, _now()
-        _event(db, "AUTHORITY_REVIEW_ASSIGNED", v, actor=admin, correlation_id=correlation_id,
-               extra={"reassignedFrom": previous} if previous and previous != admin.id else None)
-    _touch(v)
-    db.commit()
-    db.refresh(v)
-    return v
-
-
-def require_assignment(db: Session, admin: AdminUser, v: AuthorityVerification, *, correlation_id: str = "") -> None:
-    """Opening evidence or deciding needs the case. An unassigned case in
-    review is taken by the reviewer who opens it."""
-    if v.assigned_admin_id == admin.id:
-        return
-    if v.assigned_admin_id is not None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "This case is assigned to another reviewer -- reassign it to yourself first")
-    if v.state == "MANUAL_REVIEW":
-        assign(db, admin, v, correlation_id=correlation_id)
-        return
-    raise HTTPException(status.HTTP_403_FORBIDDEN, "Evidence is only available for a case assigned to you")
-
-
-# Section 11.2: "two-person review may be required by policy / risk tier".
-TWO_PERSON_CODES = ("CONFLICTING_AUTHORITY", "ENTITY_CHAIN", "EVIDENCE_REUSED", "TAMPER_SIGNAL")
-
-
-def review(db: Session, admin: AdminUser, v: AuthorityVerification, *, decision: str, reason_code: str,
-           note: str = "", expected_version: int | None = None, correlation_id: str = "") -> AuthorityVerification:
-    if admin.role != "super_admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
-    _check_version(v, expected_version)
-    decision = decision.upper()
-    if decision == "APPROVE" and v.first_approver_admin_id is not None and v.first_approver_admin_id == admin.id:
-        raise HTTPException(status.HTTP_409_CONFLICT, "A second, different reviewer must approve this authority")
-    if v.state == "MANUAL_REVIEW":
-        require_assignment(db, admin, v, correlation_id=correlation_id)
-    if decision not in REVIEW_DECISIONS:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"decision must be one of {REVIEW_DECISIONS}")
-    if reason_code not in REVIEW_REASONS[decision]:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"reasonCode must be one of {REVIEW_REASONS[decision]}")
-    if v.state != "MANUAL_REVIEW":
-        raise HTTPException(status.HTTP_409_CONFLICT, f"This authority verification is {v.state} and can't be reviewed")
-    v.reviewer_admin_id = admin.id
-    v.review_note = note.strip()[:1000]
-    v.review_reason_codes = list(dict.fromkeys([*(v.review_reason_codes or []), reason_code]))
-    v.last_reviewed_at = _now()
-    if decision == "APPROVE":
-        # Two-person review for conflicting claims, entity chains and
-        # integrity signals (Section 11.2).
-        needs_two = any(c in (v.reason_codes or []) for c in TWO_PERSON_CODES)
-        if needs_two and v.first_approver_admin_id is None:
-            v.first_approver_admin_id = admin.id
-            v.assigned_admin_id, v.assigned_at = None, None  # free for the second reviewer
-            _event(db, "AUTHORITY_REVIEW_FIRST_APPROVAL", v, actor=admin, reason_codes=[reason_code],
-                   correlation_id=correlation_id)
-            _touch(v)
-            db.commit()
-            db.refresh(v)
-            return v
-        if v.first_approver_admin_id is not None and v.first_approver_admin_id == admin.id:
-            raise HTTPException(status.HTTP_409_CONFLICT, "A second, different reviewer must approve this authority")
-        _approve(db, v, assurance="AV-2", actor=admin, correlation_id=correlation_id)
-    elif decision == "REJECT":
-        _set_state(db, v, "REJECTED")
-        v.decided_at = _now()
-        v.reason_codes = [reason_code]
-        _event(db, "AUTHORITY_REJECTED", v, actor=admin, reason_codes=[reason_code], previous_state="MANUAL_REVIEW",
-               new_state="REJECTED", correlation_id=correlation_id)
-        _notify(db, v, "Could not verify authority", describe([reason_code])["message"],
-                email_status="Could not verify", email_variant="rejected")
-    else:
-        _set_state(db, v, "ACTION_REQUIRED")
-        v.assurance_level = "AV-X"
-        v.decided_at = _now()
-        v.reason_codes = [reason_code]
-        _event(db, "AUTHORITY_ACTION_REQUIRED", v, actor=admin, reason_codes=[reason_code], previous_state="MANUAL_REVIEW",
-               new_state="ACTION_REQUIRED", correlation_id=correlation_id)
-        _notify(db, v, "Authority action required", describe([reason_code])["message"],
-                email_status="Action required", email_variant="action-required")
-    _touch(v)
-    db.commit()
-    db.refresh(v)
-    return v
-
+# -- revoke / renew / reconsider (Sections 9.2, 11) ---------------------------------
 
 def _listing_control(db: Session, v: AuthorityVerification, reason: str) -> int:
     """Section 12.4 / P0 #9: expired or revoked authority suspends live
@@ -1954,9 +1961,9 @@ def metrics(db: Session, *, days: int = 30) -> dict:
         "period_days": days, "started": len(rows), "submitted": len(submitted),
         "verified": sum(1 for v in rows if v.verified_at),
         "auto_approval_rate": rate(sum(1 for v in submitted if v.verified_at and not v.reviewer_admin_id), len(submitted)),
-        "manual_review_rate": rate(sum(1 for v in submitted if v.reviewer_admin_id or v.state == "MANUAL_REVIEW"), len(submitted)),
-        "pending_review": db.scalar(select(func.count(AuthorityVerification.id)).where(
-            AuthorityVerification.state == "MANUAL_REVIEW")) or 0,
+        # Submitted cases waiting on property verification, OCR or the scanner.
+        "waiting": db.scalar(select(func.count(AuthorityVerification.id)).where(
+            AuthorityVerification.state.in_(("SUBMITTED", "MANUAL_REVIEW")))) or 0,
         "confirmations_sent": db.scalar(select(func.count(AuthorityConfirmation.id)).where(
             AuthorityConfirmation.created_at >= since)) or 0,
         "revoked": sum(1 for v in rows if v.state == "REVOKED"),

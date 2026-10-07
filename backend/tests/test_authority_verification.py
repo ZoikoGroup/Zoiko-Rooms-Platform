@@ -1,7 +1,8 @@
 """ZR-AUTHORITY-002 -- property-scoped Authority Verification: owner, agent
 and sublet routes, evidence, owner / landlord confirmation (link + code),
-automated decision, review with four-eyes, revoke / expiry with listing
-control, renewal, the authority gate and privacy. Section 17 QA scenarios."""
+fully automatic decision (no manual review queue), revoke / expiry with
+listing control, renewal, the authority gate and privacy. Section 17 QA
+scenarios."""
 
 from __future__ import annotations
 
@@ -52,6 +53,8 @@ def _png(width: int = 40, height: int = 40) -> bytes:
 
 DEED = _pdf("SALE DEED", "Owner: Asha Rao", "Property: 12 Lake View Road, Hyderabad 500001")
 LEASE = _pdf("TENANCY AGREEMENT", "Tenant: Asha Rao", "Premises: 12 Lake View Road, Hyderabad 500001")
+ESTATE_TITLE = _pdf("SALE DEED", "Owner: Vikram Shah", "Property: 12 Lake View Road, Hyderabad 500001")
+ESTATE_GRANT = _pdf("LETTERS OF ADMINISTRATION", "Estate of the late Vikram Shah", "Administrator: Asha Rao")
 MANDATE = _pdf("PROPERTY MANAGEMENT AGREEMENT", "Owner: Vikram Shah", "Agent: Asha Rao",
                "Property: 12 Lake View Road, Hyderabad 500001", "Authority to advertise and rent")
 
@@ -206,7 +209,7 @@ class TestOwnerRoute:
         assert f.body["state"] == "ACTION_REQUIRED"
         assert "EVIDENCE_UNCLEAR" in f.body["reasonCodes"]
 
-    def test_without_an_ocr_engine_a_scan_falls_back_to_review(self, client, db_session, ocr):
+    def test_without_an_ocr_engine_a_scan_waits_and_is_decided_later(self, client, db_session, ocr):
         ocr["available"] = False
         user, prop, _ = _host(db_session, "auth-noocr@test.com")
         f = Flow(client, user, prop)
@@ -214,8 +217,12 @@ class TestOwnerRoute:
         f._send("POST", f"{BASE}/{f.body['id']}/evidence", data={"requirementId": "OWNER_PROPERTY_RIGHT"},
                 files={"file": ("deed.png", _png(), "image/png")})
         f.submit()
-        assert f.body["state"] == "MANUAL_REVIEW"
-        assert "EVIDENCE_UNREADABLE" in f.body["reasonCodes"]
+        assert f.body["state"] == "SUBMITTED"
+        assert f.body["reasonCodes"] == ["EVIDENCE_UNREADABLE"]
+        ocr.update(available=True, text="SALE DEED OWNER ASHA RAO 12 LAKE VIEW ROAD HYDERABAD 500001", confidence=82.0)
+        assert svc.recheck_pending(db_session) == 1
+        db_session.commit()
+        assert db_session.get(AuthorityVerification, f.body["id"]).state == "VERIFIED"
 
     def test_wrong_kind_of_document_needs_action(self, client, db_session):
         """Section 4.2: a utility bill naming the host and address is not
@@ -266,17 +273,26 @@ class TestOwnerRoute:
         monkeypatch.setattr(upload_scan, "clamav_scan", lambda content: "ERROR")
         f.upload("OWNER_PROPERTY_RIGHT", DEED)
         f.submit()
-        assert f.body["state"] == "MANUAL_REVIEW" and "SCAN_INCOMPLETE" in f.body["reasonCodes"]
+        assert f.body["state"] == "SUBMITTED" and f.body["reasonCodes"] == ["SCAN_INCOMPLETE"]
+        monkeypatch.setattr(upload_scan, "clamav_scan", lambda content: "CLEAN")
+        svc.recheck_pending(db_session)
+        db_session.commit()
+        assert db_session.get(AuthorityVerification, f.body["id"]).state == "VERIFIED"
 
-    def test_property_not_verified_holds_in_review(self, client, db_session, env):
+    def test_property_not_verified_waits_then_verifies_automatically(self, client, db_session, env):
         env["property"] = False
         user, prop, _ = _host(db_session, "auth-propunver@test.com")
         f = Flow(client, user, prop)
         f.start()
         f.upload("OWNER_PROPERTY_RIGHT")
         f.submit()
-        assert f.body["state"] == "MANUAL_REVIEW"
-        assert "PROPERTY_NOT_VERIFIED" in f.body["reasonCodes"]
+        assert f.body["state"] == "SUBMITTED"
+        assert f.body["reasonCodes"] == ["PROPERTY_NOT_VERIFIED"]
+        assert svc.recheck_pending(db_session) == 0  # still waiting: nothing changes, nothing is re-sent
+        env["property"] = True
+        assert svc.recheck_pending(db_session, property_id=prop.id) == 1
+        db_session.commit()
+        assert db_session.get(AuthorityVerification, f.body["id"]).state == "VERIFIED"
 
     def test_representative_needs_entity_evidence_and_review(self, client, db_session):
         user, prop, _ = _host(db_session, "auth-rep@test.com")
@@ -286,6 +302,42 @@ class TestOwnerRoute:
         f.submit()
         assert f.body["state"] == "ACTION_REQUIRED"
         assert "REQUIREMENT_MISSING" in f.body["reasonCodes"]
+
+    def test_estate_representative_with_matching_chain_is_verified_automatically(self, client, db_session):
+        """Entity chain from the documents: the title names the estate's
+        owner, the grant names that owner and the verified administrator."""
+        user, prop, room = _host(db_session, "auth-rep-estate@test.com")
+        f = Flow(client, user, prop)
+        f.start("REPRESENTATIVE")
+        f.upload("OWNER_PROPERTY_RIGHT", ESTATE_TITLE)
+        f.upload("OWNER_ENTITY_AUTHORITY", ESTATE_GRANT)
+        f.details(principalName="Vikram Shah")  # entered after the uploads: matched at submit
+        f.submit()
+        assert f.body["state"] == "VERIFIED", f.body["reasonCodes"]
+        assert get_valid_authority_for_room(db_session, room.id) is not None
+
+    def test_representative_principal_must_be_on_the_title(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-rep-wrongprincipal@test.com")
+        f = Flow(client, user, prop)
+        f.start("REPRESENTATIVE")
+        f.details(principalName="Nexalytech")
+        f.upload("OWNER_PROPERTY_RIGHT", ESTATE_TITLE)
+        f.upload("OWNER_ENTITY_AUTHORITY", ESTATE_GRANT)
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED"
+        assert {"PRINCIPAL_NOT_ON_TITLE", "PRINCIPAL_UNCONFIRMED"} <= set(f.body["reasonCodes"])
+
+    def test_representative_must_be_named_on_the_entity_document(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-rep-notnamed@test.com")
+        f = Flow(client, user, prop)
+        f.start("REPRESENTATIVE")
+        f.details(principalName="Vikram Shah")
+        f.upload("OWNER_PROPERTY_RIGHT", ESTATE_TITLE)
+        f.upload("OWNER_ENTITY_AUTHORITY", _pdf("LETTERS OF ADMINISTRATION", "Estate of the late Vikram Shah",
+                                                "Administrator: Meera Iyer"))
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED"
+        assert "NAME_MISMATCH" in f.body["reasonCodes"]
 
 
 # -- agent route --------------------------------------------------------------------
@@ -446,81 +498,148 @@ class TestSubletRoute:
         assert r.status_code == 409
 
 
-# -- review, conflicts, revoke, expiry, renewal ---------------------------------------
+# -- organizations, conflicts, integrity: decided automatically -----------------------
 
 
-def _to_review(client, db_session, email):
-    """A complete, matching agent chain through an organization nobody has
-    verified yet -- one of the cases that still needs a reviewer."""
+ORG_LETTER = _pdf("APPOINTMENT LETTER", "Lake Lettings Limited", "Asha Rao is appointed as letting manager")
+
+
+def _agent_through_org(client, db_session, email, link_document):
     user, prop, room = _host(db_session, email)
-    org = client.post("/api/users/organizations", json={"name": f"Lettings {email}"},
+    org = client.post("/api/users/organizations", json={"name": "Lake Lettings Ltd"},
                       cookies=auth_user_cookie(user)).json()
     f = Flow(client, user, prop)
     f.start("AGENT")
     f.details(organizationId=org["id"], principalName="Vikram Shah")
     f.upload("AGENT_MANDATE", MANDATE)
-    f.upload("AGENT_ORGANIZATION_LINK", _pdf("APPOINTMENT LETTER", "Asha Rao is appointed as letting manager"))
+    f.upload("AGENT_ORGANIZATION_LINK", link_document)
     f.submit()
-    assert f.body["state"] == "MANUAL_REVIEW", f.body["reasonCodes"]
-    assert f.body["reasonCodes"] == ["ORGANIZATION_UNVERIFIED"]
-    return user, prop, room, f
+    return user, prop, room, f, org
 
 
-class TestReview:
-    def test_reviewer_approves_with_reason_code(self, client, db_session):
-        user, prop, room, f = _to_review(client, db_session, "auth-review@test.com")
-        admin = _make_admin(db_session, email="auth-reviewer@test.com", role="super_admin")
-        queue = client.get("/api/authority-verifications", cookies=auth_admin_cookie(admin)).json()
-        assert any(q["id"] == f.body["id"] for q in queue)
-        case = client.get(f"/api/authority-verifications/{f.body['id']}", cookies=auth_admin_cookie(admin)).json()
-        assert case["verifiedLegalName"] == LEGAL_NAME and case["evidence"]
-        r = client.post(f"/api/authority-verifications/{f.body['id']}/review", cookies=auth_admin_cookie(admin),
-                        json={"decision": "APPROVE", "reasonCode": "REVIEW_APPROVED_DOCUMENTS"})
-        assert r.status_code == 200, r.text
-        assert r.json()["state"] == "VERIFIED" and r.json()["assuranceLevel"] == "AV-2"
+def _tampered(document: bytes) -> bytes:
+    """An incrementally re-saved PDF -- the weak edit signal."""
+    return document + b"\n%%EOF\n"
 
-    def test_free_text_reason_is_refused(self, client, db_session):
-        _, _, _, f = _to_review(client, db_session, "auth-review-bad@test.com")
-        admin = _make_admin(db_session, email="auth-reviewer-bad@test.com", role="super_admin")
-        r = client.post(f"/api/authority-verifications/{f.body['id']}/review", cookies=auth_admin_cookie(admin),
-                        json={"decision": "REJECT", "reasonCode": "because I said so"})
-        assert r.status_code == 400
 
-    def test_conflicting_claims_are_preserved_and_need_two_reviewers(self, client, db_session):
-        user, prop, room, f = _to_review(client, db_session, "auth-conflict@test.com")
-        # a second party's claim on the same property
-        other = _make_user(db_session, email="auth-conflict-other@test.com")
+class TestAutomaticOutcomes:
+    def test_organization_named_on_the_link_document_is_verified_and_reused(self, client, db_session):
+        user, prop, room, f, org = _agent_through_org(client, db_session, "auth-org-ok@test.com", ORG_LETTER)
+        assert f.body["state"] == "VERIFIED", f.body["reasonCodes"]
+        assert f.body["organization"]["status"] == "VERIFIED"
+
+    def test_link_document_not_naming_the_organization_needs_action(self, client, db_session):
+        letter = _pdf("APPOINTMENT LETTER", "Asha Rao is appointed as letting manager")
+        _, _, _, f, _ = _agent_through_org(client, db_session, "auth-org-unnamed@test.com", letter)
+        assert f.body["state"] == "ACTION_REQUIRED"
+        assert "ORGANIZATION_UNCONFIRMED" in f.body["reasonCodes"]
+
+    def test_another_partys_verified_authority_blocks_a_new_claim(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-conflict@test.com")
         party = Party(party_type="provider", status="active", jurisdiction="IN")
         db_session.add(party)
         db_session.flush()
-        other.party_id = party.id
         db_session.add(AuthorityVerification(property_id=prop.id, party_id=party.id, relationship_type="OWNER",
-                                             country_code="IN", pack_version=1, state="MANUAL_REVIEW"))
+                                             country_code="IN", pack_version=1, state="VERIFIED",
+                                             expires_at=datetime.now(timezone.utc) + timedelta(days=30)))
         db_session.commit()
-        v = db_session.get(AuthorityVerification, f.body["id"])
-        v.reason_codes = ["CONFLICTING_AUTHORITY"]
-        db_session.commit()
-        a1 = _make_admin(db_session, email="auth-4eyes-1@test.com", role="super_admin")
-        a2 = _make_admin(db_session, email="auth-4eyes-2@test.com", role="super_admin")
-        body = {"decision": "APPROVE", "reasonCode": "REVIEW_APPROVED_DOCUMENTS"}
-        r1 = client.post(f"/api/authority-verifications/{v.id}/review", cookies=auth_admin_cookie(a1), json=body)
-        assert r1.json()["state"] == "MANUAL_REVIEW"
-        again = client.post(f"/api/authority-verifications/{v.id}/review", cookies=auth_admin_cookie(a1), json=body)
-        assert again.status_code == 409
-        r2 = client.post(f"/api/authority-verifications/{v.id}/review", cookies=auth_admin_cookie(a2), json=body)
-        assert r2.json()["state"] == "VERIFIED"
-        assert db_session.scalar(select(AuthorityVerification).where(AuthorityVerification.party_id == party.id))
+        f = Flow(client, user, prop)
+        f.start()
+        f.upload("OWNER_PROPERTY_RIGHT")
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED"
+        assert "CONFLICTING_AUTHORITY" in f.body["reasonCodes"]
 
-    def test_request_evidence_then_resubmit(self, client, db_session):
-        user, prop, room, f = _to_review(client, db_session, "auth-moreev@test.com")
-        admin = _make_admin(db_session, email="auth-moreev-admin@test.com", role="super_admin")
-        r = client.post(f"/api/authority-verifications/{f.body['id']}/review", cookies=auth_admin_cookie(admin),
-                        json={"decision": "REQUEST_EVIDENCE", "reasonCode": "REVIEW_SCOPE_UNCLEAR"})
-        assert r.json()["state"] == "ACTION_REQUIRED"
-        assert r.json()["reason"]["message"]
-        f.body = r.json()
-        f.upload("AGENT_MANDATE", MANDATE)
-        assert f.body["state"] == "COLLECTING"
+    def test_pending_claims_by_others_do_not_block(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-conflict-pending@test.com")
+        party = Party(party_type="provider", status="active", jurisdiction="IN")
+        db_session.add(party)
+        db_session.flush()
+        db_session.add(AuthorityVerification(property_id=prop.id, party_id=party.id, relationship_type="OWNER",
+                                             country_code="IN", pack_version=1, state="SUBMITTED"))
+        db_session.commit()
+        f = Flow(client, user, prop)
+        f.start()
+        f.upload("OWNER_PROPERTY_RIGHT")
+        f.submit()
+        assert f.body["state"] == "VERIFIED", f.body["reasonCodes"]
+
+    def test_edited_document_needs_replacing_and_the_original_verifies(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-tamper-fixed@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        f.upload("OWNER_PROPERTY_RIGHT", _tampered(DEED))
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED"
+        assert f.body["reasonCodes"][0] == "TAMPER_SIGNAL"
+        f.upload("OWNER_PROPERTY_RIGHT", DEED, replacesId=str(f.body["evidence"][0]["id"]))
+        f.submit()
+        assert f.body["state"] == "VERIFIED", f.body["reasonCodes"]
+
+    def test_nothing_is_finally_rejected_the_host_can_always_correct_it(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-tamper-again@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        f.upload("OWNER_PROPERTY_RIGHT", _tampered(DEED))
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED"
+        f.upload("OWNER_PROPERTY_RIGHT", _tampered(_tampered(DEED)), replacesId=str(f.body["evidence"][0]["id"]))
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED" and f.body["reasonCodes"][0] == "TAMPER_SIGNAL"
+        assert {"ADD_EVIDENCE", "SUBMIT"} <= set(f.body["allowedActions"])
+        live = next(e for e in f.body["evidence"] if e["processingStatus"] == "READY")
+        f.upload("OWNER_PROPERTY_RIGHT", DEED, replacesId=str(live["id"]))
+        f.submit()
+        assert f.body["state"] == "VERIFIED", f.body["reasonCodes"]
+
+    def test_a_previously_rejected_case_is_corrected_by_the_host(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-legacy-rejected@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        f.upload("OWNER_PROPERTY_RIGHT", _pdf("SALE DEED", "Owner: Somebody Else",
+                                              "Property: 12 Lake View Road, Hyderabad 500001"))
+        v = db_session.get(AuthorityVerification, f.body["id"])
+        v.state, v.reason_codes = "REJECTED", ["REVIEW_CANNOT_ESTABLISH"]
+        db_session.commit()
+        f.body = client.get(f"{BASE}/{v.id}", cookies=auth_user_cookie(user)).json()
+        assert {"ADD_EVIDENCE", "SUBMIT"} <= set(f.body["allowedActions"])
+        f.upload("OWNER_PROPERTY_RIGHT", DEED, replacesId=str(f.body["evidence"][0]["id"]))
+        f.submit()
+        assert f.body["state"] == "VERIFIED", f.body["reasonCodes"]
+
+    def test_a_representative_cannot_act_for_themselves(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-agent-self@test.com")
+        f = Flow(client, user, prop)
+        f.start("REPRESENTATIVE")
+        f.details(principalName="Rao Asha")  # the host's own verified name, any order
+        f.upload("OWNER_PROPERTY_RIGHT", DEED)
+        f.upload("OWNER_ENTITY_AUTHORITY", _pdf("GRANT OF PROBATE", "Letters of administration",
+                                                "Estate of Asha Rao", "Administrator: Asha Rao"))
+        f.submit()
+        assert f.body["state"] == "ACTION_REQUIRED"
+        assert "PRINCIPAL_IS_YOU" in f.body["reasonCodes"]
+
+    def test_a_case_left_in_the_old_review_queue_is_decided_automatically(self, client, db_session):
+        user, prop, room = _host(db_session, "auth-legacy-review@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        f.upload("OWNER_PROPERTY_RIGHT")
+        v = db_session.get(AuthorityVerification, f.body["id"])
+        v.state, v.reason_codes = "MANUAL_REVIEW", ["ENTITY_CHAIN"]
+        db_session.commit()
+        assert svc.recheck_pending(db_session) == 1
+        db_session.commit()
+        assert db_session.get(AuthorityVerification, v.id).state == "VERIFIED"
+
+    def test_there_is_no_manual_review_route(self, client, db_session):
+        user, prop, _ = _host(db_session, "auth-no-review@test.com")
+        f = Flow(client, user, prop)
+        f.start()
+        admin = _make_admin(db_session, email="auth-no-review-admin@test.com", role="super_admin")
+        for path in ("review", "assign"):
+            r = client.post(f"/api/authority-verifications/{f.body['id']}/{path}", cookies=auth_admin_cookie(admin),
+                            json={"decision": "APPROVE", "reasonCode": "REVIEW_APPROVED_DOCUMENTS"})
+            assert r.status_code in (404, 405), path
 
 
 class TestRevokeExpiryRenew:

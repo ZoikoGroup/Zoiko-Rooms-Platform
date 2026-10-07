@@ -364,9 +364,7 @@ export interface AuthorityQueueItem {
   route: AuthorityRoute;
   countryCode: string;
   reasonCodes: string[];
-  awaitingSecondApproval: boolean;
   isReconsideration: boolean;
-  assignedAdminId: number | null;
   submittedAt: string | null;
   createdAt: string;
 }
@@ -379,41 +377,17 @@ export interface AuthorityCase extends Omit<AuthorityVerification, "evidence"> {
     principalMatched: boolean | null; reusedElsewhere: boolean; tamperSignal: boolean; scanStatus: string;
     textSource: string; ocrConfidence: number | null; typeMatched: boolean | null })[];
   matchResults: Record<string, boolean | null>;
-  reviewReasonCodes: string[];
-  reviewNote: string;
   reconsiderationNote: string;
-  awaitingSecondApproval: boolean;
-  firstApproverAdminId: number | null;
-  assignedAdminId: number | null;
-  assignedAt: string | null;
   otherClaims: { id: number; partyId: number; relationshipType: RelationshipType; state: AuthorityState; createdAt: string }[];
   events: { type: string; previousState: string | null; newState: string | null; actorKind: string; createdAt: string }[];
 }
 
-export function listAuthorityQueue(state = "MANUAL_REVIEW") {
+export function listAuthorityQueue(state = "all") {
   return apiClientFetch<AuthorityQueueItem[]>(`${ADMIN}?state=${encodeURIComponent(state)}`);
 }
 
 export function getAuthorityCase(id: number) {
   return apiClientFetch<AuthorityCase>(`${ADMIN}/${id}`);
-}
-
-export function getAuthorityReviewReasons() {
-  return apiClientFetch<Record<"APPROVE" | "REQUEST_EVIDENCE" | "REJECT", { code: string; message: string }[]>>(
-    `${ADMIN}/review-reasons`,
-  );
-}
-
-export function reviewAuthority(c: { id: number; version: number }, decision: string, reasonCode: string, note: string) {
-  return apiClientFetch<AuthorityVerification>(`${ADMIN}/${c.id}/review`, {
-    method: "POST", headers: versioned(c), body: JSON.stringify({ decision, reasonCode, note }),
-  });
-}
-
-export function assignAuthorityCase(id: number, release = false) {
-  return apiClientFetch<AuthorityVerification>(`${ADMIN}/${id}/assign`, {
-    method: "POST", body: JSON.stringify({ release }),
-  });
 }
 
 export function recordOwnershipChange(propertyId: number) {
@@ -434,16 +408,6 @@ export function adminAuthorityEvidenceUrl(verificationId: number, evidenceId: nu
 
 export function getAuthorityMetrics(days = 30) {
   return apiClientFetch<Record<string, unknown>>(`${ADMIN}/metrics?days=${days}`);
-}
-
-export function listPendingOrganizations() {
-  return apiClientFetch<Organization[]>(`${ADMIN}/organizations?status_filter=PENDING`);
-}
-
-export function decideOrganization(id: number, approve: boolean) {
-  return apiClientFetch<Organization>(`${ADMIN}/organizations/${id}/decision`, {
-    method: "POST", body: JSON.stringify({ approve }),
-  });
 }
 
 // -- Authority Regulatory Packs (Section 4) -------------------------------------------

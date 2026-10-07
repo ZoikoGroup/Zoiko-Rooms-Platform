@@ -5,8 +5,9 @@
   renew / reconsider, revoke, organizations and publication eligibility.
 - /api/authority-confirmations/{token} -- public owner / landlord
   confirmation (link + one-time code, no account needed).
-- /api/authority-verifications -- Trust & Safety queue, case, review,
-  revoke, organizations, metrics and Authority Regulatory Packs.
+- /api/authority-verifications -- Trust & Safety: read-only case list and
+  case view (every case is decided automatically), revoke, ownership
+  change, metrics and Authority Regulatory Packs.
 
 Writes take the version the client last read (If-Match header); a stale
 version gets 409. Start and submit accept an Idempotency-Key."""
@@ -85,20 +86,6 @@ class ConfirmationResponseIn(CamelModel):
     code: str
     decision: str
     responder_name: str = ""
-
-
-class ReviewIn(CamelModel):
-    decision: str
-    reason_code: str
-    note: str = ""
-
-
-class AssignIn(CamelModel):
-    release: bool = False
-
-
-class OrganizationDecisionIn(CamelModel):
-    approve: bool
 
 
 class PackUpdateIn(CamelModel):
@@ -392,16 +379,14 @@ admin_router = APIRouter(prefix="/api/authority-verifications", tags=["authority
 
 
 @admin_router.get("")
-def list_queue(state: str = "MANUAL_REVIEW", db: Session = Depends(get_db)):
+def list_queue(state: str = "all", db: Session = Depends(get_db)):
     query = select(AuthorityVerification).order_by(AuthorityVerification.submitted_at.is_(None),
                                                    AuthorityVerification.submitted_at, AuthorityVerification.id)
     if state != "all":
         query = query.where(AuthorityVerification.state == state.upper())
     return [{"id": v.id, "propertyId": v.property_id, "partyId": v.party_id, "state": svc.effective_state(v),
              "relationshipType": v.relationship_type, "route": svc.route_for(v), "countryCode": v.country_code,
-             "reasonCodes": list(v.reason_codes or []),
-             "awaitingSecondApproval": v.first_approver_admin_id is not None and v.state == "MANUAL_REVIEW",
-             "isReconsideration": v.is_reconsideration, "assignedAdminId": v.assigned_admin_id,
+             "reasonCodes": list(v.reason_codes or []), "isReconsideration": v.is_reconsideration,
              "submittedAt": v.submitted_at, "createdAt": v.created_at}
             for v in db.scalars(query.limit(200))]
 
@@ -409,33 +394,6 @@ def list_queue(state: str = "MANUAL_REVIEW", db: Session = Depends(get_db)):
 @admin_router.get("/metrics")
 def get_metrics(days: int = 30, db: Session = Depends(get_db)):
     return svc.metrics(db, days=days)
-
-
-@admin_router.get("/review-reasons")
-def get_review_reasons():
-    return {decision: [{"code": c, "message": svc.REASONS[c][0]} for c in codes]
-            for decision, codes in svc.REVIEW_REASONS.items()}
-
-
-@admin_router.get("/organizations")
-def admin_organizations(status_filter: str = "PENDING", db: Session = Depends(get_db)):
-    query = select(Organization).order_by(Organization.id)
-    if status_filter != "all":
-        query = query.where(Organization.status == status_filter.upper())
-    return [organization_read(o) for o in db.scalars(query.limit(200))]
-
-
-@admin_router.post("/organizations/{organization_id}/decision")
-def admin_decide_organization(organization_id: int, payload: OrganizationDecisionIn, request: Request,
-                              db: Session = Depends(get_db), admin: AdminUser = Depends(require_super_admin)):
-    org = db.get(Organization, organization_id)
-    if org is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
-    org = svc.decide_organization(db, admin, org, approve=payload.approve)
-    log_audit_event(db, admin, "organization.decision", "organization", str(org.id), get_correlation_id(request),
-                    reason=org.status)
-    db.commit()
-    return organization_read(org)
 
 
 @admin_router.post("/properties/{property_id}/ownership-change")
@@ -500,11 +458,7 @@ def admin_case(verification_id: int, db: Session = Depends(get_db)):
         "verifiedLegalName": svc._verified_legal_name(db, v.party_id),
         "property": {"id": prop.id, "address": prop.address, "city": prop.city,
                      "postalCode": prop.postal_code, "verified": svc._property_verified(db, prop.id)},
-        "matchResults": v.match_results or {}, "reviewReasonCodes": list(v.review_reason_codes or []),
-        "reviewNote": v.review_note, "reconsiderationNote": v.reconsideration_note,
-        "awaitingSecondApproval": v.first_approver_admin_id is not None and v.state == "MANUAL_REVIEW",
-        "firstApproverAdminId": v.first_approver_admin_id, "assignedAdminId": v.assigned_admin_id,
-        "assignedAt": v.assigned_at,
+        "matchResults": v.match_results or {}, "reconsiderationNote": v.reconsideration_note,
         "otherClaims": [{"id": o.id, "partyId": o.party_id, "relationshipType": o.relationship_type,
                          "state": svc.effective_state(o), "createdAt": o.created_at} for o in others],
         "events": [{"type": e.event_type, "previousState": e.previous_state, "newState": e.new_state,
@@ -518,39 +472,10 @@ def admin_evidence(verification_id: int, evidence_id: int, request: Request, db:
     v = db.get(AuthorityVerification, verification_id)
     if v is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Authority verification not found")
-    svc.require_assignment(db, admin, v, correlation_id=get_correlation_id(request))
     log_audit_event(db, admin, "authority_evidence.view", "authority_evidence", str(evidence_id),
                     get_correlation_id(request))
     db.commit()
     return _evidence_response(v, evidence_id)
-
-
-@admin_router.post("/{verification_id}/assign")
-def admin_assign(verification_id: int, payload: AssignIn, request: Request, db: Session = Depends(get_db),
-                 admin: AdminUser = Depends(require_super_admin)):
-    v = db.get(AuthorityVerification, verification_id)
-    if v is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Authority verification not found")
-    v = svc.assign(db, admin, v, release=payload.release, correlation_id=get_correlation_id(request))
-    log_audit_event(db, admin, "authority_verification.release" if payload.release else "authority_verification.assign",
-                    svc.RESOURCE, str(v.id), get_correlation_id(request))
-    db.commit()
-    return verification_read(db, v)
-
-
-@admin_router.post("/{verification_id}/review")
-def admin_review(verification_id: int, payload: ReviewIn, request: Request,
-                 if_match: str | None = Header(default=None, alias="If-Match"),
-                 db: Session = Depends(get_db), admin: AdminUser = Depends(require_super_admin)):
-    v = db.get(AuthorityVerification, verification_id)
-    if v is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Authority verification not found")
-    v = svc.review(db, admin, v, decision=payload.decision, reason_code=payload.reason_code, note=payload.note,
-                   expected_version=_version(if_match), correlation_id=get_correlation_id(request))
-    log_audit_event(db, admin, "authority_verification.review", svc.RESOURCE, str(v.id), get_correlation_id(request),
-                    reason=f"{payload.decision}:{payload.reason_code}")
-    db.commit()
-    return verification_read(db, v)
 
 
 @admin_router.post("/{verification_id}/revoke")

@@ -1072,6 +1072,21 @@ def _verify(db: Session, v: PropertyLocationVerification, pack: PropertyRegulato
         notification_type="property_verification.verified",
         related_entity_type=RESOURCE, related_entity_id=str(v.id),
     )
+    _recheck_waiting_authority(db, v.property_id, correlation_id)
+
+
+def _recheck_waiting_authority(db: Session, property_id: int, correlation_id: str) -> None:
+    """Authority cases waiting only on this property's verification are
+    decided straight away rather than at the next scheduler run. Best
+    effort: a failure here never undoes the property verification."""
+    from app.services.authority_service import recheck_pending
+
+    db.flush()
+    try:
+        with db.begin_nested():
+            recheck_pending(db, property_id=property_id, correlation_id=correlation_id)
+    except Exception:
+        logger.exception("authority re-check after property verification failed")
 
 
 def _notify_reviewers(db: Session, v: PropertyLocationVerification) -> None:
