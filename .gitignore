@@ -43,3 +43,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local one-off tooling, not part of the app
+/scripts/
+/backend/q.py

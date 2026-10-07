@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Check,
   Clock,
   History,
   Loader2,
   Mail,
   Mic,
+  Search,
   Send,
   Square,
   SquarePen,
@@ -27,6 +29,15 @@ import {
 } from "@/lib/user-chat";
 import { MarkdownMessage } from "@/components/admin/chat/MarkdownMessage";
 import { AssistantAvatar } from "@/components/chat/AssistantAvatar";
+import { ExternalDiscoveryCard } from "@/components/user/chat/ExternalDiscoveryCard";
+import {
+  DEFAULT_LEAD_SUMMARY,
+  ExternalCard,
+  ExternalSearchResponse,
+  LEAD_SUMMARY_FIELDS,
+  requestProviderContact,
+  searchRooms,
+} from "@/lib/external-search";
 import { sendContactEmail } from "@/lib/contact-email";
 import { cn } from "@/lib/utils";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
@@ -100,6 +111,19 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
   const [contactSending, setContactSending] = useState(false);
   const [contactSent, setContactSent] = useState(false);
   const [contactError, setContactError] = useState<string | null>(null);
+
+  const [extOpen, setExtOpen] = useState(false);
+  const [extCity, setExtCity] = useState("");
+  const [extBudget, setExtBudget] = useState("");
+  const [extLoading, setExtLoading] = useState(false);
+  const [extError, setExtError] = useState<string | null>(null);
+  const [extResult, setExtResult] = useState<ExternalSearchResponse | null>(null);
+  const [contactCard, setContactCard] = useState<ExternalCard | null>(null);
+  const [contactNote, setContactNote] = useState("");
+  const [contactConsent, setContactConsent] = useState<string[]>([]);
+  const [contactPending, setContactPending] = useState(false);
+  const [contactConfirmed, setContactConfirmed] = useState(false);
+  const [contactSubmitError, setContactSubmitError] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -190,6 +214,64 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
     } finally {
       setContactSending(false);
     }
+  }
+
+  async function runExternalSearch() {
+    const city = extCity.trim();
+    if (!city || extLoading) return;
+    setExtLoading(true);
+    setExtError(null);
+    setExtResult(null);
+    setContactCard(null);
+    const budget = Number(extBudget);
+    try {
+      const result = await searchRooms({
+        city,
+        maxPrice: Number.isFinite(budget) && budget > 0 ? budget : undefined,
+      });
+      setExtResult(result);
+    } catch (err) {
+      setExtError((err as Error).message);
+    } finally {
+      setExtLoading(false);
+    }
+  }
+
+  function openContactConsent(card: ExternalCard) {
+    if (!card.opportunityId) return;
+    setContactCard(card);
+    setContactNote("");
+    setContactConsent(DEFAULT_LEAD_SUMMARY);
+    setContactConfirmed(false);
+    setContactSubmitError(null);
+  }
+
+  function toggleConsent(field: string) {
+    setContactConsent((prev) =>
+      prev.includes(field) ? prev.filter((f) => f !== field) : [...prev, field]
+    );
+  }
+
+  async function submitContactRequest() {
+    if (!contactCard?.opportunityId || contactPending) return;
+    setContactPending(true);
+    setContactSubmitError(null);
+    try {
+      await requestProviderContact(contactCard.opportunityId, {
+        message: contactNote.trim() || "Please connect me with the provider.",
+        consentFields: contactConsent,
+      });
+      setContactConfirmed(true);
+    } catch (err) {
+      setContactSubmitError((err as Error).message);
+    } finally {
+      setContactPending(false);
+    }
+  }
+
+  function closeExternalSearch() {
+    setExtOpen(false);
+    setContactCard(null);
   }
 
   async function selectConversation(id: number) {
@@ -373,6 +455,19 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
                 className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
               >
                 <History className="h-[18px] w-[18px]" />
+              </button>
+              <button
+                onClick={() => { if (historyOpen) setHistoryOpen(false); setExtOpen((v) => !v); }}
+                aria-label="Find rooms"
+                title="Find rooms"
+                className={cn(
+                  "flex h-9 w-9 items-center justify-center rounded-full transition-colors",
+                  extOpen
+                    ? "bg-primary-100 text-primary-700 dark:bg-primary-500/20 dark:text-primary-300"
+                    : "text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+                )}
+              >
+                <Search className="h-[18px] w-[18px]" />
               </button>
               <button
                 onClick={startNewChat}
@@ -746,6 +841,203 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
                     </button>
                   </div>
                 )
+              )}
+            </div>
+          </div>
+        )}
+
+        {extOpen && (
+          <div className="animate-fade-up absolute inset-0 z-20 flex flex-col rounded-2xl bg-white dark:bg-slate-900">
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-white/10">
+              <p className="text-sm font-bold text-slate-800 dark:text-slate-100">Find rooms</p>
+              <button
+                onClick={closeExternalSearch}
+                aria-label="Close search"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+              >
+                <X className="h-[18px] w-[18px]" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5">
+              {contactCard ? (
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs leading-relaxed text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      External providers are not verified by Zoiko Rooms. Zoiko Rooms will coordinate with the
+                      provider on your behalf; a direct introduction happens only after the provider accepts and
+                      Zoiko Rooms completes its checks.
+                    </span>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">
+                      What may Zoiko Rooms share with the provider?
+                    </label>
+                    <p className="mb-1 px-2 text-xs text-slate-500 dark:text-slate-400">
+                      Only a short summary of what you&apos;re looking for, so the provider can say whether the room
+                      fits.
+                    </p>
+                    {LEAD_SUMMARY_FIELDS.map(({ key, label }) => (
+                      <label
+                        key={key}
+                        className="flex cursor-pointer items-center gap-2 rounded-xl px-2 py-2 text-sm text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-white/5"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={contactConsent.includes(key)}
+                          onChange={() => toggleConsent(key)}
+                          className="h-4 w-4 rounded accent-primary-700"
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                    <p className="mt-2 px-2 text-xs text-slate-500 dark:text-slate-400">
+                      Not shared until the provider accepts the introduction: your name, phone, email, ID documents,
+                      home address and payment details.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">
+                      Note to the provider (optional)
+                    </label>
+                    <textarea
+                      value={contactNote}
+                      onChange={(e) => setContactNote(e.target.value)}
+                      rows={3}
+                      placeholder="e.g. I'm looking for a room from mid-October."
+                      className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-700 outline-none placeholder:text-slate-400 focus:border-primary-400 focus:ring-1 focus:ring-primary-400 dark:border-white/10 dark:bg-white/5 dark:text-slate-200"
+                    />
+                  </div>
+                  {contactSubmitError && (
+                    <p className="flex items-center gap-1.5 text-xs text-accent-600 dark:text-accent-400">
+                      <AlertTriangle className="h-3.5 w-3.5" /> {contactSubmitError}
+                    </p>
+                  )}
+                  <button
+                    onClick={submitContactRequest}
+                    disabled={contactPending || contactConsent.length === 0}
+                    className="self-end rounded-xl bg-primary-700 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary-800 disabled:opacity-50"
+                  >
+                    {contactPending ? "Requesting..." : "Confirm request"}
+                  </button>
+                  {contactConfirmed && (
+                    <div className="flex items-center gap-2 rounded-xl bg-emerald-50 px-3.5 py-3 text-xs font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
+                      <Check className="h-4 w-4 shrink-0" />
+                      Request recorded. Zoiko Rooms will contact the provider and update you here when they respond.
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3.5">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">
+                      Area / city
+                    </label>
+                    <input
+                      type="text"
+                      value={extCity}
+                      onChange={(e) => setExtCity(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") runExternalSearch(); }}
+                      placeholder="e.g. Bristol"
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-700 outline-none placeholder:text-slate-400 focus:border-primary-400 focus:ring-1 focus:ring-primary-400 dark:border-white/10 dark:bg-white/5 dark:text-slate-200"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">
+                      Max budget per month (optional)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={extBudget}
+                      onChange={(e) => setExtBudget(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") runExternalSearch(); }}
+                      placeholder="e.g. 900"
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-700 outline-none placeholder:text-slate-400 focus:border-primary-400 focus:ring-1 focus:ring-primary-400 dark:border-white/10 dark:bg-white/5 dark:text-slate-200"
+                    />
+                  </div>
+                  <button
+                    onClick={runExternalSearch}
+                    disabled={!extCity.trim() || extLoading}
+                    className="w-full rounded-xl bg-primary-700 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary-800 disabled:opacity-50"
+                  >
+                    {extLoading ? "Searching..." : "Search"}
+                  </button>
+
+                  {extError && (
+                    <p className="flex items-center gap-1.5 rounded-xl bg-accent-50 px-3.5 py-2.5 text-xs text-accent-700 dark:bg-accent-500/10 dark:text-accent-300">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {extError}
+                    </p>
+                  )}
+
+                  {extResult && (
+                    <div className="flex flex-col gap-3">
+                      {extResult.state === "INTERNAL_VERIFIED" && (
+                        <>
+                          <div className="flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-xs leading-relaxed text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300">
+                            <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span>{extResult.disclosureText}</span>
+                          </div>
+                          <div className="flex flex-col gap-2">
+                            {extResult.internalResults.map((room) => (
+                              <div
+                                key={room.id}
+                                className="rounded-2xl bg-white px-3.5 py-2.5 text-sm ring-1 ring-slate-200 dark:bg-white/5 dark:ring-white/10"
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <p className="font-semibold text-slate-800 dark:text-slate-100">{room.name}</p>
+                                  <span
+                                    className={
+                                      room.verificationStatus === "INTERNAL_VERIFIED"
+                                        ? "shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
+                                        : "shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:bg-white/10 dark:text-slate-300"
+                                    }
+                                  >
+                                    {room.verificationStatus === "INTERNAL_VERIFIED"
+                                      ? "Property & authority verified"
+                                      : "Verification incomplete"}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-slate-500 dark:text-slate-400">
+                                  {room.city} · {room.roomType ?? "private room"}
+                                </p>
+                                <p className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                                  {Number(room.pricePerMonth).toLocaleString()} per month
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+
+                      {extResult.state === "EXTERNAL_DISCOVERED" && (
+                        <>
+                          <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs leading-relaxed text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span>{extResult.disclosureText}</span>
+                          </div>
+                          <div className="flex flex-col gap-2.5">
+                            {extResult.externalMatches.map((card, i) => (
+                              <ExternalDiscoveryCard
+                                key={card.opportunityId ?? `ext-${i}`}
+                                card={card}
+                                onRequestContact={openContactConsent}
+                              />
+                            ))}
+                          </div>
+                        </>
+                      )}
+
+                      {(extResult.state === "BLOCKED" || extResult.state === "INTERNAL_ZERO") && (
+                        <div className="flex items-start gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 text-xs leading-relaxed text-slate-600 dark:bg-white/5 dark:text-slate-300">
+                          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          <span>{extResult.disclosureText}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           </div>

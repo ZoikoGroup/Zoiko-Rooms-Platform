@@ -301,6 +301,17 @@ ADMIN_COOKIE = "zoiko_admin_token"
 USER_COOKIE = "zoiko_user_token"
 
 
+@pytest.fixture()
+def external_activated(db_session: Session) -> None:
+    """Turn on the ZR-AI-SEARCH-001 market activation flags (off by default)
+    for tests that exercise external discovery and provider outreach."""
+    from app.models.feature_flag import FeatureFlag
+
+    for name in ("external.search_fallback", "external.provider_outreach"):
+        db_session.add(FeatureFlag(name=name, value=True, note="test", enabled_by="test"))
+    db_session.flush()
+
+
 def _make_admin(db: Session, *, email: str = "admin@test.com", role: str = "admin") -> AdminUser:
     admin = AdminUser(
         email=email,

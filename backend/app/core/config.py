@@ -257,6 +257,19 @@ class Settings(BaseSettings):
     chat_rate_limit_max: int = 20
     chat_rate_limit_window_seconds: int = 60
 
+    # ZR-AI-SEARCH-001 Section 8 "Abuse controls": rate-limit bulk searches,
+    # repeated source-probing, scraping-style requests and automated attempts
+    # to extract external inventory through the external-search routes. Same
+    # per-authenticated-actor fixed-window pattern as chat_limiter.
+    external_search_rate_limit_max: int = 30
+    external_search_rate_limit_window_seconds: int = 60
+
+    # ZR-AI-SEARCH-001 Section 5.1 "Freshness": a published listing whose
+    # availability was last confirmed longer ago than this many days is treated
+    # as stale-unknown -- ranked after freshly-confirmed inventory (host
+    # reconfirmation via confirm_availability refreshes the stamp).
+    availability_freshness_days: int = 7
+
     # Login brute-force throttling (attempts per window, per submitted email --
     # deliberately keyed pre-authentication, unlike chat's per-authenticated-actor
     # keying, since the whole point is to slow down guessing before a login ever

@@ -26,6 +26,7 @@ import {
   streamChatMessage,
 } from "@/lib/chat";
 import { listContactEmails, markContactEmailRead, getUnreadCount, ContactEmail } from "@/lib/contact-email";
+import { listExternalOutreachQueue, OutreachQueueItem } from "@/lib/external-search";
 import { MarkdownMessage } from "@/components/admin/chat/MarkdownMessage";
 import { AssistantAvatar } from "@/components/chat/AssistantAvatar";
 import { cn } from "@/lib/utils";
@@ -97,6 +98,11 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
   const [emails, setEmails] = useState<ContactEmail[]>([]);
   const [emailsUnread, setEmailsUnread] = useState(0);
   const [emailsLoading, setEmailsLoading] = useState(false);
+
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueRows, setQueueRows] = useState<OutreachQueueItem[]>([]);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [queueError, setQueueError] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -184,6 +190,19 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
       setEmailsUnread(0);
     } catch { /* ignore */ }
     setEmailsLoading(false);
+  }
+
+  async function openQueue() {
+    setQueueOpen(true);
+    setQueueLoading(true);
+    setQueueError(null);
+    try {
+      setQueueRows(await listExternalOutreachQueue());
+    } catch (err) {
+      setQueueError((err as Error).message);
+    } finally {
+      setQueueLoading(false);
+    }
   }
 
   async function handleMarkEmailRead(id: number) {
@@ -394,6 +413,14 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
                     {emailsUnread > 99 ? "99+" : emailsUnread}
                   </span>
                 )}
+              </button>
+              <button
+                onClick={openQueue}
+                aria-label="External outreach queue"
+                title="External outreach queue"
+                className="relative flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+              >
+                <Send className="h-[18px] w-[18px]" />
               </button>
               <button
                 onClick={() => setHistoryOpen(true)}
@@ -745,6 +772,60 @@ export function AdminChatPanel({ open, onClose }: AdminChatPanelProps) {
                   </div>
                 )
               )}
+            </div>
+          </div>
+        )}
+
+        {/* External outreach queue */}
+        {queueOpen && (
+          <div className="animate-fade-up absolute inset-0 z-30 flex flex-col rounded-2xl bg-white dark:bg-slate-900">
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-white/10">
+              <p className="text-sm font-bold text-slate-800 dark:text-slate-100">External outreach queue</p>
+              <button
+                onClick={() => setQueueOpen(false)}
+                aria-label="Close outreach queue"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+              >
+                <X className="h-[18px] w-[18px]" />
+              </button>
+            </div>
+            <div className="flex-1 space-y-1 overflow-y-auto p-3">
+              {queueError && (
+                <p className="flex items-center gap-1.5 rounded-xl bg-accent-50 px-3 py-2.5 text-xs text-accent-700 dark:bg-accent-500/10 dark:text-accent-300">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {queueError}
+                </p>
+              )}
+              {queueLoading && <p className="px-3 py-8 text-center text-sm text-slate-400">Loading...</p>}
+              {!queueLoading && !queueError && queueRows.length === 0 && (
+                <p className="px-3 py-8 text-center text-sm text-slate-400">
+                  No pending provider outreach requests.
+                </p>
+              )}
+              {!queueLoading && queueRows.map((row) => (
+                <div
+                  key={row.outreachId}
+                  className="rounded-xl border border-slate-100 bg-white px-3.5 py-3 dark:border-white/5 dark:bg-white/[0.02]"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-800 dark:text-slate-100">
+                        {row.requestedByEmail || `User #${row.requestedByUserId}`}
+                      </p>
+                      <p className="mt-0.5 text-xs text-slate-400">
+                        {row.approxLocation || "Approximate area hidden"} · {relativeTime(row.requestedAt as string)}
+                      </p>
+                    </div>
+                    <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800 dark:bg-amber-500/20 dark:text-amber-300">
+                      {row.outreachStatus}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
+                    <span>{row.channel}</span>
+                    <span>Not verified by Zoiko Rooms</span>
+                    <span className="truncate">{row.externalOpportunityId}</span>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}

@@ -18,7 +18,7 @@ const PUBLIC_ACCOUNT_PATHS = [
 // browser, and vice versa. Unset in production, where there's only one deployment.
 const APP_PORT_MODE = process.env.APP_PORT_MODE;
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const isAccountPath = pathname === "/account" || pathname.startsWith("/account/");
 

@@ -25,6 +25,12 @@ CHAT_RATE_WINDOW = settings.chat_rate_limit_window_seconds
 LOGIN_RATE_LIMIT = settings.login_rate_limit_max
 LOGIN_RATE_WINDOW = settings.login_rate_limit_window_seconds
 
+# ZR-AI-SEARCH-001 Section 8 "Abuse controls": bulk-search / scraping-style
+# request throttling for the external-search routes.
+EXTERNAL_SEARCH_RATE_LIMIT = settings.external_search_rate_limit_max
+EXTERNAL_SEARCH_RATE_WINDOW = settings.external_search_rate_limit_window_seconds
+AVAILABILITY_FRESHNESS_DAYS = settings.availability_freshness_days
+
 
 class _Window:
     __slots__ = ("count", "reset_at")
@@ -79,3 +85,8 @@ SUBLET_DOCUMENT_RATE_WINDOW = settings.sublet_document_rate_limit_window_seconds
 
 sublet_submit_limiter = RateLimiter(max_requests=SUBLET_SUBMIT_RATE_LIMIT, window_seconds=SUBLET_SUBMIT_RATE_WINDOW)
 sublet_document_limiter = RateLimiter(max_requests=SUBLET_DOCUMENT_RATE_LIMIT, window_seconds=SUBLET_DOCUMENT_RATE_WINDOW)
+
+# Module-level singleton shared by the external-search routes and tests.
+external_search_limiter = RateLimiter(
+    max_requests=EXTERNAL_SEARCH_RATE_LIMIT, window_seconds=EXTERNAL_SEARCH_RATE_WINDOW
+)

@@ -139,11 +139,29 @@ def send_message_stream(
     history = _conversation_history(conversation)
     correlation_id = get_correlation_id(request)
 
+    # Capture PKs into plain locals up front: after a rollback the ORM objects
+    # are expired, and reading their attributes inside a failed transaction
+    # would itself raise PendingRollbackError -- the very failure this stream
+    # must survive.
+    conversation_id_local = conversation.id
+    user_id_local = user.id
+
     def event_stream():
         tool_calls_made: list[dict] = []
 
-        def audit(action: str, reason: str) -> None:
-            log_audit_event(db, None, action, "chat_conversation", str(conversation.id), correlation_id, reason=f"user:{user.id} {reason}")
+        def audit(action: str, reason: str, *, after_error: bool = False) -> None:
+            # On an error path the session may hold a failed transaction, so
+            # drop it first. On the success path a rollback would discard
+            # earlier flushed audit rows, so it only happens after an error.
+            # get_db never commits, so each audit row is committed here.
+            if after_error:
+                db.rollback()
+            log_audit_event(
+                db, None, action, "chat_conversation",
+                str(conversation_id_local), correlation_id,
+                reason=f"user:{user_id_local} {reason}",
+            )
+            db.commit()
 
         try:
             for event_type, data in stream_assistant_reply(db, user, history):
@@ -157,8 +175,19 @@ def send_message_stream(
                     text_parts = [b["text"] for b in blocks if b["type"] == "text"]
                     final_text = "\n".join(p for p in text_parts if p.strip())
                     tool_results_made = [b for b in blocks if b["type"] == "tool_result"]
+                    # If any tool in this turn errored, the session may hold a
+                    # failed/abandoned transaction -- clear it before persisting
+                    # the final assistant message so the INSERT cannot die with
+                    # InFailedSqlTransaction/PendingRollbackError.
+                    tool_failed = any(
+                        isinstance(row, dict) and "error" in row
+                        for b in tool_results_made
+                        for row in b.get("result", [])
+                    )
+                    if tool_failed:
+                        db.rollback()
                     assistant_message = ChatMessage(
-                        conversation_id=conversation.id,
+                        conversation_id=conversation_id_local,
                         role="assistant",
                         content=final_text,
                         tool_calls_json=json.dumps(tool_calls_made),
@@ -191,19 +220,19 @@ def send_message_stream(
                     yield _sse(event_type, data)
         except RateLimitError as exc:
             _log_failure(exc)
-            audit("user_chat.error", "rate_limited")
+            audit("user_chat.error", "rate_limited", after_error=True)
             yield _sse("error", {"message": ERR_RATE_LIMITED})
         except APIConnectionError as exc:
             _log_failure(exc)
-            audit("user_chat.error", "connection_failed")
+            audit("user_chat.error", "connection_failed", after_error=True)
             yield _sse("error", {"message": ERR_NETWORK})
         except ChatServiceError as exc:
             _log_failure(exc.log_detail or exc)
-            audit("user_chat.error", f"config:{exc.log_detail[:80]}")
+            audit("user_chat.error", f"config:{exc.log_detail[:80]}", after_error=True)
             yield _sse("error", {"message": str(exc) or ERR_NOT_CONFIGURED})
         except APIStatusError as exc:
             _log_failure(exc)
-            audit("user_chat.error", f"provider_status:{exc.status_code}")
+            audit("user_chat.error", f"provider_status:{exc.status_code}", after_error=True)
             message = (
                 ERR_NOT_CONFIGURED
                 if exc.status_code in (401, 403)
@@ -212,7 +241,7 @@ def send_message_stream(
             yield _sse("error", {"message": message})
         except Exception as exc:  # noqa: BLE001
             _log_failure(exc)
-            audit("user_chat.error", f"unexpected:{type(exc).__name__}")
+            audit("user_chat.error", f"unexpected:{type(exc).__name__}", after_error=True)
             yield _sse("error", {"message": ERR_GENERIC})
 
     return StreamingResponse(

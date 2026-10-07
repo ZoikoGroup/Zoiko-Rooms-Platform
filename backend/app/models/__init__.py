@@ -119,6 +119,7 @@ from app.models.rental_payment_provider_account import RentalPaymentProviderAcco
 from app.models.rental_payment_return import RentalPaymentReturn
 from app.models.document_sequence import DocumentSequence
 from app.models.external_payment_session import ExternalPaymentSession, RentalPaymentProviderEvent
+from app.models.external_search import ExternalOpportunity, ExternalCommercialPolicy, ProviderOutreach, SourceRightRegistry
 
 __all__ = [
     "EmailMessage",
