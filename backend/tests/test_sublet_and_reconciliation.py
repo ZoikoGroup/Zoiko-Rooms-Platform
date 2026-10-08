@@ -22,7 +22,8 @@ from app.models.party import Party
 from app.models.property import Property
 from app.models.room import Room
 from app.models.sublet_request import SubletRequest
-from tests.conftest import _make_admin, _make_user, auth_admin_cookie
+from app.models.user_account import UserAccount
+from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
 
 
 def _make_active_tenancy_with_sublet_request(db: Session):
@@ -102,15 +103,18 @@ def _make_active_tenancy_with_sublet_request(db: Session):
     return sublet_request, tenant_user, proposed_user, occupancy
 
 
+def _sublet_host(db: Session) -> UserAccount:
+    return db.scalar(select(UserAccount).where(UserAccount.email == "sublet-host@test.com"))
+
+
 class TestSubletDecisionNotifications:
     def test_approving_a_sublet_request_notifies_requester_with_entity_ref(self, client, db_session: Session):
         sublet_request, tenant_user, _proposed_user, occupancy = _make_active_tenancy_with_sublet_request(db_session)
-        admin = _make_admin(db_session, email="super@test.com", role="super_admin")
-        admin_cookies = auth_admin_cookie(admin)
+        host_user = _sublet_host(db_session)
 
         r = client.post(
-            f"/api/occupancy/sublet-requests/{sublet_request.id}/approve",
-            json={"stepUpPassword": "password123"}, cookies=admin_cookies,
+            f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve",
+            json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user),
         )
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "approved"
@@ -130,10 +134,9 @@ class TestSubletDecisionNotifications:
 
     def test_rejecting_a_sublet_request_notifies_requester_with_entity_ref(self, client, db_session: Session):
         sublet_request, tenant_user, _proposed_user, occupancy = _make_active_tenancy_with_sublet_request(db_session)
-        admin = _make_admin(db_session, email="super2@test.com", role="super_admin")
-        admin_cookies = auth_admin_cookie(admin)
+        host_user = _sublet_host(db_session)
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/reject", cookies=admin_cookies)
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/decline", cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "rejected"
 
@@ -150,13 +153,13 @@ class TestSubletDecisionNotifications:
         assert notification.related_entity_type == "sublet_request"
         assert notification.related_entity_id == str(sublet_request.id)
 
-    def test_plain_admin_cannot_approve_sublet_requests(self, client, db_session: Session):
+    def test_admins_have_no_sublet_decision_route(self, client, db_session: Session):
+        """The decision is the host's alone -- not even a super admin can make it."""
         sublet_request, _tenant_user, _proposed_user, _occupancy = _make_active_tenancy_with_sublet_request(db_session)
-        admin = _make_admin(db_session, email="plainadmin@test.com", role="admin")
-        admin_cookies = auth_admin_cookie(admin)
-
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", cookies=admin_cookies)
-        assert r.status_code == 403, r.text
+        for role in ("admin", "super_admin"):
+            admin = _make_admin(db_session, email=f"{role}-nodecide@test.com", role=role)
+            r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", cookies=auth_admin_cookie(admin))
+            assert r.status_code in (404, 405), r.text
 
 
 class TestSubletHostVisibility:
@@ -249,8 +252,7 @@ class TestSubletHostVisibility:
         assert submitted_notification is not None
         assert submitted_notification.related_entity_id == str(sublet_request.id)
 
-        admin = _make_admin(db_session, email="hostvis-admin@test.com", role="super_admin")
-        sublet_crud.approve_sublet_request(db_session, sublet_request, admin, step_up_password="password123")
+        sublet_crud.approve_sublet_request(db_session, sublet_request, host_user, step_up_password="password123")
 
         approved_notification = db_session.scalar(
             select(Notification).where(
