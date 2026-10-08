@@ -164,8 +164,8 @@ def send_message_stream(
                         conversation_id=conversation.id,
                         role="assistant",
                         content=final_text,
-                        tool_calls_json=json.dumps(tool_calls_made),
-                        tool_results_json=json.dumps(tool_results_made),
+                        tool_calls_json=json.dumps(tool_calls_made, default=str),
+                        tool_results_json=json.dumps(tool_results_made, default=str),
                         meta_json=json.dumps(meta),
                     )
                     db.add(assistant_message)

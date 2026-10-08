@@ -75,6 +75,8 @@ def _seed_partner_source(db):
             display_permitted=True,
             masking_permitted=True,
             permitted_fields=["provider_name", "approx_location", "provider_contact", "source_url"],
+            # Section 6.3: contact is only kept when extraction is permitted.
+            contact_extraction_permitted=True,
             cache_ttl_seconds=600,
             source_brand_display_rule="Partner Feed Co",
         )
@@ -108,8 +110,8 @@ class TestPartnerFeedEncryptionAtRest:
         stored_url: str = opp.source_url_encrypted
         assert stored_contact and stored_contact != "jane@partner.example"
         assert stored_url and stored_url != "https://partner.example/rooms/PF-0001"
-        # raw_data keeps the original but the *_encrypted columns never do.
-        assert opp.raw_data["provider_contact"] == "jane@partner.example"
+        # The raw feed item is never stored, so no plaintext copy exists.
+        assert opp.raw_data is None
         # reader recovers both
         assert decrypt_contact(stored_contact) == "jane@partner.example"
         assert decrypt_contact(stored_url) == "https://partner.example/rooms/PF-0001"

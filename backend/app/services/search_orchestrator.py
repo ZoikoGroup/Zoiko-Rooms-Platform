@@ -16,9 +16,10 @@ stable deterministic tie-break).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -34,7 +35,20 @@ from app.schemas.external_search import (
     SearchState,
 )
 from app.services.anti_circumvention import sanitizer
+from app.core.config import settings
 from app.services.audit_ext import log_external_search_event
+from app.services.external_broker import BrokerAccessError, broker
+from app.services.external_providers import (
+    PROVIDERS,
+    WEB_SEARCH_PROVIDERS,
+    ExternalCandidate,
+    ListingProvider,
+    fetch_candidates,
+    fetch_web_hits,
+    normalize_country,
+    web_search_provider,
+)
+from app.services.external_search_crypto import encrypt_optional
 from app.services.feature_flags import is_enabled
 from app.services.source_rights_registry import registry
 
@@ -133,6 +147,9 @@ class OrchestratorResult:
     discovery: ExternalDiscoveryResult
     internal_results: list[dict[str, Any]] = field(default_factory=list)
     external_raw: list[dict[str, Any]] = field(default_factory=list)
+    # Server-side only, aligned with discovery.external_matches: the source
+    # record behind each card (None for a dev placeholder). Never serialized.
+    external_private: list[Any] = field(default_factory=list)
 
 
 class SearchOrchestrator:
@@ -241,7 +258,6 @@ class SearchOrchestrator:
         Availability freshness is computed but only ever downgrades ranking
         (Section 5.2 priority 2), never hides a qualifying record.
         """
-        from app.core.config import settings
         from app.models.listing import Listing
 
         stmt = select(Listing).where(Listing.state == "PUBLISHED")
@@ -289,6 +305,9 @@ class SearchOrchestrator:
                     if l.room_id in verified_rooms
                     else "INTERNAL_UNVERIFIED",
                     "pricePerMonth": l.price_per_night,
+                    # The listing's own currency, so prices are never shown
+                    # in the wrong one (e.g. INR listings as GBP).
+                    "currency": l.currency,
                     "country": query.country,
                     "availabilityConfirmedAt": confirmed_at.isoformat() if confirmed_at else None,
                     "availabilityFreshStale": is_stale,
@@ -393,13 +412,67 @@ class SearchOrchestrator:
         query: SearchQuery,
         correlation_id: str,
     ) -> OrchestratorResult:
-        eligible = [
-            r for r in registry.all_active()
-            if registry.is_fallback_allowed(str(r.get("source_id")))
-            and registry.is_displayable(str(r.get("source_id")))
-        ]
+        limit = query.limit_external or 10
+        cards: list[ExternalCard] = []
+        private: list[ExternalCandidate | ExternalOpportunity | None] = []
+        registered_internally = 0
 
-        if not eligible:
+        for rule in registry.all_active():
+            sid = str(rule.get("source_id"))
+            if len(cards) >= limit or not registry.is_fallback_allowed(sid):
+                continue
+            if sid in WEB_SEARCH_SOURCE_IDS or rule.get("acquisition_mode") == "PUBLIC_FETCH":
+                continue  # handled by the approved-website search below
+            displayable = registry.is_displayable(sid)
+            provider = PROVIDERS.get(sid)
+            if provider is not None:
+                candidates = self._fetch_provider(db, provider, rule, query, limit, correlation_id)
+                if not displayable:
+                    # Section 15.4: rights allow acquisition but not masked
+                    # display -> keep as an internal opportunity only.
+                    registered_internally += _register_internal_opportunities(db, candidates)
+                    continue
+                for cand in candidates[: limit - len(cards)]:
+                    cards.append(_card_from_candidate(cand, rule, query))
+                    private.append(
+                        cand
+                        if rule.get("contact_extraction_permitted")
+                        else replace(cand, provider_contact=None)
+                    )
+            elif rule.get("acquisition_mode") == "PARTNER_FEED":
+                # Tier A: listings already ingested from the partner's feed.
+                if not displayable or not _in_territory(rule, query):
+                    continue
+                for opp in _partner_listings(db, sid, rule, query, limit - len(cards)):
+                    cards.append(_card_from_candidate(_candidate_from_opportunity(opp), rule, query))
+                    private.append(opp)
+            elif displayable and not settings.is_production and not rule.get("acquisition_mode"):
+                # Dev/test only: a seed-file source with no live adapter yields
+                # one placeholder card so the masked-card flow can be exercised.
+                cards.append(
+                    ExternalCard.model_validate(
+                        sanitizer.sanitize_card(
+                            ExternalCard(
+                                source_id=sid,
+                                source_tier=str(rule.get("tier", "C")),
+                                title=_SENTINEL_TITLE,
+                                location_city=query.city,
+                                location_country=query.country,
+                            ).model_dump()
+                        )
+                    )
+                )
+                private.append(None)
+
+        if len(cards) < limit:
+            for cand, rule in self._search_approved_websites(db, query, limit - len(cards), correlation_id):
+                if registry.is_displayable(cand.source_id):
+                    cards.append(_card_from_candidate(cand, rule, query))
+                    private.append(cand)
+                else:
+                    registered_internally += _register_internal_opportunities(db, [cand])
+
+        if not cards:
             blocked = ExternalDiscoveryResult(
                 state=SearchState.BLOCKED,
                 internal_matches=0,
@@ -407,7 +480,7 @@ class SearchOrchestrator:
                 fallback_triggered=False,
                 consent_required=False,
                 disclosure_text=NO_MATCH_DISCLOSURE,
-                guardrail_notes=["FALLBACK_NOT_ALLOWED: no rights-eligible external sources"],
+                guardrail_notes=["FALLBACK_NOT_ALLOWED: no rights-eligible external results"],
             )
             log_external_search_event(
                 db,
@@ -415,31 +488,11 @@ class SearchOrchestrator:
                 resource_type="search",
                 resource_id=correlation_id or "search",
                 correlation_id=correlation_id,
-                reason="no_eligible_external_sources",
+                reason=f"no_eligible_external_sources;registered_internally={registered_internally}",
             )
             return OrchestratorResult(discovery=blocked)
 
-        eligible = eligible[: (query.limit_external or 10)]
-        raw_cards = []
-        for src in eligible:
-            card = ExternalCard(
-                source_id=str(src.get("source_id")),
-                source_tier=str(src.get("tier", "C")),
-                canonical_id=None,
-                title=_SENTINEL_TITLE,
-                location_city=query.city,
-                location_country=query.country,
-                rent_monthly=None,
-                verification_status="unverified",
-                is_unlocked=False,
-                has_exact_address=False,
-                has_phone=False,
-                has_email=False,
-                has_url=False,
-            )
-            raw_cards.append(sanitizer.sanitize_card(card.model_dump()))
-
-        cards = [ExternalCard.model_validate(c) for c in raw_cards]
+        raw_cards = [c.model_dump() for c in cards]
 
         discovered = ExternalDiscoveryResult(
             state=SearchState.EXTERNAL_DISCOVERED,
@@ -466,7 +519,123 @@ class SearchOrchestrator:
         return OrchestratorResult(
             discovery=discovered,
             external_raw=raw_cards,
+            external_private=private,
         )
+
+    @staticmethod
+    def _search_approved_websites(
+        db: Session, query: SearchQuery, limit: int, correlation_id: str
+    ) -> list[tuple[ExternalCandidate, dict[str, Any]]]:
+        """Last step of the waterfall: web search (Brave) restricted to
+        websites that are themselves ACTIVE, approved PUBLIC_FETCH registry
+        sources for this market. Only the search API is called; result pages
+        are never fetched, and each hit takes its rights from its website's
+        own registry row."""
+        provider = web_search_provider()
+        web_rule = registry.get(provider.source_id) if provider else None
+        market = normalize_country(query.country)
+        if (
+            limit <= 0
+            or provider is None
+            or not query.city
+            or not market
+            or not web_rule
+            or not registry.is_fallback_allowed(provider.source_id)
+            or not _in_territory(web_rule, query)
+        ):
+            return []
+        sites = {
+            r["site_domain"]: r
+            for r in registry.all_active()
+            if r.get("acquisition_mode") == "PUBLIC_FETCH"
+            and r.get("site_domain")
+            and registry.is_fallback_allowed(str(r.get("source_id")))
+            and _in_territory(r, query)
+        }
+        if not sites:
+            return []
+        try:
+            broker.fetch_url_allowed(
+                db, source_id=provider.source_id, url=provider.url, correlation_id=correlation_id
+            )
+        except BrokerAccessError:
+            return []
+        hits = fetch_web_hits(
+            provider,
+            city=query.city,
+            market=market,
+            domains=sorted(sites),
+            limit=limit,
+            ttl_seconds=int(web_rule.get("cache_ttl_seconds") or 0),
+        )
+        log_external_search_event(
+            db,
+            action="search_external.web_results",
+            resource_type="external_fetch",
+            resource_id=provider.source_id,
+            correlation_id=correlation_id,
+            reason=f"hits={len(hits)} sites={len(sites)}",
+        )
+        out = []
+        for hit in hits:
+            rule = sites[hit.domain]
+            out.append(
+                (
+                    ExternalCandidate(
+                        source_id=str(rule["source_id"]),
+                        external_id=hashlib.sha256(hit.url.encode()).hexdigest()[:40],
+                        city=query.city,
+                        country=market,
+                        source_url=hit.url,
+                        room_type=hit.room_type,
+                        advertised_price_minor=hit.price_minor,
+                        currency=hit.currency,
+                        price_period=hit.price_period,
+                    ),
+                    rule,
+                )
+            )
+        return out
+
+    @staticmethod
+    def _fetch_provider(
+        db: Session,
+        provider: ListingProvider,
+        rule: dict[str, Any],
+        query: SearchQuery,
+        limit: int,
+        correlation_id: str,
+    ) -> list[ExternalCandidate]:
+        """Call a licensed listing API only for its own market, only with a
+        city (Section 5.1: never silently widen geography) and only after the
+        broker's rights + SSRF gate passes for the configured URL."""
+        if not provider.configured() or not query.city:
+            return []
+        if normalize_country(query.country) not in provider.countries:
+            return []
+        if rule.get("territories") and not _in_territory(rule, query):
+            return []
+        try:
+            broker.fetch_url_allowed(
+                db, source_id=provider.source_id, url=provider.url, correlation_id=correlation_id
+            )
+        except BrokerAccessError:
+            return []
+        candidates = fetch_candidates(
+            provider,
+            city=query.city,
+            limit=limit,
+            ttl_seconds=int(rule.get("cache_ttl_seconds") or 0),
+        )
+        log_external_search_event(
+            db,
+            action="search_external.provider_results",
+            resource_type="external_fetch",
+            resource_id=provider.source_id,
+            correlation_id=correlation_id,
+            reason=f"candidates={len(candidates)}",
+        )
+        return candidates
 
 
 def _verified_room_ids(db: Session, room_ids: set[int]) -> set[int]:
@@ -494,33 +663,172 @@ def _verified_room_ids(db: Session, room_ids: set[int]) -> set[int]:
     return valid(PropertyVerification) & valid(AuthorityRecord)
 
 
+WEB_SEARCH_SOURCE_IDS = frozenset(p.source_id for p in WEB_SEARCH_PROVIDERS.values())
+
+
+def _in_territory(rule: dict[str, Any], query: SearchQuery) -> bool:
+    """A source serves only the markets in its registry territories; no
+    territories or no recognisable market means no (fail closed)."""
+    market = normalize_country(query.country)
+    return bool(market) and market in set(rule.get("territories") or [])
+
+
+def _partner_listings(
+    db: Session, source_id: str, rule: dict[str, Any], query: SearchQuery, limit: int
+) -> list[ExternalOpportunity]:
+    """Fresh partner-feed listings in the requested city that fit the budget.
+    Requires a city (Section 5.1: never silently widen geography) and drops
+    anything older than the source's TTL (Section 6.3: never present stale
+    data as current)."""
+    if not query.city or limit <= 0:
+        return []
+    ttl = int(rule.get("cache_ttl_seconds") or 0) or 24 * 3600
+    fresh_after = datetime.now(timezone.utc) - timedelta(seconds=ttl)
+    rows = db.scalars(
+        select(ExternalOpportunity)
+        .where(
+            ExternalOpportunity.source_id == source_id,
+            ExternalOpportunity.discovered_by_user_id.is_(None),
+            ExternalOpportunity.status.in_(("EXTERNAL_DISCOVERED", "OUTREACH_PENDING")),
+            ExternalOpportunity.approx_location.ilike(f"%{_like_escape(query.city.strip())}%", escape="\\"),
+            ExternalOpportunity.discovered_at >= fresh_after,
+        )
+        .order_by(ExternalOpportunity.discovered_at.desc(), ExternalOpportunity.id)
+        .limit(200)
+    ).all()
+    out: list[ExternalOpportunity] = []
+    for opp in rows:
+        monthly = _candidate_from_opportunity(opp).rent_monthly
+        if query.max_price is not None and monthly is not None and monthly > query.max_price:
+            continue
+        if query.min_price is not None and monthly is not None and monthly < query.min_price:
+            continue
+        out.append(opp)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _like_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _candidate_from_opportunity(opp: ExternalOpportunity) -> ExternalCandidate:
+    return ExternalCandidate(
+        source_id=opp.source_id,
+        external_id=opp.external_opportunity_id,
+        city=opp.approx_location,
+        room_type=opp.room_type,
+        advertised_price_minor=opp.advertised_price_minor,
+        currency=opp.advertised_price_currency,
+        price_period=opp.price_period,
+    )
+
+
+def _card_from_candidate(cand: ExternalCandidate, rule: dict[str, Any], query: SearchQuery) -> ExternalCard:
+    """Masked consumer card with only the fields the source permits
+    (Section 7.3). The title is never the source's own (source-title control)
+    and location is the coarse area only."""
+    permitted = set(rule.get("permitted_fields") or [])
+    card = ExternalCard(
+        source_id=cand.source_id,
+        source_tier=str(rule.get("tier", "B")),
+        title=_SENTINEL_TITLE,
+        location_city=cand.city if "approx_location" in permitted else None,
+        location_region=cand.region if "approx_location" in permitted else None,
+        location_country=query.country,
+        rent_monthly=cand.rent_monthly if "advertised_price" in permitted else None,
+        currency=cand.currency if "advertised_price" in permitted and cand.rent_monthly else None,
+        room_type=cand.room_type if "room_type" in permitted else None,
+    )
+    return ExternalCard.model_validate(sanitizer.sanitize_card(card.model_dump()))
+
+
+def _register_internal_opportunities(db: Session, candidates: list[ExternalCandidate]) -> int:
+    """Record non-displayable candidates as internal-only opportunities
+    (no user, never shown). Already-known listings are skipped; the stale
+    purge job removes them after the source TTL."""
+    if not candidates:
+        return 0
+    known = set(
+        db.scalars(
+            select(ExternalOpportunity.dedupe_hash).where(
+                ExternalOpportunity.dedupe_hash.in_([c.dedupe_hash for c in candidates])
+            )
+        )
+    )
+    added = 0
+    for cand in candidates:
+        if cand.dedupe_hash in known:
+            continue
+        db.add(_opportunity_from_candidate(cand, user_id=None, approx_location=cand.city))
+        known.add(cand.dedupe_hash)
+        added += 1
+    db.flush()
+    return added
+
+
+def _opportunity_from_candidate(
+    cand: ExternalCandidate, *, user_id: int | None, approx_location: str | None
+) -> ExternalOpportunity:
+    return ExternalOpportunity(
+        external_opportunity_id=f"ext_{uuid4().hex[:12]}",
+        source_id=cand.source_id,
+        status="EXTERNAL_DISCOVERED",
+        approx_location=approx_location,
+        advertised_price_currency=cand.currency,
+        advertised_price_minor=cand.advertised_price_minor,
+        price_period=cand.price_period,
+        room_type=cand.room_type,
+        discovered_by_user_id=user_id,
+        provider_name=cand.provider_name,
+        # Section 12: raw source/contact data encrypted at rest.
+        provider_contact_encrypted=encrypt_optional(cand.provider_contact),
+        exact_address_encrypted=encrypt_optional(cand.exact_address),
+        source_url_encrypted=encrypt_optional(cand.source_url),
+        dedupe_hash=cand.dedupe_hash,
+        verification_status="NOT_VERIFIED_BY_ZOIKO_ROOMS",
+    )
+
+
 def persist_external_cards(
-    db: Session, cards: Iterable[ExternalCard], user_id: int
+    db: Session,
+    cards: Iterable[ExternalCard],
+    user_id: int,
+    private: list[ExternalCandidate | ExternalOpportunity | None] | None = None,
 ) -> list[ExternalCardResult]:
     """Record each discovered card as an ExternalOpportunity owned by the
     searching user and return the consumer-safe card (Section 15.3).
 
     The REST route and the chat tool share this so both hand out a real
     opportunity id for the consent-gated contact flow, while the source
-    identity stays in the DB row and is excluded from the returned card.
+    identity (and any source record in ``private``) stays in the DB row and
+    is excluded from the returned card.
     """
     out: list[ExternalCardResult] = []
-    for card in cards:
-        opp = ExternalOpportunity(
-            external_opportunity_id=f"ext_{uuid4().hex[:12]}",
-            source_id=card.source_id,
-            status="EXTERNAL_DISCOVERED",
-            approx_location=" ".join(
-                part for part in (card.location_city or "", card.location_region or "") if part
-            ).strip()
-            or card.location_country
-            or None,
-            room_type=card.room_type or "PRIVATE_ROOM",
-            discovered_by_user_id=user_id,
-            verification_status="NOT_VERIFIED_BY_ZOIKO_ROOMS",
-        )
-        db.add(opp)
-        db.flush()
+    for i, card in enumerate(cards):
+        approx = " ".join(
+            part for part in (card.location_city or "", card.location_region or "") if part
+        ).strip() or card.location_country or None
+        cand = private[i] if private and i < len(private) else None
+        if isinstance(cand, ExternalOpportunity):
+            # Partner-feed listing: shared record, contactable by any renter.
+            opp = cand
+        elif cand is not None:
+            opp = _opportunity_from_candidate(cand, user_id=user_id, approx_location=approx)
+        else:
+            opp = ExternalOpportunity(
+                external_opportunity_id=f"ext_{uuid4().hex[:12]}",
+                source_id=card.source_id,
+                status="EXTERNAL_DISCOVERED",
+                approx_location=approx,
+                room_type=card.room_type or "PRIVATE_ROOM",
+                discovered_by_user_id=user_id,
+                verification_status="NOT_VERIFIED_BY_ZOIKO_ROOMS",
+            )
+        if opp.id is None:
+            db.add(opp)
+            db.flush()
         out.append(
             ExternalCardResult.model_validate(
                 # Section 7.3: the card carries its discovery timestamp.

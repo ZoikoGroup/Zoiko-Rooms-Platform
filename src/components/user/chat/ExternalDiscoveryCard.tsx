@@ -45,7 +45,7 @@ export function ExternalDiscoveryCard({
   const location = [card.locationCity, card.locationRegion, card.locationCountry]
     .filter(Boolean)
     .join(", ");
-  const price = formatPrice(card.rentMonthly, null);
+  const price = formatPrice(card.rentMonthly, card.currency);
   const discovered = formatDiscovered(card.lastSeenAt);
   const canRequestContact = card.opportunityId != null && !contactPending;
 

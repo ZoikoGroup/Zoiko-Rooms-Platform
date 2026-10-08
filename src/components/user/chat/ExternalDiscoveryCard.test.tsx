@@ -11,6 +11,7 @@ const CARD: ExternalCard = {
   locationRegion: null,
   locationCountry: "GB",
   rentMonthly: null,
+  currency: null,
   deposit: null,
   availabilityText: "appears listed",
   roomType: "PRIVATE_ROOM",

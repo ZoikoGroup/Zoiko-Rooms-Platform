@@ -9,7 +9,13 @@ Fail-closed rules:
   (permitted_features mirrors the same list);
 * ingestion deduplicates by a content hash derived from the partner's own
   external id — re-ingesting the same feed is a no-op;
+* the raw feed item is never stored (Section 6.3 minimum fields), and
+  provider contact is kept only when contact_extraction_permitted is set;
 * every ingested/skipped row is audited.
+
+``sync_snapshot`` treats a pulled feed as the partner's full current
+inventory: new listings are added, existing ones refreshed, and listings no
+longer in the feed are removed unless a renter already asked about them.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.external_search import ExternalOpportunity, SourceRightRegistry
+from app.models.external_search import ExternalOpportunity, ProviderOutreach, SourceRightRegistry
 from app.services.audit_ext import log_external_search_event
 from app.services.external_search_crypto import encrypt_optional
 
@@ -50,6 +56,21 @@ _ENCRYPT_AT_REST = {
     "exact_address": "exact_address_encrypted",
     "source_url": "source_url_encrypted",
 }
+
+
+def _apply_fields(opp: ExternalOpportunity, item: dict[str, Any], src: SourceRightRegistry) -> None:
+    """Copy only permitted fields (encrypting source/contact data at rest);
+    contact additionally requires contact_extraction_permitted."""
+    permitted = set(src.permitted_fields or [])
+    for key, attr in FIELD_MAP.items():
+        if key not in permitted:
+            continue
+        if key == "provider_contact" and not src.contact_extraction_permitted:
+            continue
+        value = item.get(key)
+        if value is not None and key in _ENCRYPT_AT_REST:
+            value = encrypt_optional(str(value))
+        setattr(opp, attr, value)
 
 
 class PartnerFeedAdapter:
@@ -119,17 +140,9 @@ class PartnerFeedAdapter:
                 verification_status="NOT_VERIFIED_BY_ZOIKO_ROOMS",
                 permitted_features=sorted(permitted),
                 dedupe_hash=dedupe,
-                raw_data=item,
                 source_domain=src.source_brand_display_rule or (item.get("domain") or ""),
             )
-            for key, attr in FIELD_MAP.items():
-                if key not in permitted:
-                    continue
-                value = item.get(key)
-                if value is not None:
-                    if key in _ENCRYPT_AT_REST:
-                        value = encrypt_optional(str(value))
-                    setattr(opp, attr, value)
+            _apply_fields(opp, item, src)
             db.add(opp)
             db.flush()
             created.append(opp)
@@ -143,6 +156,91 @@ class PartnerFeedAdapter:
             reason=f"created={len(created)} skipped_duplicates={skipped}",
         )
         return created
+
+    def _require_source(self, db: Session, source_id: str, correlation_id: str) -> SourceRightRegistry:
+        src = self._resolve_source(db, source_id)
+        if src is None or not (src.legal_approved and src.security_approved):
+            log_external_search_event(
+                db,
+                action="partner_feed.blocked.source",
+                resource_type="partner_feed",
+                resource_id=source_id,
+                correlation_id=correlation_id,
+                reason="source_not_active_approved_partner_feed",
+            )
+            raise PermissionError("Partner feed source must be an ACTIVE, approved PARTNER_FEED")
+        return src
+
+    def sync_snapshot(
+        self,
+        db: Session,
+        *,
+        source_id: str,
+        items: list[dict[str, Any]],
+        correlation_id: str = "",
+    ) -> dict[str, int]:
+        """Apply a full feed snapshot: add new listings, refresh existing ones
+        (so the freshness/TTL clock restarts) and remove de-listed ones that no
+        renter has asked about. Returns created/updated/removed counts."""
+        src = self._require_source(db, source_id, correlation_id)
+        now = datetime.now(timezone.utc)
+        existing = {
+            o.dedupe_hash: o
+            for o in db.scalars(
+                select(ExternalOpportunity).where(
+                    ExternalOpportunity.source_id == source_id,
+                    ExternalOpportunity.discovered_by_user_id.is_(None),
+                )
+            )
+        }
+        seen: set[str] = set()
+        created = updated = 0
+        for item in items:
+            external_id = str(item.get("external_id", "")).strip()
+            if not external_id:
+                continue
+            dedupe = self._dedupe_hash(source_id, external_id)
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            opp = existing.get(dedupe)
+            if opp is None:
+                opp = ExternalOpportunity(
+                    external_opportunity_id=f"pf_{source_id}_{external_id}"[:100],
+                    source_id=source_id,
+                    status="EXTERNAL_DISCOVERED",
+                    verification_status="NOT_VERIFIED_BY_ZOIKO_ROOMS",
+                    permitted_features=sorted(set(src.permitted_fields or [])),
+                    dedupe_hash=dedupe,
+                    source_domain=src.source_brand_display_rule or "",
+                )
+                db.add(opp)
+                created += 1
+            else:
+                updated += 1
+            _apply_fields(opp, item, src)
+            opp.discovered_at = now
+
+        removed = 0
+        for dedupe, opp in existing.items():
+            if dedupe in seen:
+                continue
+            has_outreach = db.scalar(
+                select(ProviderOutreach.id).where(ProviderOutreach.opportunity_id == opp.id).limit(1)
+            )
+            if has_outreach is None:
+                db.delete(opp)
+                removed += 1
+        db.flush()
+        log_external_search_event(
+            db,
+            action="partner_feed.synced",
+            resource_type="partner_feed",
+            resource_id=source_id,
+            correlation_id=correlation_id,
+            reason=f"created={created} updated={updated} removed={removed}",
+        )
+        return {"created": created, "updated": updated, "removed": removed}
 
     def sync_availability(
         self,

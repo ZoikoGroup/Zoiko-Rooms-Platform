@@ -209,6 +209,14 @@ def expire_external_outreach(db: Session) -> int:
     return outreach_worker.check_expired_outreach(db)
 
 
+def sync_partner_feeds(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Tier A: pull every approved partner feed (UK BLM,
+    US RESO, CSV/JSON) and apply it as the partner's current inventory."""
+    from app.services.feed_sync import sync_partner_feeds as _sync
+
+    return _sync(db)
+
+
 def purge_stale_external_opportunities(db: Session) -> int:
     """ZR-AI-SEARCH-001 Section 12 retention: drop discovered external
     opportunities past their source TTL that were never acted on."""
@@ -265,6 +273,7 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("reconcile_listing_fee_refunds", reconcile_listing_fee_refunds),
     ("process_external_outreach", process_external_outreach),
     ("expire_external_outreach", expire_external_outreach),
+    ("sync_partner_feeds", sync_partner_feeds),
     ("purge_stale_external_opportunities", purge_stale_external_opportunities),
 )
 

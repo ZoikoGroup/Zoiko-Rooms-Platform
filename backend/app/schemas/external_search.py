@@ -44,6 +44,7 @@ class ExternalCard(BaseModel):
     location_region: str | None = Field(default=None, max_length=120)
     location_country: str | None = Field(default=None, max_length=80)
     rent_monthly: int | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
     deposit: int | None = Field(default=None, ge=0)
     availability_text: str | None = Field(default=None, max_length=120)
     room_type: str | None = Field(default=None, max_length=60)
@@ -206,3 +207,40 @@ class OutreachCreated(BaseModel):
     outreach_id: int
     status: str
     channel: str
+
+class SourceRegistryUpsert(BaseModel):
+    """Super-admin create/update of one Source Rights Registry row (Section
+    6.2). Approvals are explicit; every flag defaults to closed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_name_internal: str = Field(..., min_length=1, max_length=200)
+    acquisition_mode: Literal["PARTNER_FEED", "LICENSED_API", "PUBLIC_FETCH", "BLOCKED"]
+    status: Literal["ACTIVE", "REVIEW", "SUSPENDED", "BLOCKED"] = "REVIEW"
+    territories: list[Literal["GB", "US", "AU", "IN"]] = Field(default_factory=list)
+    terms_reference: str | None = Field(default=None, max_length=500)
+    legal_approved: bool = False
+    security_approved: bool = False
+    permitted_fields: list[
+        Literal[
+            "approx_location", "advertised_price", "room_type", "price_minor", "currency",
+            "price_period", "provider_name", "provider_contact", "exact_address", "source_url",
+        ]
+    ] = Field(default_factory=list)
+    display_permitted: bool = False
+    masking_permitted: bool = False
+    attribution_required: bool = False
+    clickthrough_required: bool = False
+    contact_extraction_permitted: bool = False
+    outreach_permitted: bool = False
+    outreach_channels: list[Literal["EMAIL", "SMS", "PLATFORM_MESSAGE", "TELEPHONE"]] = Field(default_factory=list)
+    cache_ttl_seconds: int = Field(default=3600, ge=60, le=7 * 24 * 3600)
+    feed_url: str | None = Field(default=None, max_length=1000)
+    feed_format: Literal["JSON", "CSV", "BLM", "RESO"] | None = None
+    feed_credential_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{2,99}$")
+    site_domain: str | None = Field(
+        default=None,
+        max_length=253,
+        # Lowercase hostname, e.g. "lettings.example.co.uk"; labels don't start or end with "-".
+        pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$",
+    )

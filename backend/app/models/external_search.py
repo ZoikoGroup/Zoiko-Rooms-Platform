@@ -33,6 +33,10 @@ class SourceRightRegistry(Base):
             "status IN ('ACTIVE', 'REVIEW', 'SUSPENDED', 'BLOCKED')",
             name="ck_srr_status",
         ),
+        CheckConstraint(
+            "feed_format IS NULL OR feed_format IN ('JSON', 'CSV', 'BLM', 'RESO')",
+            name="ck_srr_feed_format",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -56,6 +60,15 @@ class SourceRightRegistry(Base):
     outreach_permitted: Mapped[bool] = mapped_column(nullable=False, default=False)
     outreach_channels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     source_brand_display_rule: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # PARTNER_FEED pull settings (services/feed_sync.py). The credential is
+    # never stored here: feed_credential_env names the environment variable
+    # that holds the partner's token.
+    feed_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    feed_format: Mapped[str | None] = mapped_column(String(10), nullable=True)  # JSON | CSV | BLM | RESO
+    feed_credential_env: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # PUBLIC_FETCH website sources: the approved site (e.g. "agency.example.co.uk")
+    # that web search results may come from (services/external_providers.py).
+    site_domain: Mapped[str | None] = mapped_column(String(253), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="BLOCKED")  # ACTIVE | REVIEW | SUSPENDED | BLOCKED
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(

@@ -51,6 +51,7 @@ export interface ExternalCard {
   locationRegion: string | null;
   locationCountry: string | null;
   rentMonthly: number | null;
+  currency: string | null;
   deposit: number | null;
   availabilityText: string | null;
   roomType: string | null;
@@ -73,6 +74,7 @@ export interface InternalRoomSummary {
   propertyType: string | null;
   state: string;
   pricePerMonth: number;
+  currency: string | null;
   country?: string | null;
   /** Shown as-is; a published (or paid) listing is never implied verified. */
   verificationStatus: "INTERNAL_VERIFIED" | "INTERNAL_UNVERIFIED";
@@ -151,6 +153,7 @@ function toExternalCard(raw: Json): ExternalCard {
     locationRegion: (raw.location_region as string | null) ?? null,
     locationCountry: (raw.location_country as string | null) ?? null,
     rentMonthly: (raw.rent_monthly as number | null) ?? null,
+    currency: (raw.currency as string | null) ?? null,
     deposit: (raw.deposit as number | null) ?? null,
     availabilityText: (raw.availability_text as string | null) ?? null,
     roomType: (raw.room_type as string | null) ?? null,
@@ -175,6 +178,7 @@ function toInternalRoomSummary(raw: Json): InternalRoomSummary {
     propertyType: (raw.propertyType as string | null) ?? null,
     state: String(raw.state ?? ""),
     pricePerMonth: Number(raw.pricePerMonth ?? 0),
+    currency: (raw.currency as string | null) ?? null,
     country: (raw.country as string | null) ?? undefined,
     verificationStatus:
       raw.verificationStatus === "INTERNAL_VERIFIED" ? "INTERNAL_VERIFIED" : "INTERNAL_UNVERIFIED",

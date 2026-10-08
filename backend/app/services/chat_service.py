@@ -386,9 +386,23 @@ def _user_tool_my_host_listings(db: Session, user: UserAccount, _args: dict) -> 
 
 
 def _user_tool_search_rooms(db: Session, user: UserAccount, args: dict) -> list[dict]:
-    q = args.get("q"); city = args.get("city"); country = args.get("country"); min_price = args.get("min_price"); max_price = args.get("max_price")
-    limit_internal = args.get("limit_internal") or 20; limit_external = args.get("limit_external") or 10
-    res = orchestrator.search(db, SearchQuery(q=q, city=city, country=country, min_price=min_price, max_price=max_price, limit_internal=limit_internal, limit_external=limit_external), actor_id=user.id)
+    # Section 5.1: search the user's area, never everywhere. A country or
+    # region alone ("rooms in UK") is not a search area.
+    if not str(args.get("city") or "").strip():
+        return [{"info": "No city given. Ask the user which city or town they want to rent in, then search again."}]
+    filters = args.get("objective_filters")
+    query = SearchQuery(
+        q=args.get("q"),
+        city=args.get("city"),
+        country=args.get("country"),
+        min_price=args.get("min_price"),
+        max_price=args.get("max_price"),
+        room_type=args.get("room_type"),
+        objective_filters=[str(f) for f in filters][:10] if isinstance(filters, list) else [],
+        limit_internal=max(1, int(args.get("limit_internal") or 20)),
+        limit_external=int(args.get("limit_external") or 10),
+    )
+    res = orchestrator.search(db, query, actor_id=user.id)
     disc = res.discovery
     rows = []
     rows.append({"state": disc.state.value, "internal_matches": disc.internal_matches, "external_matches_count": len(disc.external_matches), "fallback_triggered": disc.fallback_triggered, "consent_required": disc.consent_required, "disclosure_text": disc.disclosure_text})
@@ -396,8 +410,8 @@ def _user_tool_search_rooms(db: Session, user: UserAccount, args: dict) -> list[
         rows.append({"type": "internal", **im})
     # Persisted so the model can request contact by opportunity_id; the
     # returned cards exclude the source identity (SRCH-05).
-    for card in persist_external_cards(db, disc.external_matches[:50], user.id):
-        rows.append({"type": "external_masked", **card.model_dump()})
+    for card in persist_external_cards(db, disc.external_matches[:50], user.id, res.external_private[:50]):
+        rows.append({"type": "external_masked", **card.model_dump(mode="json")})
     for gn in disc.guardrail_notes:
         rows.append({"guardrail_note": gn})
     return rows
@@ -631,21 +645,35 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="search_rooms",
             description=(
-                "Internal-first room search with controlled external fallback. Searches verified "
-                "internal inventory first; external sources are only consulted when internal "
-                "matches are zero and source rights permit it, and external results are masked."
+                "Find rooms in a city. Searches Zoiko Rooms listings first; only when there are "
+                "none does it look at approved outside sources (partner agents, licensed listing "
+                "APIs and approved websites), returned as masked, unverified cards."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "q": {"type": "string", "minLength": 1},
-                    "city": {"type": "string"},
-                    "country": {"type": "string"},
-                    "min_price": {"type": "integer", "minimum": 0},
-                    "max_price": {"type": "integer", "minimum": 0},
+                    "q": {"type": "string", "minLength": 1, "description": "What the user is looking for, e.g. 'double room'."},
+                    "city": {
+                        "type": "string",
+                        "description": "The city or town the user asked about (required; a country alone is not enough).",
+                    },
+                    "country": {
+                        "type": "string",
+                        "description": "Country of the city, e.g. 'United Kingdom' or 'United States'. "
+                        "Always send it; outside sources are only searched for a known country.",
+                    },
+                    "min_price": {"type": "integer", "minimum": 0, "description": "Monthly budget floor."},
+                    "max_price": {"type": "integer", "minimum": 0, "description": "Monthly budget ceiling."},
+                    "room_type": {"type": "string", "description": "e.g. private_room, ensuite, studio."},
+                    "objective_filters": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Objective amenities only, e.g. furnished, parking. Never personal characteristics.",
+                    },
                     "limit_internal": {"type": "integer", "minimum": 1, "maximum": 50},
                     "limit_external": {"type": "integer", "minimum": 0, "maximum": 20},
                 },
+                "required": ["city", "country"],
             },
             handler=_user_tool_search_rooms,
             roles=frozenset({ROLE_USER}),
@@ -839,6 +867,7 @@ Product context:
 - You do NOT make eligibility, compliance, ranking, application, payment, agreement, or tenancy decisions. \
 For any confirmed status, tell the user to use the record shown in Zoiko Rooms or offer to speak with a person.
 - The Zoiko Rooms services are the source of truth; you only retrieve and explain their state.
+- The platform's name is exactly "Zoiko Rooms" (Z-O-I-K-O). Never write any other spelling.
 
 Your role:
 - Help the user find available rooms, check their application status, review \
@@ -877,13 +906,20 @@ identity, professional licensure, or independent authority.
 - Keep answers concise, friendly, and helpful; prefer short bullet lists over prose.
 
 External search rules:
-- When the user wants to find a room, call `search_rooms` first: it checks Zoiko Rooms inventory first.
+- When the user wants to find a room, call `search_rooms` first: it checks Zoiko Rooms inventory first, then \
+approved outside sources only if nothing matches. Always pass both `city` and `country`. Infer the country when \
+the city makes it clear (Manchester -> United Kingdom, Austin -> United States); if the city is ambiguous \
+(e.g. Cambridge, Portland), ask which country before searching.
 - If Zoiko Rooms results are returned, present them. Do NOT disclose external sources. Report each listing's \
 `verificationStatus` as given; never call an INTERNAL_UNVERIFIED listing verified.
 - If no Zoiko Rooms results exist, safe external discovery cards may be returned. They are NOT Zoiko Rooms \
 listings and have NOT been verified by Zoiko Rooms.
 - Use the `disclosure_text` returned by `search_rooms` verbatim.
 - For external cards never say "available" — say "appears listed" / "discovered".
+- Present external cards as a short numbered list ("Option 1", "Option 2", ...): area, room type and \
+`rent_monthly` with the currency when the card has them (say "advertised price, about X per month"), \
+otherwise "price not listed". Keep `opportunity_id` for tool calls only; don't show it as a column.
+- Show each Zoiko Rooms listing's price with its own `currency` field; never convert or guess a currency.
 - Never expose source URLs, phone numbers, emails, handles, or exact addresses for external leads.
 - External leads are handled through Zoiko Rooms until the provider accepts the introduction; the user must use \
 `request_provider_contact` (with consent) to proceed. Contact does not unlock payment or verification.
@@ -1081,7 +1117,9 @@ def stream_assistant_reply(
                 {
                     "role": "tool",
                     "tool_call_id": call["id"] or f"call_{i}",
-                    "content": json.dumps(rows),
+                    # default=str: a tool row must never crash the turn on a
+                    # date/decimal value.
+                    "content": json.dumps(rows, default=str),
                 }
             )
 

@@ -50,6 +50,12 @@ def _map_db_row(row: SourceRightRegistry) -> dict[str, Any]:
         "clickthrough_required": bool(row.clickthrough_required),
         "masking_permitted": bool(row.masking_permitted),
         "outreach_channels": list(row.outreach_channels or []),
+        "permitted_fields": list(row.permitted_fields or []),
+        "acquisition_mode": str(row.acquisition_mode or BLOCKED).upper(),
+        "territories": [str(t).upper() for t in (row.territories or [])],
+        "site_domain": (row.site_domain or "").strip().lower() or None,
+        "contact_extraction_permitted": bool(row.contact_extraction_permitted),
+        "cache_ttl_seconds": int(row.cache_ttl_seconds or 0),
         "notes": None,
         "is_active": row.status == "ACTIVE"
         and bool(row.legal_approved)
@@ -118,6 +124,13 @@ class SourceRightsRegistry:
                             "clickthrough_required": bool(item.get("clickthrough_required", False)),
                             "masking_permitted": bool(item.get("masking_permitted", False)),
                             "outreach_channels": list(item.get("outreach_channels", []) or []),
+                            "permitted_fields": list(item.get("permitted_fields", []) or []),
+                            "acquisition_mode": str(item.get("acquisition_mode", "") or "").upper(),
+                            "territories": [str(t).upper() for t in item.get("territories", []) or []],
+                            "contact_extraction_permitted": bool(
+                                item.get("contact_extraction_permitted", False)
+                            ),
+                            "cache_ttl_seconds": int(item.get("cache_ttl_seconds", 0) or 0),
                             "notes": item.get("notes"),
                             "is_active": bool(item.get("is_active", False)),
                         }

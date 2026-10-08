@@ -95,3 +95,36 @@ def test_small_internal_limit_never_opens_external_fallback(db_session):
     assert result.discovery.fallback_triggered is False
     assert result.discovery.internal_matches == 2
     assert result.discovery.external_matches == []
+
+
+@pytest.mark.usefixtures("external_activated")
+def test_chat_search_with_external_cards_does_not_crash(client, db_session):
+    """Regression: dated external cards in a tool result crashed the stream
+    ("Object of type datetime is not JSON serializable")."""
+    import json as _json
+
+    from app.services.source_rights_registry import registry
+    from tests.test_qa_scenarios import _tool_client
+
+    registry._cache = {
+        "demo": {"source_id": "demo", "tier": "B", "allow_fallback": True, "masking_permitted": True,
+                 "is_active": True, "permitted_fields": ["approx_location"]},
+    }
+    try:
+        user = _make_user(db_session)
+        conv = _new_user_conv(client, user)
+        args = _json.dumps({"q": "room", "city": "London", "country": "United Kingdom"})
+        res = _user_stream(client, user, conv, "rooms in London", _tool_client("search_rooms", args, "Here are some leads."))
+        assert res.status == 200
+        assert res.errors() == []
+        assert res.done() is not None
+    finally:
+        registry._cache = None
+
+
+def test_chat_search_without_city_asks_for_one(db_session):
+    from app.services.chat_service import execute_tool
+
+    user = _make_user(db_session)
+    rows, _ = execute_tool(db_session, user, "search_rooms", '{"q": "room", "country": "United Kingdom"}')
+    assert rows == [{"info": "No city given. Ask the user which city or town they want to rent in, then search again."}]

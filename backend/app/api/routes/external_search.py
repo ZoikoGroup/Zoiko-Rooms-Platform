@@ -11,9 +11,10 @@ Auth: user routes are scoped to ``zoiko_user_token``; admin routes to
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone as _tz
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -30,10 +31,16 @@ from app.schemas.external_search import (
     ExternalSearchRestRequest,
     ExternalSearchRestResponse,
     OutreachCreated,
+    SourceRegistryUpsert,
     SearchState as SearchStateEnum,
 )
 from app.services.audit_ext import log_external_search_event
 from app.services.external_outreach import outreach_service
+from app.services.feed_formats import FEED_FORMATS, FeedFormatError, parse_feed
+from app.services.feed_sync import MAX_FEED_BYTES
+from app.services.external_broker import validate_fetch_url
+from app.services.partner_feeds import partner_feed_adapter
+from app.services.source_rights_registry import registry
 from app.services.search_orchestrator import SearchQuery, orchestrator, persist_external_cards
 
 router = APIRouter(prefix="/api/users/external-search", tags=["user-external-search"], dependencies=[Depends(get_current_user)])
@@ -102,7 +109,7 @@ def external_search(
     # platform record (ZR-AI-SEARCH-001 15.3), not just a rendered card.
     cards_out: list[ExternalCardResult] = []
     if disc.state == SearchStateEnum.EXTERNAL_DISCOVERED:
-        cards_out = persist_external_cards(db, disc.external_matches, user.id)
+        cards_out = persist_external_cards(db, disc.external_matches, user.id, result.external_private)
 
     db.commit()
     return ExternalSearchRestResponse(
@@ -288,3 +295,86 @@ def source_rights_registry_list(
             }
         )
     return out
+
+
+@admin_router.post("/feeds/{source_id}/upload", dependencies=[Depends(require_super_admin)])
+async def upload_partner_feed(
+    source_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Apply an uploaded partner feed file (e.g. a UK agent's BLM export) as
+    that partner's current inventory. Same rules as the scheduled pull: the
+    source must be an ACTIVE, approved PARTNER_FEED. ``?format=`` overrides
+    the registry's feed_format (JSON | CSV | BLM | RESO)."""
+    src = db.scalar(select(SourceRightRegistry).where(SourceRightRegistry.source_id == source_id))
+    if src is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Source not found")
+    fmt = (request.query_params.get("format") or src.feed_format or "").upper()
+    if fmt not in FEED_FORMATS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"Set the feed format to one of {', '.join(FEED_FORMATS)}",
+        )
+    content = await file.read(MAX_FEED_BYTES + 1)
+    if len(content) > MAX_FEED_BYTES:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Feed file is larger than 20 MB")
+    try:
+        items = parse_feed(content, fmt)
+        result = partner_feed_adapter.sync_snapshot(
+            db, source_id=source_id, items=items, correlation_id=get_correlation_id(request)
+        )
+    except FeedFormatError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"Couldn't read the feed: {exc}")
+    except PermissionError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc))
+    db.commit()
+    return {"source_id": source_id, "format": fmt, "listings": len(items), **result}
+
+
+@admin_router.put("/registry/{source_id}", dependencies=[Depends(require_super_admin)])
+def upsert_source_rights(
+    source_id: str,
+    payload: SourceRegistryUpsert,
+    request: Request,
+    admin: AdminUser = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create or update a Source Rights Registry row (super admin only).
+
+    A source is used only when status is ACTIVE and both approvals are set;
+    the change is audited and takes effect immediately."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{1,99}", source_id):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "source_id must be lowercase letters, digits, '_', '-' or '.'")
+    if payload.feed_url:
+        ok, reason = validate_fetch_url(payload.feed_url)
+        if not ok or not payload.feed_url.startswith("https://"):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"feed_url must be a public https URL ({reason or 'https required'})")
+    if payload.status == "ACTIVE" and not (payload.legal_approved and payload.security_approved):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "An ACTIVE source needs both legal and security approval")
+    if payload.acquisition_mode == "PUBLIC_FETCH" and not payload.site_domain:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A PUBLIC_FETCH source needs its site_domain")
+
+    row = db.scalar(select(SourceRightRegistry).where(SourceRightRegistry.source_id == source_id))
+    before = None if row is None else f"{row.status} legal={row.legal_approved} security={row.security_approved}"
+    if row is None:
+        row = SourceRightRegistry(source_id=source_id)
+        db.add(row)
+    approvals_changed = row.legal_approved != payload.legal_approved or row.security_approved != payload.security_approved
+    for field, value in payload.model_dump().items():
+        setattr(row, field, value)
+    if approvals_changed:
+        row.terms_reviewed_at = datetime.now(_tz.utc)
+    db.flush()
+    log_external_search_event(
+        db,
+        action="source_registry.upserted",
+        resource_type="source_right_registry",
+        resource_id=source_id,
+        correlation_id=get_correlation_id(request),
+        reason=f"admin:{admin.id} before=[{before}] after=[{row.status} legal={row.legal_approved} security={row.security_approved}]",
+    )
+    db.commit()
+    registry.invalidate()
+    return {"source_id": source_id, "status": row.status, "active": registry.get(source_id) is not None}

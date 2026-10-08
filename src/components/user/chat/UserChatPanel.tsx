@@ -1003,6 +1003,7 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
                                   {room.city} · {room.roomType ?? "private room"}
                                 </p>
                                 <p className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                                  {room.currency ? `${room.currency} ` : ""}
                                   {Number(room.pricePerMonth).toLocaleString()} per month
                                 </p>
                               </div>

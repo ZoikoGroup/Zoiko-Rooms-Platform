@@ -264,6 +264,34 @@ class Settings(BaseSettings):
     external_search_rate_limit_max: int = 30
     external_search_rate_limit_window_seconds: int = 60
 
+    # ZR-AI-SEARCH-001 Section 6.1 Tier B licensed listing APIs
+    # (services/external_providers.py). A key only makes the adapter callable:
+    # listings are fetched only when the source's Source Rights Registry row is
+    # ACTIVE + legal/security approved and external.search_fallback is on.
+    # RentCast (US, source_id "rentcast"): free plan is 50 requests/month.
+    rentcast_api_key: str = ""
+    rentcast_api_url: str = "https://api.rentcast.io/v1/listings/rental/long-term"
+    # Domain (Australia, source_id "domain_au"): terms require attribution and
+    # a link to the original listing, so it is registered for internal
+    # opportunities only unless Legal approves masked display.
+    domain_api_key: str = ""
+    domain_api_url: str = "https://api.domain.com.au/v1/listings/residential/_search"
+    # Brave Search API (source_id "brave_web"): finds listings only on websites
+    # that are approved PUBLIC_FETCH registry sources (site_domain). Free plan
+    # includes monthly credits; search attribution required.
+    brave_search_api_key: str = ""
+    brave_search_api_url: str = "https://api.search.brave.com/res/v1/web/search"
+    # Parallel Search API (source_id "parallel_web"), same approved-sites-only
+    # rule as Brave. Free plan: monthly credits.
+    parallel_api_key: str = ""
+    parallel_search_api_url: str = "https://api.parallel.ai/v1/search"
+    # "parallel" | "brave"; empty = the first provider with a key (Parallel, then Brave).
+    web_search_provider: str = ""
+    external_listing_timeout_seconds: float = 8.0
+    # Partner feed pulls (services/feed_sync.py): UK BLM, US RESO Web API, or
+    # Zoiko Rooms' simple CSV/JSON format, configured per registry row.
+    partner_feed_timeout_seconds: float = 30.0
+
     # ZR-AI-SEARCH-001 Section 5.1 "Freshness": a published listing whose
     # availability was last confirmed longer ago than this many days is treated
     # as stale-unknown -- ranked after freshly-confirmed inventory (host
