@@ -18,6 +18,7 @@ from app.api.routes import (
     bookings,
     chatbot,
     disputes,
+    external_search,
     finance,
     guests,
     handoffs,
@@ -215,6 +216,8 @@ app.include_router(user_contact.router)
 app.include_router(admin_contact.router)
 app.include_router(verification.router)
 app.include_router(user_verification.router)
+app.include_router(external_search.router)
+app.include_router(external_search.admin_router)
 
 
 @app.get("/health")

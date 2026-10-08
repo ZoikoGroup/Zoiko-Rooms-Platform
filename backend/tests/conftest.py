@@ -70,6 +70,9 @@ def _isolate_from_real_provider_credentials(monkeypatch):
     monkeypatch.setattr(settings, "location_provider", "google")
     monkeypatch.setattr(settings, "location_fallback_enabled", True)
     monkeypatch.setattr(settings, "location_fallback_providers", "mapbox,here")
+    # External listing/search APIs (ZR-AI-SEARCH-001): never call them for real.
+    for key in ("rentcast_api_key", "domain_api_key", "brave_search_api_key", "parallel_api_key", "web_search_provider"):
+        monkeypatch.setattr(settings, key, "")
 
 
 @pytest.fixture(autouse=True)
@@ -333,6 +336,17 @@ def client(db_session: Session) -> typing.Generator[TestClient, None, None]:
 
 ADMIN_COOKIE = "zoiko_admin_token"
 USER_COOKIE = "zoiko_user_token"
+
+
+@pytest.fixture()
+def external_activated(db_session: Session) -> None:
+    """Turn on the ZR-AI-SEARCH-001 market activation flags (off by default)
+    for tests that exercise external discovery and provider outreach."""
+    from app.models.feature_flag import FeatureFlag
+
+    for name in ("external.search_fallback", "external.provider_outreach"):
+        db_session.add(FeatureFlag(name=name, value=True, note="test", enabled_by="test"))
+    db_session.flush()
 
 
 def _make_admin(db: Session, *, email: str = "admin@test.com", role: str = "admin") -> AdminUser:

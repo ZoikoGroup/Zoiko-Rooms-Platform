@@ -235,6 +235,36 @@ def reconcile_listing_fee_refunds(db: Session) -> int:
     return reconcile_processing_refunds(db)
 
 
+def process_external_outreach(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Phase 1.3: dispatch PENDING provider outreach rows."""
+    from app.services.outreach_worker import outreach_worker
+
+    return outreach_worker.process_pending_outreach(db)
+
+
+def expire_external_outreach(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Phase 1.3: expire SENT outreach with no response in TTL."""
+    from app.services.outreach_worker import outreach_worker
+
+    return outreach_worker.check_expired_outreach(db)
+
+
+def sync_partner_feeds(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Tier A: pull every approved partner feed (UK BLM,
+    US RESO, CSV/JSON) and apply it as the partner's current inventory."""
+    from app.services.feed_sync import sync_partner_feeds as _sync
+
+    return _sync(db)
+
+
+def purge_stale_external_opportunities(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Section 12 retention: drop discovered external
+    opportunities past their source TTL that were never acted on."""
+    from app.services.outreach_worker import outreach_worker
+
+    return outreach_worker.purge_stale_opportunities(db)
+
+
 def remind_hosts_of_unconfirmed_payments(db: Session, *, now: datetime | None = None) -> int:
     """A renter recorded a direct payment and the host hasn't confirmed or
     questioned it after settings.payment_confirmation_reminder_days -- nudge
@@ -286,6 +316,10 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("purge_authority_evidence", purge_authority_evidence),
     ("remind_hosts_of_unconfirmed_payments", remind_hosts_of_unconfirmed_payments),
     ("reconcile_listing_fee_refunds", reconcile_listing_fee_refunds),
+    ("process_external_outreach", process_external_outreach),
+    ("expire_external_outreach", expire_external_outreach),
+    ("sync_partner_feeds", sync_partner_feeds),
+    ("purge_stale_external_opportunities", purge_stale_external_opportunities),
 )
 
 
