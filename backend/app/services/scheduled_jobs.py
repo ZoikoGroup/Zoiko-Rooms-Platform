@@ -178,6 +178,17 @@ def expire_authority_verifications(db: Session) -> int:
     return result["expiring"] + result["expired"]
 
 
+def recheck_authority_verifications(db: Session) -> int:
+    """ZR-AUTHORITY-002: submitted authority cases waiting on property
+    verification, OCR or the malware scanner are decided again
+    automatically (there is no manual review queue)."""
+    from app.services import authority_service
+
+    changed = authority_service.recheck_pending(db)
+    db.commit()
+    return changed
+
+
 def purge_authority_evidence(db: Session) -> int:
     from app.services import authority_service
 
@@ -271,6 +282,7 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("expire_property_verifications", expire_property_verifications),
     ("purge_property_location_evidence", purge_property_location_evidence),
     ("expire_authority_verifications", expire_authority_verifications),
+    ("recheck_authority_verifications", recheck_authority_verifications),
     ("purge_authority_evidence", purge_authority_evidence),
     ("remind_hosts_of_unconfirmed_payments", remind_hosts_of_unconfirmed_payments),
     ("reconcile_listing_fee_refunds", reconcile_listing_fee_refunds),

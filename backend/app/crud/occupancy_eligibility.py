@@ -1,8 +1,8 @@
 """ZR-ENG-CLR-012 Section 9: Occupancy / Right-to-Rent / Eligibility
-Verification. Manual-review only in this MVP -- there is no live government
-registry integration, so every check is opened and decided by an admin
-(Section 16's "Manual Verification Operations" verifier mode), evidenced and
-audited the same as any other admin decision in this codebase."""
+Verification -- completed automatically, never by an admin: in every
+jurisdiction whose market pack requires it, a verified identity completes it
+on its own (product decision, 2026-10-07). PASS issues a scoped
+VerificationCredential, the only thing the agreement / move-in gates read."""
 
 from __future__ import annotations
 
@@ -47,8 +47,10 @@ def to_occupancy_eligibility_check_read(db: Session, check: OccupancyEligibility
 
 
 def open_occupancy_eligibility_check(
-    db: Session, admin: AdminUser, *, party_id: int, jurisdiction_code: str, method: str, share_code: str = "",
+    db: Session, admin: AdminUser | None, *, party_id: int, jurisdiction_code: str, method: str, share_code: str = "",
 ) -> OccupancyEligibilityCheck:
+    """Opens a check (the automation is the actor; `admin` is only kept for
+    records created before review was automated)."""
     if method not in OCCUPANCY_ELIGIBILITY_METHODS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown method '{method}'")
 
@@ -75,9 +77,9 @@ def get_occupancy_eligibility_check_or_404(db: Session, check_id: int) -> Occupa
 
 
 def record_occupancy_eligibility_result(
-    db: Session, check: OccupancyEligibilityCheck, admin: AdminUser, *,
+    db: Session, check: OccupancyEligibilityCheck, admin: AdminUser | None, *,
     result_status: str, reason_note: str = "", evidence_ref: str = "", policy_pack_version: int | None = None,
-    follow_up_days: int | None = None,
+    follow_up_days: int | None = None, follow_up_due_at: datetime | None = None,
 ) -> OccupancyEligibilityCheck:
     """ZR-ENG-CLR-012 Section 24: PASS/WAIVED_POLICY issue a scoped
     VerificationCredential (never a bare status flip -- Section 2's 'no raw
@@ -88,19 +90,18 @@ def record_occupancy_eligibility_result(
     issues one too rather than requiring the gate to special-case it.
 
     AC-09/AC-10: only PASS/FAIL_INELIGIBLE/WAIVED_POLICY are terminal --
-    Section 8's own "Check state" table has every other outcome (including
-    the new TECHNICAL_ERROR/FRAUD_REVIEW/SUSPENDED) route to alternate/
-    manual review, so a check left in any of those can still be re-decided
-    once more evidence arrives."""
+    every other outcome can still be decided again once more evidence
+    arrives. follow_up_due_at (the permission's own end date) wins over
+    follow_up_days."""
     if check.status in OCCUPANCY_ELIGIBILITY_TERMINAL_STATUSES:
         raise HTTPException(status.HTTP_409_CONFLICT, f"A {check.status} check is terminal and cannot be re-decided")
     if result_status not in OCCUPANCY_ELIGIBILITY_STATUSES or result_status == "IN_PROGRESS":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid result status '{result_status}'")
 
-    # ZR-ENG-CLR-012 Section 9 (acceptance criteria): "Manual reviewer PASS
-    # requires reason and policy snapshot." Applies to WAIVED_POLICY too --
-    # it issues the exact same VerificationCredential as PASS below, just on
-    # a different basis, so it needs the same accountability.
+    # ZR-ENG-CLR-012 Section 9 (acceptance criteria): "PASS requires reason
+    # and policy snapshot." Applies to WAIVED_POLICY too -- it issues the
+    # exact same VerificationCredential as PASS below, just on a different
+    # basis, so it needs the same accountability.
     if result_status in ("PASS", "WAIVED_POLICY"):
         if not reason_note.strip():
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"A reason is required to record a {result_status} decision")
@@ -112,11 +113,14 @@ def record_occupancy_eligibility_result(
     now = datetime.now(timezone.utc)
     check.status = result_status
     check.reason_note = reason_note
-    check.evidence_ref = evidence_ref
-    check.checked_by_admin_id = admin.id
+    check.evidence_ref = evidence_ref or check.evidence_ref
+    check.checked_by_admin_id = admin.id if admin else None
     check.checked_at = now
-    if result_status in ("PASS", "WAIVED_POLICY") and follow_up_days:
-        check.follow_up_due_at = now + timedelta(days=follow_up_days)
+    if result_status in ("PASS", "WAIVED_POLICY"):
+        if follow_up_due_at is not None:
+            check.follow_up_due_at = follow_up_due_at
+        elif follow_up_days:
+            check.follow_up_due_at = now + timedelta(days=follow_up_days)
     db.commit()
     db.refresh(check)
 
@@ -170,10 +174,8 @@ def list_occupancy_eligibility_checks_for_party(db: Session, party_id: int) -> l
 
 
 def list_pending_occupancy_eligibility_checks(db: Session) -> list[OccupancyEligibilityCheck]:
-    """"Pending" here means "not yet terminal" -- IN_PROGRESS plus every
-    routed-to-review outcome (INCONCLUSIVE, TECHNICAL_ERROR, FRAUD_REVIEW,
-    SUSPENDED) all still need admin attention, matching
-    OCCUPANCY_ELIGIBILITY_TERMINAL_STATUSES' own definition of "done"."""
+    """Not yet terminal: IN_PROGRESS plus outcomes the renter (or the
+    automatic re-check) still has to resolve -- shown read-only to admins."""
     return list(
         db.scalars(
             select(OccupancyEligibilityCheck)
@@ -181,3 +183,41 @@ def list_pending_occupancy_eligibility_checks(db: Session) -> list[OccupancyElig
             .order_by(OccupancyEligibilityCheck.created_at.asc())
         )
     )
+
+
+# -- automatic decision ----------------------------------------------------------------
+
+def _pack(db: Session, jurisdiction_code: str):
+    """The market pack for this jurisdiction when it requires occupancy
+    eligibility, else None."""
+    from app.services.verification_requirements import _resolve_with_subnational_fallback
+
+    pack = _resolve_with_subnational_fallback(db, jurisdiction_code)
+    return pack if pack is not None and pack.occupancy_eligibility_required else None
+
+
+def ensure_automatic_check(db: Session, party_id: int, jurisdiction_code: str) -> VerificationCredential | None:
+    """The current credential, or one issued now because the person's
+    identity is verified. None only while identity isn't verified yet."""
+    credential = get_valid_occupancy_eligibility_credential(db, party_id, jurisdiction_code)
+    if credential is not None:
+        return credential
+    pack = _pack(db, jurisdiction_code)
+    if pack is None:
+        return None
+    # A verified identity completes occupancy eligibility on its own -- no
+    # further document or country check (product decision, 2026-10-07).
+    from app.crud.identity_verification import get_verified_identity_for_party
+
+    identity = get_verified_identity_for_party(db, party_id)
+    if identity is None:
+        return None
+    check = open_occupancy_eligibility_check(db, None, party_id=party_id, jurisdiction_code=jurisdiction_code,
+                                             method="IDENTITY_DOCUMENT")
+    record_occupancy_eligibility_result(
+        db, check, None, result_status="PASS", policy_pack_version=pack.version,
+        reason_note="Completed automatically: identity verified.",
+        evidence_ref=f"identity_verification:{identity.id}",
+        follow_up_days=pack.occupancy_eligibility_follow_up_days,
+    )
+    return get_valid_occupancy_eligibility_credential(db, party_id, jurisdiction_code)

@@ -34,7 +34,8 @@ import {
 
 type Step = 0 | 1 | 2 | 3;
 const RELATIONSHIPS: RelationshipType[] = ["OWNER", "CO_OWNER", "REPRESENTATIVE", "AGENT", "PROPERTY_MANAGER", "TENANT_SUBLETTER"];
-const OPEN = ["COLLECTING", "ACTION_REQUIRED"];
+// A REJECTED case (from before review was automated) is corrected like ACTION_REQUIRED.
+const OPEN = ["COLLECTING", "ACTION_REQUIRED", "REJECTED"];
 const SCOPES: ScopeCode[] = ["ADVERTISE", "RENT", "MANAGE", "SUBLET", "COLLECT_RENT"];
 
 // PDF, JPG, PNG and HEIC (iPhone photos -- converted to JPEG on upload).
@@ -137,7 +138,7 @@ export function AuthorityVerificationWizard({ propertyId, propertyLabel, onClose
       ) : editing ? (
         <>
           <Stepper step={step} showDetails={needsDetails(v)} />
-          {v.state === "ACTION_REQUIRED" && (
+          {(v.state === "ACTION_REQUIRED" || v.state === "REJECTED") && (
             <ActionRequired v={v} onShowRequirements={() => setStep(2)} />
           )}
           {step <= 1 && needsDetails(v) && (

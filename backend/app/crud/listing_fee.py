@@ -12,15 +12,11 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
-from io import BytesIO
 
 from fastapi import HTTPException, status
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.pdfgen import canvas
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.core.config import settings
 from app.core.listing_fee_receipt_documents import save_listing_fee_receipt_document
@@ -1290,60 +1286,87 @@ def get_or_create_listing_fee_receipt(db: Session, payment: ListingFeePayment) -
     return receipt
 
 
+def _fee_seller(legal_entity_name: str, tax_registration_number: str, billing_entity: dict | None):
+    """ZR-PAY-CFG-001 Section 7: the legally required company details, from
+    the Billing Entity Registry snapshot frozen at quote time."""
+    from app.services.listing_fee_documents import Party as DocParty
+
+    entity = billing_entity or {}
+    lines = []
+    if entity.get("registered_address"):
+        lines.append(entity["registered_address"])
+    if entity.get("company_registration_number"):
+        lines.append(f"Company no. {entity['company_registration_number']}")
+    if tax_registration_number:
+        lines.append(f"{entity.get('tax_registration_type') or 'Tax'} no. {tax_registration_number}")
+    return DocParty(name=legal_entity_name, lines=lines)
+
+
+def _fee_customer(payment: ListingFeePayment):
+    from app.crud.user import get_user_by_party_id
+    from app.services.listing_fee_documents import Party as DocParty
+
+    user = get_user_by_party_id(object_session(payment), payment.party_id)
+    lines = [user.email] if user and user.email else []
+    if payment.billing_country:
+        lines.append(f"Billing country: {payment.billing_country}")
+    return DocParty(name=(user.full_name if user and user.full_name else f"Account #{payment.party_id}"), lines=lines)
+
+
+def _tax_label(snapshot: dict) -> str:
+    kind = (snapshot.get("billing_entity") or {}).get("tax_registration_type") or "Tax"
+    rate = float(snapshot.get("tax_rate", 0.0)) * 100
+    return f"{kind} at {rate:g}%" + (" (included in price)" if snapshot.get("tax_behavior") == "INCLUSIVE" else "")
+
+
+def _fee_notes(snapshot: dict) -> list[str]:
+    notes = []
+    if snapshot.get("disclosure_text"):
+        notes.append(snapshot["disclosure_text"])
+    notes.append("This fee is payable to Zoiko Rooms for publishing this listing. It is separate from rent, "
+                 "deposits and any other payment between host and renter.")
+    if snapshot.get("refund_eligible"):
+        days = snapshot.get("refund_window_days")
+        notes.append(f"Refundable within {days} days of payment under the listing fee terms." if days
+                     else "Refundable under the listing fee terms.")
+    else:
+        notes.append("This fee is non-refundable except where required by law.")
+    return notes
+
+
 def _generate_listing_fee_receipt_pdf(
     payment: ListingFeePayment, receipt_number: str, *, legal_entity_name: str, tax_registration_number: str,
     billing_entity: dict | None = None,
 ) -> bytes:
-    """ZR-PAY-002 Section 8.5's minimum receipt/invoice data. Same plain
-    summary-document framing as crud/finance.py:_generate_payment_receipt_pdf --
-    no real payment-processor descriptor to show beyond what Stripe itself
-    already discloses to the payer at checkout."""
-    buffer = BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    _, height = A4
-    x = 20 * mm
-    y = height - 25 * mm
-
-    def write(text: str, size: float = 10, bold: bool = False, gap: float = 7 * mm) -> None:
-        nonlocal y
-        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        pdf.drawString(x, y, text)
-        y -= gap
-
-    write(f"{legal_entity_name} -- Listing Fee Receipt", size=16, bold=True, gap=10 * mm)
-    write(f"Receipt {receipt_number}", size=10)
-    write(f"Listing {payment.listing_id}  |  Payment #{payment.id}", size=10)
-    # ZR-PAY-CFG-001 Section 7: the legally required company details, from
-    # the Billing Entity Registry snapshot frozen at quote time.
-    if billing_entity:
-        if billing_entity.get("registered_address"):
-            write(f"Registered address: {billing_entity['registered_address']}", size=8, gap=5 * mm)
-        if billing_entity.get("company_registration_number"):
-            write(f"Company registration: {billing_entity['company_registration_number']}", size=8, gap=5 * mm)
-    if tax_registration_number:
-        write(f"Tax registration: {tax_registration_number}", size=9, gap=10 * mm)
-    else:
-        y -= 3 * mm
-    issued = payment.paid_at or datetime.now(timezone.utc)
-    write(f"Paid {issued.strftime('%Y-%m-%d %H:%M UTC')}", size=9, gap=10 * mm)
+    """ZR-PAY-002 Section 8.5's minimum receipt/invoice data, laid out in the
+    house style (services/listing_fee_documents.py)."""
+    from app.services.listing_fee_documents import FeeDocument, LineItem, render_fee_document_pdf
 
     quote = payment.quote
     snapshot = quote.policy_snapshot or {}
-    write("Charge", size=12, bold=True)
-    write(f"Listing Fee: {quote.currency} {float(quote.amount):.2f}", size=9, gap=6 * mm)
-    tax_label = "Tax (included)" if snapshot.get("tax_behavior") == "INCLUSIVE" else "Tax"
-    tax_rate = float(snapshot.get("tax_rate", 0.0))
-    write(f"{tax_label} at {tax_rate * 100:.2f}%: {quote.currency} {float(quote.tax_amount):.2f}", size=9, gap=6 * mm)
-    write(f"Total: {quote.currency} {float(quote.total_amount):.2f}", size=9, gap=10 * mm)
-
-    write(
-        "This fee is payable to Zoiko Rooms for publishing this listing. It is separate from "
-        "rent, deposits and other rental payments.",
-        size=8, gap=6 * mm,
-    )
-    pdf.showPage()
-    pdf.save()
-    return buffer.getvalue()
+    listing = payment.listing
+    listing_name = listing.name if listing else payment.listing_id
+    details = [
+        ("Receipt no.", receipt_number),
+        ("Payment ref.", f"#{payment.id}"),
+        ("Date paid", f"{(payment.paid_at or datetime.now(timezone.utc)):%d %b %Y}"),
+        ("Paid with", "Card · Stripe secure checkout"),
+        ("Listing", listing_name),
+        ("Listing ID", payment.listing_id),
+    ]
+    if listing and listing.location:
+        details.append(("Property", listing.location))
+    details.append(("Market", f"{snapshot.get('market') or '-'} · price book v{snapshot.get('price_book_version', '-')}"))
+    if payment.provider_payment_intent_id:
+        details.append(("Provider ref.", payment.provider_payment_intent_id))
+    return render_fee_document_pdf(FeeDocument(
+        kind="RECEIPT", number=receipt_number, issued_at=payment.paid_at or datetime.now(timezone.utc),
+        currency=quote.currency, seller=_fee_seller(legal_entity_name, tax_registration_number, billing_entity),
+        customer=_fee_customer(payment), details=details,
+        items=[LineItem("Listing Fee", f'Publishing "{listing_name}" on Zoiko Rooms', float(quote.amount))],
+        net_amount=float(quote.amount), tax_label=_tax_label(snapshot), tax_amount=float(quote.tax_amount),
+        total_amount=float(quote.total_amount), status_label="Paid", notes=_fee_notes(snapshot),
+    ))
 
 
 def request_refund(
@@ -1548,45 +1571,35 @@ def issue_credit_note(db: Session, refund: ListingFeeRefund) -> ListingFeeRefund
 def _generate_listing_fee_credit_note_pdf(
     refund: ListingFeeRefund, number: str, *, receipt_number: str, net_amount: float, tax_amount: float,
 ) -> bytes:
+    from app.services.listing_fee_documents import FeeDocument, LineItem, render_fee_document_pdf
+
     payment = refund.payment
     snapshot = payment.quote.policy_snapshot or {}
-    legal_entity_name = snapshot.get("legal_entity_name", "Zoiko Rooms")
-    billing_entity = snapshot.get("billing_entity") or {}
-    buffer = BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    _, height = A4
-    x = 20 * mm
-    y = height - 25 * mm
-
-    def write(text: str, size: float = 10, bold: bool = False, gap: float = 7 * mm) -> None:
-        nonlocal y
-        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        pdf.drawString(x, y, text)
-        y -= gap
-
-    write(f"{legal_entity_name} -- Credit Note", size=16, bold=True, gap=10 * mm)
-    write(f"Credit note {number}", size=10)
-    write(f"Against receipt {receipt_number}  |  Listing {payment.listing_id}  |  Payment #{payment.id}", size=10)
-    if billing_entity.get("registered_address"):
-        write(f"Registered address: {billing_entity['registered_address']}", size=8, gap=5 * mm)
-    if billing_entity.get("company_registration_number"):
-        write(f"Company registration: {billing_entity['company_registration_number']}", size=8, gap=5 * mm)
-    if snapshot.get("tax_registration_number"):
-        write(f"Tax registration: {snapshot['tax_registration_number']}", size=9, gap=10 * mm)
+    listing = payment.listing
+    listing_name = listing.name if listing else payment.listing_id
     issued = refund.completed_at or datetime.now(timezone.utc)
-    write(f"Issued {issued.strftime('%Y-%m-%d %H:%M UTC')}", size=9, gap=10 * mm)
-
-    write("Credited", size=12, bold=True)
-    write(f"Listing Fee: {payment.currency} {net_amount:.2f}", size=9, gap=6 * mm)
-    tax_rate = float(snapshot.get("tax_rate", 0.0))
-    write(f"Tax at {tax_rate * 100:.2f}%: {payment.currency} {tax_amount:.2f}", size=9, gap=6 * mm)
-    write(f"Total credited: {payment.currency} {float(refund.amount):.2f}", size=9, gap=10 * mm)
+    details = [
+        ("Credit note no.", number),
+        ("Original receipt", receipt_number),
+        ("Date issued", f"{issued:%d %b %Y}"),
+        ("Payment ref.", f"#{payment.id}"),
+        ("Listing", listing_name),
+        ("Listing ID", payment.listing_id),
+    ]
     if refund.reason:
-        write(f"Reason: {refund.reason[:120]}", size=8, gap=6 * mm)
-    write("This credit note reverses the amount above of the Listing Fee receipt it references.", size=8, gap=6 * mm)
-    pdf.showPage()
-    pdf.save()
-    return buffer.getvalue()
+        details.append(("Reason", refund.reason[:160]))
+    return render_fee_document_pdf(FeeDocument(
+        kind="CREDIT_NOTE", number=number, issued_at=issued, currency=payment.currency,
+        seller=_fee_seller(snapshot.get("legal_entity_name", "Zoiko Rooms"), snapshot.get("tax_registration_number", ""),
+                           snapshot.get("billing_entity")),
+        customer=_fee_customer(payment), details=details,
+        items=[LineItem("Listing Fee refund", f"Credit against receipt {receipt_number}", net_amount)],
+        net_amount=net_amount, tax_label=_tax_label(snapshot), tax_amount=tax_amount,
+        total_amount=float(refund.amount),
+        status_label="Refunded" if refund.status == "REFUNDED" else "Partly refunded",
+        notes=["This credit note reverses the amount above of the Listing Fee receipt it references. "
+               "The refund is returned to the original payment method."],
+    ))
 
 
 def apply_refund_status_from_provider(

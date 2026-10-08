@@ -24,7 +24,7 @@ from app.crud import refund_entitlement as refund_entitlement_crud
 from app.crud import review as review_crud
 from app.crud import sublet as sublet_crud
 from app.crud import termination as termination_crud
-from app.crud.listing import assert_party_does_not_own_listing, resolve_market_release
+from app.crud.listing import assert_party_does_not_own_listing
 from app.crud.rental_transaction_record import build_rental_transaction_record
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
@@ -39,7 +39,6 @@ from app.models.listing import Listing
 from app.models.listing_approval import CURRENT_POLICY_VERSION
 from app.models.occupancy import Occupancy
 from app.services.booking_expiry import expire_offer_if_overdue
-from app.services.verification_requirements import is_identity_required_at_application
 from app.models.user_account import UserAccount
 from app.schemas.finance import DepositClaimItemRead, DepositClaimItemRespond, DepositClaimRead, PaymentPreviewRead
 from app.schemas.habitability import HabitabilityIncidentCreate, HabitabilityIncidentRead
@@ -162,24 +161,18 @@ def submit_rental_application(
 ):
     """User submits a rental application for a listing.
 
-    ZR-ENG-CLR-012 AC-03: identity verification is only required before
-    application if the listing's own jurisdiction market pack explicitly
-    opts into that earlier gate (identity_required_at_application) --
-    progressive verification is the default; most listings need no
-    identity at all until confirmation (see check_agreement_eligibility).
+    Anyone may browse rooms, but applying needs a verified identity -- in
+    every region, whatever the market pack says (product decision,
+    2026-10-07). Occupancy eligibility then completes automatically at the
+    agreement step (crud/occupancy_eligibility.py).
     """
     listing = db.get(Listing, payload.listing_id)
 
-    jurisdiction_code = None
-    if listing:
-        market_release = resolve_market_release(db, listing)
-        jurisdiction_code = market_release.jurisdiction if market_release else None
-    if jurisdiction_code and is_identity_required_at_application(db, jurisdiction_code):
-        if not user.party_id or not get_verified_identity_for_party(db, user.party_id):
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                "You must complete identity verification before submitting applications for this listing",
-            )
+    if not user.party_id or not get_verified_identity_for_party(db, user.party_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Verify your identity before applying for a room -- you can still browse rooms meanwhile.",
+        )
 
     # A host cannot apply to their own listing -- enforced here regardless of
     # what the frontend shows, so it can't be bypassed by calling the API directly.

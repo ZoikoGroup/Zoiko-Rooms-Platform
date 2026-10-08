@@ -4,7 +4,9 @@ to rent" check... must not export England-specific immigration checking to
 other markets.' Also covers Section 2's 'no raw document becomes a
 permanent fact without a credential' doctrine (VerificationCredential) and
 Section 24's source-of-truth rule (the eligibility gate reads the
-credential, never re-derives PASS/FAIL from the check row itself)."""
+credential, never re-derives PASS/FAIL from the check row itself), and the
+automatic completion that replaced manual review: a verified identity
+completes occupancy eligibility on its own."""
 
 from __future__ import annotations
 
@@ -45,6 +47,14 @@ def _england_policy_pack(db: Session, *, occupancy_eligibility_required: bool) -
     return pack
 
 
+def _unverify_identity(db: Session, party_id: int) -> None:
+    from app.models.identity_verification import IdentityVerification
+
+    for record in db.scalars(select(IdentityVerification).where(IdentityVerification.party_id == party_id)):
+        record.status, record.session_state = "rejected", "FAILED"
+    db.commit()
+
+
 def _england_offer(db_session: Session, client, *, email_suffix: str):
     listing_id, _room_id = _make_listing_with_room(db_session)
     _make_agreement_eligible(db_session, listing_id)
@@ -71,12 +81,13 @@ class TestResolverFailsOpenWithoutAPolicyPack:
 
 
 class TestEnglandOccupancyEligibilityGate:
-    def test_agreement_eligibility_blocks_when_required_and_no_credential(self, client, db_session: Session):
+    def test_agreement_eligibility_blocks_while_identity_is_not_verified(self, client, db_session: Session):
         _england_policy_pack(db_session, occupancy_eligibility_required=True)
         offer_id, admin_cookies, renter = _england_offer(db_session, client, email_suffix="01")
 
         from app.models.leasing import Offer
         offer = db_session.get(Offer, offer_id)
+        _unverify_identity(db_session, offer.guest.user_account.party_id)
         reasons = check_agreement_eligibility(db_session, offer)
         assert any("OCCUPANCY_ELIGIBILITY" in r for r in reasons), reasons
 
@@ -105,7 +116,7 @@ class TestEnglandOccupancyEligibilityGate:
         reasons = check_agreement_eligibility(db_session, offer)
         assert not any("OCCUPANCY_ELIGIBILITY" in r for r in reasons), reasons
 
-    def test_fail_ineligible_issues_no_credential_and_still_blocks(self, client, db_session: Session):
+    def test_fail_ineligible_issues_no_credential_and_blocks_an_unverified_renter(self, client, db_session: Session):
         _england_policy_pack(db_session, occupancy_eligibility_required=True)
         offer_id, admin_cookies, renter = _england_offer(db_session, client, email_suffix="03")
 
@@ -123,6 +134,7 @@ class TestEnglandOccupancyEligibilityGate:
 
         credential = get_valid_occupancy_eligibility_credential(db_session, party_id, "England")
         assert credential is None
+        _unverify_identity(db_session, party_id)
 
         reasons = check_agreement_eligibility(db_session, offer)
         assert any("OCCUPANCY_ELIGIBILITY" in r for r in reasons), reasons
@@ -191,111 +203,42 @@ class TestOccupancyEligibilityReCheckedAtMoveIn:
 
         # Credential was valid through agreement confirmation -- now expire
         # it, simulating a lapse between confirmation and move-in.
-        credential = db_session.scalar(select(VerificationCredential).where(VerificationCredential.party_id == party_id))
+        credential = db_session.scalar(select(VerificationCredential).where(
+            VerificationCredential.party_id == party_id, VerificationCredential.requirement_code == "OCCUPANCY_ELIGIBILITY"))
         credential.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
         db_session.commit()
+        # ...and identity no longer verified, so it isn't completed again automatically.
+        _unverify_identity(db_session, party_id)
 
         reasons = check_move_in_eligibility(db_session, agreement)
         assert any("OCCUPANCY_ELIGIBILITY" in r for r in reasons), reasons
 
 
-class TestOccupancyEligibilityAdminRoutes:
-    def test_full_open_and_decide_flow_via_http(self, client, db_session: Session):
-        _england_policy_pack(db_session, occupancy_eligibility_required=True)
-        offer_id, admin_cookies, renter = _england_offer(db_session, client, email_suffix="05")
+class TestAutomaticOccupancyEligibility:
+    """Completed automatically -- a verified identity is enough; no admin
+    opens or decides a check and the renter submits nothing else."""
 
+    def test_verified_identity_completes_it_automatically(self, client, db_session: Session):
+        _england_policy_pack(db_session, occupancy_eligibility_required=True)
+        offer_id, _admin_cookies, _renter = _england_offer(db_session, client, email_suffix="a1")
         from app.models.leasing import Offer
+
         offer = db_session.get(Offer, offer_id)
         party_id = offer.guest.user_account.party_id
-
-        r = client.post(
-            "/api/verification/occupancy-eligibility-checks",
-            json={"partyId": party_id, "jurisdictionCode": "England", "method": "DIGITAL_SHARE_CODE", "shareCode": "AB1-CD2-EF3"},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 201, r.text
-        check_id = r.json()["id"]
-        assert r.json()["status"] == "IN_PROGRESS"
-
-        r = client.get("/api/verification/occupancy-eligibility-checks", cookies=admin_cookies)
-        assert r.status_code == 200, r.text
-        assert any(c["id"] == check_id for c in r.json())
-
-        r = client.post(
-            f"/api/verification/occupancy-eligibility-checks/{check_id}/decide",
-            json={"resultStatus": "PASS", "reasonNote": "Share code confirmed", "followUpDays": 365},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["status"] == "PASS"
-
+        assert get_valid_occupancy_eligibility_credential(db_session, party_id, "England") is None
+        reasons = check_agreement_eligibility(db_session, offer)
+        assert not any("OCCUPANCY_ELIGIBILITY" in r for r in reasons), reasons
         credential = get_valid_occupancy_eligibility_credential(db_session, party_id, "England")
-        assert credential is not None
-        assert credential.expires_at is not None
+        assert credential is not None and credential.method == "IDENTITY_DOCUMENT"
+        assert credential.expires_at is not None  # the pack's follow-up period (365 days here)
 
-    def test_cannot_decide_a_non_pending_check_twice(self, client, db_session: Session):
-        _england_policy_pack(db_session, occupancy_eligibility_required=True)
-        offer_id, admin_cookies, renter = _england_offer(db_session, client, email_suffix="06")
-
-        from app.models.leasing import Offer
-        offer = db_session.get(Offer, offer_id)
-        party_id = offer.guest.user_account.party_id
-
-        r = client.post(
-            "/api/verification/occupancy-eligibility-checks",
-            json={"partyId": party_id, "jurisdictionCode": "England", "method": "MANUAL_DOCUMENT_CHECK"},
-            cookies=admin_cookies,
-        )
-        check_id = r.json()["id"]
-        r = client.post(
-            f"/api/verification/occupancy-eligibility-checks/{check_id}/decide",
-            json={"resultStatus": "PASS", "reasonNote": "Manual document check passed"},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 200, r.text
-
-        r = client.post(f"/api/verification/occupancy-eligibility-checks/{check_id}/decide", json={"resultStatus": "FAIL_INELIGIBLE"}, cookies=admin_cookies)
-        assert r.status_code == 409, r.text
-
-    def test_inconclusive_is_not_terminal_and_can_be_re_decided(self, client, db_session: Session):
-        """AC-09/AC-10: INCONCLUSIVE routes to alternate/manual review --
-        must be re-decidable once more evidence arrives, unlike the
-        genuinely terminal PASS/FAIL_INELIGIBLE outcomes."""
-        _england_policy_pack(db_session, occupancy_eligibility_required=True)
-        offer_id, admin_cookies, renter = _england_offer(db_session, client, email_suffix="08")
-
-        from app.models.leasing import Offer
-        offer = db_session.get(Offer, offer_id)
-        party_id = offer.guest.user_account.party_id
-
-        r = client.post(
-            "/api/verification/occupancy-eligibility-checks",
-            json={"partyId": party_id, "jurisdictionCode": "England", "method": "MANUAL_DOCUMENT_CHECK"},
-            cookies=admin_cookies,
-        )
-        check_id = r.json()["id"]
-
-        r = client.post(
-            f"/api/verification/occupancy-eligibility-checks/{check_id}/decide",
-            json={"resultStatus": "INCONCLUSIVE", "reasonNote": "Document quality too low to read"},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["status"] == "INCONCLUSIVE"
-
-        r = client.post(
-            f"/api/verification/occupancy-eligibility-checks/{check_id}/decide",
-            json={"resultStatus": "PASS", "reasonNote": "Clearer document received"},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["status"] == "PASS"
-
-        r = client.post(
-            f"/api/verification/occupancy-eligibility-checks/{check_id}/decide",
-            json={"resultStatus": "FAIL_INELIGIBLE"}, cookies=admin_cookies,
-        )
-        assert r.status_code == 409, r.text
+    def test_admins_can_no_longer_open_or_decide_checks(self, client, db_session: Session):
+        admin = auth_admin_cookie(_make_admin(db_session, email="voe-noadmin@test.com", role="super_admin"))
+        r = client.post("/api/verification/occupancy-eligibility-checks", cookies=admin,
+                        json={"partyId": 1, "jurisdictionCode": "England", "method": "MANUAL_DOCUMENT_CHECK"})
+        assert r.status_code == 405
+        assert client.post("/api/verification/occupancy-eligibility-checks/1/decide", cookies=admin,
+                           json={"resultStatus": "PASS"}).status_code in (404, 405)
 
 
 class TestOccupancyEligibilityExpandedStateModel:

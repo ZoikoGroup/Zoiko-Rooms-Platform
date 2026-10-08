@@ -6,14 +6,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 # ZR-ENG-CLR-012 Section 9: "Occupancy eligibility exists only where a
-# jurisdiction imposes it." England's real mechanism (GOV.UK, Section 34's
-# own validation example) is either an online "share code" lookup or an
-# accepted manual document check -- both real, publicly documented routes.
-# This MVP has no live Home Office API integration, so DIGITAL_SHARE_CODE
-# still resolves to a manual admin decision (share_code is recorded for the
-# record, not verified against a live government service) -- same honesty
-# as every other "not really automated yet" corner of this codebase.
-OCCUPANCY_ELIGIBILITY_METHODS = ("DIGITAL_SHARE_CODE", "MANUAL_DOCUMENT_CHECK")
+# jurisdiction imposes it." Completed automatically, never by an admin
+# (crud/occupancy_eligibility.py): IDENTITY_DOCUMENT -- the person's verified
+# identity. DIGITAL_SHARE_CODE / MANUAL_DOCUMENT_CHECK remain only for
+# records decided before this was automated.
+OCCUPANCY_ELIGIBILITY_METHODS = ("IDENTITY_DOCUMENT", "DIGITAL_SHARE_CODE", "MANUAL_DOCUMENT_CHECK")
 
 # ZR-ENG-CLR-012 Section 8's own "Check state" table, in full -- NOT_REQUIRED
 # and REQUIRED are deliberately excluded as *stored* values: they are
@@ -52,8 +49,8 @@ class OccupancyEligibilityCheck(Base):
     party_id: Mapped[int] = mapped_column(ForeignKey("parties.id", ondelete="CASCADE"), nullable=False, index=True)
     jurisdiction_code: Mapped[str] = mapped_column(String(50), nullable=False)
     method: Mapped[str] = mapped_column(String(30), nullable=False)
-    # Only meaningful for DIGITAL_SHARE_CODE -- the code the renter shares,
-    # recorded for audit even though nothing here calls a live government API.
+    # Only meaningful for DIGITAL_SHARE_CODE (older records) -- recorded for
+    # audit; no government API is called.
     share_code: Mapped[str] = mapped_column(String(100), default="")
     evidence_ref: Mapped[str] = mapped_column(String(1024), default="")
     status: Mapped[str] = mapped_column(String(20), default="IN_PROGRESS")

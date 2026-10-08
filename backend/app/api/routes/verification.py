@@ -1,5 +1,6 @@
-"""ZR-ENG-CLR-012: admin-facing Verification Operations routes. Manual-review
-only in this MVP -- see crud/occupancy_eligibility.py."""
+"""ZR-ENG-CLR-012: admin-facing Verification Operations routes. Occupancy
+eligibility is decided automatically (crud/occupancy_eligibility.py); admins
+only view it here."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -17,9 +18,7 @@ from app.db.session import get_db
 from app.models.admin_user import AdminUser
 from app.models.identity_verification import IdentityVerification
 from app.schemas.verification import (
-    OccupancyEligibilityCheckCreate,
     OccupancyEligibilityCheckRead,
-    OccupancyEligibilityDecisionCreate,
     PropertyComplianceCredentialCreate,
     PropertyComplianceCredentialDeclare,
     PropertyComplianceCredentialRead,
@@ -46,17 +45,6 @@ from app.services.verification_operational_metrics import compute_verification_o
 router = APIRouter(prefix="/api/verification", tags=["verification"], dependencies=[Depends(get_current_admin)])
 
 
-@router.post("/occupancy-eligibility-checks", response_model=OccupancyEligibilityCheckRead, status_code=status.HTTP_201_CREATED)
-def post_open_occupancy_eligibility_check(
-    payload: OccupancyEligibilityCheckCreate, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
-):
-    check = crud.open_occupancy_eligibility_check(
-        db, admin, party_id=payload.party_id, jurisdiction_code=payload.jurisdiction_code,
-        method=payload.method, share_code=payload.share_code,
-    )
-    return crud.to_occupancy_eligibility_check_read(db, check)
-
-
 @router.get("/occupancy-eligibility-checks", response_model=list[OccupancyEligibilityCheckRead])
 def get_pending_occupancy_eligibility_checks(admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     return [crud.to_occupancy_eligibility_check_read(db, c) for c in crud.list_pending_occupancy_eligibility_checks(db)]
@@ -65,19 +53,6 @@ def get_pending_occupancy_eligibility_checks(admin: AdminUser = Depends(get_curr
 @router.get("/occupancy-eligibility-checks/party/{party_id}", response_model=list[OccupancyEligibilityCheckRead])
 def get_occupancy_eligibility_checks_for_party(party_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     return [crud.to_occupancy_eligibility_check_read(db, c) for c in crud.list_occupancy_eligibility_checks_for_party(db, party_id)]
-
-
-@router.post("/occupancy-eligibility-checks/{check_id}/decide", response_model=OccupancyEligibilityCheckRead)
-def post_decide_occupancy_eligibility_check(
-    check_id: int, payload: OccupancyEligibilityDecisionCreate,
-    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
-):
-    check = crud.get_occupancy_eligibility_check_or_404(db, check_id)
-    updated = crud.record_occupancy_eligibility_result(
-        db, check, admin, result_status=payload.result_status, reason_note=payload.reason_note,
-        evidence_ref=payload.evidence_ref, follow_up_days=payload.follow_up_days,
-    )
-    return crud.to_occupancy_eligibility_check_read(db, updated)
 
 
 @router.post(
