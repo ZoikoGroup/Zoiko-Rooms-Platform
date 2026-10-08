@@ -3,6 +3,8 @@ import { IdentityVerificationsManager } from "@/components/admin/IdentityVerific
 import { MarketPolicyPackManager } from "@/components/admin/MarketPolicyPackManager";
 import { OccupancyEligibilityManager } from "@/components/admin/OccupancyEligibilityManager";
 import { PropertyComplianceManager } from "@/components/admin/PropertyComplianceManager";
+import { PropertyLocationReviewManager } from "@/components/admin/PropertyLocationReviewManager";
+import { AuthorityReviewManager } from "@/components/admin/AuthorityReviewManager";
 import { ScreeningManager } from "@/components/admin/ScreeningManager";
 import { TrustSafetyManager } from "@/components/admin/TrustSafetyManager";
 import { VerificationOperationsPanel } from "@/components/admin/VerificationOperationsPanel";
@@ -23,6 +25,8 @@ export default async function AdminTrustSafetyPage() {
       <MarketPolicyPackManager />
       <AgreementClauseRegistryManager />
       <IdentityVerificationsManager />
+      <PropertyLocationReviewManager />
+      <AuthorityReviewManager />
       <OccupancyEligibilityManager />
       <ScreeningManager />
       <PropertyComplianceManager />

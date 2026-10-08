@@ -64,6 +64,8 @@ class PropertyRead(CamelModel):
     # True once the property has a live listing or a tenancy, after which its
     # region can no longer change (services/jurisdictions.py:property_region_is_locked).
     region_locked: bool = False
+    # ZR-PROPERTY-VERIFY-001 Section 13.3 -- send back as If-Match on update.
+    location_version: int = 1
 
 
 class OpenJurisdictionRead(CamelModel):
@@ -128,13 +130,6 @@ class AuthorityRecordRead(CamelModel):
     created_at: datetime
 
 
-class IdentityVerificationCreate(CamelModel):
-    party_id: int | None = None
-    document_type: str
-    encrypted_reference: str
-    evidence_ref: str = ""
-
-
 class IdentityVerificationRead(CamelModel):
     """Admin-facing read straight from the ORM. The document number is only
     ever exposed masked (ZR-IDENTITY-001 Section 5.4/9.2) -- the encrypted
@@ -176,10 +171,6 @@ class IdentityVerificationRead(CamelModel):
     decided_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
-
-
-class IdentityVerificationReject(CamelModel):
-    notes: str = ""
 
 
 class BreakGlassAccessRequest(CamelModel):

@@ -1616,10 +1616,7 @@ def _payment_deadline_after_signing(agreement: Agreement, now: datetime) -> date
     bank transfer. With the card rent rail on, it stays the short
     card-checkout lock."""
     from app.core.config import settings
-    from app.services.payment_boundary import capability_enabled
 
-    if capability_enabled("rent_card_checkout_enabled"):
-        return compute_checkout_deadline(now, agreement.offer.listing.market_release)
     deadline = now + timedelta(days=settings.direct_payment_confirmation_hold_days)
     offer = agreement.offer
     if offer is not None:

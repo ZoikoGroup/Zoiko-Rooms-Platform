@@ -52,10 +52,11 @@ class IdentitySessionRead(CamelModel):
     message: str = ""
     actions: list[str] = []
     escalated: bool = False
-    # Hosted capture: whether the person can (re)open the provider flow now,
-    # and the URL to do so (only on submit / launch responses).
-    launch_available: bool = False
-    launch_url: str | None = None
+    # Zoiko's capture screens: whether photos can be taken now, which were
+    # already sent to the provider, and whether the document's back is needed.
+    capture_available: bool = False
+    captured: list[str] = []
+    back_required: bool = False
     can_restart: bool = False
     created_at: datetime
     submitted_at: datetime | None = None
@@ -98,11 +99,6 @@ class IdentitySubmit(CamelModel):
     attested: bool = False
 
 
-class IdentityAlternativeRequest(CamelModel):
-    reason_code: str
-    note: str = ""
-
-
 class IdentityHandoffRead(CamelModel):
     token: str
     expires_in_seconds: int
@@ -143,12 +139,6 @@ class IdentityPackUpdate(CamelModel):
     reverify_on_account_recovery: bool | None = None
     document_provider_code: str | None = None
     max_attempts_per_day: int | None = None
-
-
-class IdentityReviewerDecision(CamelModel):
-    decision: str
-    reason_code: str
-    note: str
 
 
 class IdentityReviewRead(CamelModel):

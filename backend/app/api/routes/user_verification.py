@@ -89,7 +89,7 @@ def get_my_verification_status(user: UserAccount = Depends(get_current_user), db
             explanation=f"Confirms your right to occupy a property in {check.jurisdiction_code} before move-in.",
             sharing_scope=OCCUPANCY_ELIGIBILITY_SHARING_SCOPE,
             retention_note=_retention_note(db, check.jurisdiction_code),
-            alternative_method_note="Available via a digital share code or a manual document check -- whichever suits you.",
+            alternative_method_note="Completed automatically once your identity is verified -- nothing else to submit.",
         )
         for check in list_occupancy_eligibility_checks_for_party(db, user.party_id)
     ]
@@ -139,10 +139,12 @@ def get_my_verification_status(user: UserAccount = Depends(get_current_user), db
         if authority_record:
             authority_status = "verified"
         else:
+            from app.services.authority_service import room_status
+
             latest_authority_submission = db.scalar(
                 select(AuthorityRecord).where(AuthorityRecord.room_id == room_id).order_by(AuthorityRecord.id.desc())
             )
-            authority_status = (
+            authority_status = room_status(db, room_id) or (
                 effective_verification_status(latest_authority_submission, now) if latest_authority_submission else "not_submitted"
             )
         authority_to_list_items.append(

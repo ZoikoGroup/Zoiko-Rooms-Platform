@@ -9,6 +9,8 @@ const PUBLIC_ACCOUNT_PATHS = [
   "/account/register",
   "/account/forgot-password",
   "/account/reset-password",
+  // ZR-AUTHORITY-002: owners / landlords confirm without an account.
+  "/account/authority-confirmation",
 ];
 
 // Local dev only: when two `next dev` instances run on separate ports (one for

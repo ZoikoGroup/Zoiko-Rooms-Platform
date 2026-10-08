@@ -31,6 +31,11 @@ HOST_CAPACITY_LABELS: dict[str, str] = {
     "OWNER": "Owner",
     "AGENT": "Authorized Agent",
     "MANAGER": "Property Manager",
+    # ZR-AUTHORITY-002 relationship types
+    "CO_OWNER": "Co-owner",
+    "REPRESENTATIVE": "Authorized Representative of the Owner",
+    "PROPERTY_MANAGER": "Property Manager",
+    "TENANT_SUBLETTER": "Tenant (Sublessor)",
 }
 
 CADENCE_LABELS: dict[str, str] = {

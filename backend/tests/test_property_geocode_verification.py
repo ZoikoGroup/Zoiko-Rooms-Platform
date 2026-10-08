@@ -47,7 +47,7 @@ class TestAutoVerificationNeedsTheMap:
     def test_address_found_on_map_is_auto_verified(self, db_session: Session, host_room, monkeypatch):
         user, room = host_room
         monkeypatch.setattr(geocoding, "geocode_address", _stub(geocoding.FOUND))
-        record = _declare(db_session, user, room)
+        record = _declare(db_session, user, room, evidence_ref="Property Address: 1 Verify Way, Bengaluru")
 
         assert record.geocode_status == "FOUND"
         assert record.geocode_latitude == 12.97 and record.geocode_longitude == 77.59
@@ -102,75 +102,69 @@ class _FakeResponse:
 
 
 class TestGeocodingService:
-    def test_nominatim_house_level_in_the_right_country_is_found(self, monkeypatch):
-        monkeypatch.setattr(settings, "geocoding_provider", "nominatim")
-        monkeypatch.setattr(geocoding, "_nominatim_last_call", 0.0)
-        monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse([{
-            "lat": "51.5", "lon": "-0.12", "display_name": "10 Downing Street, London", "place_rank": 30,
-            "address": {"country_code": "gb"},
-        }]))
+    """The legacy room-level check goes through the ZR-PROPERTY-VERIFY-001
+    adapter (Google primary, Mapbox / HERE fallback)."""
+
+    @staticmethod
+    def _google(monkeypatch, payload):
+        monkeypatch.setattr(settings, "google_maps_api_key", "test-key")
+        seen = {}
+
+        def fake_request(method, url, **k):
+            # Address Validation first; the house-number check may follow up
+            # with a geocode lookup, so keep every URL.
+            seen.setdefault("urls", []).append(url)
+            seen["url"] = seen["urls"][0]
+            return _FakeResponse(payload)
+
+        monkeypatch.setattr(httpx, "request", fake_request)
+        return seen
+
+    def test_house_level_in_the_right_country_is_found(self, monkeypatch):
+        seen = self._google(monkeypatch, {"result": {
+            "verdict": {"addressComplete": True, "validationGranularity": "PREMISE", "geocodeGranularity": "PREMISE"},
+            "address": {"formattedAddress": "10 Downing Street, London SW1A 2AA, UK",
+                        "postalAddress": {"regionCode": "GB", "addressLines": ["10 Downing Street"], "locality": "London"}},
+            "geocode": {"location": {"latitude": 51.5, "longitude": -0.12}, "placeId": "p1"},
+        }})
         result = real_geocode_address("10 Downing Street", "London", None, "England")
+        assert "addressvalidation.googleapis.com" in seen["url"]
         assert result.status == geocoding.FOUND and result.precision == "HOUSE" and result.country_code == "GB"
+        assert result.provider == "google"
         assert result.query == "10 Downing Street, London, United Kingdom"
 
     def test_address_in_another_country_is_a_mismatch(self, monkeypatch):
-        monkeypatch.setattr(settings, "geocoding_provider", "nominatim")
-        monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse([{
-            "lat": "17.1", "lon": "80.3", "display_name": "Madhira, Khammam, India", "place_rank": 26,
-            "address": {"country_code": "in"},
-        }]))
+        self._google(monkeypatch, {"result": {
+            "verdict": {"addressComplete": True, "validationGranularity": "PREMISE", "geocodeGranularity": "PREMISE"},
+            "address": {"formattedAddress": "Madhira, India", "postalAddress": {"regionCode": "IN"}},
+            "geocode": {"location": {"latitude": 17.1, "longitude": 80.3}},
+        }})
         result = real_geocode_address("Madupally Madhira", "Khammam", None, "England")
         assert result.status == geocoding.COUNTRY_MISMATCH
         assert "India" in result.detail
 
     def test_city_level_match_is_imprecise(self, monkeypatch):
-        monkeypatch.setattr(settings, "geocoding_provider", "nominatim")
-        monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse([{
-            "lat": "51.5", "lon": "-0.12", "display_name": "London", "place_rank": 16, "address": {"country_code": "gb"},
-        }]))
+        self._google(monkeypatch, {"result": {
+            "verdict": {"validationGranularity": "LOCALITY", "geocodeGranularity": "LOCALITY"},
+            "address": {"postalAddress": {"regionCode": "GB"}},
+            "geocode": {"location": {"latitude": 51.5, "longitude": -0.12}},
+        }})
         assert real_geocode_address("Nowhere Lane 999", "London", None, "England").status == geocoding.IMPRECISE
 
     def test_no_result_is_not_found(self, monkeypatch):
-        monkeypatch.setattr(settings, "geocoding_provider", "nominatim")
-        monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResponse([]))
+        self._google(monkeypatch, {"result": {"verdict": {}, "address": {}}})
         assert real_geocode_address("xyz", "abc", None, "England").status == geocoding.NOT_FOUND
 
     def test_network_failure_is_unavailable_not_an_error(self, monkeypatch):
-        monkeypatch.setattr(settings, "geocoding_provider", "nominatim")
+        monkeypatch.setattr(settings, "google_maps_api_key", "test-key")
 
         def boom(*a, **k):
             raise httpx.ConnectError("offline")
 
-        monkeypatch.setattr(httpx, "get", boom)
-        result = real_geocode_address("1 Road", "London", None, "England")
-        assert result.status == geocoding.UNAVAILABLE
-
-    def test_google_used_automatically_when_key_configured(self, monkeypatch):
-        monkeypatch.setattr(settings, "geocoding_provider", "auto")
-        monkeypatch.setattr(settings, "google_maps_api_key", "test-key")
-        seen = {}
-
-        def fake_get(url, params=None, **k):
-            seen["url"], seen["params"] = url, params
-            return _FakeResponse({"status": "OK", "results": [{
-                "formatted_address": "221B Baker St, London NW1 6XE, UK",
-                "geometry": {"location": {"lat": 51.52, "lng": -0.158}, "location_type": "ROOFTOP"},
-                "types": ["street_address"],
-                "address_components": [{"short_name": "GB", "types": ["country", "political"]}],
-            }]})
-
-        monkeypatch.setattr(httpx, "get", fake_get)
-        result = real_geocode_address("221B Baker Street", "London", None, "England")
-        assert "maps.googleapis.com" in seen["url"] and seen["params"]["region"] == "gb"
-        assert result.provider == "google" and result.status == geocoding.FOUND and result.precision == "HOUSE"
-
-    def test_google_without_key_is_unavailable(self, monkeypatch):
-        monkeypatch.setattr(settings, "geocoding_provider", "google")
-        monkeypatch.setattr(settings, "google_maps_api_key", "")
+        monkeypatch.setattr(httpx, "request", boom)
         assert real_geocode_address("1 Road", "London", None, "England").status == geocoding.UNAVAILABLE
 
-    def test_provider_none_disables_lookups(self, monkeypatch):
-        monkeypatch.setattr(settings, "geocoding_provider", "none")
+    def test_no_provider_configured_is_unavailable(self, monkeypatch):
         assert real_geocode_address("1 Road", "London", None, "England").status == geocoding.UNAVAILABLE
 
     def test_google_maps_url(self):

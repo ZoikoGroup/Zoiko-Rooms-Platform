@@ -38,18 +38,7 @@ _REFUSAL_MESSAGES = {
     "escrow_enabled": "Zoiko Rooms does not hold funds in escrow.",
     "wallet_enabled": "Zoiko Rooms does not maintain wallet balances.",
     "split_settlement_enabled": "Zoiko Rooms does not settle or split rental payments.",
-    "rent_card_checkout_enabled": (
-        "Your rent is paid directly to your host/property owner using the payment method agreed with them. "
-        "Zoiko does not collect or process your rent payment."
-    ),
 }
-
-# The rail above that is not Zoiko money movement: a card rent checkout on the
-# host's own Stripe account still settles host-side. Kept out of
-# rental_money_movement_via_zoiko so turning it on never reads as Zoiko
-# handling rent.
-_NON_CUSTODIAL_FLAGS = ("rent_card_checkout_enabled",)
-
 
 def capability_enabled(flag: str) -> bool:
     if flag not in _REFUSAL_MESSAGES:
@@ -83,9 +72,7 @@ def capabilities_snapshot() -> dict[str, bool]:
         "listing_fee_enabled": True,
         "rental_payment_records_enabled": True,
         "rental_payment_instructions_enabled": True,
-        "rental_money_movement_via_zoiko": any(
-            capability_enabled(f) for f in _REFUSAL_MESSAGES if f not in _NON_CUSTODIAL_FLAGS
-        ),
+        "rental_money_movement_via_zoiko": any(capability_enabled(f) for f in _REFUSAL_MESSAGES),
         **{flag: capability_enabled(flag) for flag in _REFUSAL_MESSAGES},
         "platform_fee_rate": None,
         "host_commission_enabled": False,

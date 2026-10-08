@@ -7,10 +7,10 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.crud.identity_verification import get_valid_identity_credential, verify_identity_verification
+from app.crud.identity_verification import get_valid_identity_credential
 from app.models.identity_verification import IdentityVerification
 from app.models.party import Party
-from tests.conftest import _make_admin
+from tests.conftest import approve_identity_via_provider
 
 
 def _make_pending(db: Session) -> IdentityVerification:
@@ -26,11 +26,10 @@ def _make_pending(db: Session) -> IdentityVerification:
 class TestIdentityCredentialIssuance:
     def test_verify_issues_a_valid_identity_credential(self, db_session: Session):
         record = _make_pending(db_session)
-        super_admin = _make_admin(db_session, email="idc-super-01@test.com", role="super_admin")
 
         assert get_valid_identity_credential(db_session, record.party_id) is None
 
-        verify_identity_verification(db_session, record, super_admin)
+        approve_identity_via_provider(db_session, record)
 
         credential = get_valid_identity_credential(db_session, record.party_id)
         assert credential is not None

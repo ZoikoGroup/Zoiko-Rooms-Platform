@@ -25,7 +25,7 @@ RENT_BUCKETS = {
     "awaiting_host": ("RECIPIENT_CONFIRMATION_PENDING", "PAYER_RECORDED"),
     "overdue": ("OVERDUE",),
     "disputed": ("DISPUTED",),
-    "due": ("UPCOMING", "DUE", "PARTIALLY_PAID", "REVERSED", "PAYMENT_SESSION_STARTED"),
+    "due": ("UPCOMING", "DUE", "PARTIALLY_PAID", "REVERSED"),
 }
 RENT_LIST_LIMIT = 200
 

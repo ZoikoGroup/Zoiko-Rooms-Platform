@@ -49,6 +49,27 @@ def _isolate_from_real_provider_credentials(monkeypatch):
     monkeypatch.setattr(settings, "scheduler_enabled", False)
     monkeypatch.setattr(settings, "stripe_webhook_secret", "")
     monkeypatch.setattr(settings, "stripe_listing_fee_webhook_secret", "")
+    # Same for Veriff: tests that need it set fake keys (tests/test_identity_veriff.py).
+    # The env vars cover tests that build a fresh Settings() (which would
+    # otherwise read real keys from backend/.env).
+    monkeypatch.setattr(settings, "veriff_api_key", "")
+    monkeypatch.setattr(settings, "veriff_shared_secret", "")
+    # " " not "": on Windows an empty value unsets the variable (so .env would
+    # win); Settings strips it back to "" (config.py:_strip_secret).
+    monkeypatch.setenv("VERIFF_API_KEY", " ")
+    monkeypatch.setenv("VERIFF_SHARED_SECRET", " ")
+    # Location lookups stay offline unless a test opts in (services/location.py).
+    monkeypatch.setattr(settings, "google_maps_api_key", "")
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", " ")
+    monkeypatch.setattr(settings, "mapbox_access_token", "")
+    monkeypatch.setenv("MAPBOX_ACCESS_TOKEN", " ")
+    monkeypatch.setattr(settings, "here_api_key", "")
+    monkeypatch.setenv("HERE_API_KEY", " ")
+    # A deployment may run Google only (LOCATION_FALLBACK_ENABLED=false); tests
+    # use the code defaults and opt into what they exercise.
+    monkeypatch.setattr(settings, "location_provider", "google")
+    monkeypatch.setattr(settings, "location_fallback_enabled", True)
+    monkeypatch.setattr(settings, "location_fallback_providers", "mapbox,here")
     # External listing/search APIs (ZR-AI-SEARCH-001): never call them for real.
     for key in ("rentcast_api_key", "domain_api_key", "brave_search_api_key", "parallel_api_key", "web_search_provider"):
         monkeypatch.setattr(settings, key, "")
@@ -95,11 +116,24 @@ def _legacy_payment_capabilities(request, monkeypatch):
         return
     from app.services import policy
 
-    for flag in ("rent_collection_enabled", "deposit_collection_enabled", "host_payouts_enabled", "rent_card_checkout_enabled"):
+    for flag in ("rent_collection_enabled", "deposit_collection_enabled", "host_payouts_enabled"):
         monkeypatch.setattr(settings, flag, True)
     monkeypatch.setattr(settings, "listing_fee_fail_closed", False)
     monkeypatch.setattr(settings, "payment_receipt_authority_required", False)
     monkeypatch.setitem(policy._DEFAULTS, "payment.external_handoff_approved", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def _admin_review_publication(request, monkeypatch):
+    """Publication is automatic by default (policy publication.requires_approval
+    = False). Most of this suite predates that and drives the admin review
+    flow (submit -> REVIEW -> approve -> publish), so it keeps admin review
+    on. Tests marked @pytest.mark.automatic_publication use the real default."""
+    if request.node.get_closest_marker("automatic_publication"):
+        return
+    from app.services import policy
+
+    monkeypatch.setitem(policy._DEFAULTS, "publication.requires_approval", lambda: True)
 
 
 @pytest.fixture(autouse=True)
@@ -329,6 +363,23 @@ def _make_admin(db: Session, *, email: str = "admin@test.com", role: str = "admi
     return admin
 
 
+def approve_identity_via_provider(db: Session, record):
+    """Verifies an identity the only way production can: a Veriff
+    "approved" decision applied to the attempt (services/identity/
+    service.py:apply_result). For tests that need a verified identity as
+    setup rather than testing the Veriff flow itself."""
+    from app.services.identity import providers
+    from app.services.identity import service as identity_service
+
+    if record.session_state not in ("IN_PROGRESS", "PROCESSING", "ACTION_REQUIRED"):
+        record.session_state = "PROCESSING"
+    record.provider_code = "veriff"
+    db.flush()
+    return identity_service.apply_result(db, record, providers.NormalizedResult(
+        provider_code="veriff", normalized_outcome="PASS", provider_decision="approved",
+    ))
+
+
 def _make_user(db: Session, *, email: str = "user@test.com") -> UserAccount:
     user = UserAccount(
         email=email,
@@ -341,6 +392,32 @@ def _make_user(db: Session, *, email: str = "user@test.com") -> UserAccount:
     db.add(user)
     db.flush()
     return user
+
+
+def make_room_publishable(db: Session, room) -> None:
+    """Satisfies the publication gates (ZR-AUTHORITY-002 Section 2.4) for a
+    test that is about something else: a verified identity for the listing
+    party, a verified property and current VERIFIED listing authority."""
+    from app.crud.identity_verification import get_verified_identity_for_party
+    from app.models.authority_verification import AuthorityVerification
+    from app.models.identity_verification import IdentityVerification
+    from app.models.property import Property
+    from app.models.property_location import PropertyLocationVerification
+    from app.services.authority_service import valid_for_room
+    from app.services.property_location_service import valid_for_property
+
+    prop = db.get(Property, room.property_id)
+    party_id = prop.owner_party_id
+    if get_verified_identity_for_party(db, party_id) is None:
+        db.add(IdentityVerification(party_id=party_id, document_type="passport", status="verified"))
+    if valid_for_property(db, prop.id) is None:
+        db.add(PropertyLocationVerification(property_id=prop.id, party_id=party_id, state="VERIFIED"))
+    if valid_for_room(db, room.id) is None:
+        now = dt.datetime.now(dt.timezone.utc)
+        db.add(AuthorityVerification(property_id=prop.id, party_id=party_id, relationship_type="OWNER",
+                                     state="VERIFIED", assurance_level="AV-1", scope_codes=["ADVERTISE", "RENT"],
+                                     verified_at=now, expires_at=now + dt.timedelta(days=365)))
+    db.commit()
 
 
 def _make_room_owned_by(db: Session, party) -> "Room":

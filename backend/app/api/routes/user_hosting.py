@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -9,7 +8,7 @@ from app.api.deps import get_current_user
 from app.core.correlation import get_correlation_id
 from app.core.image_uploads import save_listing_images
 from app.core.property_verification_uploads import (
-    resolve_property_verification_document_path,
+    document_response,
     save_property_verification_document,
 )
 from app.core.rate_limit import sublet_document_limiter
@@ -311,24 +310,73 @@ def update_user_property(
     property_id: int,
     payload: PropertyCreate,
     request: Request,
+    if_match: str | None = Header(default=None, alias="If-Match"),
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Update a property. Its region can only change while nothing is bound
-    to the current region's rules yet (services/jurisdictions.py)."""
+    to the current region's rules yet (services/jurisdictions.py).
+    ZR-PROPERTY-VERIFY-001 Section 13.3: If-Match carries the location
+    version the client last read -- a stale client gets 409 instead of
+    silently overwriting a newer address."""
     prop = _get_property_or_404(db, property_id, user)
+    from app.crud.property_verification import invalidate_for_address_change, is_material_address_change
 
+    material = is_material_address_change(
+        {"address": prop.address, "city": prop.city, "landmark": prop.landmark, "jurisdiction_code": prop.jurisdiction_code},
+        {"address": payload.address, "city": payload.city, "landmark": payload.landmark,
+         "jurisdiction_code": payload.jurisdiction_code})
+    confirmed = bool(prop.canonical_formatted_address) or prop.latitude_private is not None
+    if material and confirmed and not if_match:
+        # A confirmed address can only be replaced by a client that read it.
+        raise HTTPException(status.HTTP_428_PRECONDITION_REQUIRED,
+                            "Reload the property before changing its confirmed address")
+    if if_match:
+        try:
+            expected = int(if_match.strip().strip('"'))
+        except ValueError:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "If-Match must be the property's location version")
+        if expected != prop.location_version:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "This property's address changed in another window. Reload to see the latest version.")
+
+    before = {"address": prop.address, "city": prop.city, "landmark": prop.landmark,
+              "jurisdiction_code": prop.jurisdiction_code}
     previous_region = prop.jurisdiction_code
     jurisdiction_service.apply_property_jurisdiction_change(db, prop, payload.jurisdiction_code)
     prop.address = payload.address
     prop.city = payload.city
     prop.landmark = payload.landmark
+    invalidated = 0
+    if is_material_address_change(before, {"address": prop.address, "city": prop.city, "landmark": prop.landmark,
+                                           "jurisdiction_code": prop.jurisdiction_code}):
+        # ZR-PROPERTY-VERIFY-001 Section 13.3: verification can't silently
+        # transfer to a different address.
+        invalidated = invalidate_for_address_change(db, prop.id, actor_user_id=user.id,
+                                                    correlation_id=get_correlation_id(request))
+        from app.services.property_location_service import invalidate_property
+
+        invalidated += invalidate_property(db, prop.id, reason="ADDRESS_CHANGED",
+                                           correlation_id=get_correlation_id(request))
+        # ...and the authority to list it (Section 13.3: dependencies reopen).
+        from app.services.authority_service import reopen_for_address_change
+
+        invalidated += reopen_for_address_change(db, prop.id, correlation_id=get_correlation_id(request))
+        # The canonical structured address no longer describes this property.
+        prop.canonical_formatted_address = ""
+        prop.address_line_1 = prop.address_line_2 = prop.subpremise = prop.locality = ""
+        prop.administrative_area = prop.postal_code = prop.address_local = ""
+        prop.location_precision = prop.geocode_status = prop.pin_status = ""
+        prop.latitude_private = prop.longitude_private = None
+        prop.location_version += 1
     db.commit()
     db.refresh(prop)
 
     reason = f"user:{user.id}"
     if prop.jurisdiction_code != previous_region:
         reason += f" region:{previous_region}->{prop.jurisdiction_code}"
+    if invalidated:
+        reason += f" property_verifications_invalidated:{invalidated}"
     log_audit_event(db, None, "user_property.update", "property", str(property_id), get_correlation_id(request), reason=reason)
     db.commit()
     return jurisdiction_service.to_property_read(db, prop)
@@ -956,20 +1004,10 @@ def declare_hosted_authority_record(
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if payload.room_id != room_id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "roomId in the body must match the room in the URL")
-    room = get_room(db, room_id)
-    if not room:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
-    record = authority_crud.declare_authority_record(
-        db, user, room, relationship_type=payload.relationship_type, evidence_ref=payload.evidence_ref,
-    )
-    emit_event(
-        db, "authority_record.declared", "authority_record", str(record.id),
-        {"roomId": room_id}, correlation_id=get_correlation_id(request),
-    )
-    db.commit()
-    return record
+    """Retired by ZR-AUTHORITY-002: a free-text declaration can't establish
+    authority. Hosts verify through /api/users/properties/{id}/authority-verifications."""
+    raise HTTPException(status.HTTP_410_GONE,
+                        "Authority is now verified per property with evidence -- use Verify authority on the property")
 
 
 # --- ZR-PAY-LINK-003 Section 1.1/2: payment-receipt authority, deliberately
@@ -1011,25 +1049,11 @@ async def declare_hosted_property_verification(
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """A multipart request (not JSON) since it always carries a real
-    evidence file now -- see core/property_verification_uploads.py for
-    content validation and storage. Previously evidence_ref (free text)
-    was the only thing ever recorded, with no real document behind it."""
-    room = get_room(db, room_id)
-    if not room:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Room not found")
-    stored_filename, original_filename, content_type, file_size, sha256_hash = await save_property_verification_document(file)
-    record = property_verification_crud.declare_property_verification(
-        db, user, room, evidence_ref=evidence_ref,
-        stored_filename=stored_filename, original_filename=original_filename,
-        content_type=content_type, file_size=file_size, sha256_hash=sha256_hash,
-    )
-    emit_event(
-        db, "property_verification.declared", "property_verification", str(record.id),
-        {"roomId": room_id}, correlation_id=get_correlation_id(request),
-    )
-    db.commit()
-    return record
+    """Retired by ZR-PROPERTY-VERIFY-001: a per-room upload auto-verified on
+    a map hit alone, with no unit, pin or attestation step. Properties are
+    verified once per property through /api/users/property-verifications."""
+    raise HTTPException(status.HTTP_410_GONE,
+                        "Property verification is now done once per property -- use Verify property on the property")
 
 
 @router.get("/rooms/{room_id}/property-verifications/{verification_id}/document")
@@ -1049,15 +1073,8 @@ def download_hosted_property_verification_document(
     if not record.document_file_path:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No document was uploaded for this verification")
 
-    path = resolve_property_verification_document_path(record.document_file_path)
-    if not path.is_file():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored document could not be found")
-
-    return FileResponse(
-        path,
-        media_type=record.document_file_content_type or "application/octet-stream",
-        filename=record.document_file_original_name or "document",
-    )
+    return document_response(record.document_file_path, record.document_file_content_type,
+                             record.document_file_original_name)
 
 
 # --- Rental Transaction Record: host-facing read-only view --------------

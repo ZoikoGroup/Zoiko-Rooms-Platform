@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from app.crud.occupancy_classification import ensure_default_classification
 from app.models.listing import Listing
 from app.models.listing_approval import ListingApproval
 from app.models.market_release import MarketRelease
@@ -37,6 +38,7 @@ class TestPublicationRequiresApprovalFalse:
 
         listing = db_session.get(Listing, listing_id)
         listing.market_release_id = release.id
+        ensure_default_classification(db_session, listing.room)
         db_session.commit()
 
         r = client.post(f"/api/users/hosting/listings/{listing_id}/submit-for-review", cookies=cookies)
@@ -48,7 +50,7 @@ class TestPublicationRequiresApprovalFalse:
                 ListingApproval.reviewer_authority_scope == "system",
             )
         )
-        assert any(a.decision_reason_code == "publication_requires_approval_false" for a in approvals)
+        assert any(a.decision_reason_code == "all_verifications_passed" for a in approvals)
 
         published_notification = db_session.query(Notification).filter(
             Notification.notification_type == "listing.published",

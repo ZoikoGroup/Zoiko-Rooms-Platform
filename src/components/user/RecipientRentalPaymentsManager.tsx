@@ -8,9 +8,7 @@ import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { RentalPaymentEvidenceList } from "@/components/user/RentalPaymentEvidenceList";
-import { CardPaymentOutcome, CardPaymentOutcomeTag } from "@/components/user/CardPaymentOutcome";
 import { COUNTRY_OPTIONS, resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
-import { usePaymentCapabilities } from "@/components/user/DirectPaymentNotice";
 import { HostReturnsManager } from "@/components/user/RentalPaymentReturns";
 import { RentalPaymentTimeline } from "@/components/user/RentalPaymentTimeline";
 import {
@@ -21,7 +19,6 @@ import {
   RentalPaymentMethodCategory,
   RentalPaymentObligation,
   RentalPaymentObligationType,
-  RentalPaymentProviderAccount,
   RentalPaymentRecord,
 } from "@/lib/types";
 import {
@@ -34,13 +31,10 @@ import {
 import { formatDate, formatDateTime, formatMoney } from "@/lib/utils";
 import {
   confirmRentalPaymentInstruction,
-  confirmRentalPaymentProviderAccountChange,
   confirmRentalPaymentReceipt,
-  connectRentalPaymentProviderAccount,
   downloadListingFeeCreditNote,
   downloadListingFeeReceipt,
   errorMessage,
-  getRentalPaymentProviderAccount,
   listListingFeeRefundsForPayment,
   listMyListingFeePayments,
   listMyRentalPaymentInstructions,
@@ -48,16 +42,10 @@ import {
   recordRentalPaymentReceiptAsRecipient,
   updateOwnOpenRentalPaymentDispute,
   uploadRentalPaymentEvidenceAsRecipient,
-  refreshRentalPaymentProviderAccount,
-  resumeRentalPaymentProviderAccountOnboarding,
   reportRentalPaymentDiscrepancyAsRecipient,
-  requestRentalPaymentProviderAccountChange,
   resendRentalPaymentInstructionCode,
-  resendRentalPaymentProviderAccountChangeCode,
-  simulateRentalPaymentProviderAccountOnboardingComplete,
   submitRentalPaymentInstruction,
 } from "@/lib/user-api";
-import { ApiError } from "@/lib/api-client";
 
 // Rent is paid straight to the host: bank transfer, UPI or cash.
 const METHOD_OPTIONS: { value: RentalPaymentMethodCategory; label: string }[] = [
@@ -103,7 +91,6 @@ const OBLIGATIONS_PAGE_LIMIT = 100;
 
 export function RecipientRentalPaymentsManager() {
   const { toast, showToast } = useToast();
-  const capabilities = usePaymentCapabilities();
   const [markingReceived, setMarkingReceived] = useState<RentalPaymentObligation | null>(null);
   const [obligations, setObligations] = useState<RentalPaymentObligation[]>([]);
   const [obligationsTotal, setObligationsTotal] = useState(0);
@@ -312,7 +299,6 @@ export function RecipientRentalPaymentsManager() {
                         <td className="px-5 py-3 capitalize text-slate-600 dark:text-slate-300">{obligation.displayLabel}</td>
                         <td className="px-5 py-3 font-semibold text-primary-900 dark:text-white">
                           {formatMoney(record.declaredAmount, record.declaredCurrency)}
-                          <CardPaymentOutcomeTag record={record} />
                         </td>
                         <td className="px-5 py-3">
                           <Badge tone={rentalPaymentStatusTone[record.status] ?? "neutral"}>
@@ -345,7 +331,6 @@ export function RecipientRentalPaymentsManager() {
 
       {tab === "instructions" && (
         <div className="space-y-6">
-          {capabilities?.rent_card_checkout_enabled && <ProviderAccountManager />}
           <InstructionsManager instructions={instructions} onChanged={load} />
         </div>
       )}
@@ -595,7 +580,6 @@ function ReviewModal({
           <Row label="Tenant marked paid" value={formatDateTime(record.createdAt)} />
           <Row label="Payment method" value={record.paymentMethodCategory.replace(/_/g, " ").toLowerCase()} />
           {record.externalReference && <Row label="Transaction reference" value={record.externalReference} />}
-          <CardPaymentOutcome record={record} viewer="host" />
           <RentalPaymentTimeline recordId={record.id} />
           <div>
             <span className="mb-1 block text-xs text-slate-400">Evidence</span>
@@ -716,308 +700,6 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-/** ZR-PAY-LINK-003 Section 6/Wireframe C: the online-payment rail's own
- *  destination, alongside InstructionsManager's direct-instruction one
- *  below -- "Manual bank transfer and provider-hosted digital payment are
- *  two rails over the same relationship" (Section 1.1). */
-function ProviderAccountManager() {
-  const { toast, showToast } = useToast();
-  const [loading, setLoading] = useState(true);
-  const [account, setAccount] = useState<RentalPaymentProviderAccount | null>(null);
-  const [connecting, setConnecting] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [resuming, setResuming] = useState(false);
-  const [simulating, setSimulating] = useState(false);
-  const [email, setEmail] = useState("");
-  const [country, setCountry] = useState("GB");
-  const [changingAccount, setChangingAccount] = useState(false);
-
-  function load() {
-    setLoading(true);
-    getRentalPaymentProviderAccount()
-      .then((loaded) => {
-        setAccount(loaded);
-        // Stripe's account.updated webhook is the real production path for
-        // status to reach us (see api/routes/rental_payments.py's own
-        // webhook handler) -- but there's no local listener for it in most
-        // dev setups, and even in production the webhook can lag behind
-        // this page load by a few seconds. A silent one-shot refresh here
-        // means a host landing back from onboarding doesn't have to know
-        // to click "Refresh status" themselves. Errors are swallowed --
-        // this is a background nicety, not a user-initiated action, and
-        // the visible "Refresh status" button remains for a manual retry.
-        if (loaded.status !== "COMPLETE") {
-          refreshRentalPaymentProviderAccount().then(setAccount).catch(() => {});
-        }
-      })
-      .catch((err) => {
-        if (err instanceof ApiError && err.status === 404) {
-          setAccount(null);
-        } else {
-          showToast(errorMessage(err, "Could not load your payment account."), "error");
-        }
-      })
-      .finally(() => setLoading(false));
-  }
-
-  useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  async function handleConnect() {
-    if (!email.trim()) {
-      showToast("Enter the email Stripe should use for this account.", "error");
-      return;
-    }
-    setConnecting(true);
-    try {
-      const result = await connectRentalPaymentProviderAccount({ country, email: email.trim() });
-      setAccount(result.account);
-      if (result.onboardingUrl) {
-        window.location.href = result.onboardingUrl;
-      }
-    } catch (err) {
-      showToast(errorMessage(err, "Could not connect a payment account."), "error");
-    } finally {
-      setConnecting(false);
-    }
-  }
-
-  async function handleRefresh() {
-    setRefreshing(true);
-    try {
-      setAccount(await refreshRentalPaymentProviderAccount());
-    } catch (err) {
-      showToast(errorMessage(err, "Could not refresh your account status."), "error");
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
-  async function handleResumeOnboarding() {
-    setResuming(true);
-    try {
-      const result = await resumeRentalPaymentProviderAccountOnboarding();
-      if (result.onboardingUrl) {
-        window.location.href = result.onboardingUrl;
-      }
-    } catch (err) {
-      showToast(errorMessage(err, "Could not resume onboarding."), "error");
-    } finally {
-      setResuming(false);
-    }
-  }
-
-  async function handleSimulate() {
-    setSimulating(true);
-    try {
-      setAccount(await simulateRentalPaymentProviderAccountOnboardingComplete());
-      showToast("Onboarding marked complete (dev/test only).");
-    } catch (err) {
-      showToast(errorMessage(err, "Could not simulate onboarding completion."), "error");
-    } finally {
-      setSimulating(false);
-    }
-  }
-
-  if (loading) return <Loader label="Loading payment account" />;
-
-  return (
-    <Card>
-      <SectionHeading title="Secure online payment" subtitle="Connect a Stripe account so tenants can pay you directly online." />
-      <ul className="mt-3 space-y-1 rounded-xl bg-slate-50 px-4 py-3 text-xs text-slate-600 dark:bg-white/5 dark:text-slate-300">
-        <li>Tenants&apos; card payments go straight into your own Stripe account -- Zoiko Rooms never holds your rent.</li>
-        <li>Stripe&apos;s card processing fees are deducted from each payment by Stripe.</li>
-        <li>
-          Refunds (for example, when a booking is cancelled before move-in) come back out of your Stripe balance, and any
-          card dispute a tenant raises is yours to answer in your Stripe Dashboard.
-        </li>
-      </ul>
-      {!account ? (
-        <div className="mt-3 space-y-3">
-          <Field label="Country">
-            <input value={country} onChange={(e) => setCountry(e.target.value.toUpperCase())} className={inputClass} maxLength={2} />
-          </Field>
-          <Field label="Email for this Stripe account">
-            <input value={email} onChange={(e) => setEmail(e.target.value)} className={inputClass} type="email" />
-          </Field>
-          <Button size="sm" loading={connecting} onClick={handleConnect}>
-            Connect payment account
-          </Button>
-        </div>
-      ) : (
-        <div className="mt-3 space-y-3">
-          <div className="flex items-center gap-2">
-            <Badge tone={account.status === "COMPLETE" ? "success" : "warning"}>
-              {account.status === "COMPLETE" ? "Connected" : "Onboarding incomplete"}
-            </Badge>
-            {account.chargesEnabled && <span className="text-xs text-slate-500 dark:text-slate-400">Ready to accept payments</span>}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" loading={refreshing} onClick={handleRefresh}>
-              Refresh status
-            </Button>
-            {account.status !== "COMPLETE" && (
-              <Button size="sm" loading={resuming} onClick={handleResumeOnboarding}>
-                Resume onboarding
-              </Button>
-            )}
-            {account.status !== "COMPLETE" && account.canSimulateOnboarding && process.env.NODE_ENV !== "production" && (
-              <Button size="sm" variant="ghost" loading={simulating} onClick={handleSimulate}>
-                Simulate onboarding complete (dev)
-              </Button>
-            )}
-            {account.status === "COMPLETE" && !changingAccount && (
-              <Button size="sm" variant="ghost" onClick={() => setChangingAccount(true)}>
-                Change account
-              </Button>
-            )}
-          </div>
-          {changingAccount && (
-            <ProviderAccountChangeForm
-              onCancel={() => setChangingAccount(false)}
-              onChanged={(updated) => {
-                setChangingAccount(false);
-                setAccount(updated);
-                showToast("Payment account changed -- complete onboarding for the new account.");
-              }}
-            />
-          )}
-        </div>
-      )}
-      <Toast toast={toast} />
-    </Card>
-  );
-}
-
-/** ZR-PAY-LINK-003 Section 14.1: the step-up confirmation for a payment
- *  account CHANGE -- same shape as PaymentRecipientSetup.tsx's own
- *  ConfirmChangeForm, for the sibling destination-change governance flow. */
-function ProviderAccountChangeForm({
-  onCancel,
-  onChanged,
-}: {
-  onCancel: () => void;
-  onChanged: (account: RentalPaymentProviderAccount) => void;
-}) {
-  const [requested, setRequested] = useState(false);
-  const [requesting, setRequesting] = useState(false);
-  const [code, setCode] = useState("");
-  const [newCountry, setNewCountry] = useState("GB");
-  const [newEmail, setNewEmail] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [resending, setResending] = useState(false);
-  const [resent, setResent] = useState(false);
-  const [error, setError] = useState("");
-
-  async function handleRequest() {
-    setRequesting(true);
-    setError("");
-    try {
-      await requestRentalPaymentProviderAccountChange();
-      setRequested(true);
-    } catch (err) {
-      setError(errorMessage(err, "Could not request this change."));
-    } finally {
-      setRequesting(false);
-    }
-  }
-
-  async function handleResend() {
-    setResending(true);
-    try {
-      await resendRentalPaymentProviderAccountChangeCode();
-      setResent(true);
-    } catch (err) {
-      setError(errorMessage(err, "Could not resend the code."));
-    } finally {
-      setResending(false);
-    }
-  }
-
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    setError("");
-    if (!newEmail.trim()) {
-      setError("Enter the email the new Stripe account should use.");
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const result = await confirmRentalPaymentProviderAccountChange({
-        code: code.trim(), country: newCountry, email: newEmail.trim(),
-      });
-      if (result.onboardingUrl) {
-        window.location.href = result.onboardingUrl;
-        return;
-      }
-      onChanged(result.account);
-    } catch (err) {
-      setError(errorMessage(err, "Could not confirm this change."));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  if (!requested) {
-    return (
-      <Card className="!bg-amber-50 !ring-amber-200 dark:!bg-amber-500/10 dark:!ring-amber-500/20">
-        <p className="text-xs text-slate-600 dark:text-slate-300">
-          We&apos;ll email a confirmation code to your account before you can connect a new payment account.
-        </p>
-        {error && <p className="mt-2 text-xs text-rose-600 dark:text-rose-300">{error}</p>}
-        <div className="mt-3 flex gap-2">
-          <Button size="sm" variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button size="sm" loading={requesting} onClick={handleRequest}>
-            Send confirmation code
-          </Button>
-        </div>
-      </Card>
-    );
-  }
-
-  return (
-    <Card className="!bg-amber-50 !ring-amber-200 dark:!bg-amber-500/10 dark:!ring-amber-500/20">
-      <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">Confirm this change</p>
-      <form onSubmit={handleSubmit} className="mt-3 space-y-3">
-        {error && (
-          <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">
-            {error}
-          </p>
-        )}
-        <Field label="Confirmation code *">
-          <input
-            required value={code} onChange={(e) => setCode(e.target.value)} className={inputClass}
-            inputMode="numeric" maxLength={6} autoComplete="one-time-code"
-          />
-        </Field>
-        <Field label="Country for the new account">
-          <input value={newCountry} onChange={(e) => setNewCountry(e.target.value.toUpperCase())} className={inputClass} maxLength={2} />
-        </Field>
-        <Field label="Email for the new account">
-          <input required value={newEmail} onChange={(e) => setNewEmail(e.target.value)} className={inputClass} type="email" />
-        </Field>
-        <div className="flex items-center justify-between gap-2">
-          <Button type="button" variant="ghost" size="sm" loading={resending} onClick={handleResend}>
-            {resent ? "Code resent" : "Resend code"}
-          </Button>
-          <div className="flex gap-2">
-            <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
-              Cancel
-            </Button>
-            <Button type="submit" size="sm" loading={submitting}>
-              Confirm change
-            </Button>
-          </div>
-        </div>
-      </form>
-    </Card>
-  );
-}
-
-/** The host records rent/deposit they received directly (bank transfer, UPI,
- *  cash) -- no renter declaration needed first. For the booking's deposit
- *  and first rent, this is what confirms the booking and unlocks move-in. */
 function MarkReceivedModal({
   obligation,
   onClose,

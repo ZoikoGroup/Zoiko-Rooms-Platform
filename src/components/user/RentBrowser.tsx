@@ -253,7 +253,7 @@ export function RentBrowser() {
                     </button>
 
                     <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-                      <MapPin className="h-3.5 w-3.5" /> {listing.location}, {listing.city}
+                      <MapPin className="h-3.5 w-3.5" /> {[listing.location, listing.city].filter(Boolean).join(", ")}
                     </p>
 
                     <div className="mt-1.5 flex items-center gap-1.5">

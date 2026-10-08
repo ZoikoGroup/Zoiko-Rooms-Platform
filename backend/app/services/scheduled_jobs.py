@@ -155,6 +155,46 @@ def link_payment_disputes_to_cases(db: Session) -> int:
     return link_open_payment_disputes(db)
 
 
+def expire_property_verifications(db: Session) -> int:
+    """ZR-PROPERTY-VERIFY-001 Section 7: VERIFIED past expires_at -> EXPIRED."""
+    from app.services.property_location_service import sweep_expired
+
+    return sweep_expired(db)
+
+
+def purge_property_location_evidence(db: Session) -> int:
+    """Property evidence files past the pack's retention period are deleted."""
+    from app.services.property_location_service import purge_expired_evidence
+
+    return purge_expired_evidence(db)
+
+
+def expire_authority_verifications(db: Session) -> int:
+    """ZR-AUTHORITY-002 Section 9: expiring-soon notices and expiry, which
+    applies the pack's listing control."""
+    from app.services import authority_service
+
+    result = authority_service.sweep_expiry(db)
+    return result["expiring"] + result["expired"]
+
+
+def recheck_authority_verifications(db: Session) -> int:
+    """ZR-AUTHORITY-002: submitted authority cases waiting on property
+    verification, OCR or the malware scanner are decided again
+    automatically (there is no manual review queue)."""
+    from app.services import authority_service
+
+    changed = authority_service.recheck_pending(db)
+    db.commit()
+    return changed
+
+
+def purge_authority_evidence(db: Session) -> int:
+    from app.services import authority_service
+
+    return authority_service.purge_expired_evidence(db)
+
+
 def sweep_identity_reverification(db: Session) -> int:
     """ZR-IDENTITY-001 Section 7.3: verified identities whose policy
     renewal date has passed move to REVERIFICATION_REQUIRED."""
@@ -269,6 +309,11 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("purge_identity_evidence", purge_identity_evidence),
     ("process_identity_webhooks", process_identity_webhooks),
     ("reconcile_identity_sessions", reconcile_identity_sessions),
+    ("expire_property_verifications", expire_property_verifications),
+    ("purge_property_location_evidence", purge_property_location_evidence),
+    ("expire_authority_verifications", expire_authority_verifications),
+    ("recheck_authority_verifications", recheck_authority_verifications),
+    ("purge_authority_evidence", purge_authority_evidence),
     ("remind_hosts_of_unconfirmed_payments", remind_hosts_of_unconfirmed_payments),
     ("reconcile_listing_fee_refunds", reconcile_listing_fee_refunds),
     ("process_external_outreach", process_external_outreach),

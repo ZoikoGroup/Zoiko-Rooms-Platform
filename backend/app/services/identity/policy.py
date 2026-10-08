@@ -19,9 +19,9 @@ from app.core.config import settings
 from app.models.identity_profile import DEFAULT_PACK_COUNTRY, IdentityRegulatoryPack
 
 _GENERIC_CONSENT = (
-    "If you choose a check that uses your camera, we compare a photo of you with your identity document to confirm "
-    "it's you. The images are used only for identity verification and deleted under our retention policy. "
-    "You can choose another verification option instead."
+    "To verify your identity, our verification partner checks that your identity document is genuine and compares "
+    "a photo of you with it to confirm it's you. The images are used only for identity verification and deleted "
+    "under our retention policy."
 )
 _GENERIC_PRIVACY = (
     "We use your identity information only to verify that this account belongs to you. Your documents are never "
@@ -34,25 +34,25 @@ _SEED_PACKS: tuple[dict, ...] = (
     {
         "country_code": DEFAULT_PACK_COUNTRY, "country_name": "Other countries",
         "accepted_document_types": ["passport", "national_id", "driving_license", "residence_permit", "government_photo_id"],
-        "available_methods": ["DOCUMENT", "MANUAL"],
+        "available_methods": ["DOCUMENT"],
         "date_of_birth_required": False, "minimum_age": 18, "evidence_retention_days": 365,
     },
     {
         "country_code": "GB", "country_name": "United Kingdom",
         "accepted_document_types": ["passport", "driving_license", "national_id", "residence_permit"],
-        "available_methods": ["DOCUMENT", "MANUAL"],
+        "available_methods": ["DOCUMENT"],
         "date_of_birth_required": True, "minimum_age": 18, "evidence_retention_days": 365,
     },
     {
         "country_code": "IN", "country_name": "India",
         "accepted_document_types": ["passport", "aadhaar", "pan_card", "driving_license", "voter_id"],
-        "available_methods": ["DOCUMENT", "MANUAL"],
+        "available_methods": ["DOCUMENT"],
         "date_of_birth_required": True, "minimum_age": 18, "evidence_retention_days": 365,
     },
     {
         "country_code": "US", "country_name": "United States",
         "accepted_document_types": ["passport", "driving_license", "government_photo_id", "permanent_resident_card"],
-        "available_methods": ["DOCUMENT", "MANUAL"],
+        "available_methods": ["DOCUMENT"],
         "date_of_birth_required": True, "minimum_age": 18, "evidence_retention_days": 365,
     },
 )
@@ -121,10 +121,9 @@ def list_countries(db: Session) -> list[IdentityRegulatoryPack]:
 
 
 def pack_summary(pack: IdentityRegulatoryPack, db: Session | None = None) -> dict:
-    """What the person-facing flow needs from a pack -- including how the
-    document step works (uploaded to Zoiko, or captured inside the
-    provider's own flow), never any provider credential."""
-    from app.services.identity.providers import UPLOAD, get_provider
+    """What the person-facing flow needs from a pack: whether the provider
+    (Veriff) is available to verify right now, never any credential."""
+    from app.services.identity.providers import PROVIDER_HOSTED, get_provider
 
     if db is not None:
         from app.services.identity.golive import resolve_provider
@@ -133,7 +132,7 @@ def pack_summary(pack: IdentityRegulatoryPack, db: Session | None = None) -> dic
     else:
         provider = get_provider(pack.document_provider_code)
     return {
-        "capture_mode": provider.capture_mode if provider else UPLOAD,
+        "capture_mode": PROVIDER_HOSTED,
         "provider_available": provider is not None,
         "selfie_check": bool(provider and provider.checks_person_binding),
         "country_code": pack.country_code,

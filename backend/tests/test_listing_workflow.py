@@ -17,7 +17,7 @@ from app.models.party import Party
 from app.models.property import Property
 from app.models.room import Room
 from app.models.user_account import UserAccount
-from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
+from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie, make_room_publishable
 
 LISTING_PAYLOAD = {
     "name": "Sunny Room in Koramangala",
@@ -40,9 +40,11 @@ LISTING_PAYLOAD = {
 }
 
 
-def _make_host_with_room(db: Session, *, email: str = "host@test.com") -> tuple[UserAccount, int]:
+def _make_host_with_room(db: Session, *, email: str = "host@test.com",
+                         publishable: bool = True) -> tuple[UserAccount, int]:
     """A USER with a party, owning one property with one room -- the minimum a
-    host needs to be able to create a listing."""
+    host needs to be able to create a listing. `publishable` also satisfies
+    the identity / property / authority publication gates."""
     party = Party(party_type="renter", status="active", jurisdiction="IN")
     db.add(party)
     db.flush()
@@ -59,13 +61,16 @@ def _make_host_with_room(db: Session, *, email: str = "host@test.com") -> tuple[
     db.add(room)
     db.flush()
     db.commit()
+    if publishable:
+        make_room_publishable(db, room)
 
     return user, room.id
 
 
-def _create_and_submit_listing(client, db_session: Session, *, email: str = "host@test.com") -> tuple[str, dict]:
+def _create_and_submit_listing(client, db_session: Session, *, email: str = "host@test.com",
+                               publishable: bool = True) -> tuple[str, dict]:
     """USER creates a listing and submits it for review. Returns (listing_id, user_cookies)."""
-    user, room_id = _make_host_with_room(db_session, email=email)
+    user, room_id = _make_host_with_room(db_session, email=email, publishable=publishable)
     cookies = auth_user_cookie(user)
 
     r = client.post(
@@ -159,23 +164,28 @@ class TestApproveAndPublish:
         assert r.json()["state"] == "PUBLISHED"
 
 
-# ── 6-8: publishing an approved listing bypasses the old compliance gates ──
+# ── 6-8: identity / property / authority are hard publication gates ─────
+# ZR-AUTHORITY-002 Section 2.4 / P0 #10: an admin's approval can't stand in
+# for them; occupancy classification stays an informational review signal.
 
 
-class TestNoComplianceGates:
-    def test_publish_succeeds_without_authority_record(self, client, db_session: Session):
-        from app.models.authority_record import AuthorityRecord
+class TestPublicationGates:
+    def test_publish_blocked_without_listing_authority(self, client, db_session: Session):
+        from app.models.authority_verification import AuthorityVerification
 
         listing_id, _ = _create_and_submit_listing(client, db_session, email="host3@test.com")
+        for v in db_session.scalars(select(AuthorityVerification)):
+            db_session.delete(v)
+        db_session.commit()
         admin = _make_admin(db_session, email="admin3@test.com")
         cookies = auth_admin_cookie(admin)
-        client.post(f"/api/listings/{listing_id}/approve", cookies=cookies)
-
-        assert db_session.scalars(select(AuthorityRecord)).first() is None  # none exists at all
+        r = client.post(f"/api/listings/{listing_id}/approve", cookies=cookies)
+        assert r.status_code == 200, r.text
+        assert r.json()["state"] == "APPROVED"  # approved, but not published
 
         r = client.post(f"/api/listings/{listing_id}/publish", cookies=cookies)
-        assert r.status_code == 200, r.text
-        assert r.json()["state"] == "PUBLISHED"
+        assert r.status_code == 409
+        assert "authority" in r.json()["detail"].lower()
 
     def test_publish_succeeds_without_occupancy_classification(self, client, db_session: Session):
         from app.models.occupancy_classification import OccupancyClassification
@@ -191,19 +201,16 @@ class TestNoComplianceGates:
         assert r.status_code == 200, r.text
         assert r.json()["state"] == "PUBLISHED"
 
-    def test_publish_succeeds_without_identity_verification(self, client, db_session: Session):
-        from app.models.identity_verification import IdentityVerification
-
-        listing_id, _ = _create_and_submit_listing(client, db_session, email="host5@test.com")
+    def test_publish_blocked_without_identity_verification(self, client, db_session: Session):
+        listing_id, _ = _create_and_submit_listing(client, db_session, email="host5@test.com", publishable=False)
         admin = _make_admin(db_session, email="admin5@test.com")
         cookies = auth_admin_cookie(admin)
         client.post(f"/api/listings/{listing_id}/approve", cookies=cookies)
 
-        assert db_session.scalars(select(IdentityVerification)).first() is None
-
         r = client.post(f"/api/listings/{listing_id}/publish", cookies=cookies)
-        assert r.status_code == 200, r.text
-        assert r.json()["state"] == "PUBLISHED"
+        assert r.status_code == 409
+        detail = r.json()["detail"]
+        assert "identity" in detail and "Property verification" in detail and "authority" in detail
 
 
 # ── 9-10: pause / republish lifecycle ───────────────────────────────────────
@@ -221,7 +228,9 @@ class TestPauseAndRepublish:
         assert r.status_code == 200, r.text
         assert r.json()["state"] == "PAUSED"
 
-    def test_paused_listing_can_be_published_again_without_recheck(self, client, db_session: Session):
+    def test_paused_listing_republish_rechecks_gates(self, client, db_session: Session):
+        from app.models.authority_verification import AuthorityVerification
+
         listing_id, _ = _create_and_submit_listing(client, db_session, email="host7@test.com")
         admin = _make_admin(db_session, email="admin7@test.com")
         cookies = auth_admin_cookie(admin)
@@ -229,10 +238,18 @@ class TestPauseAndRepublish:
         client.post(f"/api/listings/{listing_id}/publish", cookies=cookies)
         client.post(f"/api/listings/{listing_id}/pause", cookies=cookies)
 
-        # No authority/occupancy/identity records exist, and republishing still succeeds.
+        # Content review isn't re-run, and with the gates still met it republishes.
         r = client.post(f"/api/listings/{listing_id}/publish", cookies=cookies)
         assert r.status_code == 200, r.text
         assert r.json()["state"] == "PUBLISHED"
+
+        # Authority withdrawn while paused: republishing is refused.
+        client.post(f"/api/listings/{listing_id}/pause", cookies=cookies)
+        for v in db_session.scalars(select(AuthorityVerification)):
+            v.state = "REVOKED"
+        db_session.commit()
+        r = client.post(f"/api/listings/{listing_id}/publish", cookies=cookies)
+        assert r.status_code == 409
 
 
 # ── 11: reject with reason ──────────────────────────────────────────────────

@@ -3,8 +3,7 @@ through Stripe. Rent is paid straight to the host (bank transfer, UPI or
 cash) and recording it is optional -- Zoiko creates no rent checkout, needs
 no Stripe Connect account for rent, and never treats a Stripe webhook as
 evidence of rent. Covers:
-- the card rent rail being refused while rent_card_checkout_enabled is off
-  (the production default);
+- there being no card / Stripe rail for rent at all;
 - the host marking rent/deposit as received directly, which is what
   confirms the booking once the deposit and first rent are in."""
 
@@ -25,7 +24,6 @@ from app.models.party import Party
 from app.models.rental_payment import RentalPaymentRecord
 from app.models.user_account import UserAccount
 from app.services.payment_boundary import capabilities_snapshot
-from app.crud import rental_payment_provider_account as rpa_crud
 from tests.conftest import _make_user, auth_user_cookie
 from tests.test_rental_payment_legacy_bridge import (
     _create_signed_agreement,
@@ -48,49 +46,30 @@ def _host_user_for(db: Session, party_id: int) -> UserAccount:
 
 
 @boundary
-class TestCardRentRailIsOffByDefault:
-    def test_capabilities_tell_the_frontend_card_rent_checkout_is_off(self):
+class TestNoCardRentRail:
+    def test_capabilities_report_no_rent_money_movement(self):
         snapshot = capabilities_snapshot()
-        assert snapshot["rent_card_checkout_enabled"] is False
+        assert "rent_card_checkout_enabled" not in snapshot
         assert snapshot["rental_money_movement_via_zoiko"] is False
 
-    def test_a_renter_cannot_open_a_rent_checkout(self, client, db_session: Session):
+    def test_there_is_no_rent_checkout(self, client, db_session: Session):
         user, user_cookies, agreement_id, _start = _create_signed_agreement(client, db_session, email_suffix="dm-card")
         rent = _rental_payment_obligations_for(db_session, agreement_id)["RENT"]
         r = client.post(f"/api/users/rental-payments/obligations/{rent.id}/payment-session", cookies=user_cookies)
-        assert r.status_code == 403, r.text
-        assert "paid directly to your host" in r.json()["detail"]
+        assert r.status_code in (404, 405), r.text
 
-    def test_a_host_is_never_asked_to_create_a_stripe_account_for_rent(self, client, db_session: Session):
+    def test_there_is_no_host_stripe_account_for_rent(self, client, db_session: Session):
         _user, _cookies, agreement_id, _start = _create_signed_agreement(client, db_session, email_suffix="dm-connect")
         rent = _rental_payment_obligations_for(db_session, agreement_id)["RENT"]
         host_cookies = auth_user_cookie(_host_user_for(db_session, rent.recipient_party_id))
-        r = client.post(
-            "/api/users/rental-payments/recipient/provider-account",
-            json={"country": "GB", "email": "host@test.com"}, cookies=host_cookies,
-        )
-        assert r.status_code == 403, r.text
+        r = client.post("/api/users/rental-payments/recipient/provider-account",
+                        json={"country": "GB", "email": "host@test.com"}, cookies=host_cookies)
+        assert r.status_code in (404, 405), r.text
 
-    def test_the_rent_webhook_never_takes_a_stripe_event_as_rent_evidence(self, client):
-        r = client.post(
-            "/api/finance/rental-payments/stripe/webhook",
-            content=b'{"id": "evt_forged", "type": "checkout.session.completed"}',
-            headers={"stripe-signature": "t=1,v1=forged"},
-        )
-        assert r.status_code == 200
-        assert r.json() == {"received": True, "ignored": True}
-
-    def test_a_connected_stripe_account_does_not_make_a_room_payment_ready(self, client, db_session: Session):
-        from app.crud.payment_connection import get_payment_connection_for_room
-
-        _user, _cookies, agreement_id, _start = _create_signed_agreement(client, db_session, email_suffix="dm-conn")
-        rent = _rental_payment_obligations_for(db_session, agreement_id)["RENT"]
-        recipient = db_session.get(Party, rent.recipient_party_id)
-        account = rpa_crud.create_connected_account(db_session, recipient, country="GB", email="host@test.com")
-        rpa_crud.simulate_onboarding_complete(db_session, account)
-
-        connection = get_payment_connection_for_room(db_session, rent.room)
-        assert connection.destination_method != "ONLINE_PROVIDER"
+    def test_there_is_no_rent_stripe_webhook(self, client):
+        r = client.post("/api/finance/rental-payments/stripe/webhook", content=b"{}",
+                        headers={"stripe-signature": "t=1,v1=forged"})
+        assert r.status_code in (404, 405)
 
 
 class TestHostMarksRentReceived:

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { BedDouble, Building2, ClipboardList, MapPin, Pencil, Plus } from "lucide-react";
+import { AlertTriangle, BadgeCheck, BedDouble, Building2, ClipboardList, MapPin, Pencil, Plus } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
@@ -24,7 +24,15 @@ import {
   updateHostedProperty,
   updateHostedRoom,
 } from "@/lib/user-api";
-import { ListARoomWizard } from "@/components/user/ListARoomWizard";
+import { ListARoomWizard, submitOutcomeMessage } from "@/components/user/ListARoomWizard";
+import { PropertyVerificationWizard } from "@/components/user/PropertyVerificationWizard";
+import { AuthorityVerificationWizard } from "@/components/user/AuthorityVerificationWizard";
+import {
+  AuthorityState, authorityStateCta, authorityStateLabel, listPropertyAuthority,
+} from "@/lib/authority-verification";
+import {
+  PropertyVerificationState, getPropertyVerificationForProperty, propertyStateCta, propertyStateLabel,
+} from "@/lib/property-verification";
 import { RegionSelect } from "@/components/user/RegionSelect";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
 import { occupancyStatusTone } from "@/lib/status";
@@ -60,6 +68,15 @@ export function HostingPropertiesManager() {
   const [error, setError] = useState("");
   const [recordOccupancyId, setRecordOccupancyId] = useState<number | null>(null);
   const [handoverBusyId, setHandoverBusyId] = useState<string | null>(null);
+  // ZR-PROPERTY-VERIFY-001 Section 11: one quiet badge when verified, one
+  // actionable exception otherwise.
+  const [verificationByProperty, setVerificationByProperty] =
+    useState<Record<number, { state: PropertyVerificationState; message: string }>>({});
+  const [verifyProperty, setVerifyProperty] = useState<{ id: number; label: string } | null>(null);
+  // ZR-AUTHORITY-002 Section 15.4: authority status per property.
+  const [authorityByProperty, setAuthorityByProperty] =
+    useState<Record<number, { state: AuthorityState; message: string }>>({});
+  const [authorityProperty, setAuthorityProperty] = useState<{ id: number; label: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -73,6 +90,18 @@ export function HostingPropertiesManager() {
         owned.map((property) => listHostedRooms(property.id).catch(() => [] as Room[]))
       );
       setRoomsByProperty(Object.fromEntries(owned.map((property, i) => [property.id, roomLists[i]])));
+      const statuses = await Promise.all(owned.map((property) =>
+        getPropertyVerificationForProperty(property.id).catch(() => null)));
+      setVerificationByProperty(Object.fromEntries(owned.map((property, i) => [property.id, {
+        state: statuses[i]?.state ?? "NOT_STARTED",
+        message: statuses[i]?.verification?.message ?? "",
+      }])));
+      const authority = await Promise.all(owned.map((property) =>
+        listPropertyAuthority(property.id).catch(() => [])));
+      setAuthorityByProperty(Object.fromEntries(owned.map((property, i) => {
+        const current = authority[i].find((a) => a.state !== "SUPERSEDED");
+        return [property.id, { state: current?.state ?? "NOT_STARTED", message: current?.reason.message ?? "" }];
+      })));
 
       const allRooms = roomLists.flat();
       const occupancyLists = await Promise.all(
@@ -114,7 +143,8 @@ export function HostingPropertiesManager() {
         await createHostedProperty(payload);
         showToast("Property added.");
       } else {
-        await updateHostedProperty(propertyForm.id, payload);
+        await updateHostedProperty(propertyForm.id, payload,
+          properties.find((p) => p.id === propertyForm.id)?.locationVersion);
         showToast("Property updated.");
       }
       setPropertyForm(null);
@@ -256,6 +286,14 @@ export function HostingPropertiesManager() {
                       <MapPin className="h-3.5 w-3.5" /> {property.city} · {property.jurisdictionCode} · Property #
                       {property.id}
                     </p>
+                    <PropertyVerificationBadge
+                      status={verificationByProperty[property.id]}
+                      onOpen={() => setVerifyProperty({ id: property.id, label: `${property.address} · Property #${property.id}` })}
+                    />
+                    <AuthorityBadge
+                      status={authorityByProperty[property.id]}
+                      onOpen={() => setAuthorityProperty({ id: property.id, label: `${property.address} · Property #${property.id}` })}
+                    />
                   </div>
                   <div className="flex items-center gap-2">
                     <Badge tone={property.status === "active" ? "success" : "neutral"}>{property.status}</Badge>
@@ -408,6 +446,12 @@ export function HostingPropertiesManager() {
         title={propertyForm?.id === null ? "Add a property" : "Edit property"}
       >
         <form onSubmit={handlePropertySubmit} className="space-y-4">
+          {propertyForm && propertyForm.id !== null && (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-500/20">
+              Changing the address or city means the property and your authority to list it must be verified again,
+              and listings can&apos;t go live until they are.
+            </p>
+          )}
           <Field label="Address">
             <input
               value={propertyForm?.address ?? ""}
@@ -505,18 +549,39 @@ export function HostingPropertiesManager() {
         </form>
       </Modal>
 
+      {authorityProperty && (
+        <Modal open onClose={() => { setAuthorityProperty(null); void load(); }} title="Authority to list" size="xl">
+          <AuthorityVerificationWizard
+            propertyId={authorityProperty.id}
+            propertyLabel={authorityProperty.label}
+            onClose={() => { setAuthorityProperty(null); void load(); }}
+          />
+        </Modal>
+      )}
+
+      {verifyProperty && (
+        <Modal open onClose={() => { setVerifyProperty(null); void load(); }} title="Property verification" size="xl">
+          <PropertyVerificationWizard
+            propertyId={verifyProperty.id}
+            propertyLabel={verifyProperty.label}
+            onClose={() => { setVerifyProperty(null); void load(); }}
+            onContinueToAuthority={() => {
+              setAuthorityProperty({ id: verifyProperty.id, label: verifyProperty.label });
+              setVerifyProperty(null);
+            }}
+          />
+        </Modal>
+      )}
+
       <ListARoomWizard
         open={wizardOpen}
         onClose={() => setWizardOpen(false)}
         contact={{ name: user?.fullName ?? "", phone: user?.phone ?? "", email: user?.email ?? "" }}
-        onCreated={async (submitted) => {
+        onCreated={async (outcome) => {
           setWizardOpen(false);
           await load();
-          showToast(
-            submitted
-              ? "Listing submitted for review — a Zoiko admin will approve or reject it."
-              : "Draft listing created — find it under My Listings when you're ready to submit it for review."
-          );
+          const { text, tone } = submitOutcomeMessage(outcome);
+          showToast(text, tone);
         }}
       />
 
@@ -525,6 +590,65 @@ export function HostingPropertiesManager() {
       </Modal>
 
       <Toast toast={toast} />
+    </div>
+  );
+}
+
+/** Section 11.1: quiet "Property Verified" when all is well; otherwise one
+ *  plain-language exception with a single CTA. Never shows the geocode
+ *  provider, pin precision or internal source results. */
+function PropertyVerificationBadge({ status, onOpen }: {
+  status?: { state: PropertyVerificationState; message: string };
+  onOpen: () => void;
+}) {
+  if (!status) return null;
+  if (status.state === "VERIFIED") {
+    return (
+      <p className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+        <BadgeCheck className="h-3.5 w-3.5" aria-hidden="true" /> Property Verified
+      </p>
+    );
+  }
+  const neutral = status.state === "MANUAL_REVIEW" || status.state === "IN_PROGRESS";
+  return (
+    <div className={`mt-2 flex flex-wrap items-center gap-2 rounded-lg px-3 py-2 text-xs ${
+      neutral ? "bg-slate-50 text-slate-600 dark:bg-slate-800/60 dark:text-slate-300" : "bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-200"}`}>
+      {!neutral && <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />}
+      <span className="font-semibold">{propertyStateLabel[status.state]}</span>
+      {status.message && !neutral && <span>{status.message}</span>}
+      <button type="button" onClick={onOpen} className="font-semibold text-primary-700 underline dark:text-primary-300">
+        {propertyStateCta[status.state] ?? "View status"}
+      </button>
+    </div>
+  );
+}
+
+/** ZR-AUTHORITY-002 Section 15.4: "Listing Authority Verified" when
+ *  current; otherwise one plain-language status with a single CTA. Never
+ *  shows evidence, match results or reviewer notes. */
+function AuthorityBadge({ status, onOpen }: {
+  status?: { state: AuthorityState; message: string };
+  onOpen: () => void;
+}) {
+  if (!status) return null;
+  if (status.state === "VERIFIED") {
+    return (
+      <p className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+        <BadgeCheck className="h-3.5 w-3.5" aria-hidden="true" /> Listing Authority Verified
+        <button type="button" onClick={onOpen} className="ml-1 font-normal text-slate-500 underline">Details</button>
+      </p>
+    );
+  }
+  const neutral = status.state === "MANUAL_REVIEW" || status.state === "SUBMITTED" || status.state === "COLLECTING";
+  return (
+    <div className={`mt-2 flex flex-wrap items-center gap-2 rounded-lg px-3 py-2 text-xs ${
+      neutral ? "bg-slate-50 text-slate-600 dark:bg-slate-800/60 dark:text-slate-300" : "bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-200"}`}>
+      {!neutral && <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />}
+      <span className="font-semibold">{authorityStateLabel[status.state]}</span>
+      {status.message && !neutral && <span>{status.message}</span>}
+      <button type="button" onClick={onOpen} className="font-semibold text-primary-700 underline dark:text-primary-300">
+        {authorityStateCta[status.state] ?? "View status"}
+      </button>
     </div>
   );
 }

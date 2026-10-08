@@ -13,7 +13,7 @@ the cross-domain drift risk Section 1 calls out."""
 from sqlalchemy import func, select
 from app.crud.identity_verification import get_verified_identity_for_party
 from app.crud.listing import resolve_market_release
-from app.crud.occupancy_eligibility import get_valid_occupancy_eligibility_credential
+from app.crud.occupancy_eligibility import ensure_automatic_check
 from app.models.leasing import Agreement, Application, Offer
 from app.models.listing import Listing
 from app.models.market_release import MarketRelease
@@ -85,11 +85,12 @@ def _check_occupancy_eligibility_requirements(db, listing: Listing, guest) -> li
 
     reasons: list[str] = []
     for requirement in resolve_verification_requirements(db, jurisdiction_code):
-        credential = get_valid_occupancy_eligibility_credential(db, party_id, jurisdiction_code)
+        # Completed automatically once the renter's identity is verified.
+        credential = ensure_automatic_check(db, party_id, jurisdiction_code)
         if credential is None:
             reasons.append(
                 f"{requirement.requirement_code} check has not been completed for this jurisdiction "
-                "-- routed to manual review"
+                "-- the renter's identity is not verified"
             )
     return reasons
 

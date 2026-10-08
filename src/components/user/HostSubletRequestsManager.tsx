@@ -1,5 +1,6 @@
 "use client";
 
+import { SubletPaymentsPanel } from "@/components/user/SubletPaymentsPanel";
 import { useCallback, useEffect, useState } from "react";
 import { Download, HelpCircle, Repeat, ThumbsDown, ThumbsUp } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
@@ -262,6 +263,7 @@ export function HostSubletRequestsManager() {
                           {request.approvalExpiresAt && <>Expires {formatDate(request.approvalExpiresAt)}</>}
                         </p>
                       )}
+                    {request.status === "approved" && request.newAgreementId && <SubletPaymentsPanel subletId={request.id} />}
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <Badge tone={subletRequestStatusTone[request.status] ?? "neutral"}>
