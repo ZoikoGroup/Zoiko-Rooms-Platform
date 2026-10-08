@@ -25,7 +25,7 @@ from app.models.occupancy import Occupancy
 from app.models.party import Party
 from app.models.rental_payment import RentalPaymentObligation
 from app.models.user_account import UserAccount
-from tests.conftest import _make_admin, auth_admin_cookie
+from tests.conftest import auth_user_cookie
 from tests.test_sublet_arrangement_classification import _make_active_tenancy
 
 
@@ -34,10 +34,10 @@ def _approve(client, db: Session, occupancy_id: int, tenant_user, proposed_party
     occupancy.room.max_occupants = 2
     db.commit()
     request = sublet_crud.submit_sublet_request(db, tenant_user, occupancy_id, proposed_party_id, arrangement, **kw)
-    admin = _make_admin(db, email=f"sp-admin-{suffix}@test.com", role="super_admin")
+    host = db.scalar(select(UserAccount).where(UserAccount.party_id == occupancy.listing.party_id))
     r = client.post(
-        f"/api/occupancy/sublet-requests/{request.id}/approve", json={"stepUpPassword": "password123"},
-        cookies=auth_admin_cookie(admin),
+        f"/api/users/hosting/sublet-requests/{request.id}/approve", json={"stepUpPassword": "password123"},
+        cookies=auth_user_cookie(host),
     )
     assert r.status_code == 200, r.text
     return r.json()

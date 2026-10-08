@@ -1845,6 +1845,10 @@ export interface SubletRequest {
   // E_SIGNATURE for this jurisdiction, it's left unsigned until both
   // parties actually sign it (see signOwnAgreement/signHostedAgreement).
   newAgreementId: number | null;
+  // The incoming occupant's overlap with their other tenancies -- live while
+  // pending, as recorded once decided. BLOCK needs an override reason to approve.
+  occupantRiskTier: "NONE" | "REVIEW" | "BLOCK";
+  occupantRiskReason: string;
 }
 
 export interface SubletChronologyEvent {

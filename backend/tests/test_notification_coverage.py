@@ -346,8 +346,7 @@ class TestSubletNotifications:
         db_session.commit()
         db_session.refresh(sublet_request)
 
-        admin = _make_admin(db_session, email="sublet-admin@test.com", role="super_admin")
-        sublet_crud.approve_sublet_request(db_session, sublet_request, admin, notes="Looks good", step_up_password="password123")
+        sublet_crud.approve_sublet_request(db_session, sublet_request, host, notes="Looks good", step_up_password="password123")
 
         assert _notification(db_session, notification_type="sublet_request.authorized", recipient_user_id=proposed_user.id) is not None
         assert _notification(db_session, notification_type="sublet_request.tenant_changed", recipient_user_id=host.id) is not None

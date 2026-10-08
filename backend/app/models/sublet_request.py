@@ -194,6 +194,13 @@ class SubletRequest(Base):
     # ZR-ENG-CLR-003 Rule 4.5: resolved from the market pack per arrangement
     # type, not hard-coded to "Host" or "original renter".
     payee_model: Mapped[str] = mapped_column(String(30), default="")
+    # ZR-ENG-CLR-001 Rule 6 / Section 9: the incoming occupant's overlap
+    # risk, evaluated at approval (services/overlap.py) -- the same tier an
+    # ordinary offer acceptance records on Offer.occupant_risk_tier. A BLOCK
+    # only gets here with the approver's override reason in
+    # occupant_risk_reason.
+    occupant_risk_tier: Mapped[str] = mapped_column(String(10), default="NONE", server_default="NONE")
+    occupant_risk_reason: Mapped[str] = mapped_column(String(500), default="", server_default="")
     # Only set for SUBLEASE_PARTIAL/ADD_CO_TENANT -- the new, independent signed
     # agreement (own rent + deposit obligations) created for the co-tenant. They
     # pay against and move in on this exactly like any other agreement; the

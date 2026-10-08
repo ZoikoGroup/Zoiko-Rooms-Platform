@@ -83,21 +83,3 @@ class TestStepUpAuthOnReplacingArrangements:
             json={"declineReasonCode": "TERMS_NOT_ACCEPTABLE"}, cookies=auth_user_cookie(host_user),
         )
         assert r.status_code == 200, r.text
-
-    def test_admin_legal_ops_override_also_requires_step_up(self, client, db_session: Session):
-        from tests.conftest import _make_admin, auth_admin_cookie
-
-        tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="stepup6")
-        sublet_request = sublet_crud.submit_sublet_request(
-            db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL",
-        )
-        admin = _make_admin(db_session, email="stepup6-admin@test.com", role="super_admin")
-
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", cookies=auth_admin_cookie(admin))
-        assert r.status_code == 401
-
-        r = client.post(
-            f"/api/occupancy/sublet-requests/{sublet_request.id}/approve",
-            json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(admin),
-        )
-        assert r.status_code == 200, r.text
