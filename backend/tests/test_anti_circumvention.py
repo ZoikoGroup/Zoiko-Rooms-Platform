@@ -84,9 +84,17 @@ class TestNoProhibitedSchemaFields:
         }
         assert forbidden.intersection(ExternalCard.model_fields) == set()
 
-    def test_external_card_result_adds_only_opportunity_id(self):
+    def test_external_card_result_adds_only_safe_section_15_fields(self):
         result_extra = set(ExternalCardResult.model_fields) - set(ExternalCard.model_fields)
-        assert result_extra == {"opportunity_id"}
+        assert result_extra == {
+            "opportunity_id", "external_opportunity_id", "status", "approx_location",
+            "advertised_price", "discovered_at", "primary_cta",
+        }
+        forbidden = {
+            "source_url", "source_domain", "phone", "email", "exact_address", "address",
+            "social_handle", "direct_booking_url", "provider_phone", "provider_email", "contact",
+        }
+        assert forbidden.intersection(ExternalCardResult.model_fields) == set()
 
     def test_mask_flags_are_booleans_and_default_false(self):
         for name in ("has_exact_address", "has_phone", "has_email", "has_url", "is_unlocked"):

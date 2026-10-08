@@ -14,6 +14,7 @@ import {
   LayoutDashboard,
   LogOut,
   MessageCircle,
+  MessagesSquare,
   Receipt,
   Repeat,
   Scale,
@@ -36,6 +37,7 @@ const navGroups = [
     items: [
       { href: "/account/rent", label: "Find a Room", icon: Search },
       { href: "/account/applications", label: "My Applications", icon: ClipboardList },
+      { href: "/account/room-requests", label: "Room Requests", icon: MessagesSquare },
       { href: "/account/rentals", label: "My Rentals", icon: DoorOpen },
       { href: "/account/rent-payments", label: "Rent & Deposit Payments", icon: Receipt },
       { href: "/account/sublets", label: "Sublet Requests", icon: Repeat },

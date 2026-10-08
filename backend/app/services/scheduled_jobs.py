@@ -236,10 +236,62 @@ def reconcile_listing_fee_refunds(db: Session) -> int:
 
 
 def process_external_outreach(db: Session) -> int:
-    """ZR-AI-SEARCH-001 Phase 1.3: dispatch PENDING provider outreach rows."""
+    """ZR-AI-SEARCH-001 Section 9 step 3: email PENDING provider outreach
+    (eligibility, market channel and suppression re-checked per row). Rows
+    that cannot be emailed stay in the operator queue."""
     from app.services.outreach_worker import outreach_worker
+    from app.services.provider_journey import email_dispatch
 
-    return outreach_worker.process_pending_outreach(db)
+    return outreach_worker.process_pending_outreach(db, dispatch=email_dispatch)
+
+
+def remind_hosts_to_reconfirm_availability(db: Session, *, now: datetime | None = None) -> int:
+    """ZR-AI-SEARCH-001 Section 5.1 freshness: a published listing whose
+    availability has not been confirmed within availability_freshness_days is
+    ranked lower in search; remind its host (at most once per period)."""
+    from app.models.listing import Listing
+
+    now = now or datetime.now(timezone.utc)
+    period = timedelta(days=settings.availability_freshness_days)
+    stale = db.scalars(
+        select(Listing).where(
+            Listing.state == "PUBLISHED",
+            Listing.party_id.is_not(None),
+            (Listing.availability_confirmed_at.is_(None)) | (Listing.availability_confirmed_at <= now - period),
+        )
+    ).all()
+    reminded = 0
+    for listing in stale:
+        recent = db.scalar(
+            select(Notification.id).where(
+                Notification.notification_type == "listing.availability_reconfirm",
+                Notification.related_entity_id == str(listing.id),
+                Notification.created_at >= now - period,
+            ).limit(1)
+        )
+        if recent is not None:
+            continue
+        notif_crud.notify_user_by_party(
+            db, listing.party_id, title="Is your room still available?",
+            message=(
+                f"Please confirm that \"{listing.name}\" is still available. Listings with a recent "
+                "confirmation are shown higher in Zoiko Rooms search."
+            ),
+            notification_type="listing.availability_reconfirm",
+            related_entity_type="listing", related_entity_id=str(listing.id),
+        )
+        reminded += 1
+    if reminded:
+        db.commit()
+    return reminded
+
+
+def sync_internalised_external_leads(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Section 9 step 8: claimed rooms whose listing passed
+    the platform's gates and was published become internal inventory."""
+    from app.services.provider_journey import sync_internalised
+
+    return sync_internalised(db)
 
 
 def expire_external_outreach(db: Session) -> int:
@@ -319,6 +371,8 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("process_external_outreach", process_external_outreach),
     ("expire_external_outreach", expire_external_outreach),
     ("sync_partner_feeds", sync_partner_feeds),
+    ("sync_internalised_external_leads", sync_internalised_external_leads),
+    ("remind_hosts_to_reconfirm_availability", remind_hosts_to_reconfirm_availability),
     ("purge_stale_external_opportunities", purge_stale_external_opportunities),
 )
 

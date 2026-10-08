@@ -73,6 +73,13 @@ def _apply_fields(opp: ExternalOpportunity, item: dict[str, Any], src: SourceRig
         setattr(opp, attr, value)
 
 
+def _source_market(src: SourceRightRegistry) -> str | None:
+    """A partner's leads belong to its single market; a multi-market source
+    leaves it unset, so outreach fails closed until an operator assigns it."""
+    territories = [str(t).upper() for t in (src.territories or [])]
+    return territories[0] if len(territories) == 1 else None
+
+
 class PartnerFeedAdapter:
     def _resolve_source(self, db: Session, source_id: str) -> SourceRightRegistry | None:
         return db.scalar(
@@ -136,6 +143,7 @@ class PartnerFeedAdapter:
             opp = ExternalOpportunity(
                 external_opportunity_id=f"pf_{source_id}_{external_id}",
                 source_id=source_id,
+                market_code=_source_market(src),
                 status="EXTERNAL_DISCOVERED",
                 verification_status="NOT_VERIFIED_BY_ZOIKO_ROOMS",
                 permitted_features=sorted(permitted),
@@ -208,6 +216,7 @@ class PartnerFeedAdapter:
                 opp = ExternalOpportunity(
                     external_opportunity_id=f"pf_{source_id}_{external_id}"[:100],
                     source_id=source_id,
+                    market_code=_source_market(src),
                     status="EXTERNAL_DISCOVERED",
                     verification_status="NOT_VERIFIED_BY_ZOIKO_ROOMS",
                     permitted_features=sorted(set(src.permitted_fields or [])),

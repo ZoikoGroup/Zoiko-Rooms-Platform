@@ -163,7 +163,7 @@ function toExternalCard(raw: Json): ExternalCard {
     qualityScore: Number(raw.quality_score ?? 0),
     imagesPresent: Boolean(raw.images_present),
     lastSeenAt: (raw.last_seen_at as string | null) ?? null,
-    verificationStatus: String(raw.verification_status ?? "unverified"),
+    verificationStatus: String(raw.verification_status ?? "NOT_VERIFIED_BY_ZOIKO_ROOMS"),
     isUnlocked: Boolean(raw.is_unlocked),
     opportunityId: raw.opportunity_id != null ? Number(raw.opportunity_id) : null,
   };
@@ -245,12 +245,16 @@ export async function searchRooms(
 /** Ask Zoiko Rooms to contact the provider for an external opportunity. */
 export async function requestProviderContact(
   opportunityId: number,
-  payload: { message: string; consentFields: string[] },
+  payload: { message: string; consentFields: string[]; leadDetails?: Record<string, string> },
   signal?: AbortSignal
 ): Promise<ExternalContactResult> {
   const raw = await request<Json>(`/api/users/external-search/opportunities/${opportunityId}/contact`, {
     method: "POST",
-    body: JSON.stringify({ message: payload.message, consent_fields: payload.consentFields }),
+    body: JSON.stringify({
+      message: payload.message,
+      consent_fields: payload.consentFields,
+      lead_details: payload.leadDetails ?? {},
+    }),
     signal,
   });
   return {
@@ -270,4 +274,190 @@ export async function listMyExternalOpportunities(signal?: AbortSignal): Promise
 export async function listExternalOutreachQueue(limit = 50, signal?: AbortSignal): Promise<OutreachQueueItem[]> {
   const rows = await request<Json[]>(`/api/admin/external-search/outreach?limit=${limit}`, { signal });
   return rows.map((r) => toOutreachQueueItem(r as Json));
+}
+// ---------------------------------------------------------------------------
+// Provider journey (ZR-AI-SEARCH-001 Sections 9 and 11)
+// ---------------------------------------------------------------------------
+
+export interface ThreadMessage {
+  id: number;
+  from: "you" | "provider" | "renter";
+  body: string;
+  at: string | null;
+}
+
+export interface ReleaseState {
+  available: boolean;
+  youConsented: boolean;
+  otherConsented: boolean;
+  released: boolean;
+  contact: string | null;
+}
+
+export interface ProviderRequestView {
+  approxLocation: string | null;
+  renterDemand: Record<string, string>;
+  renterMessage: string;
+  status: "AWAITING_RESPONSE" | "ACCEPTED" | "DECLINED" | string;
+  acceptanceModel: string | null;
+  options: Array<"CLAIM_AND_LIST" | "ONE_OFF_INTRODUCTION">;
+  termsVersion: string | null;
+  leadProtectionDays: number | null;
+  senderEntity: string;
+  messages: ThreadMessage[];
+  canMessage: boolean;
+  release: ReleaseState;
+}
+
+export interface RenterRequestView {
+  outreachId: number;
+  opportunityId: number;
+  externalOpportunityId: string;
+  approxLocation: string | null;
+  verificationStatus: string;
+  outreachStatus: string;
+  providerResponse: string;
+  providerName: string | null;
+  requestedAt: string | null;
+  canMessage: boolean;
+  messages: ThreadMessage[];
+  release: ReleaseState;
+}
+
+function toThread(raw: unknown): ThreadMessage[] {
+  return Array.isArray(raw)
+    ? raw.map((m) => {
+        const r = m as Json;
+        return {
+          id: Number(r.id ?? 0),
+          from: (r.from as ThreadMessage["from"]) ?? "renter",
+          body: String(r.body ?? ""),
+          at: (r.at as string | null) ?? null,
+        };
+      })
+    : [];
+}
+
+function toRelease(raw: unknown): ReleaseState {
+  const r = (raw ?? {}) as Json;
+  return {
+    available: Boolean(r.available),
+    youConsented: Boolean(r.you_consented),
+    otherConsented: Boolean(r.other_consented),
+    released: Boolean(r.released),
+    contact: (r.contact as string | null) ?? null,
+  };
+}
+
+function toProviderView(r: Json): ProviderRequestView {
+  return {
+    approxLocation: (r.approx_location as string | null) ?? null,
+    renterDemand: (r.renter_demand as Record<string, string>) ?? {},
+    renterMessage: String(r.renter_message ?? ""),
+    status: String(r.status ?? "AWAITING_RESPONSE"),
+    acceptanceModel: (r.acceptance_model as string | null) ?? null,
+    options: (Array.isArray(r.options) ? r.options : ["CLAIM_AND_LIST"]) as ProviderRequestView["options"],
+    termsVersion: (r.terms_version as string | null) ?? null,
+    leadProtectionDays: (r.lead_protection_days as number | null) ?? null,
+    senderEntity: String(r.sender_entity ?? "Zoiko Realty Group Inc."),
+    messages: toThread(r.messages),
+    canMessage: Boolean(r.can_message),
+    release: toRelease(r.release),
+  };
+}
+
+function toRenterView(r: Json): RenterRequestView {
+  return {
+    outreachId: Number(r.outreach_id ?? 0),
+    opportunityId: Number(r.opportunity_id ?? 0),
+    externalOpportunityId: String(r.external_opportunity_id ?? ""),
+    approxLocation: (r.approx_location as string | null) ?? null,
+    verificationStatus: String(r.verification_status ?? "NOT_VERIFIED_BY_ZOIKO_ROOMS"),
+    outreachStatus: String(r.outreach_status ?? ""),
+    providerResponse: String(r.provider_response ?? "AWAITING_RESPONSE"),
+    providerName: (r.provider_name as string | null) ?? null,
+    requestedAt: (r.requested_at as string | null) ?? null,
+    canMessage: Boolean(r.can_message),
+    messages: toThread(r.messages),
+    release: toRelease(r.release),
+  };
+}
+
+const PORTAL = "/api/public/provider";
+
+/** Provider (no account): the request behind their signed link. */
+export async function getProviderRequest(token: string): Promise<ProviderRequestView> {
+  return toProviderView(await request<Json>(`${PORTAL}/request`, { method: "POST", body: JSON.stringify({ token }) }));
+}
+
+export async function respondAsProvider(
+  token: string,
+  payload: { decision: "ACCEPT" | "DECLINE"; model?: string; providerName?: string; acceptedTerms?: boolean }
+): Promise<ProviderRequestView> {
+  return toProviderView(
+    await request<Json>(`${PORTAL}/respond`, {
+      method: "POST",
+      body: JSON.stringify({
+        token,
+        decision: payload.decision,
+        model: payload.model ?? null,
+        provider_name: payload.providerName ?? null,
+        accepted_terms: Boolean(payload.acceptedTerms),
+      }),
+    })
+  );
+}
+
+export async function providerOptOut(token: string): Promise<void> {
+  await request<Json>(`${PORTAL}/opt-out`, { method: "POST", body: JSON.stringify({ token }) });
+}
+
+export async function providerSendMessage(token: string, body: string): Promise<ProviderRequestView> {
+  return toProviderView(await request<Json>(`${PORTAL}/messages`, { method: "POST", body: JSON.stringify({ token, body }) }));
+}
+
+export async function providerConsentToRelease(token: string): Promise<ProviderRequestView> {
+  return toProviderView(await request<Json>(`${PORTAL}/release`, { method: "POST", body: JSON.stringify({ token }) }));
+}
+
+/** Renter: their contact requests, threads and contact-release state. */
+export async function listMyRoomRequests(signal?: AbortSignal): Promise<RenterRequestView[]> {
+  const rows = await request<Json[]>("/api/users/external-search/requests", { signal });
+  return rows.map((r) => toRenterView(r as Json));
+}
+
+export async function sendRoomRequestMessage(outreachId: number, body: string): Promise<RenterRequestView> {
+  return toRenterView(
+    await request<Json>(`/api/users/external-search/requests/${outreachId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    })
+  );
+}
+
+export async function consentToShareContact(outreachId: number): Promise<RenterRequestView> {
+  return toRenterView(await request<Json>(`/api/users/external-search/requests/${outreachId}/release`, { method: "POST" }));
+}
+
+export type ReportReason = "STALE" | "INACCURATE" | "SUSPICIOUS" | "OTHER";
+
+export async function reportExternalOpportunity(opportunityId: number, reason: ReportReason, note = ""): Promise<void> {
+  await request<Json>(`/api/users/external-search/opportunities/${opportunityId}/report`, {
+    method: "POST",
+    body: JSON.stringify({ reason, note }),
+  });
+}
+
+/** Provider (signed in): claim the room from their link -> DRAFT listing. */
+export async function claimExternalRoom(token: string): Promise<{ listingId: string; slug: string; state: string }> {
+  const r = await request<Json>("/api/users/external-search/claim", { method: "POST", body: JSON.stringify({ token }) });
+  return { listingId: String(r.listing_id ?? ""), slug: String(r.slug ?? ""), state: String(r.state ?? "") };
+}
+
+/** Host: reconfirm a published listing is still available (search freshness). */
+export async function confirmListingAvailability(listingId: string): Promise<string | null> {
+  const r = await request<Json>(`/api/users/external-search/listings/${encodeURIComponent(listingId)}/confirm-availability`, {
+    method: "POST",
+  });
+  return (r.availability_confirmed_at as string | null) ?? null;
 }

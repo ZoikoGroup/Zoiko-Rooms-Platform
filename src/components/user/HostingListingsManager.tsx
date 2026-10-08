@@ -45,6 +45,7 @@ import {
   AuthorityState, authorityStateCta, authorityStateLabel, isAuthorityException, listPropertyAuthority,
 } from "@/lib/authority-verification";
 import { RentPaymentReadiness } from "@/components/user/RentPaymentReadiness";
+import { confirmListingAvailability } from "@/lib/external-search";
 
 const MAX_LISTING_IMAGES = 10;
 
@@ -447,6 +448,20 @@ export function HostingListingsManager() {
                     {(listing.state === "DRAFT" || listing.state === "REJECTED") && (
                       <Button size="sm" loading={busy} onClick={() => submitForReview(listing.id)}>
                         <Send className="h-3.5 w-3.5" /> Submit
+                      </Button>
+                    )}
+                    {listing.state === "PUBLISHED" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        title="Recently confirmed listings are shown higher in search"
+                        onClick={() =>
+                          confirmListingAvailability(listing.id)
+                            .then(() => showToast("Thanks -- availability confirmed."))
+                            .catch((err) => showToast(errorMessage(err, "Could not confirm availability."), "error"))
+                        }
+                      >
+                        <ShieldCheck className="h-3.5 w-3.5" /> Still available
                       </Button>
                     )}
                   </div>

@@ -24,6 +24,8 @@ import json
 import re
 from typing import Any
 
+from app.services.external_providers import clean_label
+
 FEED_FORMATS = ("JSON", "CSV", "BLM", "RESO")
 
 
@@ -105,7 +107,7 @@ def parse_blm(text: str) -> list[dict[str, Any]]:
             {
                 "external_id": row["AGENT_REF"],
                 # Town only: the full postcode would pinpoint the property.
-                "approx_location": _clean(row.get("TOWN")),
+                "approx_location": clean_label(row.get("TOWN")),
                 "price_minor": int(round(price * factor)) if price is not None else None,
                 "currency": "GBP",
                 "price_period": period,
@@ -141,11 +143,11 @@ def parse_reso(text: str) -> list[dict[str, Any]]:
         items.append(
             {
                 "external_id": str(row["ListingKey"]),
-                "approx_location": _clean(row.get("City")),
+                "approx_location": clean_label(row.get("City")),
                 "price_minor": _minor(row.get("ListPrice")),
                 "currency": "USD",
                 "price_period": "MONTH",
-                "room_type": _clean(row.get("PropertySubType")),
+                "room_type": clean_label(row.get("PropertySubType")),
                 "bedrooms": _clean(row.get("BedroomsTotal")),
                 "provider_name": _clean(row.get("ListAgentFullName") or row.get("ListOfficeName")),
                 "provider_contact": _clean(row.get("ListAgentEmail") or row.get("ListAgentDirectPhone")),
@@ -186,11 +188,11 @@ def parse_simple(text: str, fmt: str) -> list[dict[str, Any]]:
         items.append(
             {
                 "external_id": _clean(row.get("external_id")),
-                "approx_location": _clean(row.get("city")),
+                "approx_location": clean_label(row.get("city")),
                 "price_minor": _minor(row.get("price")),
                 "currency": (_clean(row.get("currency")) or "").upper() or None,
                 "price_period": period if period in ("MONTH", "WEEK") else "MONTH",
-                "room_type": _clean(row.get("room_type")),
+                "room_type": clean_label(row.get("room_type")),
                 "bedrooms": _clean(row.get("bedrooms")),
                 "provider_name": _clean(row.get("provider_name")),
                 "provider_contact": _clean(row.get("provider_contact")),

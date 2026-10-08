@@ -90,6 +90,25 @@ _COUNTRY_ALIASES = {
 }
 
 
+# Section 6.3: source text is untrusted. Labels (room type, city, region) are
+# kept only when they look like a plain label -- letters, spaces and a few
+# separators, short, and with no instruction-like or link-like content.
+_LABEL = re.compile(r"^[\w][\w .,'()/&-]{0,59}$", re.UNICODE)
+_INJECTION = re.compile(
+    r"\b(?:ignore|disregard|instruction|instructions|system|prompt|assistant|override|print|http|www)\b",
+    re.IGNORECASE,
+)
+
+
+def clean_label(value: object) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    if not text or not _LABEL.match(text) or _INJECTION.search(text):
+        return None
+    return text
+
+
 def normalize_country(country: str | None) -> str | None:
     if not country:
         return None
@@ -143,10 +162,10 @@ class RentCastProvider:
                 ExternalCandidate(
                     source_id=self.source_id,
                     external_id=str(row["id"]),
-                    city=row.get("city"),
-                    region=row.get("state"),
+                    city=clean_label(row.get("city")),
+                    region=clean_label(row.get("state")),
                     country="US",
-                    room_type=row.get("propertyType"),
+                    room_type=clean_label(row.get("propertyType")),
                     bedrooms=row.get("bedrooms"),
                     advertised_price_minor=_price_minor(row.get("price")),
                     currency="USD",
@@ -201,10 +220,10 @@ class DomainProvider:
                 ExternalCandidate(
                     source_id=self.source_id,
                     external_id=str(listing["id"]),
-                    city=details.get("suburb"),
-                    region=details.get("state"),
+                    city=clean_label(details.get("suburb")),
+                    region=clean_label(details.get("state")),
                     country="AU",
-                    room_type=details.get("propertyType"),
+                    room_type=clean_label(details.get("propertyType")),
                     bedrooms=details.get("bedrooms"),
                     advertised_price_minor=_price_minor((listing.get("priceDetails") or {}).get("price")),
                     currency="AUD",

@@ -18,13 +18,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.external_search import ExternalOpportunity
@@ -50,11 +52,14 @@ from app.services.external_providers import (
 )
 from app.services.external_search_crypto import encrypt_optional
 from app.services.feature_flags import is_enabled
+from app.services.market_legal_pack import external_search_allowed, prohibited_terms, public_fetch_allowed
 from app.services.source_rights_registry import registry
 
 logger = logging.getLogger(__name__)
 
 _SENTINEL_TITLE = "[External listing — masked]"
+# Recorded with every search audit row so each shown disclosure is attributable.
+DISCLOSURE_VERSION = "ZR-AI-SEARCH-001/1.0"
 
 EXTERNAL_SEARCH_FLAG = "external.search_fallback"
 
@@ -106,23 +111,39 @@ _PROTECTED_CLASS_TERMS = (
 )
 
 
-def _fair_housing_block(city: str | None, q: str | None) -> str | None:
-    """Return a reason string when the query encodes a protected characteristic,
-    else None. `q` is matched on word boundaries; the city must match exactly."""
-    text = (q or "").lower()
-    words = text.split()
-    for term in _PROTECTED_CLASS_TERMS:
-        if " " in term:
-            if term in text:
-                return f"protected_class:{term}"
-        elif any(
-            w == term or w == f"{term}s" or w == f"{term}es" or w.endswith(f"{term}'s")
-            for w in words
-        ):
-            # matches the bare word plus simple inflections (e.g. muslims) but
-            # never a prefix of unrelated words (e.g. Whitechapel).
-            return f"protected_class:{term}"
-    if city and any(w.lower() in _PROTECTED_CLASS_TERMS for w in city.split()):
+def _term_hit(text: str, term: str) -> bool:
+    """Whole-word (or simple inflection) match of a protected term."""
+    if " " in term:
+        return term in text
+    return any(
+        w == term or w == f"{term}s" or w == f"{term}es" or w.endswith(f"{term}'s")
+        for w in re.findall(r"[a-z0-9']+", text)
+    )
+
+
+def _fair_housing_block(
+    city: str | None,
+    q: str | None,
+    filters: list[str] | None = None,
+    room_type: str | None = None,
+    extra_terms: list[str] | None = None,
+) -> str | None:
+    """Return a reason string when the search encodes a protected
+    characteristic (SRCH-14), else None. Checks the free text, the objective
+    filters and room type, against the base vocabulary plus the market Legal
+    Pack's own prohibited terms. Matches whole words only, so e.g.
+    Whitechapel is not "white"."""
+    terms = tuple(_PROTECTED_CLASS_TERMS) + tuple(extra_terms or ())
+    fields = {
+        "query": (q or "").lower(),
+        "filters": " ".join(str(f) for f in (filters or [])).lower(),
+        "room_type": (room_type or "").lower(),
+    }
+    for name, text in fields.items():
+        for term in terms:
+            if text and _term_hit(text, term):
+                return f"protected_class:{term}" + ("" if name == "query" else f":{name}")
+    if city and any(w.lower() in terms for w in city.split()):
         return "protected_class:city"
     return None
 
@@ -140,6 +161,10 @@ class SearchQuery:
     objective_filters: list[str] = field(default_factory=list)
     limit_internal: int = 20
     limit_external: int = 10
+    # Section 15.1 optional area: a centre point and radius in metres.
+    latitude: float | None = None
+    longitude: float | None = None
+    radius_m: int | None = None
 
 
 @dataclass
@@ -167,30 +192,44 @@ class SearchOrchestrator:
         query: SearchQuery,
         correlation_id: str = "",
         actor_id: int | None = None,
+        allow_external: bool = True,
+        public_visitor: bool = False,
     ) -> OrchestratorResult:
-        fair_housing = _fair_housing_block(query.city, query.q)
-        if fair_housing:
-            blocked = ExternalDiscoveryResult(
-                state=SearchState.BLOCKED,
-                internal_matches=0,
-                external_matches=[],
-                fallback_triggered=False,
-                consent_required=False,
-                disclosure_text=(
-                    "This search was not run because it described a protected "
-                    "characteristic. Zoiko Rooms listings are open to everyone."
-                ),
-                guardrail_notes=["FAIR_HOUSING: protected characteristic rejected", fair_housing],
-            )
+        """Section 15.4 waterfall. ``actor_id`` attributes every audit row to
+        the searching user; ``public_visitor`` marks anonymous website traffic
+        (which also needs the market pack's public_visitor_search_enabled)."""
+        query_id = f"q_{uuid4().hex[:16]}"
+        actor = f"user:{actor_id}" if actor_id else ("visitor" if public_visitor else "system")
+        market = normalize_country(query.country)
+
+        def audit(action: str, reason: str) -> None:
             log_external_search_event(
                 db,
-                action="search_external.fair_housing_blocked",
+                action=action,
                 resource_type="search",
-                resource_id=correlation_id or "search",
+                resource_id=query_id,
                 correlation_id=correlation_id,
-                reason=fair_housing,
+                reason=f"{reason};actor={actor};market={market or '-'}",
             )
-            return OrchestratorResult(discovery=blocked)
+
+        fair_housing = _fair_housing_block(
+            query.city, query.q, query.objective_filters, query.room_type, prohibited_terms(db, market)
+        )
+        if fair_housing:
+            audit("search_external.fair_housing_blocked", fair_housing)
+            return OrchestratorResult(
+                discovery=ExternalDiscoveryResult(
+                    state=SearchState.BLOCKED,
+                    query_id=query_id,
+                    search_route="NONE",
+                    external_search_status="BLOCKED_PROHIBITED_CRITERIA",
+                    disclosure_text=(
+                        "This search was not run because it described a protected "
+                        "characteristic. Zoiko Rooms listings are open to everyone."
+                    ),
+                    guardrail_notes=["FAIR_HOUSING: protected characteristic rejected", fair_housing],
+                )
+            )
 
         internal = self._search_internal(db, query)
         # The precedence decision uses the full qualifying count, never the
@@ -200,52 +239,54 @@ class SearchOrchestrator:
         internal_rows = internal["rows"][: max(1, query.limit_internal or 0)]
 
         if qualifying_count > 0:
-            result = OrchestratorResult(
+            audit("search_external.waterfall", f"internal_only:{qualifying_count};disclosure={DISCLOSURE_VERSION}:7.1")
+            return OrchestratorResult(
                 discovery=ExternalDiscoveryResult(
                     state=SearchState.INTERNAL_VERIFIED,
+                    query_id=query_id,
+                    search_route="INTERNAL_ONLY",
+                    external_search_status="SKIPPED_INTERNAL_MATCH",
                     internal_matches=qualifying_count,
-                    external_matches=[],
-                    fallback_triggered=False,
-                    consent_required=False,
                     disclosure_text=INTERNAL_DISCLOSURE,
                     guardrail_notes=["INTERNAL_FIRST: returned Zoiko Rooms inventory only"],
                 ),
                 internal_results=internal_rows,
             )
-            log_external_search_event(
-                db,
-                action="search_external.waterfall",
-                resource_type="search",
-                resource_id=correlation_id or "search",
-                correlation_id=correlation_id,
-                reason="internal_verified",
-            )
-            return result
 
-        # Section 13 market activation gate: external discovery stays off
-        # until Legal/Privacy/Commercial approve it and the flag is enabled.
-        if not is_enabled(db, EXTERNAL_SEARCH_FLAG):
-            log_external_search_event(
-                db,
-                action="search_external.not_activated",
-                resource_type="search",
-                resource_id=correlation_id or "search",
-                correlation_id=correlation_id,
-                reason="internal_zero;external_search_not_activated",
-            )
+        # Section 13: external discovery needs the global kill switch, the
+        # caller's channel, and an approved Market Legal Pack for this market.
+        if (
+            not allow_external
+            or not is_enabled(db, EXTERNAL_SEARCH_FLAG)
+            or not external_search_allowed(db, market, public_visitor=public_visitor)
+        ):
+            audit("search_external.not_activated", "internal_zero;external_search_not_activated")
             return OrchestratorResult(
                 discovery=ExternalDiscoveryResult(
                     state=SearchState.INTERNAL_ZERO,
-                    internal_matches=0,
-                    external_matches=[],
-                    fallback_triggered=False,
-                    consent_required=False,
+                    query_id=query_id,
+                    search_route="NONE",
+                    external_search_status="NOT_ACTIVATED",
                     disclosure_text=NO_MATCH_DISCLOSURE,
                     guardrail_notes=["INTERNAL_ZERO", "EXTERNAL_SEARCH_NOT_ACTIVATED"],
                 )
             )
 
-        return self._external_fallback(db, query, correlation_id)
+        result = self._external_fallback(db, query, correlation_id)
+        disc = result.discovery
+        disc.query_id = query_id
+        if disc.state == SearchState.EXTERNAL_DISCOVERED:
+            disc.search_route = "EXTERNAL_FALLBACK"
+            disc.external_search_status = "COMPLETE"
+            audit(
+                "search_external.discovered",
+                f"external_discovered:{len(disc.external_matches)};disclosure={DISCLOSURE_VERSION}:7.2",
+            )
+        else:
+            disc.search_route = "NONE"
+            disc.external_search_status = "NO_ELIGIBLE_RESULTS"
+            audit("search_external.blocked", "no_eligible_external_results")
+        return result
 
     def _search_internal(self, db: Session, query: SearchQuery) -> dict[str, Any]:
         """Section 5.1 qualifying-match gate over internal inventory.
@@ -262,12 +303,26 @@ class SearchOrchestrator:
 
         stmt = select(Listing).where(Listing.state == "PUBLISHED")
         if query.city:
-            stmt = stmt.where(Listing.city.ilike(f"%{query.city}%"))
+            # Section 5.1: the user's own area, never silently widened
+            # ("York" must not match "New York").
+            stmt = stmt.where(func.lower(func.trim(Listing.city)) == query.city.strip().lower())
         if query.min_price is not None:
             stmt = stmt.where(Listing.price_per_night >= query.min_price)
         if query.max_price is not None:
             stmt = stmt.where(Listing.price_per_night <= query.max_price)
         rows = db.execute(stmt.limit(500)).scalars().all()
+        if query.latitude is not None and query.longitude is not None and query.radius_m:
+            rows = [
+                l for l in rows
+                if l.latitude is None or l.longitude is None
+                or _distance_m(query.latitude, query.longitude, l.latitude, l.longitude) <= query.radius_m
+            ]
+        unavailable = _unavailable_listing_ids(db, [l.id for l in rows], query.move_in_from, query.move_in_to)
+        rows = [l for l in rows if l.id not in unavailable]
+        if settings.availability_stale_exclude_days > 0:
+            # Section 5.1: records not reconfirmed for too long stop qualifying.
+            cutoff = datetime.now(timezone.utc) - timedelta(days=settings.availability_stale_exclude_days)
+            rows = [l for l in rows if l.availability_confirmed_at and _aware(l.availability_confirmed_at) > cutoff]
         verified_rooms = _verified_room_ids(db, {l.room_id for l in rows if l.room_id})
 
         q = (query.q or "").lower()
@@ -294,6 +349,7 @@ class SearchOrchestrator:
             out.append(
                 {
                     "id": l.id,
+                    "slug": l.slug,
                     "name": l.name,
                     "city": l.city,
                     "roomType": l.room_type,
@@ -426,7 +482,9 @@ class SearchOrchestrator:
             displayable = registry.is_displayable(sid)
             provider = PROVIDERS.get(sid)
             if provider is not None:
-                candidates = self._fetch_provider(db, provider, rule, query, limit, correlation_id)
+                candidates = _drop_internalised(
+                    db, self._fetch_provider(db, provider, rule, query, limit, correlation_id)
+                )
                 if not displayable:
                     # Section 15.4: rights allow acquisition but not masked
                     # display -> keep as an internal opportunity only.
@@ -473,24 +531,22 @@ class SearchOrchestrator:
                     registered_internally += _register_internal_opportunities(db, [cand])
 
         if not cards:
-            blocked = ExternalDiscoveryResult(
-                state=SearchState.BLOCKED,
-                internal_matches=0,
-                external_matches=[],
-                fallback_triggered=False,
-                consent_required=False,
-                disclosure_text=NO_MATCH_DISCLOSURE,
-                guardrail_notes=["FALLBACK_NOT_ALLOWED: no rights-eligible external results"],
+            if registered_internally:
+                log_external_search_event(
+                    db,
+                    action="search_external.registered_internally",
+                    resource_type="search",
+                    resource_id=correlation_id or "search",
+                    correlation_id=correlation_id,
+                    reason=f"registered_internally={registered_internally}",
+                )
+            return OrchestratorResult(
+                discovery=ExternalDiscoveryResult(
+                    state=SearchState.BLOCKED,
+                    disclosure_text=NO_MATCH_DISCLOSURE,
+                    guardrail_notes=["FALLBACK_NOT_ALLOWED: no rights-eligible external results"],
+                )
             )
-            log_external_search_event(
-                db,
-                action="search_external.blocked",
-                resource_type="search",
-                resource_id=correlation_id or "search",
-                correlation_id=correlation_id,
-                reason=f"no_eligible_external_sources;registered_internally={registered_internally}",
-            )
-            return OrchestratorResult(discovery=blocked)
 
         raw_cards = [c.model_dump() for c in cards]
 
@@ -507,14 +563,6 @@ class SearchOrchestrator:
                 "MASKED_CARDS_ONLY",
                 "CONSENT_REQUIRED_BEFORE_CONTACT",
             ],
-        )
-        log_external_search_event(
-            db,
-            action="search_external.discovered",
-            resource_type="search",
-            resource_id=correlation_id or "search",
-            correlation_id=correlation_id,
-            reason=f"external_discovered:{len(cards)}",
         )
         return OrchestratorResult(
             discovery=discovered,
@@ -542,6 +590,7 @@ class SearchOrchestrator:
             or not web_rule
             or not registry.is_fallback_allowed(provider.source_id)
             or not _in_territory(web_rule, query)
+            or not public_fetch_allowed(db, market)
         ):
             return []
         sites = {
@@ -638,6 +687,54 @@ class SearchOrchestrator:
         return candidates
 
 
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in metres (haversine)."""
+    r = 6_371_000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _unavailable_listing_ids(
+    db: Session, listing_ids: list[str], move_in_from: date | None, move_in_to: date | None
+) -> set[str]:
+    """Section 5.1 availability: listings known to be taken for the requested
+    move-in window -- a pending/active occupancy still running on that date,
+    or a confirmed booking overlapping it. No dates requested -> none."""
+    if not move_in_from or not listing_ids:
+        return set()
+    from app.models.booking import Booking
+    from app.models.occupancy import Occupancy
+
+    window_end = move_in_to or (move_in_from + timedelta(days=30))
+    occupied = set(
+        db.scalars(
+            select(Occupancy.listing_id).where(
+                Occupancy.listing_id.in_(listing_ids),
+                Occupancy.status.in_(("PENDING_MOVE_IN", "ACTIVE")),
+                (Occupancy.expected_end_date.is_(None)) | (Occupancy.expected_end_date >= move_in_from),
+                (Occupancy.move_in_date.is_(None)) | (Occupancy.move_in_date <= window_end),
+            )
+        )
+    )
+    booked = set(
+        db.scalars(
+            select(Booking.listing_id).where(
+                Booking.listing_id.in_(listing_ids),
+                Booking.status == "confirmed",
+                Booking.check_in < window_end,
+                Booking.check_out > move_in_from,
+            )
+        )
+    )
+    return occupied | booked
+
+
 def _verified_room_ids(db: Session, room_ids: set[int]) -> set[int]:
     """Rooms with BOTH a currently valid property verification and a valid
     listing-authority record (Section 11.1 existence + authority). One query
@@ -690,6 +787,9 @@ def _partner_listings(
             ExternalOpportunity.source_id == source_id,
             ExternalOpportunity.discovered_by_user_id.is_(None),
             ExternalOpportunity.status.in_(("EXTERNAL_DISCOVERED", "OUTREACH_PENDING")),
+            # Section 4.1: once a lead is claimed into Zoiko inventory the
+            # internal canonical record always wins.
+            ExternalOpportunity.internal_listing_id.is_(None),
             ExternalOpportunity.approx_location.ilike(f"%{_like_escape(query.city.strip())}%", escape="\\"),
             ExternalOpportunity.discovered_at >= fresh_after,
         )
@@ -723,6 +823,22 @@ def _candidate_from_opportunity(opp: ExternalOpportunity) -> ExternalCandidate:
         currency=opp.advertised_price_currency,
         price_period=opp.price_period,
     )
+
+
+def _drop_internalised(db: Session, candidates: list[ExternalCandidate]) -> list[ExternalCandidate]:
+    """Section 4.1 dedupe: a source listing whose lead has been claimed into
+    Zoiko inventory is not shown again as an external card."""
+    if not candidates:
+        return candidates
+    claimed = set(
+        db.scalars(
+            select(ExternalOpportunity.dedupe_hash).where(
+                ExternalOpportunity.dedupe_hash.in_([c.dedupe_hash for c in candidates]),
+                ExternalOpportunity.internal_listing_id.is_not(None),
+            )
+        )
+    )
+    return [c for c in candidates if c.dedupe_hash not in claimed]
 
 
 def _card_from_candidate(cand: ExternalCandidate, rule: dict[str, Any], query: SearchQuery) -> ExternalCard:
@@ -774,6 +890,7 @@ def _opportunity_from_candidate(
     return ExternalOpportunity(
         external_opportunity_id=f"ext_{uuid4().hex[:12]}",
         source_id=cand.source_id,
+        market_code=normalize_country(cand.country),
         status="EXTERNAL_DISCOVERED",
         approx_location=approx_location,
         advertised_price_currency=cand.currency,
@@ -820,6 +937,7 @@ def persist_external_cards(
             opp = ExternalOpportunity(
                 external_opportunity_id=f"ext_{uuid4().hex[:12]}",
                 source_id=card.source_id,
+                market_code=normalize_country(card.location_country),
                 status="EXTERNAL_DISCOVERED",
                 approx_location=approx,
                 room_type=card.room_type or "PRIVATE_ROOM",
@@ -831,11 +949,33 @@ def persist_external_cards(
             db.flush()
         out.append(
             ExternalCardResult.model_validate(
-                # Section 7.3: the card carries its discovery timestamp.
-                {**card.model_dump(), "last_seen_at": opp.discovered_at, "opportunity_id": opp.id}
+                {
+                    **card.model_dump(),
+                    # Section 7.3: the card carries its discovery timestamp.
+                    "last_seen_at": opp.discovered_at,
+                    "opportunity_id": opp.id,
+                    **section_15_fields(card, opp.external_opportunity_id, opp.discovered_at),
+                }
             )
         )
     return out
+
+
+def section_15_fields(card: ExternalCard, external_opportunity_id: str | None, discovered_at: Any) -> dict[str, Any]:
+    """The Section 15.3 safe-schema fields for a card. Only values the card
+    itself may show (already permitted-field filtered) are used."""
+    area = ", ".join(p for p in (card.location_city, card.location_region) if p) or card.location_country
+    price = (
+        {"currency": card.currency, "amount_minor": int(card.rent_monthly) * 100, "period": "MONTH"}
+        if card.rent_monthly and card.currency
+        else None
+    )
+    return {
+        "external_opportunity_id": external_opportunity_id,
+        "approx_location": area,
+        "advertised_price": price,
+        "discovered_at": discovered_at,
+    }
 
 
 orchestrator = SearchOrchestrator()

@@ -344,8 +344,22 @@ def external_activated(db_session: Session) -> None:
     for tests that exercise external discovery and provider outreach."""
     from app.models.feature_flag import FeatureFlag
 
+    from app.models.external_search import ExternalMarketLegalPack
+
     for name in ("external.search_fallback", "external.provider_outreach"):
         db_session.add(FeatureFlag(name=name, value=True, note="test", enabled_by="test"))
+    # Section 13: an approved Market Legal Pack per test market.
+    for market in ("GB", "US", "IN", "AU"):
+        db_session.add(
+            ExternalMarketLegalPack(
+                market_code=market, version=1, status="ACTIVE",
+                legal_approved=True, privacy_approved=True, commercial_approved=True,
+                external_search_enabled=True, public_visitor_search_enabled=True,
+                public_fetch_enabled=True, provider_outreach_enabled=True,
+                permitted_outreach_channels=["EMAIL", "PLATFORM_MESSAGE"],
+                direct_contact_release_enabled=True,
+            )
+        )
     db_session.flush()
 
 

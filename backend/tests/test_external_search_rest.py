@@ -72,6 +72,7 @@ def _publish_listing(db, listing_id: str = "TST-1001", city: str = "Mumbai") -> 
 
 def _seed_opportunity(db, source_id: str = "s1", *, status: str = "EXTERNAL_DISCOVERED") -> ExternalOpportunity:
     opp = ExternalOpportunity(
+        market_code="GB",
         external_opportunity_id=f"ext_{source_id}",
         source_id=source_id,
         status=status,
@@ -92,7 +93,7 @@ def _seed_opportunity(db, source_id: str = "s1", *, status: str = "EXTERNAL_DISC
 
 
 def test_search_requires_user_auth(client, db_session):
-    assert client.post(SEARCH_URL, json={"city": "Atlantis"}).status_code == 401
+    assert client.post(SEARCH_URL, json={"city": "Atlantis", "country": "UK"}).status_code == 401
 
 
 def test_admin_queue_requires_admin_auth(client, db_session):
@@ -125,7 +126,7 @@ def test_search_external_fallback_masked(client, db_session):
     user = _make_user(db_session)
     registry._cache = {"demo_external": _rule("demo_external", fallback=True)}
 
-    res = client.post(SEARCH_URL, json={"city": "Atlantis"}, cookies=auth_user_cookie(user))
+    res = client.post(SEARCH_URL, json={"city": "Atlantis", "country": "UK"}, cookies=auth_user_cookie(user))
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["state"] == "EXTERNAL_DISCOVERED"
@@ -149,7 +150,7 @@ def test_search_internal_verified_wins(client, db_session):
     _publish_listing(db_session, city="Mumbai")
     registry._cache = {"demo_external": _rule("demo_external", fallback=True)}
 
-    res = client.post(SEARCH_URL, json={"city": "Mumbai"}, cookies=auth_user_cookie(user))
+    res = client.post(SEARCH_URL, json={"city": "Mumbai", "country": "UK"}, cookies=auth_user_cookie(user))
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["state"] == "INTERNAL_VERIFIED"
@@ -165,7 +166,7 @@ def test_search_blocked_when_no_eligible_external(client, db_session):
     user = _make_user(db_session)
     registry._cache = {"demo_external": _rule("demo_external", fallback=False)}
 
-    res = client.post(SEARCH_URL, json={"city": "Atlantis"}, cookies=auth_user_cookie(user))
+    res = client.post(SEARCH_URL, json={"city": "Atlantis", "country": "UK"}, cookies=auth_user_cookie(user))
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["state"] == "BLOCKED"
@@ -204,7 +205,7 @@ def test_search_internal_rows_carry_freshness_signal(client, db_session):
     user = _make_user(db_session)
     _publish_listing(db_session, city="Mumbai")
     res = client.post(
-        SEARCH_URL, json={"city": "Mumbai"}, cookies=auth_user_cookie(user)
+        SEARCH_URL, json={"city": "Mumbai", "country": "UK"}, cookies=auth_user_cookie(user)
     )
     assert res.status_code == 200, res.text
     row = res.json()["internal_results"][0]
@@ -230,7 +231,7 @@ def test_rate_limit_returns_429_after_window_exhausted(client, db_session):
         for _ in range(settings.external_search_rate_limit_max):
             assert external_search_limiter.allow(key) is True
         res = client.post(
-            SEARCH_URL, json={"city": "Atlantis"}, cookies=auth_user_cookie(user)
+            SEARCH_URL, json={"city": "Atlantis", "country": "UK"}, cookies=auth_user_cookie(user)
         )
         assert res.status_code == 429
         assert "rate limit" in res.json()["detail"].lower()
@@ -252,7 +253,7 @@ def test_rate_limit_is_per_actor(client, db_session):
             external_search_limiter.allow(f"external_search:search:{user_a.id}")
         # user B is unaffected by user A's budget.
         res = client.post(
-            SEARCH_URL, json={"city": "Atlantis"}, cookies=auth_user_cookie(user_b)
+            SEARCH_URL, json={"city": "Atlantis", "country": "UK"}, cookies=auth_user_cookie(user_b)
         )
         assert res.status_code == 200, res.text
     finally:

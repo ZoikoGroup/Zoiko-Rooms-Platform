@@ -41,6 +41,8 @@ from app.api.routes import (
     properties,
     public,
     public_assistant,
+    provider_portal,
+    public_room_search,
     rental_payment_returns,
     rental_payments,
     reviews,
@@ -98,6 +100,10 @@ async def _scheduler_loop() -> None:
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
+    if settings.is_production:
+        from app.services.search_protocol_config import assert_protocol_invariants
+
+        assert_protocol_invariants()  # ZR-AI-SEARCH-001 Appendix A
     task = asyncio.create_task(_scheduler_loop()) if settings.scheduler_enabled else None
     try:
         yield
@@ -181,6 +187,8 @@ app.include_router(settings_routes.router)
 app.include_router(admin_users.router)
 app.include_router(public.router)
 app.include_router(public_assistant.router)
+app.include_router(public_room_search.router)
+app.include_router(provider_portal.router)
 app.include_router(uploads.router)
 app.include_router(search.router)
 app.include_router(market_releases.router)
