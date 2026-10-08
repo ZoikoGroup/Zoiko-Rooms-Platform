@@ -686,6 +686,7 @@ def approve_sublet_request(
         condition_list=payload.condition_list if payload else None,
         authority_confirmed=payload.authority_confirmed if payload else False,
         step_up_password=payload.step_up_password if payload else "",
+        override_reason=payload.override_reason if payload else "",
     )
     log_audit_event(db, admin, "sublet_request.approve", "sublet_request", str(sublet_request_id), get_correlation_id(request))
     emit_event(

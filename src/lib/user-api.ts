@@ -710,13 +710,14 @@ export function approveHostedSubletRequest(
   subletRequestId: number,
   payload: {
     notes?: string; conditions?: string; expiresAt?: string | null; conditionList?: string[];
-    authorityConfirmed?: boolean; stepUpPassword?: string;
+    authorityConfirmed?: boolean; stepUpPassword?: string; overrideReason?: string;
   } = {}
 ): Promise<SubletRequest> {
   return apiClientFetch<SubletRequest>(`/api/users/hosting/sublet-requests/${subletRequestId}/approve`, {
     method: "POST",
     body: JSON.stringify({
-      notes: "", conditions: "", expiresAt: null, conditionList: [], authorityConfirmed: false, stepUpPassword: "", ...payload,
+      notes: "", conditions: "", expiresAt: null, conditionList: [], authorityConfirmed: false, stepUpPassword: "",
+      overrideReason: "", ...payload,
     }),
   });
 }

@@ -61,6 +61,12 @@ def to_sublet_request_read(db: Session, sr: SubletRequest) -> SubletRequestRead:
         if sr.proposed_renter_party_id is not None
         else None
     )
+    # While the request awaits a decision the reviewer sees the live risk
+    # (what approving now would record); afterwards, what was recorded.
+    if sr.status in DECIDABLE_SUBLET_REQUEST_STATUSES and occupancy is not None:
+        risk_tier, risk_reason = evaluate_sublet_overlap(db, sr)
+    else:
+        risk_tier, risk_reason = sr.occupant_risk_tier, sr.occupant_risk_reason
 
     return SubletRequestRead(
         id=sr.id,
@@ -96,6 +102,8 @@ def to_sublet_request_read(db: Session, sr: SubletRequest) -> SubletRequestRead:
         policy_snapshot=sr.policy_snapshot,
         new_agreement_id=sr.new_agreement_id,
         payee_model=sr.payee_model,
+        occupant_risk_tier=risk_tier,
+        occupant_risk_reason=risk_reason,
         listing_name=listing.name if listing else "",
         listing_city=listing.city if listing else "",
         room_type=listing.room_type if listing else "",
@@ -733,10 +741,50 @@ def _reassign_open_rent_to(db: Session, occupancy: Occupancy, guest_id: str) -> 
             obligation.tenant_guest_id = guest_id
 
 
+def evaluate_sublet_overlap(db: Session, sublet_request: SubletRequest) -> tuple[str, str]:
+    """ZR-ENG-CLR-001 Rule 6 / Section 9 for the incoming occupant: the same
+    risk tier crud/leasing.py:_accept_offer_and_hold_room computes when an
+    offer is accepted, so taking a tenancy over by sublet can't skip the
+    check an ordinary application gets. The window is what they'd actually
+    occupy -- the proposed dates, else from today to the end of the current
+    tenancy. ADDITIONAL_OCCUPANT creates no tenancy, so never overlaps.
+    Read-only: safe to call while just displaying a pending request."""
+    if sublet_request.arrangement_type in NO_TENANCY_ARRANGEMENT_TYPES or sublet_request.proposed_renter_party_id is None:
+        return "NONE", ""
+    occupancy = sublet_request.current_occupancy
+    user = db.scalar(
+        select(UserAccount)
+        .where(UserAccount.party_id == sublet_request.proposed_renter_party_id, UserAccount.is_active.is_(True))
+        .order_by(UserAccount.id)
+    )
+    if user is None:
+        return "NONE", ""
+    guest = db.scalar(select(Guest).where(Guest.user_account_id == user.id)) or db.scalar(
+        select(Guest).where(Guest.email == user.email, Guest.user_account_id.is_(None))
+    )
+    if guest is None:
+        return "NONE", ""  # never rented anything, so nothing to overlap with
+
+    start = sublet_request.proposed_start_date or date.today()
+    end = sublet_request.proposed_end_date or occupancy.expected_end_date
+    if end is None and occupancy.offer is not None and occupancy.offer.terms:
+        terms = occupancy.offer.terms[-1]
+        end = _add_months(terms.start_date, terms.term_months)
+    if end is None or end <= start:
+        return "NONE", ""
+
+    from app.services.overlap import evaluate_occupant_overlap
+
+    return evaluate_occupant_overlap(
+        db, occupant_guest_id=guest.id, listing_id=occupancy.listing_id, start_date=start, end_date=end,
+    )
+
+
 def approve_sublet_request(
     db: Session, sublet_request: SubletRequest, actor: "AdminUser | UserAccount", notes: str = "",
     conditions: str = "", expires_at: datetime | None = None,
     condition_list: list[str] | None = None, authority_confirmed: bool = False, step_up_password: str = "",
+    override_reason: str = "",
 ) -> SubletRequest:
     """The verified Host approves a sublet request (or, exceptionally, a super
     admin acting as a legal-ops override -- see _assert_can_decide_sublet).
@@ -753,7 +801,10 @@ def approve_sublet_request(
     only when approving a REPLACING_ARRANGEMENT_TYPES request, the one real
     "risk signal" already in this taxonomy: an irreversible full handover of
     the tenancy, unlike a lower-stakes co-tenancy/additional-occupant
-    approval."""
+    approval.
+    override_reason: only consulted when the incoming occupant's overlap
+    check (evaluate_sublet_overlap) comes back BLOCK -- the approver's
+    recorded exception, exactly like user_accept_offer's own."""
     _assert_can_decide_sublet(db, sublet_request, actor)
     if expires_at is not None and expires_at <= datetime.now(timezone.utc):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Approval expiry must be in the future")
@@ -765,6 +816,17 @@ def approve_sublet_request(
     if not verify_sublet_identity(db, sublet_request):
         raise HTTPException(status.HTTP_409_CONFLICT, "Proposed renter no longer has an approved identity verification")
     _assert_sublet_permitted(db, sublet_request.current_occupancy)
+
+    risk_tier, risk_reason = evaluate_sublet_overlap(db, sublet_request)
+    if risk_tier == "BLOCK" and not override_reason.strip():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"message": "The proposed renter already has an overlapping tenancy elsewhere", "reason": risk_reason},
+        )
+    sublet_request.occupant_risk_tier = risk_tier
+    sublet_request.occupant_risk_reason = (
+        f"{risk_reason} (approved with override: {override_reason.strip()})" if risk_tier == "BLOCK" else risk_reason
+    )[:500]
 
     listing = sublet_request.current_occupancy.listing
     proposed_guest = _guest_for_proposed_party(db, sublet_request.proposed_renter_party_id)
@@ -813,6 +875,8 @@ def approve_sublet_request(
             recipient_party_id=recipient_party_id,
         )
         sublet_request.new_agreement_id = new_agreement.id
+        new_agreement.offer.occupant_risk_tier = sublet_request.occupant_risk_tier
+        new_agreement.offer.occupant_risk_reason = sublet_request.occupant_risk_reason
         # Both tenants remain fully active and liable -- adding a co-tenant
         # doesn't release the original renter of anything. A licensee/lodger
         # has no tenancy rights (Section 3's canonical meaning), unlike a true
@@ -853,6 +917,8 @@ def approve_sublet_request(
             # keeps authorizing the released original renter instead of the
             # assignee who actually now holds the tenancy.
             sublet_request.current_occupancy.offer.guest_id = proposed_guest.id
+            sublet_request.current_occupancy.offer.occupant_risk_tier = sublet_request.occupant_risk_tier
+            sublet_request.current_occupancy.offer.occupant_risk_reason = sublet_request.occupant_risk_reason
             # The released renter owes nothing more -- rent that's open and
             # untouched (nothing recorded on it yet) now belongs to the assignee.
             _reassign_open_rent_to(db, sublet_request.current_occupancy, proposed_guest.id)

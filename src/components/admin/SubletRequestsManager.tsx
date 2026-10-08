@@ -28,6 +28,7 @@ export function SubletRequestsManager() {
   const [rejectReasonCode, setRejectReasonCode] = useState("");
   const [approveTarget, setApproveTarget] = useState<SubletRequest | null>(null);
   const [approveStepUpPassword, setApproveStepUpPassword] = useState("");
+  const [approveOverrideReason, setApproveOverrideReason] = useState("");
   const [toast, setToast] = useState("");
 
   function showToast(message: string) {
@@ -60,12 +61,18 @@ export function SubletRequestsManager() {
     return (REPLACING_ARRANGEMENT_TYPES as readonly string[]).includes(request.arrangementType);
   }
 
-  async function approve(request: SubletRequest, stepUpPassword = "") {
+  // The incoming occupant already holds a tenancy covering nearly the same
+  // period -- the backend refuses approval without a recorded reason.
+  function requiresOverride(request: SubletRequest): boolean {
+    return request.occupantRiskTier === "BLOCK";
+  }
+
+  async function approve(request: SubletRequest, stepUpPassword = "", overrideReason = "") {
     setBusyId(request.id);
     try {
       await apiClientFetch<SubletRequest>(`/api/occupancy/sublet-requests/${request.id}/approve`, {
         method: "POST",
-        body: JSON.stringify({ notes: "", stepUpPassword }),
+        body: JSON.stringify({ notes: "", stepUpPassword, overrideReason }),
       });
       showToast("Sublet request approved — occupancy transferred");
       setApproveTarget(null);
@@ -80,9 +87,10 @@ export function SubletRequestsManager() {
   }
 
   function handleApproveClick(request: SubletRequest) {
-    if (requiresStepUp(request)) {
+    if (requiresStepUp(request) || requiresOverride(request)) {
       setApproveTarget(request);
       setApproveStepUpPassword("");
+      setApproveOverrideReason("");
       return;
     }
     approve(request);
@@ -159,6 +167,15 @@ export function SubletRequestsManager() {
                   <span>Requested {formatDate(request.createdAt)}</span>
                   {request.authorityEvidenceRef && <span>Evidence ref: {request.authorityEvidenceRef}</span>}
                 </p>
+                {request.occupantRiskTier !== "NONE" && (
+                  <p
+                    className={`mt-1 text-xs font-medium ${
+                      request.occupantRiskTier === "BLOCK" ? "text-red-600 dark:text-red-400" : "text-amber-700 dark:text-amber-300"
+                    }`}
+                  >
+                    Occupant overlap {request.occupantRiskTier}: {request.occupantRiskReason}
+                  </p>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <Badge tone={subletRequestStatusTone[request.status] ?? "neutral"}>
@@ -223,20 +240,39 @@ export function SubletRequestsManager() {
 
       <Modal open={Boolean(approveTarget)} onClose={() => setApproveTarget(null)} title="Confirm approval">
         <div className="space-y-3.5">
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            This hands the tenancy over to a new occupant and can&apos;t be undone — re-enter your admin password to
-            confirm (ZR-SUB-003 Section 10 step-up authentication).
-          </p>
-          <input
-            type="password"
-            autoComplete="off"
-            data-1p-ignore
-            data-lpignore="true"
-            value={approveStepUpPassword}
-            onChange={(e) => setApproveStepUpPassword(e.target.value)}
-            placeholder="Your admin password"
-            className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-          />
+          {approveTarget && requiresOverride(approveTarget) && (
+            <>
+              <p className="text-sm text-red-600 dark:text-red-400">
+                The proposed renter already has a tenancy elsewhere covering nearly the same period (
+                {approveTarget.occupantRiskReason}). Record why approving anyway is acceptable.
+              </p>
+              <textarea
+                value={approveOverrideReason}
+                onChange={(e) => setApproveOverrideReason(e.target.value)}
+                rows={2}
+                placeholder="Override reason"
+                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              />
+            </>
+          )}
+          {approveTarget && requiresStepUp(approveTarget) && (
+            <>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                This hands the tenancy over to a new occupant and can&apos;t be undone — re-enter your admin password
+                to confirm (ZR-SUB-003 Section 10 step-up authentication).
+              </p>
+              <input
+                type="password"
+                autoComplete="off"
+                data-1p-ignore
+                data-lpignore="true"
+                value={approveStepUpPassword}
+                onChange={(e) => setApproveStepUpPassword(e.target.value)}
+                placeholder="Your admin password"
+                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              />
+            </>
+          )}
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setApproveTarget(null)}>
               Cancel
@@ -244,8 +280,12 @@ export function SubletRequestsManager() {
             <Button
               variant="primary"
               loading={busyId === approveTarget?.id}
-              disabled={!approveStepUpPassword}
-              onClick={() => approveTarget && approve(approveTarget, approveStepUpPassword)}
+              disabled={
+                !approveTarget ||
+                (requiresStepUp(approveTarget) && !approveStepUpPassword) ||
+                (requiresOverride(approveTarget) && !approveOverrideReason.trim())
+              }
+              onClick={() => approveTarget && approve(approveTarget, approveStepUpPassword, approveOverrideReason.trim())}
             >
               Approve request
             </Button>

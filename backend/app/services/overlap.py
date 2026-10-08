@@ -60,14 +60,17 @@ def evaluate_occupant_overlap(
     occupant_guest_id: str,
     listing_id: str,
     start_date: date,
-    term_months: int,
+    term_months: int = 0,
+    end_date: date | None = None,
     exclude_offer_id: int | None = None,
 ) -> tuple[str, str]:
-    """Compares [start_date, start_date + term_months) against every other
-    live Offer's interval already committed to this same occupant on a
-    DIFFERENT listing. Returns (tier, reason) -- reason is a short,
-    human-readable audit note, blank only when tier == 'NONE'."""
-    requested_end = _add_months(start_date, term_months)
+    """Compares [start_date, start_date + term_months) -- or [start_date,
+    end_date) when end_date is given, e.g. a sublet taking over the rest of
+    an existing tenancy -- against every other live Offer's interval already
+    committed to this same occupant on a DIFFERENT listing. Returns (tier,
+    reason) -- reason is a short, human-readable audit note, blank only when
+    tier == 'NONE'."""
+    requested_end = end_date if end_date is not None else _add_months(start_date, term_months)
 
     candidate_offers = db.scalars(
         select(Offer)
@@ -77,7 +80,12 @@ def evaluate_occupant_overlap(
             (Application.named_occupant_guest_id == occupant_guest_id)
             | (
                 (Application.named_occupant_guest_id.is_(None))
-                & (Application.guest_id == occupant_guest_id)
+                # Offer.guest_id, not Application.guest_id: the two are equal
+                # until a sublet ASSIGNMENT_FULL hands the offer to the
+                # assignee (crud/sublet.py:approve_sublet_request) -- from
+                # then on the assignee holds this tenancy, not the released
+                # original applicant.
+                & (Offer.guest_id == occupant_guest_id)
             ),
         )
     ).all()
