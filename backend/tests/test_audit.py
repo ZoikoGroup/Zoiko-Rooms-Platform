@@ -21,7 +21,9 @@ def _events(db, *, action=None, resource_id=None):
     if action:
         q = q.where(AuditEvent.action == action)
     if resource_id:
-        q = q.where(AuditEvent.resource_id == resource_id)
+        # Search rows are keyed by query_id; the caller's correlation id ties
+        # them to the request.
+        q = q.where(AuditEvent.correlation_id == resource_id)
     return list(db.execute(q).scalars())
 
 
@@ -69,12 +71,15 @@ class TestSearchAudited:
     def test_fallback_search_audited_discovered(self, db_session):
         _seed_rule(db_session)
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(q="en-suite room", city="London"), correlation_id="c-1"
+            db_session, SearchQuery(q="en-suite room", city="London", country="United Kingdom"), correlation_id="c-1"
         )
         assert result.discovery.state == "EXTERNAL_DISCOVERED"
         events = _events(db_session, action="search_external.discovered", resource_id="c-1")
         assert len(events) == 1
-        assert events[0].reason == "external_discovered:1"
+        # SRCH-15: route, disclosure version, actor and market are all recorded.
+        reason = events[0].reason
+        assert reason.startswith("external_discovered:1;disclosure=ZR-AI-SEARCH-001/1.0:7.2")
+        assert "actor=system" in reason and "market=GB" in reason
 
     def test_internal_waterfall_audited(self, db_session):
         from app.models.listing import Listing
@@ -90,17 +95,19 @@ class TestSearchAudited:
         )
         db_session.flush()
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(q="en-suite room", city="London"), correlation_id="c-2"
+            db_session, SearchQuery(q="en-suite room", city="London", country="United Kingdom"), correlation_id="c-2"
         )
         assert result.discovery.state == "INTERNAL_VERIFIED"
         events = _events(db_session, action="search_external.waterfall", resource_id="c-2")
         assert len(events) == 1
-        assert events[0].reason == "internal_verified"
+        reason = events[0].reason
+        assert reason.startswith("internal_only:1;disclosure=ZR-AI-SEARCH-001/1.0:7.1")
+        assert "actor=system" in reason and "market=GB" in reason
 
     def test_fair_housing_block_audited(self, db_session):
         _seed_rule(db_session)
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(q="christian only", city="London"), correlation_id="c-3"
+            db_session, SearchQuery(q="christian only", city="London", country="United Kingdom"), correlation_id="c-3"
         )
         assert result.discovery.state == "BLOCKED"
         events = _events(db_session, action="search_external.fair_housing_blocked", resource_id="c-3")

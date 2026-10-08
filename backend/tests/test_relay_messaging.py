@@ -47,6 +47,7 @@ def _rule(source_id="s1"):
 
 def _seed_opportunity(db, *, source_id="s1", status="EXTERNAL_DISCOVERED"):
     opp = ExternalOpportunity(
+        market_code="GB",
         external_opportunity_id=f"opp-{source_id}",
         source_id=source_id,
         status=status,

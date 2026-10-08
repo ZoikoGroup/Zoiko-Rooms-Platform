@@ -96,7 +96,7 @@ class TestWaterfall:
         _seed_listing(db_session)
 
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(q="en-suite room", city="London")
+            db_session, SearchQuery(q="en-suite room", city="London", country="United Kingdom")
         )
         assert result.discovery.state == "INTERNAL_VERIFIED"
         assert result.discovery.fallback_triggered is False
@@ -107,13 +107,13 @@ class TestWaterfall:
         _seed_rule(db_session)
 
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(q="en-suite room", city="London")
+            db_session, SearchQuery(q="en-suite room", city="London", country="United Kingdom")
         )
         assert result.discovery.state == "EXTERNAL_DISCOVERED"
         assert result.discovery.fallback_triggered is True
         assert len(result.discovery.external_matches) == 1
         match = result.discovery.external_matches[0]
-        assert match.verification_status == "unverified"
+        assert match.verification_status == "NOT_VERIFIED_BY_ZOIKO_ROOMS"
         assert match.is_unlocked is False
 
     def test_internal_without_city_match_triggers_fallback(self, db_session):
@@ -123,7 +123,7 @@ class TestWaterfall:
         _seed_listing(db_session, slug="listed-2", city="Manchester", name="Bright En-suite Room")
 
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(q="en-suite room", city="London")
+            db_session, SearchQuery(q="en-suite room", city="London", country="United Kingdom")
         )
         assert result.discovery.internal_matches == 0
         assert result.discovery.fallback_triggered is True
@@ -144,7 +144,7 @@ class TestFairHousing:
     def test_protected_characteristic_blocks(self, db_session, q):
         _seed_rule(db_session)
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(q=q, city="London")
+            db_session, SearchQuery(q=q, city="London", country="United Kingdom")
         )
         assert result.discovery.state == "BLOCKED"
         assert result.discovery.external_matches == []
@@ -153,14 +153,14 @@ class TestFairHousing:
     def test_city_with_protected_class_blocks(self, db_session):
         _seed_rule(db_session)
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(q="room", city="Christian Quarter")
+            db_session, SearchQuery(q="room", city="Christian Quarter", country="United Kingdom")
         )
         assert result.discovery.state == "BLOCKED"
 
     def test_benign_query_passes_fair_housing(self, db_session):
         _seed_rule(db_session)
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(q="bright ensuite room", city="London")
+            db_session, SearchQuery(q="bright ensuite room", city="London", country="United Kingdom")
         )
         assert result.discovery.state == "EXTERNAL_DISCOVERED"
 
@@ -168,7 +168,7 @@ class TestFairHousing:
         _seed_rule(db_session)
         _seed_listing(db_session)
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(q="disabled only", city="London")
+            db_session, SearchQuery(q="disabled only", city="London", country="United Kingdom")
         )
         assert result.discovery.state == "BLOCKED"
 
@@ -198,7 +198,7 @@ class TestInternalQualifyingMatches:
         db_session.add(paused)
         db_session.flush()
 
-        result = SearchOrchestrator().search(db_session, SearchQuery(city="London"))
+        result = SearchOrchestrator().search(db_session, SearchQuery(city="London", country="United Kingdom"))
         assert result.discovery.state == "INTERNAL_VERIFIED"
         assert result.discovery.internal_matches == 1
         assert all(r["state"] == "PUBLISHED" for r in result.internal_results)
@@ -208,14 +208,14 @@ class TestInternalQualifyingMatches:
         _seed_listing(db_session, slug="suite-1", city="London")
         _seed_listing(db_session, slug="studio-1", city="London", room_type="studio")
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(city="London", room_type="ensuite")
+            db_session, SearchQuery(city="London", room_type="ensuite", country="United Kingdom")
         )
         assert result.discovery.state == "INTERNAL_VERIFIED"
         assert [r["id"] for r in result.internal_results] == ["suite-1"]
         assert all(r["roomType"].lower() == "ensuite" for r in result.internal_results)
 
         no_match = SearchOrchestrator().search(
-            db_session, SearchQuery(city="London", room_type="shared_house")
+            db_session, SearchQuery(city="London", room_type="shared_house", country="United Kingdom")
         )
         assert no_match.discovery.internal_matches == 0
         assert no_match.discovery.state == "EXTERNAL_DISCOVERED"
@@ -231,13 +231,13 @@ class TestInternalQualifyingMatches:
 
         hit = SearchOrchestrator().search(
             db_session,
-            SearchQuery(city="London", objective_filters=["Furnished", "WiFi"]),
+            SearchQuery(city="London", objective_filters=["Furnished", "WiFi"], country="United Kingdom"),
         )
         assert hit.discovery.internal_matches == 1
 
         miss = SearchOrchestrator().search(
             db_session,
-            SearchQuery(city="London", objective_filters=["Furnished", "Parking"]),
+            SearchQuery(city="London", objective_filters=["Furnished", "Parking"], country="United Kingdom"),
         )
         assert miss.discovery.internal_matches == 0
         assert miss.discovery.state == "EXTERNAL_DISCOVERED"
@@ -246,7 +246,7 @@ class TestInternalQualifyingMatches:
         _seed_rule(db_session)
         _seed_listing(db_session, slug="cheap-1", city="London", price=600)
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(city="London", max_price=700)
+            db_session, SearchQuery(city="London", max_price=700, country="United Kingdom")
         )
         assert result.discovery.internal_matches == 1
 
@@ -267,7 +267,7 @@ class TestInternalRanking:
         stale.availability_confirmed_at = datetime.now(timezone.utc) - timedelta(days=60)
         db_session.flush()
 
-        result = SearchOrchestrator().search(db_session, SearchQuery(city="London"))
+        result = SearchOrchestrator().search(db_session, SearchQuery(city="London", country="United Kingdom"))
         assert [r["id"] for r in result.internal_results] == ["fresh-1", "stale-1"]
         assert result.internal_results[0]["availabilityFreshStale"] is False
         assert result.internal_results[1]["availabilityFreshStale"] is True
@@ -281,7 +281,7 @@ class TestInternalRanking:
         _seed_listing(db_session, slug="unknown-1", city="London", name="Never Confirmed Room")
         db_session.flush()
 
-        result = SearchOrchestrator().search(db_session, SearchQuery(city="London"))
+        result = SearchOrchestrator().search(db_session, SearchQuery(city="London", country="United Kingdom"))
         assert [r["id"] for r in result.internal_results] == ["confirmed-1", "unknown-1"]
         assert result.internal_results[1]["availabilityConfirmedAt"] is None
         assert result.internal_results[1]["availabilityFreshStale"] is True
@@ -292,10 +292,10 @@ class TestInternalRanking:
         _seed_listing(db_session, slug="a-room", city="London")
         db_session.flush()
 
-        result = SearchOrchestrator().search(db_session, SearchQuery(city="London"))
+        result = SearchOrchestrator().search(db_session, SearchQuery(city="London", country="United Kingdom"))
         assert [r["id"] for r in result.internal_results] == ["a-room", "b-room"]
         # stable between calls -- never a random reshuffle of material ranking
-        again = SearchOrchestrator().search(db_session, SearchQuery(city="London"))
+        again = SearchOrchestrator().search(db_session, SearchQuery(city="London", country="United Kingdom"))
         assert [r["id"] for r in again.internal_results] == ["a-room", "b-room"]
 
     def test_confirm_availability_stamps_and_audits(self, db_session):

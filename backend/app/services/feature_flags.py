@@ -86,6 +86,13 @@ FLAG_REGISTRY: dict[str, FlagSpec] = {
         "(ZR-AI-SEARCH-001 Sections 9 and 13). Off until outreach channels, suppression "
         "and privacy notices are approved.",
     ),
+    "external.public_search_fallback": FlagSpec(
+        "external.public_search_fallback",
+        False,
+        "Let anonymous website visitors (POST /api/public/rooms/search) receive external "
+        "discovery results. Also needs external.search_fallback. Off by default so public "
+        "traffic cannot spend external search credits until enabled.",
+    ),
     "external.referral_billing": FlagSpec(
         "external.referral_billing",
         False,

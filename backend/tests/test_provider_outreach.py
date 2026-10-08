@@ -50,6 +50,7 @@ def _rule(source_id="s1", *, allow_direct_contact=True, channels=None, tier="B")
 def _seed_opportunity(db, *, source_id="s1", status="EXTERNAL_DISCOVERED",
                       verification_status="NOT_VERIFIED_BY_ZOIKO_ROOMS") -> ExternalOpportunity:
     opp = ExternalOpportunity(
+        market_code="GB",
         external_opportunity_id=f"opp-{source_id}",
         source_id=source_id,
         status=status,
@@ -93,7 +94,9 @@ class TestRequestIntro:
         po = outreach_service.request_intro(
             db_session, user_id=user.id, opportunity_id=opp.id
         )
-        assert po.channel == "SMS"
+        # The source allows SMS first, but the GB Legal Pack only permits EMAIL
+        # and PLATFORM_MESSAGE: the market decides (Section 9.1).
+        assert po.channel == "EMAIL"
 
     def test_unknown_source_blocks(self, db_session):
         user = _make_user(db_session)
@@ -135,10 +138,12 @@ class TestSendOutreach:
 
         assert po.outreach_status == "SENT"
         assert po.outreach_sent_at is not None
-        assert captured["body"] == render_provider_outreach(
-            provider_name=opp.provider_name, approx_location=opp.approx_location
-        )
-        assert captured["body"].startswith("Subject: Zoiko Rooms")
+        body = captured["body"]
+        assert body.startswith("Subject: Zoiko Rooms")
+        assert "a trading name of Zoiko Realty Group Inc." in body
+        assert "/provider/respond?token=" in body          # signed response link
+        assert "opt out here" in body and "action=opt-out" in body
+        assert render_provider_outreach is not None
         body_lower = captured["body"].lower()
         for phrase in FORBIDDEN_PHRASES:
             assert phrase.lower() not in body_lower

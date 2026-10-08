@@ -311,6 +311,11 @@ class Settings(BaseSettings):
     # as stale-unknown -- ranked after freshly-confirmed inventory (host
     # reconfirmation via confirm_availability refreshes the stamp).
     availability_freshness_days: int = 7
+    # Optional: a listing whose availability was last confirmed longer ago than
+    # this many days stops qualifying for search at all (0 = never; stale
+    # listings are then only ranked lower). Hosts get a reconfirmation reminder
+    # once availability_freshness_days has passed.
+    availability_stale_exclude_days: int = 0
 
     # Login brute-force throttling (attempts per window, per submitted email --
     # deliberately keyed pre-authentication, unlike chat's per-authenticated-actor
@@ -355,6 +360,13 @@ class Settings(BaseSettings):
     # client IP, fixed window (requests per IP per window).
     public_assistant_rate_limit_max: int = 10
     public_assistant_rate_limit_window_seconds: int = 60
+    # Anonymous room search for the marketing website (routes/public_room_search.py).
+    # Per visitor; the website's server identifies visitors with a hashed id and
+    # authenticates with PUBLIC_SEARCH_SERVICE_TOKEN. Empty token = only direct,
+    # per-IP calls are accepted.
+    public_room_search_rate_limit_max: int = 10
+    public_room_search_rate_limit_window_seconds: int = 60
+    public_search_service_token: str = ""
 
     # ZR-PAY-CFG-001 Section 9: Zoiko Rooms collects its own Listing Fee only.
     # Rent and deposits go directly from renter to the verified recipient;
@@ -414,7 +426,8 @@ class Settings(BaseSettings):
         return []
 
     @field_validator("veriff_api_key", "veriff_shared_secret", "google_maps_api_key", "mapbox_access_token",
-                     "here_api_key", mode="before")
+                     "here_api_key", "public_search_service_token", "parallel_api_key",
+                     "brave_search_api_key", "rentcast_api_key", "domain_api_key", mode="before")
     @classmethod
     def _strip_secret(cls, value):
         """Stray whitespace around a key (e.g. in .env) is never part of it;

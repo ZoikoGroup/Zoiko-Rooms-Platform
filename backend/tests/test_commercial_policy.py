@@ -66,10 +66,25 @@ class TestReferralBillingGate:
             db_session, market_code="GB", provider_type="LANDLORD"
         ) is None
 
-    def test_enabling_flag_enables_quote(self, db_session):
+    def test_market_pack_must_allow_fees(self, db_session):
         admin = _make_admin(db_session, role="super_admin")
         _seed_policy(db_session, billing_enabled=True)
         set_flag(db_session, admin, FEATURE_FLAG, True)
+        assert commercial_policy_service.charge_eligible(
+            db_session, market_code="GB", provider_type="LANDLORD"
+        ) is False
+
+    def test_enabling_flag_enables_quote(self, db_session):
+        from app.models.external_search import ExternalMarketLegalPack
+
+        admin = _make_admin(db_session, role="super_admin")
+        _seed_policy(db_session, billing_enabled=True)
+        set_flag(db_session, admin, FEATURE_FLAG, True)
+        db_session.add(ExternalMarketLegalPack(
+            market_code="GB", status="ACTIVE", legal_approved=True, privacy_approved=True,
+            commercial_approved=True, referral_fees_enabled=True,
+        ))
+        db_session.flush()
 
         assert commercial_policy_service.charge_eligible(
             db_session, market_code="GB", provider_type="LANDLORD"

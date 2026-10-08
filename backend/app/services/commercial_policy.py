@@ -50,6 +50,8 @@ class CommercialPolicyService:
                 ExternalCommercialPolicy.provider_type == provider_type,
                 ExternalCommercialPolicy.status == "ACTIVE",
                 ExternalCommercialPolicy.effective_from <= today,
+                # An expired policy never applies.
+                (ExternalCommercialPolicy.effective_to.is_(None)) | (ExternalCommercialPolicy.effective_to >= today),
             )
             .order_by(ExternalCommercialPolicy.effective_from.desc())
         )
@@ -68,9 +70,19 @@ class CommercialPolicyService:
         if not self.policy_enabled(db, market_code=market_code):
             self._audit(db, market_code, provider_type, "blocked", "feature_flag_off", correlation_id)
             return False
+        from app.services.market_legal_pack import referral_fees_allowed
+
+        # Section 13: referral/success fees need the market's Legal Pack too.
+        if not referral_fees_allowed(db, market_code):
+            self._audit(db, market_code, provider_type, "blocked", "market_pack_disallows_fees", correlation_id)
+            return False
         policy = self.resolve_policy(db, market_code=market_code, provider_type=provider_type)
         if policy is None or not policy.billing_enabled:
             self._audit(db, market_code, provider_type, "blocked", "billing_disabled_or_no_active_policy", correlation_id)
+            return False
+        # Section 10.2: never a percentage of rent / rent deduction.
+        if str(policy.fee_share_basis or "").upper() == "RENT":
+            self._audit(db, market_code, provider_type, "blocked", "rent_based_fee_prohibited", correlation_id)
             return False
         self._audit(db, market_code, provider_type, "eligible", "billing_enabled", correlation_id)
         return True

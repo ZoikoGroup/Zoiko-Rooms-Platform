@@ -1730,6 +1730,13 @@ def submit_rental_payment_instruction(
     the clear."""
     if method not in RENTAL_PAYMENT_INSTRUCTION_METHODS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"method must be one of {RENTAL_PAYMENT_INSTRUCTION_METHODS}")
+    # ZR-AI-SEARCH-001 SRCH-12: unverified external providers never receive
+    # Zoiko-issued payment instructions.
+    from app.services.provider_journey import payment_block_reason
+
+    blocked = payment_block_reason(db, party.id)
+    if blocked:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, blocked)
     recipient_name = recipient_name.strip()
     if not recipient_name:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Recipient name is required")

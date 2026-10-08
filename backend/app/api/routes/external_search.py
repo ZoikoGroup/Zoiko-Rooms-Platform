@@ -60,13 +60,17 @@ def _rate_limit_or_raise(
         )
 
 
-def _consent_record(message: str, consent_fields: list[str]) -> dict:
+def _consent_record(message: str, consent_fields: list[str], lead_details: dict[str, str] | None = None) -> dict:
     """What the renter explicitly agreed to share (Section 7.4), recorded with
-    the intro request before any outreach is dispatched."""
+    the intro request before any outreach is dispatched. Detail values are
+    kept only for consented fields; the message is scrubbed of contact data."""
+    from app.services.anti_circumvention import sanitizer
+
     return {
         "basis": "user_requested_contact",
-        "message": message,
+        "message": sanitizer.sanitize_text(message),
         "consent_fields": consent_fields,
+        "lead_details": {k: v for k, v in (lead_details or {}).items() if k in consent_fields},
         "at": datetime.now(_tz.utc).isoformat(),
     }
 
@@ -87,7 +91,7 @@ def external_search(
     query = SearchQuery(
         q=payload.q,
         city=payload.city,
-        country=payload.country,
+        country=payload.country or payload.market_code,
         min_price=payload.min_price,
         max_price=payload.max_price,
         move_in_from=payload.move_in_from,
@@ -96,6 +100,9 @@ def external_search(
         objective_filters=payload.objective_filters,
         limit_internal=payload.limit_internal,
         limit_external=payload.limit_external,
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+        radius_m=payload.radius_m,
     )
     result = orchestrator.search(db, query, correlation_id=correlation_id, actor_id=user.id)
     disc = result.discovery
@@ -113,9 +120,15 @@ def external_search(
 
     db.commit()
     return ExternalSearchRestResponse(
+        query_id=disc.query_id,
+        search_route=disc.search_route,
+        external_search_status=disc.external_search_status,
         state=disc.state.value,
         internal_matches=disc.internal_matches,
-        internal_results=result.internal_results,
+        # Ranking internals (_relevance, _trust, ...) never leave the server.
+        internal_results=[
+            {k: v for k, v in row.items() if not k.startswith("_")} for row in result.internal_results
+        ],
         external_matches=cards_out,
         fallback_triggered=disc.fallback_triggered,
         consent_required=disc.consent_required,
@@ -148,7 +161,7 @@ def request_provider_contact(
             db,
             user_id=user.id,
             opportunity_id=opportunity_id,
-            consent_fields=_consent_record(payload.message, payload.consent_fields),
+            consent_fields=_consent_record(payload.message, payload.consent_fields, payload.lead_details),
             correlation_id=get_correlation_id(request),
         )
     except PermissionError as exc:
@@ -378,3 +391,314 @@ def upsert_source_rights(
     db.commit()
     registry.invalidate()
     return {"source_id": source_id, "status": row.status, "active": registry.get(source_id) is not None}
+
+
+# ---------------------------------------------------------------------------
+# Renter: my requests, controlled introduction, release, reports, claim
+# (ZR-AI-SEARCH-001 Sections 9 and 11)
+# ---------------------------------------------------------------------------
+
+from typing import Literal as _Literal  # noqa: E402
+
+from pydantic import BaseModel as _BaseModel, ConfigDict as _ConfigDict, Field as _Field  # noqa: E402
+
+from app.models.external_search import ExternalMarketLegalPack  # noqa: E402
+from app.services import provider_journey as _journey  # noqa: E402
+
+
+class _MessageIn(_BaseModel):
+    model_config = _ConfigDict(extra="forbid")
+    body: str = _Field(..., min_length=1, max_length=5000)
+
+
+class _ReportIn(_BaseModel):
+    model_config = _ConfigDict(extra="forbid")
+    reason: _Literal["STALE", "INACCURATE", "SUSPICIOUS", "OTHER"]
+    note: str = _Field(default="", max_length=1000)
+
+
+class _ClaimIn(_BaseModel):
+    model_config = _ConfigDict(extra="forbid")
+    token: str = _Field(..., min_length=10, max_length=400)
+
+
+def _my_outreach(db: Session, user: UserAccount, outreach_id: int) -> ProviderOutreach:
+    po = db.get(ProviderOutreach, outreach_id)
+    if po is None or po.requested_by_user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    return po
+
+
+@router.get("/requests")
+def my_requests(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
+    """The renter's contact requests: status, provider response, the
+    Zoiko-mediated thread and contact-release state."""
+    return _journey.renter_requests(db, user.id)
+
+
+@router.post("/requests/{outreach_id}/messages")
+def renter_message(
+    outreach_id: int, payload: _MessageIn,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+) -> dict:
+    po = _my_outreach(db, user, outreach_id)
+    try:
+        _journey.send_message(db, po, sender="RENTER", body=payload.body, user_id=user.id)
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    db.commit()
+    return _journey.renter_request_view(db, po)
+
+
+@router.post("/requests/{outreach_id}/release")
+def renter_release_consent(
+    outreach_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+) -> dict:
+    po = _my_outreach(db, user, outreach_id)
+    try:
+        _journey.consent_to_release(db, po, side="RENTER")
+    except PermissionError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    db.commit()
+    return _journey.renter_request_view(db, po)
+
+
+@router.post("/opportunities/{opportunity_id}/report")
+def report_opportunity(
+    opportunity_id: int, payload: _ReportIn, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+) -> dict:
+    """Section 16: a renter reports a stale, inaccurate or suspicious lead."""
+    from app.models.external_search import ExternalOpportunityReport
+
+    opp = db.get(ExternalOpportunity, opportunity_id)
+    if opp is None or (opp.discovered_by_user_id not in (None, user.id)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Opportunity not found")
+    _rate_limit_or_raise(request, user.id, resource="report")
+    row = ExternalOpportunityReport(opportunity_id=opp.id, reporter_user_id=user.id,
+                                    reason=payload.reason, note=payload.note.strip())
+    db.add(row)
+    db.flush()
+    log_external_search_event(
+        db, action="external_opportunity.reported", resource_type="external_opportunity",
+        resource_id=str(opp.id), correlation_id=get_correlation_id(request),
+        reason=f"user:{user.id};reason={payload.reason}",
+    )
+    db.commit()
+    return {"reported": True}
+
+
+@router.post("/claim")
+def claim_room(
+    payload: _ClaimIn, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+) -> dict:
+    """Claim & List: a provider who accepted signs in and claims the room; a
+    DRAFT listing they own is created for the standard checks and Listing Fee."""
+    try:
+        po = db.get(ProviderOutreach, _journey.read_provider_token(payload.token))
+    except PermissionError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc))
+    if po is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    try:
+        listing = _journey.claim(db, po, user, correlation_id=get_correlation_id(request))
+    except PermissionError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    db.commit()
+    return {"listing_id": listing.id, "slug": listing.slug, "state": listing.state}
+
+
+# ---------------------------------------------------------------------------
+# Admin: market legal packs, suppression, verification domains, takedowns
+# ---------------------------------------------------------------------------
+
+class _MarketPackIn(_BaseModel):
+    model_config = _ConfigDict(extra="forbid")
+    status: _Literal["DRAFT", "ACTIVE", "SUSPENDED"] = "DRAFT"
+    legal_approved: bool = False
+    privacy_approved: bool = False
+    commercial_approved: bool = False
+    external_search_enabled: bool = False
+    public_visitor_search_enabled: bool = False
+    public_fetch_enabled: bool = False
+    provider_outreach_enabled: bool = False
+    permitted_outreach_channels: list[_Literal["EMAIL", "SMS", "PLATFORM_MESSAGE", "TELEPHONE"]] = _Field(default_factory=list)
+    direct_contact_release_enabled: bool = False
+    referral_fees_enabled: bool = False
+    sensitive_filters_enabled: bool = False
+    prohibited_search_terms: list[str] = _Field(default_factory=list, max_length=200)
+    lawful_basis_note: str = _Field(default="", max_length=5000)
+    privacy_notice_url: str | None = _Field(default=None, max_length=500, pattern=r"^https://")
+    sender_legal_entity: str = _Field(default="Zoiko Realty Group Inc.", min_length=2, max_length=200)
+    lead_protection_days: int | None = _Field(default=None, ge=0, le=730)
+    terms_version: str = _Field(default="1", min_length=1, max_length=40)
+
+
+@admin_router.get("/market-packs", dependencies=[Depends(require_super_admin)])
+def list_market_packs(db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.scalars(select(ExternalMarketLegalPack).order_by(
+        ExternalMarketLegalPack.market_code, ExternalMarketLegalPack.version.desc())).all()
+    return [{c.name: getattr(r, c.name) for c in ExternalMarketLegalPack.__table__.columns} for r in rows]
+
+
+@admin_router.put("/market-packs/{market_code}", dependencies=[Depends(require_super_admin)])
+def publish_market_pack(
+    market_code: str, payload: _MarketPackIn, request: Request,
+    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+) -> dict:
+    """Section 13: every change is a NEW version (history is kept). An ACTIVE
+    pack needs Legal, Privacy and Commercial approval; referral fees stay off
+    until the payment specification is amended (ZR-PAY-CFG-001)."""
+    from sqlalchemy import func as _func
+
+    from app.services.external_providers import normalize_country
+
+    market = normalize_country(market_code)
+    if not market:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown market code")
+    if payload.status == "ACTIVE" and not (payload.legal_approved and payload.privacy_approved and payload.commercial_approved):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "An ACTIVE pack needs Legal, Privacy and Commercial approval")
+    if payload.referral_fees_enabled:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Referral fees stay disabled until the payment configuration (ZR-PAY-CFG-001) is formally amended",
+        )
+    version = (db.scalar(select(_func.max(ExternalMarketLegalPack.version)).where(
+        ExternalMarketLegalPack.market_code == market)) or 0) + 1
+    approved = payload.status == "ACTIVE"
+    fields = payload.model_dump()
+    fields["prohibited_search_terms"] = [t.strip().lower() for t in payload.prohibited_search_terms if t.strip()]
+    pack = ExternalMarketLegalPack(
+        market_code=market, version=version,
+        approved_by=(admin.email or f"admin:{admin.id}") if approved else None,
+        approved_at=datetime.now(_tz.utc) if approved else None,
+        **fields,
+    )
+    db.add(pack)
+    db.flush()
+    log_external_search_event(
+        db, action="market_pack.published", resource_type="external_market_legal_pack", resource_id=f"{market}:v{version}",
+        correlation_id=get_correlation_id(request), reason=f"admin:{admin.id};status={payload.status}",
+    )
+    db.commit()
+    return {"market_code": market, "version": version, "status": pack.status}
+
+
+class _SuppressIn(_BaseModel):
+    model_config = _ConfigDict(extra="forbid")
+    contact: str | None = _Field(default=None, max_length=320)
+    source_id: str | None = _Field(default=None, max_length=100)
+    note: str = _Field(default="", max_length=500)
+
+
+@admin_router.post("/suppressions")
+def add_suppression(
+    payload: _SuppressIn, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+) -> dict:
+    """Record an opt-out received outside the link (email reply, phone call)."""
+    row = _journey.suppress(db, contact=payload.contact, source_id=payload.source_id,
+                            reason="OPT_OUT", note=payload.note, created_by=f"admin:{admin.id}")
+    if row is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Give a contact or a source_id")
+    db.commit()
+    return {"suppressed": True, "id": row.id}
+
+
+class _EvidenceIn(_BaseModel):
+    model_config = _ConfigDict(extra="forbid")
+    evidence: str = _Field(..., min_length=3, max_length=2000)
+
+
+def _opportunity_or_404(db: Session, opportunity_id: int) -> ExternalOpportunity:
+    opp = db.get(ExternalOpportunity, opportunity_id)
+    if opp is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Opportunity not found")
+    return opp
+
+
+@admin_router.post("/opportunities/{opportunity_id}/payment-authority", dependencies=[Depends(require_super_admin)])
+def record_payment_authority(opportunity_id: int, request: Request, db: Session = Depends(get_db)) -> dict:
+    """Section 11.1: the separate authority to receive payment (checked by an
+    operator); payment instructions stay blocked until it is recorded."""
+    opp = _opportunity_or_404(db, opportunity_id)
+    try:
+        outreach_service.record_payment_receipt_authority(db, opp, correlation_id=get_correlation_id(request))
+    except PermissionError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    db.commit()
+    return {"payment_receipt_authority_verified": True}
+
+
+@admin_router.post("/opportunities/{opportunity_id}/sublet-permission", dependencies=[Depends(require_super_admin)])
+def record_sublet_permission(
+    opportunity_id: int, payload: _EvidenceIn, request: Request, db: Session = Depends(get_db),
+) -> dict:
+    opp = _opportunity_or_404(db, opportunity_id)
+    try:
+        outreach_service.record_sublet_permission(db, opp, evidence=payload.evidence,
+                                                  correlation_id=get_correlation_id(request))
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    db.commit()
+    return {"sublet_permission_verified": True}
+
+
+class _TakedownIn(_BaseModel):
+    model_config = _ConfigDict(extra="forbid")
+    note: str = _Field(..., min_length=3, max_length=1000)
+
+
+@admin_router.post("/registry/{source_id}/takedown", dependencies=[Depends(require_super_admin)])
+def source_takedown(
+    source_id: str, payload: _TakedownIn, request: Request,
+    admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
+) -> dict:
+    """Section 16 source takedown/complaint: suspend the source at once and
+    withdraw its unrequested leads."""
+    row = db.scalar(select(SourceRightRegistry).where(SourceRightRegistry.source_id == source_id))
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Source not found")
+    row.status = "SUSPENDED"
+    withdrawn = 0
+    for opp in db.scalars(select(ExternalOpportunity).where(
+        ExternalOpportunity.source_id == source_id, ExternalOpportunity.status == "EXTERNAL_DISCOVERED")):
+        opp.status = "BLOCKED"
+        withdrawn += 1
+    log_external_search_event(
+        db, action="source.takedown", resource_type="source_right_registry", resource_id=source_id,
+        correlation_id=get_correlation_id(request),
+        reason=f"admin:{admin.id};withdrawn={withdrawn};note={payload.note[:200]}",
+    )
+    db.commit()
+    registry.invalidate()
+    return {"source_id": source_id, "status": "SUSPENDED", "withdrawn_leads": withdrawn}
+
+
+@router.post("/listings/{listing_id}/confirm-availability")
+def confirm_listing_availability(
+    listing_id: str, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+) -> dict:
+    """Section 5.1 freshness: the host reconfirms their published listing is
+    still available; recently confirmed listings rank higher in search."""
+    from app.models.listing import Listing
+
+    listing = db.get(Listing, listing_id)
+    if listing is None or not user.party_id or listing.party_id != user.party_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Listing not found")
+    try:
+        orchestrator.confirm_availability(db, listing_id, confirmed_by_party_id=user.party_id,
+                                          correlation_id=get_correlation_id(request))
+    except PermissionError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    db.commit()
+    return {"listing_id": listing_id, "availability_confirmed_at": listing.availability_confirmed_at.isoformat()}
+
+
+@admin_router.get("/protocol-config", dependencies=[Depends(require_super_admin)])
+def protocol_config() -> dict:
+    """Appendix A minimum production configuration, as enforced."""
+    from app.services.search_protocol_config import effective_protocol_config
+
+    return effective_protocol_config()

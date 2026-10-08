@@ -60,9 +60,10 @@ class ExternalCard(BaseModel):
     has_email: bool = Field(default=False)
     has_url: bool = Field(default=False)
 
-    verification_status: Literal["unverified", "pending_consent", "consented", "blocked"] = Field(
-        default="unverified"
-    )
+    # Section 15.3: the exact label every external card carries.
+    verification_status: Literal[
+        "NOT_VERIFIED_BY_ZOIKO_ROOMS", "unverified", "pending_consent", "consented", "blocked"
+    ] = Field(default="NOT_VERIFIED_BY_ZOIKO_ROOMS")
     is_unlocked: bool = Field(default=False)
 
 
@@ -80,6 +81,14 @@ class ExternalCardResult(ExternalCard):
 
     opportunity_id: int | None = Field(default=None, ge=1)
 
+    # Section 15.3 safe-schema fields (alongside the fields above).
+    external_opportunity_id: str | None = Field(default=None, max_length=100)
+    status: Literal["EXTERNAL_DISCOVERED"] = "EXTERNAL_DISCOVERED"
+    approx_location: str | None = Field(default=None, max_length=300)
+    advertised_price: dict[str, Any] | None = None
+    discovered_at: datetime | None = None
+    primary_cta: Literal["REQUEST_ZOIKO_CONTACT"] = "REQUEST_ZOIKO_CONTACT"
+
 
 class ExternalDiscoveryResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -94,6 +103,10 @@ class ExternalDiscoveryResult(BaseModel):
     )
     guardrail_notes: list[str] = Field(default_factory=list)
     audit_id: str | None = Field(default=None)
+    # Section 15.2 / 15.3 envelope.
+    query_id: str | None = Field(default=None)
+    search_route: Literal["INTERNAL_ONLY", "EXTERNAL_FALLBACK", "NONE"] | None = None
+    external_search_status: str | None = None
 
 
 class ProviderContactRequest(BaseModel):
@@ -107,11 +120,19 @@ class ProviderContactRequest(BaseModel):
     consent_fields: list[str] = Field(
         default_factory=lambda: ["desired_area", "move_in_window", "budget_band", "room_type"]
     )
+    # Section 7.4: the user must have confirmed what will be shared.
+    user_confirmed_sharing: bool = False
+    lead_details: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("consent_fields")
     @classmethod
     def _lead_summary_only(cls, v: list[str]) -> list[str]:
         return sorted(set(v) & LEAD_SUMMARY_FIELDS) or ["desired_area"]
+
+    @field_validator("lead_details")
+    @classmethod
+    def _short_lead_details(cls, v: dict[str, str]) -> dict[str, str]:
+        return {k: " ".join(str(val).split())[:120] for k, val in v.items() if k in LEAD_SUMMARY_FIELDS and str(val).strip()}
 
 
 class ProviderOutreachCreate(BaseModel):
@@ -156,6 +177,11 @@ class ExternalSearchRestRequest(BaseModel):
     move_in_to: date | None = None
     room_type: str | None = Field(default=None, max_length=60)
     objective_filters: list[str] = Field(default_factory=list, max_length=50)
+    # Section 15.1: market and an optional search radius around a point.
+    market_code: str | None = Field(default=None, min_length=2, max_length=2)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    radius_m: int | None = Field(default=None, ge=100, le=100_000)
     # ge=1: a zero limit would hide internal matches and wrongly open the
     # external fallback (SRCH-01).
     limit_internal: int = Field(default=20, ge=1, le=100)
@@ -165,6 +191,9 @@ class ExternalSearchRestRequest(BaseModel):
 class ExternalSearchRestResponse(BaseModel):
     """Safe search response -- internal rows plus masked external cards only."""
 
+    query_id: str | None = None
+    search_route: str | None = None
+    external_search_status: str | None = None
     state: str
     internal_matches: int = 0
     internal_results: list[dict[str, Any]] = Field(default_factory=list)
@@ -191,6 +220,22 @@ class ExternalContactRestRequest(BaseModel):
 
     message: str = Field(..., min_length=1, max_length=2000)
     consent_fields: list[str] = Field(..., min_length=1, max_length=len(LEAD_SUMMARY_FIELDS))
+    # Optional values for consented lead-summary fields (e.g. move_in_window
+    # "from mid-November", budget_band "GBP 800-1000"). Only keys the renter
+    # consented to share are kept.
+    lead_details: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("lead_details")
+    @classmethod
+    def _short_lead_details(cls, v: dict[str, str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for key, value in v.items():
+            if key not in LEAD_SUMMARY_FIELDS:
+                raise ValueError(f"unknown lead detail: {key}")
+            text = " ".join(str(value).split())[:120]
+            if text:
+                out[key] = text
+        return out
 
     @field_validator("consent_fields")
     @classmethod

@@ -107,7 +107,7 @@ class TestInternalFirstWaterfall:
         registry._cache = {"s1": _active_rule_dict("s1", allow_fallback=True)}
 
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(city="London")
+            db_session, SearchQuery(city="London", country="United Kingdom")
         )
         assert result.discovery.state == SearchState.INTERNAL_VERIFIED
         assert result.discovery.internal_matches == 1
@@ -123,7 +123,7 @@ class TestInternalFirstWaterfall:
         registry._cache = {"s1": _active_rule_dict("s1", allow_fallback=True)}
 
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(city="Atlantis", limit_external=5)
+            db_session, SearchQuery(city="Atlantis", limit_external=5, country="United Kingdom")
         )
         assert result.discovery.state == SearchState.EXTERNAL_DISCOVERED
         assert result.discovery.internal_matches == 0
@@ -140,7 +140,7 @@ class TestInternalFirstWaterfall:
         }
 
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(city="Atlantis")
+            db_session, SearchQuery(city="Atlantis", country="United Kingdom")
         )
         assert result.discovery.state == SearchState.BLOCKED
         assert result.discovery.fallback_triggered is False
@@ -157,7 +157,7 @@ class TestMaskedCards:
         registry._cache = {"s1": _active_rule_dict("s1", allow_fallback=True)}
 
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(city="Atlantis")
+            db_session, SearchQuery(city="Atlantis", country="United Kingdom")
         )
         for card in result.discovery.external_matches:
             assert card.has_url is False
@@ -165,14 +165,14 @@ class TestMaskedCards:
             assert card.has_email is False
             assert card.has_exact_address is False
             assert card.is_unlocked is False
-            assert card.verification_status == "unverified"
+            assert card.verification_status == "NOT_VERIFIED_BY_ZOIKO_ROOMS"
             assert card.canonical_id is None
             assert card.rent_monthly is None
 
     def test_title_is_sentinel_not_provider_data(self, db_session):
         registry._cache = {"s1": _active_rule_dict("s1", allow_fallback=True)}
         result = SearchOrchestrator().search(
-            db_session, SearchQuery(city="Atlantis")
+            db_session, SearchQuery(city="Atlantis", country="United Kingdom")
         )
         for card in result.discovery.external_matches:
             assert "masked" in card.title.lower()
@@ -485,14 +485,14 @@ class TestRegistryIntegration:
 class TestDisclosure:
     def test_disclosure_on_external_fallback(self, db_session):
         registry._cache = {"s1": _active_rule_dict("s1", allow_fallback=True)}
-        result = SearchOrchestrator().search(db_session, SearchQuery(city="Atlantis"))
+        result = SearchOrchestrator().search(db_session, SearchQuery(city="Atlantis", country="United Kingdom"))
         # Section 7.2 mandatory disclosure, verbatim.
         assert result.discovery.disclosure_text == EXTERNAL_DISCLOSURE
         assert "have not been verified by Zoiko Rooms" in result.discovery.disclosure_text
 
     def test_disclosure_on_internal(self, db_session):
         _seed_listing(db_session, city="London")
-        result = SearchOrchestrator().search(db_session, SearchQuery(city="London"))
+        result = SearchOrchestrator().search(db_session, SearchQuery(city="London", country="United Kingdom"))
         # Section 7.1 approved pattern; never claims the inventory is verified.
         assert result.discovery.disclosure_text == INTERNAL_DISCLOSURE
         assert "verified" not in result.discovery.disclosure_text.lower()
@@ -503,7 +503,7 @@ class TestDisclosure:
         db_session.query(FeatureFlag).filter_by(name="external.search_fallback").delete()
         db_session.flush()
         registry._cache = {"s1": _active_rule_dict("s1", allow_fallback=True)}
-        result = SearchOrchestrator().search(db_session, SearchQuery(city="Atlantis"))
+        result = SearchOrchestrator().search(db_session, SearchQuery(city="Atlantis", country="United Kingdom"))
         assert result.discovery.state == "INTERNAL_ZERO"
         assert result.discovery.external_matches == []
         assert result.discovery.fallback_triggered is False

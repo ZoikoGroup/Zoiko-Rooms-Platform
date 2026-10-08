@@ -41,11 +41,14 @@ class ProviderOutreachService:
     # -- shared helpers ------------------------------------------------------
 
     @staticmethod
-    def _resolve_channel(rule: dict[str, Any] | None) -> str | None:
+    def _resolve_channel(rule: dict[str, Any] | None, market_channels: list[str] | None = None) -> str | None:
+        """First channel the source's rights AND the market's Legal Pack both
+        permit (Section 9.1 channel compliance). None = not contactable."""
         if not rule or not rule.get("allow_direct_contact"):
             return None
         allowed = [
-            c for c in rule.get("outreach_channels", []) if c in SUPPORTED_CHANNELS
+            c for c in rule.get("outreach_channels", [])
+            if c in SUPPORTED_CHANNELS and (market_channels is None or c in market_channels)
         ]
         # Fail closed: a source with no configured permitted channel is not
         # contactable (never assume EMAIL).
@@ -148,7 +151,11 @@ class ProviderOutreachService:
     ) -> dict[str, Any]:
         """Step 2 of Section 9. Fail-closed: unknown source, inactive source,
         BLOCKED tier or missing direct-contact rights all deny outreach."""
+        from app.services.market_legal_pack import active_pack
+        from app.services.provider_journey import is_suppressed
+
         rule = registry.get(opportunity.source_id)
+        pack = active_pack(db, opportunity.market_code)
         reasons: list[str] = []
         if not rule:
             reasons.append("unknown source")
@@ -159,9 +166,16 @@ class ProviderOutreachService:
                 reasons.append("source blocked")
             if not rule.get("allow_direct_contact"):
                 reasons.append("outreach not permitted for source")
-        channel = self._resolve_channel(rule) if rule else None
+        # Section 13: the market's Legal Pack decides whether and how.
+        if pack is None or not pack.provider_outreach_enabled:
+            reasons.append("outreach not activated for this market")
+        market_channels = list(pack.permitted_outreach_channels or []) if pack else []
+        channel = self._resolve_channel(rule, market_channels) if rule else None
         if rule and not channel:
             reasons.append("no permitted channel")
+        # Sections 9.1 / 12: honour opt-outs.
+        if is_suppressed(db, opportunity):
+            reasons.append("provider opted out")
         return {
             "eligible": bool(channel) and not reasons,
             "channel": channel,
@@ -280,7 +294,6 @@ class ProviderOutreachService:
         SENT unless a message was actually handed to a channel.
         """
         from app.services.audit_ext import log_external_search_event
-        from app.services.outreach_templates import render_provider_outreach
 
         now = now or datetime.now(timezone.utc)
         decision = self.check_outreach_eligibility(db, po.opportunity)
@@ -301,11 +314,14 @@ class ProviderOutreachService:
         if dispatch is None:
             return po
 
-        body = render_provider_outreach(
-            provider_name=po.opportunity.provider_name,
-            approx_location=po.opportunity.approx_location,
-        )
+        from app.services.provider_journey import render_for
+
+        body, _respond_url = render_for(db, po)
         message_id = dispatch(db, po, body)
+        if not message_id:
+            # The channel adapter could not send this one (e.g. no email
+            # address): it stays PENDING in the operator queue.
+            return po
 
         po.outreach_status = "SENT"
         po.outreach_sent_at = now
@@ -378,7 +394,9 @@ class ProviderOutreachService:
         from app.services.audit_ext import log_external_search_event
 
         opp = po.opportunity
-        opp.status = "PROVIDER_ACCEPTED"
+        # A shared lead already in verification/internalised never moves back.
+        if opp.status in ("EXTERNAL_DISCOVERED", "OUTREACH_PENDING"):
+            opp.status = "PROVIDER_ACCEPTED"
         self._append_trail(
             po,
             "step:acceptance",
@@ -411,7 +429,7 @@ class ProviderOutreachService:
         the opportunity remains "not verified by Zoiko Rooms"."""
         from app.services.audit_ext import log_external_search_event
 
-        if opportunity.status != "PROVIDER_ACCEPTED":
+        if opportunity.status not in ("PROVIDER_ACCEPTED", "VERIFICATION_IN_PROGRESS"):
             raise PermissionError("Introduction may only be unlocked after provider acceptance")
         if opportunity.intro_unlocked_at is None:
             opportunity.intro_unlocked_at = datetime.now(timezone.utc)
@@ -469,11 +487,13 @@ class ProviderOutreachService:
         from app.services.audit_ext import log_external_search_event
         from app.services.external_search_crypto import encrypt_optional
 
-        if opportunity.status != "PROVIDER_ACCEPTED":
+        if opportunity.status not in ("PROVIDER_ACCEPTED", "VERIFICATION_IN_PROGRESS"):
             raise PermissionError("Sublet-permission capture requires provider acceptance")
+        # Section 11.1: permission is recorded only together with evidence.
+        if not (evidence or "").strip():
+            raise ValueError("Evidence of the landlord/agent permission is required")
         now = datetime.now(timezone.utc)
-        if evidence is not None:
-            opportunity.sublet_evidence_encrypted = encrypt_optional(evidence)
+        opportunity.sublet_evidence_encrypted = encrypt_optional(evidence)
         opportunity.sublet_permission_verified = True
         opportunity.sublet_permission_verified_at = now
         log_external_search_event(
@@ -589,7 +609,7 @@ class ProviderOutreachService:
             longitude=None,
             price_per_night=self._price_per_night(opportunity),
             currency=opportunity.advertised_price_currency or "GBP",
-            rating=4.5,
+            rating=0.0,
             review_count=0,
             guests=1,
             bedrooms=1,

@@ -26,6 +26,7 @@ pytestmark = pytest.mark.usefixtures("external_activated")
 
 def _seed_opportunity(db, *, source_id="s1", status="EXTERNAL_DISCOVERED"):
     opp = ExternalOpportunity(
+        market_code="GB",
         external_opportunity_id=f"opp-{source_id}",
         source_id=source_id,
         status=status,
@@ -100,6 +101,7 @@ class TestAcceptanceVsVerification:
     def test_verification_status_independent_of_acceptance(self):
         for status in ("EXTERNAL_DISCOVERED", "OUTREACH_PENDING", "PROVIDER_ACCEPTED"):
             opp = ExternalOpportunity(
+                market_code="GB",
                 external_opportunity_id=f"opp-{status}",
                 source_id="s1",
                 status=status,

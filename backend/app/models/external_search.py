@@ -6,11 +6,14 @@ Models
 * ExternalOpportunity — an external room/property lead discovered via web/API/feed
 * ProviderOutreach — record of contact initiated with an external provider
 * ExternalCommercialPolicy — market-specific billing/commercial configuration
+* ExternalMarketLegalPack — per-market activation gate (Section 13)
+* ProviderSuppression — provider opt-out / suppression list (Sections 9.1, 12)
+* ExternalOpportunityReport — renter reports of stale/inaccurate leads (Section 16)
 """
 
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -104,6 +107,9 @@ class ExternalOpportunity(Base):
         String(100), unique=True, nullable=False, index=True
     )
     source_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    # Market (ISO alpha-2) the lead was discovered for; outreach and release are
+    # gated by that market's Legal Pack. Null (legacy) fails closed.
+    market_code: Mapped[str | None] = mapped_column(String(2), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="EXTERNAL_DISCOVERED")
     approx_location: Mapped[str | None] = mapped_column(String(300), nullable=True)
     advertised_price_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
@@ -167,7 +173,7 @@ class ExternalOpportunity(Base):
         cascade="all, delete-orphan",
         order_by="RelayMessage.created_at",
     )
-    direct_contact_release: Mapped["DirectContactRelease | None"] = relationship(
+    direct_contact_releases: Mapped[list["DirectContactRelease"]] = relationship(
         back_populates="opportunity",
         cascade="all, delete-orphan",
         uselist=False,
@@ -207,6 +213,12 @@ class ProviderOutreach(Base):
     provider_response_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consent_record: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     audit_trail: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Section 9 step 5: what the provider accepted, under which terms version,
+    # and that they control the contact the link was sent to.
+    acceptance_model: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    acceptance_terms_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    provider_display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    provider_contact_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -240,22 +252,30 @@ class RelayMessage(Base):
     )
     sender_handle: Mapped[str] = mapped_column(String(120), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    # The renter-provider thread: one per contact request, so a provider's reply
+    # reaches the renter who asked (a partner listing can have many requests).
+    outreach_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_outreach.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     opportunity: Mapped[ExternalOpportunity] = relationship(back_populates="relay_messages")
 
 
 class DirectContactRelease(Base):
-    """Bilateral consent to release direct contact details for an opportunity
-    (ZR-AI-SEARCH-001 Phase 2). Both parties must consent; only then is a
-    masked/forwarding contact issued. Provider acceptance alone is NOT a
-    release, and release is NOT verification."""
+    """Bilateral consent to release direct contact details between one
+    renter and one provider (ZR-AI-SEARCH-001 Section 11). Both parties must
+    consent and the market's Legal Pack must allow release. Provider acceptance
+    alone is NOT a release, and release is NOT verification."""
 
     __tablename__ = "direct_contact_release"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     opportunity_id: Mapped[int] = mapped_column(
-        ForeignKey("external_opportunities.id", ondelete="CASCADE"), nullable=False, index=True, unique=True
+        ForeignKey("external_opportunities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    outreach_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_outreach.id", ondelete="CASCADE"), nullable=True, unique=True
     )
     renter_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     provider_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -268,7 +288,7 @@ class DirectContactRelease(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
-    opportunity: Mapped[ExternalOpportunity] = relationship(back_populates="direct_contact_release")
+    opportunity: Mapped[ExternalOpportunity] = relationship(back_populates="direct_contact_releases")
 
 
 class ExternalCommercialPolicy(Base):
@@ -320,3 +340,99 @@ class ExternalCommercialPolicy(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class ExternalMarketLegalPack(Base):
+    """Per-market activation gate for external discovery and outreach
+    (ZR-AI-SEARCH-001 Section 13 "Market Activation Gate").
+
+    No market may enable external search, public web fetch, automated provider
+    outreach, direct-contact release, referral fees or sensitive housing
+    filters until Legal, Privacy and Commercial have approved its pack. The
+    active pack for a market is the latest ACTIVE, fully approved version
+    within its effective window; anything else fails closed.
+    """
+
+    __tablename__ = "external_market_legal_pack"
+    __table_args__ = (
+        UniqueConstraint("market_code", "version", name="uq_emlp_market_version"),
+        CheckConstraint("status IN ('DRAFT', 'ACTIVE', 'SUSPENDED')", name="ck_emlp_status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    market_code: Mapped[str] = mapped_column(String(2), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")
+    legal_approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    privacy_approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    commercial_approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    approved_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Capabilities (all fail closed).
+    external_search_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    public_visitor_search_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    public_fetch_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    provider_outreach_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    permitted_outreach_channels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    direct_contact_release_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    referral_fees_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sensitive_filters_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # Market rules.
+    prohibited_search_terms: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    lawful_basis_note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    privacy_notice_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sender_legal_entity: Mapped[str] = mapped_column(
+        String(200), nullable=False, default="Zoiko Realty Group Inc."
+    )
+    lead_protection_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    terms_version: Mapped[str] = mapped_column(String(40), nullable=False, default="1")
+
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ProviderSuppression(Base):
+    """Provider opt-out / suppression list (Sections 9.1 and 12 "Direct
+    marketing"). A matching entry stops any outreach. Contacts are stored only
+    as a SHA-256 of the normalised value, never in plain text."""
+
+    __tablename__ = "provider_suppression"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    source_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    reason: Mapped[str] = mapped_column(String(40), nullable=False, default="OPT_OUT")
+    note: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    created_by: Mapped[str] = mapped_column(String(120), nullable=False, default="provider")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ExternalOpportunityReport(Base):
+    """A renter's report that an external lead is stale, inaccurate or
+    suspicious (Section 16 external_stale_or_inaccurate_report rate)."""
+
+    __tablename__ = "external_opportunity_report"
+    __table_args__ = (
+        CheckConstraint("reason IN ('STALE', 'INACCURATE', 'SUSPICIOUS', 'OTHER')", name="ck_eor_reason"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[int] = mapped_column(
+        ForeignKey("external_opportunities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    reporter_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    reason: Mapped[str] = mapped_column(String(20), nullable=False)
+    note: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

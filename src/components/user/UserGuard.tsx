@@ -34,7 +34,9 @@ export function UserGuard({ children }: { children: React.ReactNode }) {
         }
         setUser(profile);
       } else {
-        router.replace("/account/login");
+        // Come back here after signing in (e.g. a provider's claim link).
+        const here = `${window.location.pathname}${window.location.search}`;
+        router.replace(here === "/account" ? "/account/login" : `/account/login?next=${encodeURIComponent(here)}`);
       }
     });
   }, [router]);

@@ -9,7 +9,6 @@ import {
   Loader2,
   Mail,
   Mic,
-  Search,
   Send,
   Square,
   SquarePen,
@@ -79,6 +78,14 @@ function TypingDots() {
   );
 }
 
+/** Optional values for the consented lead-summary fields (Section 7.4). */
+const LEAD_DETAIL_INPUTS = [
+  { key: "move_in_window", label: "Move-in date", placeholder: "e.g. from 1 November" },
+  { key: "budget_band", label: "Monthly budget", placeholder: "e.g. 800-1000" },
+  { key: "occupants", label: "Number of occupants", placeholder: "e.g. 1" },
+  { key: "requirements", label: "Requirements", placeholder: "e.g. furnished, near a station" },
+];
+
 export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
   const [conversations, setConversations] = useState<UserChatConversation[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
@@ -120,6 +127,7 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
   const [extResult, setExtResult] = useState<ExternalSearchResponse | null>(null);
   const [contactCard, setContactCard] = useState<ExternalCard | null>(null);
   const [contactNote, setContactNote] = useState("");
+  const [contactLeadDetails, setContactLeadDetails] = useState<Record<string, string>>({});
   const [contactConsent, setContactConsent] = useState<string[]>([]);
   const [contactPending, setContactPending] = useState(false);
   const [contactConfirmed, setContactConfirmed] = useState(false);
@@ -241,6 +249,7 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
     if (!card.opportunityId) return;
     setContactCard(card);
     setContactNote("");
+    setContactLeadDetails({});
     setContactConsent(DEFAULT_LEAD_SUMMARY);
     setContactConfirmed(false);
     setContactSubmitError(null);
@@ -260,6 +269,9 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
       await requestProviderContact(contactCard.opportunityId, {
         message: contactNote.trim() || "Please connect me with the provider.",
         consentFields: contactConsent,
+        leadDetails: Object.fromEntries(
+          Object.entries(contactLeadDetails).filter(([k, v]) => contactConsent.includes(k) && v.trim())
+        ),
       });
       setContactConfirmed(true);
     } catch (err) {
@@ -455,19 +467,6 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
                 className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
               >
                 <History className="h-[18px] w-[18px]" />
-              </button>
-              <button
-                onClick={() => { if (historyOpen) setHistoryOpen(false); setExtOpen((v) => !v); }}
-                aria-label="Find rooms"
-                title="Find rooms"
-                className={cn(
-                  "flex h-9 w-9 items-center justify-center rounded-full transition-colors",
-                  extOpen
-                    ? "bg-primary-100 text-primary-700 dark:bg-primary-500/20 dark:text-primary-300"
-                    : "text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
-                )}
-              >
-                <Search className="h-[18px] w-[18px]" />
               </button>
               <button
                 onClick={startNewChat}
@@ -897,6 +896,21 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
                       home address and payment details.
                     </p>
                   </div>
+                  {LEAD_DETAIL_INPUTS.filter(({ key }) => contactConsent.includes(key)).map(({ key, label, placeholder }) => (
+                    <div key={key}>
+                      <label htmlFor={`lead-${key}`} className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">
+                        {label} (optional)
+                      </label>
+                      <input
+                        id={`lead-${key}`}
+                        value={contactLeadDetails[key] ?? ""}
+                        onChange={(e) => setContactLeadDetails((prev) => ({ ...prev, [key]: e.target.value }))}
+                        maxLength={120}
+                        placeholder={placeholder}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-sm text-slate-700 outline-none placeholder:text-slate-400 focus:border-primary-400 focus:ring-1 focus:ring-primary-400 dark:border-white/10 dark:bg-white/5 dark:text-slate-200"
+                      />
+                    </div>
+                  ))}
                   <div>
                     <label className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">
                       Note to the provider (optional)
