@@ -11,8 +11,10 @@ import {
   ClipboardList,
   CreditCard,
   DoorOpen,
+  Home,
   LayoutDashboard,
   LogOut,
+  MailOpen,
   MessageCircle,
   MessagesSquare,
   Receipt,
@@ -46,9 +48,9 @@ const navGroups = [
   {
     label: "HOST",
     items: [
-      { href: "/account/host", label: "My Properties", icon: Building2 },
+      { href: "/account/host", label: "Properties & Rooms", icon: Home },
       { href: "/account/host/listings", label: "My Listings", icon: BedDouble },
-      { href: "/account/host/applications", label: "Applications", icon: ClipboardCheck },
+      { href: "/account/host/applications", label: "Applications", icon: MailOpen },
       { href: "/account/host/payments", label: "Payments", icon: Receipt },
       { href: "/account/host/sublet-requests", label: "Sublet Requests", icon: Repeat },
       { href: "/account/host/disputes", label: "Disputes", icon: Scale },
