@@ -24,7 +24,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -771,21 +770,19 @@ def _nearby_conflict(db: Session, v: PropertyLocationVerification) -> int | None
 
 # -- Step 5: evidence ------------------------------------------------------------
 
-def _evidence_dir() -> Path:
-    path = Path(settings.property_location_upload_dir)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+EVIDENCE_FILE_CATEGORY = "property_location"
 
 
 def read_evidence(evidence: PropertyLocationEvidence) -> bytes | None:
+    from sqlalchemy.orm import object_session
+
+    from app.core import file_store
     from app.core.field_encryption import decrypt_bytes
 
     if not evidence.stored_filename:
         return None
-    path = Path(settings.property_location_upload_dir) / evidence.stored_filename
-    if not path.is_file():
-        return None
-    return decrypt_bytes(path.read_bytes())
+    data = file_store.read(object_session(evidence), EVIDENCE_FILE_CATEGORY, evidence.stored_filename)
+    return decrypt_bytes(data) if data is not None else None
 
 
 def add_evidence(db: Session, user: UserAccount, v: PropertyLocationVerification, *, evidence_type: str,
@@ -821,8 +818,12 @@ def add_evidence(db: Session, user: UserAccount, v: PropertyLocationVerification
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You can add up to 10 documents")
 
     sha = hashlib.sha256(content).hexdigest()
-    stored = f"{uuid.uuid4().hex}{extension}.enc"
-    (_evidence_dir() / stored).write_bytes(encrypt_bytes(content))
+    from app.core import file_store
+
+    stored = file_store.put(
+        db, EVIDENCE_FILE_CATEGORY, encrypt_bytes(content), extension=f"{extension}.enc",
+        content_type=content_type, encrypted=True,
+    )
     reused = db.scalar(select(func.count(PropertyLocationEvidence.id)).join(PropertyLocationVerification).where(
         PropertyLocationEvidence.sha256 == sha, PropertyLocationVerification.property_id != v.property_id)) or 0
     from app.services.authority_service import _verified_legal_name
@@ -861,7 +862,9 @@ def remove_evidence(db: Session, user: UserAccount, v: PropertyLocationVerificat
     if evidence is None or evidence.verification_id != v.id or evidence.removed_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
     if evidence.stored_filename:
-        (Path(settings.property_location_upload_dir) / evidence.stored_filename).unlink(missing_ok=True)
+        from app.core import file_store
+
+        file_store.delete(db, EVIDENCE_FILE_CATEGORY, evidence.stored_filename)
     # Soft delete: the file goes, the hash and match results stay so the same
     # document is still caught if it's reused elsewhere (Section 14).
     evidence.stored_filename = None
@@ -1354,7 +1357,9 @@ def purge_expired_evidence(db: Session) -> int:
         if not pack.evidence_retention_days or decided is None or v.state in OPEN_STATES + ("MANUAL_REVIEW",):
             continue
         if decided + timedelta(days=pack.evidence_retention_days) <= _now():
-            (Path(settings.property_location_upload_dir) / evidence.stored_filename).unlink(missing_ok=True)
+            from app.core import file_store
+
+            file_store.delete(db, EVIDENCE_FILE_CATEGORY, evidence.stored_filename)
             evidence.stored_filename = None
             evidence.purged_at = _now()
             purged += 1

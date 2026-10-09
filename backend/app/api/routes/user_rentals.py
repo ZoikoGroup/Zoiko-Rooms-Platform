@@ -2,14 +2,13 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
-from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.core.agreement_documents import resolve_agreement_document_path
+from app.core.agreement_documents import read_agreement_document
 from app.core.correlation import get_correlation_id
-from app.core.identity_uploads import resolve_identity_document_path
+from app.core.identity_uploads import read_identity_document
 from app.core.rate_limit import sublet_document_limiter, sublet_submit_limiter
 from app.core.signed_urls import verify_signed_download_token
 from app.crud import booking_change_requests as bcr_crud
@@ -666,7 +665,7 @@ def download_own_agreement_pdf(
 
     artifact = agreement.versions[-1].artifact if agreement.versions else None
     if artifact is not None:
-        pdf_bytes = resolve_agreement_document_path(artifact.storage_ref).read_bytes()
+        pdf_bytes = read_agreement_document(db, artifact.storage_ref)
     else:
         pdf_bytes = leasing_crud.generate_agreement_pdf(db, agreement)
     return Response(
@@ -1333,7 +1332,7 @@ def download_own_sublet_document(
     _assert_tenant_owns_sublet_request(db, sublet_request, user)
     document = sublet_documents_crud.get_sublet_document_or_404(db, sublet_request, document_id)
     verify_signed_download_token(token, "sublet_document", str(document.id))
-    return sublet_documents_crud.sublet_document_file_response(document)
+    return sublet_documents_crud.sublet_document_file_response(db, document)
 
 
 @router.get("/deposit-claims", response_model=list[DepositClaimRead])
@@ -1382,10 +1381,13 @@ def get_my_deposit_claim_item_evidence(item_id: int, user: UserAccount = Depends
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This deposit claim does not belong to you")
     if not item.evidence_filename:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No evidence uploaded for this claim item")
-    path = resolve_identity_document_path(item.evidence_filename)
-    if not path.exists():
+    data = read_identity_document(db, item.evidence_filename)
+    if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Evidence file is missing")
-    return FileResponse(path, media_type=item.evidence_content_type, filename=item.evidence_original_name)
+    return Response(
+        content=data, media_type=item.evidence_content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{item.evidence_original_name or "evidence"}"'},
+    )
 
 
 @router.post("/reviews", response_model=ReviewRead, status_code=status.HTTP_201_CREATED)

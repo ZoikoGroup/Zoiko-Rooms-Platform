@@ -1,9 +1,10 @@
 import hashlib
-import uuid
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
+from sqlalchemy.orm import Session
 
+from app.core import file_store
 from app.core.config import settings
 
 # Same magic-byte sniffing discipline as core/identity_uploads.py -- checked
@@ -11,6 +12,8 @@ from app.core.config import settings
 # Content-Type header. Section 21's evidence examples (photos, invoices,
 # condition reports, receipts) are covered by this set; video/other document
 # types are an honest, stated MVP trim, not silently dropped scope.
+CATEGORY = "dispute_evidence"
+
 _SIGNATURES: list[tuple[bytes, str, str]] = [
     (b"%PDF-", ".pdf", "application/pdf"),
     (b"\xff\xd8\xff", ".jpg", "image/jpeg"),
@@ -25,7 +28,7 @@ def _sniff(contents: bytes) -> tuple[str, str] | None:
     return None
 
 
-async def save_dispute_evidence_file(file: UploadFile) -> tuple[str, str, str, int, str]:
+async def save_dispute_evidence_file(db: Session, file: UploadFile) -> tuple[str, str, str, int, str]:
     """Validates and persists an uploaded evidence file outside any publicly
     served directory, same as save_identity_document, plus a real SHA-256
     hash of the immutable original -- Section 21's "content hash" -- which
@@ -50,26 +53,35 @@ async def save_dispute_evidence_file(file: UploadFile) -> tuple[str, str, str, i
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unsupported file — upload a PDF, JPG or PNG")
     extension, content_type = sniffed
 
-    upload_dir = Path(settings.evidence_upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    stored_filename = f"{uuid.uuid4().hex}{extension}"
-    (upload_dir / stored_filename).write_bytes(contents)
+    stored_filename = file_store.put(db, CATEGORY, contents, extension=extension, content_type=content_type)
 
     original_filename = Path(file.filename or "evidence").name
     sha256_hash = hashlib.sha256(contents).hexdigest()
     return stored_filename, original_filename, content_type, size, sha256_hash
 
 
-def resolve_dispute_evidence_path(stored_filename: str) -> Path:
-    """`stored_filename` only ever originates from save_dispute_evidence_file
-    above (a uuid4 hex we generated), never from client input, so this can't
-    be used for path traversal."""
-    return Path(settings.evidence_upload_dir) / stored_filename
+def read_dispute_evidence(db: Session, stored_filename: str | None) -> bytes | None:
+    """The stored evidence file, or None when there's no such file."""
+    return file_store.read(db, CATEGORY, stored_filename)
 
 
-def delete_dispute_evidence_file(stored_filename: str) -> None:
+def dispute_evidence_response(db: Session, stored_filename: str | None, content_type: str, original_filename: str):
+    """The evidence file as a download (authorization is the caller's job)."""
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    data = file_store.read_or_404(db, CATEGORY, stored_filename)
+    name = original_filename or "evidence"
+    return Response(
+        content=data, media_type=content_type or "application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}", "Cache-Control": "no-store"},
+    )
+
+
+def delete_dispute_evidence_file(db: Session, stored_filename: str | None) -> None:
     """QA-Q16: the actual byte-erasure half of a granted deletion request
-    (crud/dispute_evidence.py:request_deletion) -- best-effort (missing_ok),
-    since a request granted twice, or a row whose file already vanished for
-    any other reason, must not turn an erasure into a crash."""
-    resolve_dispute_evidence_path(stored_filename).unlink(missing_ok=True)
+    (crud/dispute_evidence.py:request_deletion). Joins the caller's
+    transaction; a file already gone is not an error, so a request granted
+    twice can't turn an erasure into a crash."""
+    file_store.delete(db, CATEGORY, stored_filename)

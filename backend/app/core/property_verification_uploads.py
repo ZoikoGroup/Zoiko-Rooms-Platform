@@ -8,19 +8,21 @@ encryption key (stored as "<uuid><ext>.enc"); read_property_verification_documen
 decrypts in memory. Files saved before encryption (no ".enc") are read as-is."""
 
 import hashlib
-import uuid
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
+from sqlalchemy.orm import Session
 
+from app.core import file_store
 from app.core.config import settings
 from app.core.field_encryption import decrypt_bytes, encrypt_bytes
 from app.core.identity_uploads import _sniff, _strip_image_metadata
 
 ENCRYPTED_SUFFIX = ".enc"
+CATEGORY = "property_verification"
 
 
-async def save_property_verification_document(file: UploadFile) -> tuple[str, str, str, int, str]:
+async def save_property_verification_document(db: Session, file: UploadFile) -> tuple[str, str, str, int, str]:
     """Validates and persists an uploaded property verification document outside
     any publicly served directory. Returns (stored_filename, original_filename,
     content_type, size, sha256_hash) -- same shape as save_identity_document."""
@@ -44,39 +46,35 @@ async def save_property_verification_document(file: UploadFile) -> tuple[str, st
 
     contents = _strip_image_metadata(contents, extension)
 
-    upload_dir = Path(settings.property_verification_upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    stored_filename = f"{uuid.uuid4().hex}{extension}{ENCRYPTED_SUFFIX}"
-    (upload_dir / stored_filename).write_bytes(encrypt_bytes(contents))
+    stored_filename = file_store.put(
+        db, CATEGORY, encrypt_bytes(contents), extension=f"{extension}{ENCRYPTED_SUFFIX}",
+        content_type=content_type, encrypted=True,
+    )
 
     original_filename = Path(file.filename or "document").name
     sha256_hash = hashlib.sha256(contents).hexdigest()
     return stored_filename, original_filename, content_type, len(contents), sha256_hash
 
 
-def resolve_property_verification_document_path(stored_filename: str) -> Path:
-    """`stored_filename` only ever originates from save_property_verification_document
-    above (a uuid4 hex we generated), never from client input, so this can't be
-    used for path traversal."""
-    return Path(settings.property_verification_upload_dir) / stored_filename
-
-
-def read_property_verification_document(stored_filename: str) -> bytes | None:
+def read_property_verification_document(db: Session, stored_filename: str | None) -> bytes | None:
     """The original bytes (decrypted), or None when the file is missing."""
-    path = resolve_property_verification_document_path(stored_filename)
-    if not path.is_file():
+    data = file_store.read(db, CATEGORY, stored_filename)
+    if data is None:
         return None
-    data = path.read_bytes()
     return decrypt_bytes(data) if stored_filename.endswith(ENCRYPTED_SUFFIX) else data
 
 
-def document_response(stored_filename: str, content_type: str, original_name: str):
+def delete_property_verification_document(db: Session, stored_filename: str | None) -> None:
+    file_store.delete(db, CATEGORY, stored_filename)
+
+
+def document_response(db: Session, stored_filename: str, content_type: str, original_name: str):
     """Streams a decrypted evidence file (authorization is the caller's job)."""
     from urllib.parse import quote
 
     from fastapi.responses import Response
 
-    data = read_property_verification_document(stored_filename)
+    data = read_property_verification_document(db, stored_filename)
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored document could not be found")
     name = original_name or "document"

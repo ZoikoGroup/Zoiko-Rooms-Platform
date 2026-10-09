@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_admin, get_current_user, require_super_admin
 from app.core.config import settings
 from app.core.correlation import get_correlation_id
-from app.core.listing_fee_receipt_documents import resolve_listing_fee_receipt_document_path
+from app.core.listing_fee_receipt_documents import read_listing_fee_receipt_document
 from app.crud import listing as listing_crud
 from app.crud import billing_entity as billing_entity_crud
 from app.crud import listing_fee as listing_fee_crud
@@ -252,7 +252,7 @@ def _credit_note_response(db: Session, refund) -> Response:
     if refund.status not in ("PARTIALLY_REFUNDED", "REFUNDED"):
         raise HTTPException(status.HTTP_409_CONFLICT, "A credit note exists only once the refund is confirmed")
     refund = listing_fee_crud.issue_credit_note(db, refund)
-    pdf_bytes = resolve_listing_fee_receipt_document_path(refund.credit_note_storage_ref).read_bytes()
+    pdf_bytes = read_listing_fee_receipt_document(db, refund.credit_note_storage_ref)
     return Response(
         content=pdf_bytes, media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{refund.credit_note_number}.pdf"'},
@@ -286,7 +286,7 @@ def download_own_listing_fee_receipt(payment_id: int, user: UserAccount = Depend
     receipt = listing_fee_crud.get_or_create_listing_fee_receipt(db, payment)
     db.commit()
 
-    pdf_bytes = resolve_listing_fee_receipt_document_path(receipt.storage_ref).read_bytes()
+    pdf_bytes = read_listing_fee_receipt_document(db, receipt.storage_ref)
     return Response(
         content=pdf_bytes, media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{receipt.receipt_number}.pdf"'},

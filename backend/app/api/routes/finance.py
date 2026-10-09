@@ -1,15 +1,14 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
-from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.services.payment_boundary import capabilities_snapshot, require_capability
 from app.api.deps import get_current_admin, require_super_admin
 from app.core.correlation import get_correlation_id
-from app.core.identity_uploads import resolve_identity_document_path, save_identity_document
-from app.core.payout_statement_documents import resolve_payout_statement_document_path
-from app.core.service_fee_invoice_documents import resolve_service_fee_invoice_document_path
-from app.core.receipt_documents import resolve_receipt_document_path
-from app.core.rent_invoice_documents import resolve_rent_invoice_document_path
+from app.core.identity_uploads import read_identity_document, save_identity_document
+from app.core.payout_statement_documents import read_payout_statement_document
+from app.core.service_fee_invoice_documents import read_service_fee_invoice_document
+from app.core.receipt_documents import read_receipt_document
+from app.core.rent_invoice_documents import read_rent_invoice_document
 from app.crud import finance as crud
 from app.crud import host_stripe_account as host_stripe_account_crud
 from app.crud import payment_provider as payment_provider_crud
@@ -211,7 +210,7 @@ def get_payment_receipt(
     log_audit_event(db, admin, "payment_receipt.download", "payment_receipt", str(receipt.id), get_correlation_id(request))
     db.commit()
 
-    pdf_bytes = resolve_receipt_document_path(receipt.storage_ref).read_bytes()
+    pdf_bytes = read_receipt_document(db, receipt.storage_ref)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -232,7 +231,7 @@ def get_rent_invoice(
     log_audit_event(db, admin, "rent_invoice.download", "rent_invoice", str(invoice.id), get_correlation_id(request))
     db.commit()
 
-    pdf_bytes = resolve_rent_invoice_document_path(invoice.storage_ref).read_bytes()
+    pdf_bytes = read_rent_invoice_document(db, invoice.storage_ref)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -324,7 +323,7 @@ async def post_deposit_claim_item_evidence(
     db: Session = Depends(get_db),
 ):
     item = crud.get_deposit_claim_item_or_404(db, item_id)
-    stored_filename, original_filename, content_type, _, _ = await save_identity_document(file)
+    stored_filename, original_filename, content_type, _, _ = await save_identity_document(db, file)
     crud.attach_deposit_claim_item_evidence(db, item, admin, stored_filename, original_filename, content_type)
     log_audit_event(db, admin, "deposit_claim_item.evidence_attach", "deposit_claim_item", str(item_id), get_correlation_id(request))
     db.commit()
@@ -337,10 +336,13 @@ def get_deposit_claim_item_evidence(item_id: int, admin: AdminUser = Depends(get
     crud.assert_deposit_record_access(db, admin, item.claim.deposit_record)
     if not item.evidence_filename:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No evidence uploaded for this claim item")
-    path = resolve_identity_document_path(item.evidence_filename)
-    if not path.exists():
+    data = read_identity_document(db, item.evidence_filename)
+    if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Evidence file is missing")
-    return FileResponse(path, media_type=item.evidence_content_type, filename=item.evidence_original_name)
+    return Response(
+        content=data, media_type=item.evidence_content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{item.evidence_original_name or "evidence"}"'},
+    )
 
 
 @router.post("/deposit-claims/{claim_id}/resolve", response_model=DepositClaimRead)
@@ -518,7 +520,7 @@ def get_payout_statement(
     log_audit_event(db, admin, "payout_statement.download", "payout_statement", str(statement.id), get_correlation_id(request))
     db.commit()
 
-    pdf_bytes = resolve_payout_statement_document_path(statement.storage_ref).read_bytes()
+    pdf_bytes = read_payout_statement_document(db, statement.storage_ref)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -538,7 +540,7 @@ def get_service_fee_invoice(
     log_audit_event(db, admin, "service_fee_invoice.download", "service_fee_invoice", str(invoice.id), get_correlation_id(request))
     db.commit()
 
-    pdf_bytes = resolve_service_fee_invoice_document_path(invoice.storage_ref).read_bytes()
+    pdf_bytes = read_service_fee_invoice_document(db, invoice.storage_ref)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

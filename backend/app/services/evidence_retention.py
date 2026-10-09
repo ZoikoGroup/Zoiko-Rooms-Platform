@@ -20,8 +20,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.dispute_evidence_uploads import delete_dispute_evidence_file, resolve_dispute_evidence_path
-from app.core.identity_uploads import resolve_identity_document_path
+from app.core import file_store
+from app.core.dispute_evidence_uploads import delete_dispute_evidence_file
 from app.crud.market_policy import jurisdiction_code_for_occupancy, resolve_market_policy
 from app.models.dispute import DisputeResolutionCase
 from app.models.dispute_evidence import DisputeEvidenceItem
@@ -37,9 +37,9 @@ from app.models.rental_payment import RentalPaymentEvidenceHold
 # own directory (core/identity_uploads.py vs core/dispute_evidence_uploads.py,
 # which crud/rental_payment.py:upload_payment_evidence also uses), so the
 # sweep must resolve the right one rather than assuming identity's.
-_PATH_RESOLVERS = {
-    "identity_verification": resolve_identity_document_path,
-    "rental_payment_record": resolve_dispute_evidence_path,
+_FILE_CATEGORIES = {
+    "identity_verification": "identity_document",
+    "rental_payment_record": "dispute_evidence",
 }
 
 
@@ -103,10 +103,8 @@ def sweep_expired_evidence(db: Session, *, now: datetime | None = None) -> list[
         if _has_active_legal_hold(db, artifact):
             continue
 
-        resolve_path = _PATH_RESOLVERS.get(artifact.related_entity_type, resolve_identity_document_path)
-        path = resolve_path(artifact.stored_filename)
-        if path.is_file():
-            path.unlink()
+        category = _FILE_CATEGORIES.get(artifact.related_entity_type, "identity_document")
+        file_store.delete(db, category, artifact.stored_filename)
         artifact.deleted_at = now
         deleted.append(artifact)
 
@@ -170,7 +168,7 @@ def sweep_expired_dispute_evidence(db: Session, *, now: datetime | None = None) 
         if now < cutoff:
             continue
 
-        delete_dispute_evidence_file(item.stored_filename)
+        delete_dispute_evidence_file(db, item.stored_filename)
         item.stored_filename = None
         item.original_filename = ""
         item.deleted_at = now

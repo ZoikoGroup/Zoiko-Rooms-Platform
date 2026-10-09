@@ -184,7 +184,7 @@ def _extract_and_match(db: Session, record: PropertyVerification, user: UserAcco
     from app.services import document_regex
 
     try:
-        document_bytes = read_property_verification_document(record.document_file_path) or b""
+        document_bytes = read_property_verification_document(db, record.document_file_path) or b""
     except (OSError, TypeError):
         document_bytes = b""
     details = document_regex.extract_property_details(

@@ -1309,7 +1309,7 @@ def get_or_create_listing_fee_receipt(db: Session, payment: ListingFeePayment) -
                 tax_registration_number=snapshot.get("tax_registration_number", ""),
                 billing_entity=snapshot.get("billing_entity"),
             )
-            storage_ref, content_hash = save_listing_fee_receipt_document(pdf_bytes)
+            storage_ref, content_hash = save_listing_fee_receipt_document(db, pdf_bytes)
             receipt = ListingFeeReceipt(
                 payment_id=payment.id, receipt_number=receipt_number,
                 legal_entity_name=snapshot.get("legal_entity_name", "Zoiko Rooms"),
@@ -1613,7 +1613,7 @@ def issue_credit_note(db: Session, refund: ListingFeeRefund) -> ListingFeeRefund
             refund, number, receipt_number=receipt.receipt_number, net_amount=_round2(refunded - tax_part),
             tax_amount=tax_part,
         )
-        storage_ref, content_hash = save_listing_fee_receipt_document(pdf_bytes)
+        storage_ref, content_hash = save_listing_fee_receipt_document(db, pdf_bytes)
         refund.credit_note_number = number
         refund.credit_note_storage_ref = storage_ref
         refund.credit_note_content_hash = content_hash

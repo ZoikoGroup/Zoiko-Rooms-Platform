@@ -20,7 +20,7 @@ from app.models.domain_event import DomainEvent
 from app.models.listing import Listing
 from app.models.property_location import PropertyLocationEvidence, PropertyLocationVerification
 from app.services import property_location_service as svc
-from tests.conftest import _make_admin, auth_admin_cookie, auth_user_cookie
+from tests.conftest import stored_refs, _make_admin, auth_admin_cookie, auth_user_cookie
 from tests.test_property_location_verification import (  # noqa: F401 -- fixtures
     BASE, Flow, _host, _pdf, provider, uploads,
 )
@@ -124,7 +124,7 @@ class TestEvidenceHandling:
         removed = db_session.get(PropertyLocationEvidence, evidence_id)
         db_session.refresh(removed)
         assert removed.removed_at is not None and removed.stored_filename is None and removed.sha256
-        assert list(uploads.iterdir()) == []
+        assert stored_refs(db_session, "property_location") == []
         v = db_session.get(PropertyLocationVerification, flow.body["id"])
         db_session.refresh(v)
         assert v.evidence == []
