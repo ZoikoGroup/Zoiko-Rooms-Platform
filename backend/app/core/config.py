@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Anchor .env to the backend package root so settings load regardless of the
@@ -55,10 +55,6 @@ class Settings(BaseSettings):
     # `python -c "from cryptography.fernet import Fernet;
     # print(Fernet.generate_key().decode())"` for any real deployment.
     field_encryption_key: str = DEV_FIELD_ENCRYPTION_KEY
-    # ZR-IDENTITY-001 Section 8.3: HMAC secret for an external identity
-    # provider's signed webhook (services/identity/providers.py:
-    # SignedWebhookProvider). Blank = no external provider enabled.
-    identity_webhook_secret: str = ""
     # ZR-IDV-ADR-001: Veriff, the primary identity provider (Document + Selfie
     # IDV). Credentials come only from the environment / secret store -- a
     # separate integration per environment, rotated without code changes,
@@ -75,14 +71,22 @@ class Settings(BaseSettings):
     # Which result webhook the contracted Veriff plan provides (ADR Section 2):
     # "decision" (Plus / Premium -- Decision Webhook) or "full_auto" (Essential).
     veriff_plan: str = "decision"
+    # Optional extra control on the Veriff webhooks (ADR Section 8): comma-
+    # separated IPs / CIDR ranges Veriff publishes. Blank = no IP filter. It
+    # never replaces the HMAC check -- both must pass.
+    veriff_webhook_allowed_ips: str = ""
+    # How many reverse proxies sit in front of the API and append to
+    # X-Forwarded-For. 0 = use the direct peer address. Only used for the
+    # allow-list above, so the caller's address can't be spoofed by a header.
+    veriff_webhook_trusted_proxy_hops: int = 0
+    # Contracted price per Veriff session, for the cost-per-verification
+    # metric (ADR Section 14). 0 = not reported.
+    veriff_cost_per_session: float = 0.0
+    veriff_cost_currency: str = "EUR"
     # (The webhook URLs on the readiness page are built from public_api_url.)
     # Provider written into new country packs; packs are edited afterwards.
-    identity_default_provider: str = "zoiko_document_check"
-    # Whether the built-in document check (number format + name in a PDF --
-    # no authenticity or selfie check) may verify someone on its own. Unset
-    # = allowed outside production only; in production its "pass" goes to a
-    # reviewer. Setting it true in production is refused at startup.
-    identity_builtin_check_can_verify: bool | None = None
+    # Veriff is the only identity provider (no manual or built-in route).
+    identity_default_provider: str = "veriff"
     # Comma-separated allow-list. Includes the authenticated platform frontend
     # and the public marketing site (local dev + deployed) so the anonymous
     # assistant widget can call /api/public/assistant cross-origin.
@@ -112,17 +116,32 @@ class Settings(BaseSettings):
     property_verification_upload_dir: str = "secure_uploads/property_verification"
     property_verification_document_max_size_mb: int = 10
 
-    # Address check for property verification (services/geocoding.py): a
-    # property is only auto-verified when its address resolves on a map.
-    # "auto" uses Google's Geocoding API when google_maps_api_key is set,
-    # otherwise OpenStreetMap Nominatim (free, no key; usage policy requires
-    # an identifying User-Agent and <= 1 request/second). "none" disables
-    # lookups -- every submission then goes to manual review.
-    geocoding_provider: str = "auto"
+    # ZR-PROPERTY-VERIFY-001 Sections 3-4 location adapter (services/location.py).
+    # Google Maps Platform is primary; Mapbox and HERE are pre-qualified
+    # secondaries tried in order on outage / quota / coverage gap. All three
+    # are SERVER credentials -- restrict them by IP and to the APIs used
+    # (Google: Places API (New), Address Validation API, Geocoding API) and
+    # never send them to the browser; the browser map uses its own
+    # referrer-restricted web key (NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY).
+    # With no credentials the host completes the manual structured-address
+    # path and evidence / review decides.
     google_maps_api_key: str = ""
-    nominatim_url: str = "https://nominatim.openstreetmap.org/search"
-    nominatim_user_agent: str = "ZoikoRooms/1.0 (property-verification; support@zoikorooms.com)"
+    mapbox_access_token: str = ""
+    here_api_key: str = ""
+    location_provider: str = "google"
+    location_fallback_providers: str = "mapbox,here"
+    location_fallback_enabled: bool = True
     geocoding_timeout_seconds: float = 6.0
+    property_location_upload_dir: str = "secure_uploads/property_location"
+    # ZR-AUTHORITY-002 authority evidence (encrypted at rest, never publicly mounted).
+    authority_upload_dir: str = "secure_uploads/authority"
+    # Optional ClamAV daemon (clamd, TCP INSTREAM) for evidence uploads
+    # (core/upload_scan.py). Unset = structural checks only, scan_status
+    # NOT_SCANNED; a configured scanner that can't answer marks ERROR and the
+    # evidence goes to a reviewer.
+    clamav_host: str = ""
+    clamav_port: int = 3310
+    clamav_timeout_seconds: float = 10.0
 
     # ZR-ENG-CLR-004 Section 13.1/AC-08: executed agreement PDFs, stored once
     # per AgreementVersion and never regenerated/overwritten -- same
@@ -179,11 +198,6 @@ class Settings(BaseSettings):
     # stripe_webhook_secret so a single-endpoint Stripe setup keeps working
     # unchanged.
     stripe_listing_fee_webhook_secret: str = ""
-    # ZR-PAY-LINK-003 Section 6: this domain's own Stripe Connect events
-    # (direct charges on a recipient's connected account) -- same
-    # separate-endpoint-with-its-own-secret, falls-back-to-shared-secret
-    # pattern as stripe_listing_fee_webhook_secret above.
-    stripe_rental_payment_webhook_secret: str = ""
     # ZR-PAY-002 Section 13.1: one immutable PDF per SUCCEEDED ListingFeePayment.
     # Same never-publicly-mounted secure_uploads/ convention as
     # receipt_document_dir above, own directory/module (core/listing_fee_
@@ -257,6 +271,52 @@ class Settings(BaseSettings):
     chat_rate_limit_max: int = 20
     chat_rate_limit_window_seconds: int = 60
 
+    # ZR-AI-SEARCH-001 Section 8 "Abuse controls": rate-limit bulk searches,
+    # repeated source-probing, scraping-style requests and automated attempts
+    # to extract external inventory through the external-search routes. Same
+    # per-authenticated-actor fixed-window pattern as chat_limiter.
+    external_search_rate_limit_max: int = 30
+    external_search_rate_limit_window_seconds: int = 60
+
+    # ZR-AI-SEARCH-001 Section 6.1 Tier B licensed listing APIs
+    # (services/external_providers.py). A key only makes the adapter callable:
+    # listings are fetched only when the source's Source Rights Registry row is
+    # ACTIVE + legal/security approved and external.search_fallback is on.
+    # RentCast (US, source_id "rentcast"): free plan is 50 requests/month.
+    rentcast_api_key: str = ""
+    rentcast_api_url: str = "https://api.rentcast.io/v1/listings/rental/long-term"
+    # Domain (Australia, source_id "domain_au"): terms require attribution and
+    # a link to the original listing, so it is registered for internal
+    # opportunities only unless Legal approves masked display.
+    domain_api_key: str = ""
+    domain_api_url: str = "https://api.domain.com.au/v1/listings/residential/_search"
+    # Brave Search API (source_id "brave_web"): finds listings only on websites
+    # that are approved PUBLIC_FETCH registry sources (site_domain). Free plan
+    # includes monthly credits; search attribution required.
+    brave_search_api_key: str = ""
+    brave_search_api_url: str = "https://api.search.brave.com/res/v1/web/search"
+    # Parallel Search API (source_id "parallel_web"), same approved-sites-only
+    # rule as Brave. Free plan: monthly credits.
+    parallel_api_key: str = ""
+    parallel_search_api_url: str = "https://api.parallel.ai/v1/search"
+    # "parallel" | "brave"; empty = the first provider with a key (Parallel, then Brave).
+    web_search_provider: str = ""
+    external_listing_timeout_seconds: float = 8.0
+    # Partner feed pulls (services/feed_sync.py): UK BLM, US RESO Web API, or
+    # Zoiko Rooms' simple CSV/JSON format, configured per registry row.
+    partner_feed_timeout_seconds: float = 30.0
+
+    # ZR-AI-SEARCH-001 Section 5.1 "Freshness": a published listing whose
+    # availability was last confirmed longer ago than this many days is treated
+    # as stale-unknown -- ranked after freshly-confirmed inventory (host
+    # reconfirmation via confirm_availability refreshes the stamp).
+    availability_freshness_days: int = 7
+    # Optional: a listing whose availability was last confirmed longer ago than
+    # this many days stops qualifying for search at all (0 = never; stale
+    # listings are then only ranked lower). Hosts get a reconfirmation reminder
+    # once availability_freshness_days has passed.
+    availability_stale_exclude_days: int = 0
+
     # Login brute-force throttling (attempts per window, per submitted email --
     # deliberately keyed pre-authentication, unlike chat's per-authenticated-actor
     # keying, since the whole point is to slow down guessing before a login ever
@@ -285,8 +345,7 @@ class Settings(BaseSettings):
     # Rent is paid to the host directly (bank transfer/UPI/cash), which can
     # take days -- so once both sides sign, the room stays held this long for
     # the host to mark the deposit and first rent received, instead of the
-    # 30-minute card-checkout lock above (which only applies while the card
-    # rent rail, rent_card_checkout_enabled, is on).
+    # 30-minute card-checkout lock above.
     direct_payment_confirmation_hold_days: int = 7
     # The in-process scheduler (app/main.py -> services/scheduled_jobs.py):
     # monthly rent creation, due/overdue status and reminders, booking
@@ -301,6 +360,13 @@ class Settings(BaseSettings):
     # client IP, fixed window (requests per IP per window).
     public_assistant_rate_limit_max: int = 10
     public_assistant_rate_limit_window_seconds: int = 60
+    # Anonymous room search for the marketing website (routes/public_room_search.py).
+    # Per visitor; the website's server identifies visitors with a hashed id and
+    # authenticates with PUBLIC_SEARCH_SERVICE_TOKEN. Empty token = only direct,
+    # per-IP calls are accepted.
+    public_room_search_rate_limit_max: int = 10
+    public_room_search_rate_limit_window_seconds: int = 60
+    public_search_service_token: str = ""
 
     # ZR-PAY-CFG-001 Section 9: Zoiko Rooms collects its own Listing Fee only.
     # Rent and deposits go directly from renter to the verified recipient;
@@ -316,14 +382,11 @@ class Settings(BaseSettings):
     escrow_enabled: bool = False
     wallet_enabled: bool = False
     split_settlement_enabled: bool = False
-    # Zoiko Rooms Payment Model: renters pay rent straight to the host by the
-    # method the host lists (bank transfer, UPI, cash) -- Zoiko does not
-    # create a rent checkout, needs no Stripe Connect account for rent, and
-    # never treats a Stripe webhook as evidence of rent. This turns back on
-    # the Stripe Connect direct-charge rail (a rent checkout on the host's own
-    # Stripe account); off by default, and every route into it is refused
-    # while it is off (services/payment_boundary.py).
-    rent_card_checkout_enabled: bool = False
+    # Zoiko Rooms Payment Model: renters (and sublet tenants) pay rent and
+    # deposits straight to the entitled payee by bank transfer, UPI or cash.
+    # Zoiko Rooms has no card / Stripe rail for rent -- Stripe is used for the
+    # Listing Fee only.
+
     # Fail-closed rules for the Listing Fee (no approved ACTIVE price = no
     # publication) and for payment instructions (no verified PAYMENT_RECEIPT
     # authority = no instructions). On everywhere by default; only the legacy
@@ -350,19 +413,6 @@ class Settings(BaseSettings):
         gaps: list[str] = []
         if not (self.stripe_listing_fee_webhook_secret or self.stripe_webhook_secret):
             gaps.append("STRIPE_LISTING_FEE_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET) must be set when STRIPE_SECRET_KEY is")
-        # The rent webhook and Stripe Connect onboarding only exist for the
-        # card rent rail -- with rent paid directly to hosts (the default),
-        # neither is used, so neither is required.
-        if self.rent_card_checkout_enabled:
-            if not (self.stripe_rental_payment_webhook_secret or self.stripe_webhook_secret):
-                gaps.append(
-                    "STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET) must be set when "
-                    "RENT_CARD_CHECKOUT_ENABLED is on"
-                )
-            for name in ("stripe_connect_refresh_url", "stripe_connect_return_url"):
-                url = getattr(self, name).strip().lower()
-                if not url.startswith("https://") or "localhost" in url or "127.0.0.1" in url:
-                    gaps.append(f"{name.upper()} must be a public https:// URL in production")
 
         if self.stripe_secret_key.startswith(("sk_live_", "rk_live_")):
             return gaps
@@ -374,6 +424,15 @@ class Settings(BaseSettings):
         for gap in gaps:
             logger.warning("stripe (test mode, not enforced): %s", gap)
         return []
+
+    @field_validator("veriff_api_key", "veriff_shared_secret", "google_maps_api_key", "mapbox_access_token",
+                     "here_api_key", "public_search_service_token", "parallel_api_key",
+                     "brave_search_api_key", "rentcast_api_key", "domain_api_key", mode="before")
+    @classmethod
+    def _strip_secret(cls, value):
+        """Stray whitespace around a key (e.g. in .env) is never part of it;
+        a blank-only value means "not configured"."""
+        return value.strip() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _validate_production(self) -> "Settings":
@@ -419,21 +478,14 @@ class Settings(BaseSettings):
             )
         return self
 
-    @property
-    def builtin_check_can_verify(self) -> bool:
-        if self.identity_builtin_check_can_verify is None:
-            return not self.is_production
-        return self.identity_builtin_check_can_verify
-
     def _identity_production_problems(self) -> list[str]:
         """ZR-IDV-ADR-001 Sections 12 / 17: identity verification settings
         that must be right before production traffic."""
         problems = []
-        if self.identity_builtin_check_can_verify:
-            problems.append(
-                "IDENTITY_BUILTIN_CHECK_CAN_VERIFY must not be true in production -- the built-in check can't "
-                "confirm a document is genuine"
-            )
+        if self.identity_default_provider != "veriff":
+            problems.append("IDENTITY_DEFAULT_PROVIDER must be 'veriff'")
+        if self.veriff_webhook_trusted_proxy_hops < 0:
+            problems.append("VERIFF_WEBHOOK_TRUSTED_PROXY_HOPS must be 0 or more")
         if self.veriff_plan not in ("decision", "full_auto"):
             problems.append("VERIFF_PLAN must be 'decision' or 'full_auto'")
         veriff_keys = bool(self.veriff_api_key) + bool(self.veriff_shared_secret)

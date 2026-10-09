@@ -18,11 +18,15 @@ from app.api.routes import (
     bookings,
     chatbot,
     disputes,
+    external_search,
     finance,
     guests,
     handoffs,
     feature_flags,
     identity_verification,
+    property_location,
+    authority_verification,
+    sublet_payments,
     leasing,
     listings,
     listing_fees,
@@ -37,6 +41,8 @@ from app.api.routes import (
     properties,
     public,
     public_assistant,
+    provider_portal,
+    public_room_search,
     rental_payment_returns,
     rental_payments,
     reviews,
@@ -62,6 +68,11 @@ from app.core.correlation import correlation_id_middleware
 import logging
 
 logger = logging.getLogger("uvicorn.error")
+# Google web-service calls carry the server key in the URL (?key=...);
+# httpx logs full request URLs at INFO, so keep it at WARNING
+# (ZR-PROPERTY-VERIFY-001 Section 4: never log secret credentials).
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 if settings.llm_provider == "groq" and not settings.groq_api_key:
     logger.warning(
@@ -89,6 +100,10 @@ async def _scheduler_loop() -> None:
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
+    if settings.is_production:
+        from app.services.search_protocol_config import assert_protocol_invariants
+
+        assert_protocol_invariants()  # ZR-AI-SEARCH-001 Appendix A
     task = asyncio.create_task(_scheduler_loop()) if settings.scheduler_enabled else None
     try:
         yield
@@ -147,8 +162,8 @@ app.include_router(auth.router)
 app.include_router(user_auth.router)
 app.include_router(user_identity.router)
 app.include_router(user_identity_flow.router)
-app.include_router(user_identity_flow.webhook_router)
 app.include_router(user_identity_flow.veriff_webhook_router)
+app.include_router(user_identity_flow.v1_router)
 app.include_router(user_payments.router)
 app.include_router(user_rentals.router)
 app.include_router(user_hosting.router)
@@ -160,7 +175,7 @@ app.include_router(rental_payment_returns.router)
 app.include_router(rental_payments.router)
 app.include_router(rental_payments.recipient_router)
 app.include_router(rental_payments.admin_router)
-app.include_router(rental_payments.webhook_router)
+app.include_router(sublet_payments.router)
 app.include_router(knowledge.router)
 app.include_router(bookings.router)
 app.include_router(guests.router)
@@ -172,6 +187,8 @@ app.include_router(settings_routes.router)
 app.include_router(admin_users.router)
 app.include_router(public.router)
 app.include_router(public_assistant.router)
+app.include_router(public_room_search.router)
+app.include_router(provider_portal.router)
 app.include_router(uploads.router)
 app.include_router(search.router)
 app.include_router(market_releases.router)
@@ -180,6 +197,14 @@ app.include_router(properties.router)
 app.include_router(party.router)
 app.include_router(authority.router)
 app.include_router(identity_verification.router)
+app.include_router(property_location.router)
+app.include_router(property_location.location_router)
+app.include_router(property_location.admin_location_router)
+app.include_router(property_location.admin_router)
+app.include_router(authority_verification.router)
+app.include_router(authority_verification.confirmation_router)
+app.include_router(authority_verification.admin_router)
+app.include_router(identity_verification.internal_router)
 app.include_router(room_passport.router)
 app.include_router(occupancy_classification.router)
 app.include_router(leasing.router)
@@ -199,6 +224,8 @@ app.include_router(user_contact.router)
 app.include_router(admin_contact.router)
 app.include_router(verification.router)
 app.include_router(user_verification.router)
+app.include_router(external_search.router)
+app.include_router(external_search.admin_router)
 
 
 @app.get("/health")

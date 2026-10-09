@@ -61,7 +61,7 @@ export function ApplyForRoomModal({
       <form onSubmit={handleApply} className="space-y-4">
         <div className="rounded-xl bg-slate-50 px-4 py-3 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
           <p>
-            {listing?.location}, {listing?.city} — {listing ? formatCurrency(listing.pricePerNight, listing.currency) : ""} / night,
+            {[listing?.location, listing?.city].filter(Boolean).join(", ")} — {listing ? formatCurrency(listing.pricePerNight, listing.currency) : ""} / night,
             minimum {listing?.minStayNights} nights.
           </p>
           <p className="mt-1">Host contact: {listing?.ownerName || "Zoiko host"}</p>

@@ -13,11 +13,11 @@ from sqlalchemy.orm import Session
 
 from app.crud.agreement_amendments import approve_amendment, classify_amendment, propose_guarantor_addition, request_amendment
 from app.crud.agreement_party import get_agreement_party_or_404, record_guarantor_consent
-from app.crud.identity_verification import get_valid_identity_credential, verify_identity_verification
+from app.crud.identity_verification import get_valid_identity_credential
 from app.crud.screening import list_screening_checks_for_party, open_screening_check
 from app.models.identity_verification import IdentityVerification
 from app.models.leasing import Agreement
-from tests.conftest import _make_admin, auth_admin_cookie
+from tests.conftest import _make_admin, auth_admin_cookie, approve_identity_via_provider
 from tests.test_agreement_engine_extensions_2 import _full_signed_agreement
 from tests.test_room_hold_atomicity import _make_listing_with_room, _make_verified_renter
 
@@ -137,7 +137,7 @@ class TestGuarantorVerificationSubjectIndependence:
         record = IdentityVerification(party_id=guarantor_party_id, document_type="passport", status="pending")
         db_session.add(record)
         db_session.commit()
-        verify_identity_verification(db_session, record, admin)
+        approve_identity_via_provider(db_session, record)
 
         assert get_valid_identity_credential(db_session, guarantor_party_id) is not None
         assert get_valid_identity_credential(db_session, renter_party_id) is None

@@ -2,19 +2,17 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Building2, Check, ChevronLeft, ChevronRight, FileEdit, Send, ShieldCheck, Upload } from "lucide-react";
+import { AlertTriangle, Building2, Check, ChevronLeft, ChevronRight, FileEdit, Send, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Switch } from "@/components/ui/Switch";
-import { AuthorityRelationshipType, OpenJurisdiction, Property, Room } from "@/lib/types";
+import { OpenJurisdiction, Property, Room } from "@/lib/types";
 import {
   HostedListingInput,
   createHostedListing,
   createHostedProperty,
   createHostedRoom,
-  declareHostedAuthorityRecord,
-  declareHostedPropertyVerification,
   errorMessage,
   listHostedProperties,
   listHostedRooms,
@@ -27,9 +25,23 @@ import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { formatCurrency } from "@/lib/utils";
 import { Field, inputClass } from "@/components/user/ui";
 import { useUserSession } from "@/components/user/UserSessionContext";
-import { ACCEPTED_DOCUMENT_EXTENSIONS, MAX_DOCUMENT_SIZE_MB } from "@/lib/identity-documents";
 
 const MAX_LISTING_IMAGES = 10;
+
+/** What happened when the host submitted: approval is automatic once every
+ *  verification is complete, so the listing is live, waiting only for the
+ *  Listing Fee, or (when something is still missing) saved as a draft. */
+export type SubmitOutcome = { submitted: boolean; state: string; note?: string };
+
+export function submitOutcomeMessage(outcome: SubmitOutcome): { text: string; tone: "success" | "error" } {
+  if (outcome.state === "PUBLISHED") return { text: "Every check passed -- your listing is live.", tone: "success" };
+  if (outcome.state === "APPROVED") {
+    return { text: "Every check passed -- pay the Listing Fee and your listing goes live straight away.", tone: "success" };
+  }
+  if (outcome.state === "REVIEW") return { text: "Submitted -- this market reviews listings before they go live.", tone: "success" };
+  if (outcome.note) return { text: `Saved as a draft. ${outcome.note}`, tone: "error" };
+  return { text: "Draft listing created -- submit it from My Listings when you're ready.", tone: "success" };
+}
 const SUPPORTED_CURRENCIES = ["INR", "GBP", "USD", "EUR", "CAD", "AUD", "AED", "SGD", "NZD"];
 const STEPS = ["Property", "Room", "Listing", "Photos", "Review"] as const;
 
@@ -84,7 +96,8 @@ function emptyDetails(contact: { name: string; phone: string; email: string }): 
  *  management (and listing editing) are untouched -- this is an additional,
  *  friendlier entry point on top of the same backend endpoints, not a
  *  replacement. Review offers "Save as Draft" (create only, same as before) or
- *  "Submit for Review" (create, then immediately ask an admin to review it). */
+ *  "Submit" (create, then submit -- approved automatically when identity,
+ *  property and authority verification are complete). */
 export function ListARoomWizard({
   open,
   onClose,
@@ -93,9 +106,8 @@ export function ListARoomWizard({
 }: {
   open: boolean;
   onClose: () => void;
-  /** submitted is true when the host chose "Submit for Review" on the Review
-   *  step, false when they chose "Save as Draft". */
-  onCreated: (submitted: boolean) => void;
+  /** The listing's state after "Submit" (or DRAFT for "Save as Draft"). */
+  onCreated: (outcome: SubmitOutcome) => void;
   contact: { name: string; phone: string; email: string };
 }) {
   const [step, setStep] = useState(0);
@@ -113,14 +125,6 @@ export function ListARoomWizard({
   });
   const [roomChoice, setRoomChoice] = useState<RoomChoice>({ mode: "new", size: "", hasEnsuite: false });
   const [details, setDetails] = useState<ListingDetailsForm>(emptyDetails(contact));
-  // Lister, Property & Authority Verification wireframe: optional, best-effort
-  // evidence -- submitted after the room exists (see handleFinish) and never
-  // blocks listing creation if left blank or if the submission call fails.
-  const [propertyEvidenceRef, setPropertyEvidenceRef] = useState("");
-  const [propertyEvidenceFile, setPropertyEvidenceFile] = useState<File | null>(null);
-  const [propertyEvidenceFileError, setPropertyEvidenceFileError] = useState("");
-  const [authorityRelationshipType, setAuthorityRelationshipType] = useState<AuthorityRelationshipType>("OWNER");
-  const [authorityEvidenceRef, setAuthorityEvidenceRef] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -132,9 +136,6 @@ export function ListARoomWizard({
     setStep(0);
     setError("");
     setDetails(emptyDetails(contact));
-    setPropertyEvidenceRef("");
-    setAuthorityRelationshipType("OWNER");
-    setAuthorityEvidenceRef("");
     setLoadingContext(true);
     Promise.all([listHostedProperties().catch(() => [] as Property[]), listOpenJurisdictions().catch(() => [] as OpenJurisdiction[])])
       .then(([owned, openRegions]) => {
@@ -263,30 +264,6 @@ export function ListARoomWizard({
         roomId = createdRoom.id;
       }
 
-      // Lister, Property & Authority Verification wireframe: optional
-      // evidence, submitted best-effort -- never blocks listing creation.
-      // Verification stays a separate, informational admin review step
-      // (see PublishEligibility), not a hard gate on this wizard.
-      if (propertyEvidenceRef.trim() && propertyEvidenceFile) {
-        try {
-          await declareHostedPropertyVerification(roomId, {
-            evidenceRef: propertyEvidenceRef.trim(), file: propertyEvidenceFile,
-          });
-        } catch {
-          // Best-effort -- surfaced later via the verification status summary, not here.
-        }
-      }
-      if (authorityEvidenceRef.trim()) {
-        try {
-          await declareHostedAuthorityRecord(roomId, {
-            relationshipType: authorityRelationshipType,
-            evidenceRef: authorityEvidenceRef.trim(),
-          });
-        } catch {
-          // Best-effort -- surfaced later via the verification status summary, not here.
-        }
-      }
-
       const payload: HostedListingInput = {
         name: details.name.trim(),
         roomType: details.roomType.trim() || "Private room",
@@ -308,10 +285,17 @@ export function ListARoomWizard({
         contactEmail: details.contactEmail.trim(),
       };
       const created = await createHostedListing(payload);
+      let outcome: SubmitOutcome = { submitted: submitForReview, state: "DRAFT" };
       if (submitForReview) {
-        await submitHostedListingForReview(created.id);
+        // The listing exists now; a refused submit (verification still
+        // missing) leaves it as a draft rather than failing the whole wizard.
+        try {
+          outcome = { submitted: true, state: (await submitHostedListingForReview(created.id)).state };
+        } catch (err) {
+          outcome = { submitted: true, state: "DRAFT", note: errorMessage(err, "It couldn't be submitted yet.") };
+        }
       }
-      onCreated(submitForReview);
+      onCreated(outcome);
     } catch (err) {
       setError(errorMessage(err, "Could not create the listing."));
     } finally {
@@ -654,14 +638,15 @@ export function ListARoomWizard({
             {step === 4 && (
               <div className="space-y-4">
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Review your listing before saving. You can save it as a draft and come back later, or submit it
-                  for a Zoiko admin to review and publish.
+                  Review your listing before saving. You can save it as a draft and come back later, or submit it.
+                  Once your identity, property and authority are verified it&apos;s approved automatically and goes
+                  live as soon as the Listing Fee is paid.
                 </p>
 
                 {identityVerified ? (
                   <div className="flex items-start gap-2 rounded-xl bg-emerald-50 px-4 py-3 text-xs text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20">
                     <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span>Your identity is verified — this listing can be published once a Zoiko admin approves it.</span>
+                    <span>Your identity is verified — once the property and your authority to let it are verified, this listing is approved automatically.</span>
                   </div>
                 ) : (
                   <div className="flex flex-col gap-2 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-700 ring-1 ring-amber-200 sm:flex-row sm:items-center sm:justify-between dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20">
@@ -678,75 +663,12 @@ export function ListARoomWizard({
                   </div>
                 )}
 
-                <div className="space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-100 dark:bg-slate-800/60 dark:ring-white/10">
-                  <p className="text-xs font-semibold text-primary-900 dark:text-white">
-                    Property &amp; authority evidence <span className="font-normal text-slate-400">(optional, can be added later)</span>
+                <div className="space-y-1 rounded-xl bg-slate-50 p-4 text-xs text-slate-500 ring-1 ring-slate-100 dark:bg-slate-800/60 dark:text-slate-400 dark:ring-white/10">
+                  <p className="font-semibold text-primary-900 dark:text-white">Next: verify the property and your authority</p>
+                  <p>
+                    After you finish, open My Properties to verify this property&apos;s address and your authority to
+                    list it (as owner, agent, property manager or tenant). Both are needed before the listing can go live.
                   </p>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    These are separate from your identity verification above — they confirm the property itself is
-                    real, and that you have the right (owner, agent, or manager) to list it. An admin reviews them
-                    independently; the status is shown on your account&apos;s verification page.
-                  </p>
-                  <Field label="Property evidence reference" hint="e.g. title deed, utility bill, or uploaded document ID">
-                    <input
-                      value={propertyEvidenceRef}
-                      onChange={(e) => setPropertyEvidenceRef(e.target.value)}
-                      placeholder="Document ID or reference"
-                      className={inputClass}
-                    />
-                  </Field>
-                  <div>
-                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                      Upload evidence document
-                    </span>
-                    <label className="flex cursor-pointer items-center gap-3 rounded-xl border-2 border-dashed border-slate-200 bg-white px-4 py-4 text-sm text-slate-500 transition-colors hover:border-primary-300 hover:bg-primary-50/50 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-400">
-                      <Upload className="h-5 w-5 shrink-0 text-slate-400" />
-                      <span className="min-w-0 flex-1 truncate">
-                        {propertyEvidenceFile ? propertyEvidenceFile.name : "Choose a PDF, JPG or PNG file"}
-                      </span>
-                      <input
-                        type="file"
-                        accept={ACCEPTED_DOCUMENT_EXTENSIONS}
-                        onChange={(e) => {
-                          const selected = e.target.files?.[0] ?? null;
-                          if (selected && selected.size > MAX_DOCUMENT_SIZE_MB * 1024 * 1024) {
-                            setPropertyEvidenceFileError(`That file is larger than ${MAX_DOCUMENT_SIZE_MB}MB.`);
-                            setPropertyEvidenceFile(null);
-                            e.target.value = "";
-                            return;
-                          }
-                          setPropertyEvidenceFileError("");
-                          setPropertyEvidenceFile(selected);
-                        }}
-                        className="hidden"
-                      />
-                    </label>
-                    <p className="mt-1.5 text-xs text-slate-400">PDF, JPG or PNG, up to {MAX_DOCUMENT_SIZE_MB}MB.</p>
-                    {propertyEvidenceFileError && (
-                      <p className="mt-1 text-xs font-medium text-accent-600">{propertyEvidenceFileError}</p>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <Field label="Your relationship to this property">
-                      <select
-                        value={authorityRelationshipType}
-                        onChange={(e) => setAuthorityRelationshipType(e.target.value as AuthorityRelationshipType)}
-                        className={inputClass}
-                      >
-                        <option value="OWNER">Owner</option>
-                        <option value="AGENT">Agent</option>
-                        <option value="MANAGER">Manager</option>
-                      </select>
-                    </Field>
-                    <Field label="Authority evidence reference" hint="e.g. lease, ownership deed, or NOC">
-                      <input
-                        value={authorityEvidenceRef}
-                        onChange={(e) => setAuthorityEvidenceRef(e.target.value)}
-                        placeholder="Document ID or reference"
-                        className={inputClass}
-                      />
-                    </Field>
-                  </div>
                 </div>
 
                 <div className="overflow-hidden rounded-xl ring-1 ring-slate-100 dark:ring-white/10">
@@ -814,7 +736,7 @@ export function ListARoomWizard({
                 <FileEdit className="h-4 w-4" /> Save as Draft
               </Button>
               <Button type="button" onClick={() => handleFinish(true)} loading={submitting}>
-                <Send className="h-4 w-4" /> Submit for Review
+                <Send className="h-4 w-4" /> Submit
               </Button>
             </div>
           )}

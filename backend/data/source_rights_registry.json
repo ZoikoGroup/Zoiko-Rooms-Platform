@@ -1,0 +1,27 @@
+{
+  "$comment": "ZR-AI-SEARCH-001 SS-2 seed registry, used only outside production when the DB registry is empty. Every flag defaults to closed. Fail closed: anything absent here or in DB is BLOCKED.",
+  "sources": [
+    {
+      "source_id": "internal",
+      "domain": "zoikorooms.com",
+      "tier": "A",
+      "allow_fallback": false,
+      "allow_direct_contact": false,
+      "allow_indexing": true,
+      "policy_ref": "ZR-POL-SRCH-001",
+      "notes": "Internal verified inventory - never treated as an external source"
+    },
+    {
+      "source_id": "demo_external",
+      "domain": "example.org",
+      "tier": "B",
+      "allow_fallback": true,
+      "allow_direct_contact": false,
+      "allow_indexing": false,
+      "masking_permitted": true,
+      "is_active": true,
+      "policy_ref": "ZR-POL-SRCH-001",
+      "notes": "Dev/test only (never loaded in production). Demo entry proving the masked-card + rights path. Direct contact disabled until policy amendment (Phase 3)."
+    }
+  ]
+}

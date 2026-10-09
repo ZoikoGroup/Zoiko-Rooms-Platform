@@ -72,6 +72,34 @@ FLAG_REGISTRY: dict[str, FlagSpec] = {
         "gas/electrical safety, EPC, HMO, alarms, fees). Only valid for the ENG market.",
         markets=("ENGLAND",),
     ),
+    "external.search_fallback": FlagSpec(
+        "external.search_fallback",
+        False,
+        "Market activation gate for external room discovery when internal matches are "
+        "zero (ZR-AI-SEARCH-001 Section 13). Off until Legal/Privacy/Commercial approve "
+        "the Market Legal Pack and an approved source set.",
+    ),
+    "external.provider_outreach": FlagSpec(
+        "external.provider_outreach",
+        False,
+        "Market activation gate for contacting external providers on a renter's behalf "
+        "(ZR-AI-SEARCH-001 Sections 9 and 13). Off until outreach channels, suppression "
+        "and privacy notices are approved.",
+    ),
+    "external.public_search_fallback": FlagSpec(
+        "external.public_search_fallback",
+        False,
+        "Let anonymous website visitors (POST /api/public/rooms/search) receive external "
+        "discovery results. Also needs external.search_fallback. Off by default so public "
+        "traffic cannot spend external search credits until enabled.",
+    ),
+    "external.referral_billing": FlagSpec(
+        "external.referral_billing",
+        False,
+        "Enable referral/introduction fee models for external provider conversion "
+        "(ZR-AI-SEARCH-001 Section 10). Off until the payment-policy amendment, an "
+        "approved Market Legal Pack, contract templates and the price book are live.",
+    ),
 }
 
 # Requirement strings surfaced in reports/admin responses.

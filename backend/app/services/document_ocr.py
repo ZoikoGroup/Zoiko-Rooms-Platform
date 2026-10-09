@@ -214,6 +214,42 @@ def _ocr_text_and_confidence(document_bytes: bytes) -> tuple[str, float]:
     return " ".join(words).upper(), avg_confidence
 
 
+def ocr_document(document_bytes: bytes, max_pages: int = 4) -> tuple[str, float]:
+    """Multi-page variant for property / authority evidence: deeds, leases
+    and mandates put the parties on one page and the property schedule on
+    another, so the first `max_pages` pages of a PDF are read (an image is
+    one page). Returns (upper-cased text, word-weighted mean confidence)."""
+    import pytesseract
+    from PIL import Image
+    from io import BytesIO
+
+    cmd = _resolve_tesseract_cmd()
+    if cmd is None:
+        raise RuntimeError("Tesseract OCR binary not found on this machine")
+    pytesseract.pytesseract.tesseract_cmd = cmd
+
+    if document_bytes.startswith(b"%PDF"):
+        from pdf2image import convert_from_bytes
+
+        poppler_bin_dir = _resolve_poppler_bin_dir()
+        if poppler_bin_dir is None:
+            raise RuntimeError("Poppler (pdftoppm) not found on this machine")
+        images = convert_from_bytes(document_bytes, first_page=1, last_page=max_pages, dpi=200,
+                                    poppler_path=poppler_bin_dir)
+    else:
+        images = [Image.open(BytesIO(document_bytes))]
+    words: list[str] = []
+    confidences: list[float] = []
+    for image in images:
+        data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+        for word, conf in zip(data.get("text", []), data.get("conf", [])):
+            if word.strip() and conf not in ("-1", -1):
+                words.append(word)
+                confidences.append(float(conf))
+    avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return " ".join(words).upper(), avg_confidence
+
+
 # A passport's machine-readable zone (ICAO 9303, the two OCR-B lines at the
 # bottom of every passport photo page) is a REAL, standardized format --
 # unlike freeform document text, this genuinely can be parsed reliably:

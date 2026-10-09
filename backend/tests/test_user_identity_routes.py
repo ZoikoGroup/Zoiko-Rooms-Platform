@@ -1,154 +1,30 @@
 """Integration tests for /api/users/identity-verifications (user side) --
 previously 66% covered. The document download route is already covered by
-test_document_access.py; this covers submit (multipart)/list/get-by-id."""
+test_document_access.py; this covers list/get-by-id and that uploading is gone."""
 
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.models.identity_verification import IdentityVerification
 from app.models.party import Party
-from tests.conftest import _make_admin, _make_user, auth_user_cookie
+from tests.conftest import _make_user, auth_user_cookie
 
 _PDF_BYTES = b"%PDF-1.4 fake identity document content"
 
 
-class TestSubmit:
-    def test_requires_authentication(self, client):
-        r = client.post(
-            "/api/users/identity-verifications",
-            data={"document_type": "passport"},
-            files={"file": ("doc.pdf", _PDF_BYTES, "application/pdf")},
-        )
-        assert r.status_code == 401, r.text
-
-    def test_an_upload_is_saved_until_the_legal_details_are_confirmed(
-        self, client, db_session: Session, tmp_path, monkeypatch
-    ):
-        monkeypatch.setattr(settings, "identity_upload_dir", str(tmp_path))
-        user = _make_user(db_session, email="uidv-submit@test.com")
-        party = Party(party_type="renter", status="active", jurisdiction="IN")
-        db_session.add(party)
-        db_session.flush()
-        user.party_id = party.id
-        db_session.commit()
-
-        r = client.post(
-            "/api/users/identity-verifications",
-            data={"document_type": "passport", "document_number": "P987654"},
-            files={"file": ("passport.pdf", _PDF_BYTES, "application/pdf")},
-            cookies=auth_user_cookie(user),
-        )
-        assert r.status_code == 201, r.text
-        body = r.json()
-        # ZR-IDENTITY-001 Section 4: no date of birth confirmed yet (India
-        # requires one), so the document is saved but not submitted.
-        assert body["status"] == "draft"
-        assert body["documentNumber"] == "••••7654"
-        assert body["documentType"] == "passport"
-        assert body["hasDocument"] is True
-        assert body["documentOriginalName"] == "passport.pdf"
-
-    def test_rejects_an_invalid_document_type(self, client, db_session: Session, tmp_path, monkeypatch):
-        monkeypatch.setattr(settings, "identity_upload_dir", str(tmp_path))
-        user = _make_user(db_session, email="uidv-badtype@test.com")
-        party = Party(party_type="renter", status="active", jurisdiction="IN")
-        db_session.add(party)
-        db_session.flush()
-        user.party_id = party.id
-        db_session.commit()
-
-        r = client.post(
-            "/api/users/identity-verifications",
-            data={"document_type": "not-a-real-type"},
-            files={"file": ("doc.pdf", _PDF_BYTES, "application/pdf")},
-            cookies=auth_user_cookie(user),
-        )
-        assert r.status_code == 400, r.text
-
-    def test_rejects_a_file_that_isnt_actually_pdf_jpg_or_png(self, client, db_session: Session, tmp_path, monkeypatch):
-        monkeypatch.setattr(settings, "identity_upload_dir", str(tmp_path))
-        user = _make_user(db_session, email="uidv-badfile@test.com")
-        party = Party(party_type="renter", status="active", jurisdiction="IN")
-        db_session.add(party)
-        db_session.flush()
-        user.party_id = party.id
-        db_session.commit()
-
-        r = client.post(
-            "/api/users/identity-verifications",
-            data={"document_type": "passport"},
-            files={"file": ("doc.pdf", b"not a real document", "application/pdf")},
-            cookies=auth_user_cookie(user),
-        )
-        assert r.status_code == 400, r.text
-
-    def test_reuploading_identical_document_bytes_flags_admins_of_the_duplicate(
-        self, client, db_session: Session, tmp_path, monkeypatch
-    ):
-        """ZR-ENG-CLR-012 Section 18: duplicate/fraud-pattern detection must
-        actually reach the admin notification queue, not just exist as an
-        unused helper."""
-        from app.models.notification import Notification
-
-        monkeypatch.setattr(settings, "identity_upload_dir", str(tmp_path))
-        super_admin = _make_admin(db_session, email="uidv-dup-super@test.com", role="super_admin")
-
-        party_a = Party(party_type="renter", status="active", jurisdiction="IN")
-        party_b = Party(party_type="renter", status="active", jurisdiction="IN")
-        db_session.add_all([party_a, party_b])
-        db_session.flush()
-        user_a = _make_user(db_session, email="uidv-dup-a@test.com")
-        user_a.party_id = party_a.id
-        user_b = _make_user(db_session, email="uidv-dup-b@test.com")
-        user_b.party_id = party_b.id
-        db_session.commit()
-        for user in (user_a, user_b):
-            r = client.put("/api/users/identity/details", json={
-                "givenName": "Test", "familyName": "User", "dateOfBirth": "1990-01-01", "countryCode": "IN",
-            }, cookies=auth_user_cookie(user))
-            assert r.status_code == 200, r.text
-
-        r1 = client.post(
-            "/api/users/identity-verifications",
-            data={"document_type": "passport", "document_number": "P111"},
-            files={"file": ("passport.pdf", _PDF_BYTES, "application/pdf")},
-            cookies=auth_user_cookie(user_a),
-        )
-        assert r1.status_code == 201, r1.text
-        first_id = r1.json()["id"]
-
-        r2 = client.post(
-            "/api/users/identity-verifications",
-            data={"document_type": "passport", "document_number": "P222"},
-            files={"file": ("passport.pdf", _PDF_BYTES, "application/pdf")},
-            cookies=auth_user_cookie(user_b),
-        )
-        assert r2.status_code == 201, r2.text
-        second_id = r2.json()["id"]
-
-        notification = db_session.query(Notification).filter(
-            Notification.recipient_admin_id == super_admin.id,
-            Notification.notification_type == "identity_verification.submitted",
-            Notification.related_entity_id == str(second_id),
-        ).one_or_none()
-        assert notification is not None
-        assert f"verification #{first_id}" in notification.message
-
-    def test_user_with_no_party_gets_409(self, client, db_session: Session, tmp_path, monkeypatch):
-        monkeypatch.setattr(settings, "identity_upload_dir", str(tmp_path))
-        user = _make_user(db_session, email="uidv-noparty@test.com")
-        db_session.commit()
-        assert user.party_id is None
-
+class TestNoUpload:
+    def test_documents_can_no_longer_be_uploaded_here(self, client, db_session: Session):
+        """Identity is verified only inside Veriff's own capture
+        (ZR-IDV-ADR-001) -- there is no upload route to send a document to."""
+        user = _make_user(db_session, email="uidv-no-upload@test.com")
         r = client.post(
             "/api/users/identity-verifications",
             data={"document_type": "passport"},
             files={"file": ("doc.pdf", _PDF_BYTES, "application/pdf")},
             cookies=auth_user_cookie(user),
         )
-        assert r.status_code == 409, r.text
+        assert r.status_code == 405, r.text
 
 
 class TestListAndGetOwnership:

@@ -155,6 +155,46 @@ def link_payment_disputes_to_cases(db: Session) -> int:
     return link_open_payment_disputes(db)
 
 
+def expire_property_verifications(db: Session) -> int:
+    """ZR-PROPERTY-VERIFY-001 Section 7: VERIFIED past expires_at -> EXPIRED."""
+    from app.services.property_location_service import sweep_expired
+
+    return sweep_expired(db)
+
+
+def purge_property_location_evidence(db: Session) -> int:
+    """Property evidence files past the pack's retention period are deleted."""
+    from app.services.property_location_service import purge_expired_evidence
+
+    return purge_expired_evidence(db)
+
+
+def expire_authority_verifications(db: Session) -> int:
+    """ZR-AUTHORITY-002 Section 9: expiring-soon notices and expiry, which
+    applies the pack's listing control."""
+    from app.services import authority_service
+
+    result = authority_service.sweep_expiry(db)
+    return result["expiring"] + result["expired"]
+
+
+def recheck_authority_verifications(db: Session) -> int:
+    """ZR-AUTHORITY-002: submitted authority cases waiting on property
+    verification, OCR or the malware scanner are decided again
+    automatically (there is no manual review queue)."""
+    from app.services import authority_service
+
+    changed = authority_service.recheck_pending(db)
+    db.commit()
+    return changed
+
+
+def purge_authority_evidence(db: Session) -> int:
+    from app.services import authority_service
+
+    return authority_service.purge_expired_evidence(db)
+
+
 def sweep_identity_reverification(db: Session) -> int:
     """ZR-IDENTITY-001 Section 7.3: verified identities whose policy
     renewal date has passed move to REVERIFICATION_REQUIRED."""
@@ -193,6 +233,88 @@ def reconcile_listing_fee_refunds(db: Session) -> int:
     from app.crud.listing_fee import reconcile_processing_refunds
 
     return reconcile_processing_refunds(db)
+
+
+def process_external_outreach(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Section 9 step 3: email PENDING provider outreach
+    (eligibility, market channel and suppression re-checked per row). Rows
+    that cannot be emailed stay in the operator queue."""
+    from app.services.outreach_worker import outreach_worker
+    from app.services.provider_journey import email_dispatch
+
+    return outreach_worker.process_pending_outreach(db, dispatch=email_dispatch)
+
+
+def remind_hosts_to_reconfirm_availability(db: Session, *, now: datetime | None = None) -> int:
+    """ZR-AI-SEARCH-001 Section 5.1 freshness: a published listing whose
+    availability has not been confirmed within availability_freshness_days is
+    ranked lower in search; remind its host (at most once per period)."""
+    from app.models.listing import Listing
+
+    now = now or datetime.now(timezone.utc)
+    period = timedelta(days=settings.availability_freshness_days)
+    stale = db.scalars(
+        select(Listing).where(
+            Listing.state == "PUBLISHED",
+            Listing.party_id.is_not(None),
+            (Listing.availability_confirmed_at.is_(None)) | (Listing.availability_confirmed_at <= now - period),
+        )
+    ).all()
+    reminded = 0
+    for listing in stale:
+        recent = db.scalar(
+            select(Notification.id).where(
+                Notification.notification_type == "listing.availability_reconfirm",
+                Notification.related_entity_id == str(listing.id),
+                Notification.created_at >= now - period,
+            ).limit(1)
+        )
+        if recent is not None:
+            continue
+        notif_crud.notify_user_by_party(
+            db, listing.party_id, title="Is your room still available?",
+            message=(
+                f"Please confirm that \"{listing.name}\" is still available. Listings with a recent "
+                "confirmation are shown higher in Zoiko Rooms search."
+            ),
+            notification_type="listing.availability_reconfirm",
+            related_entity_type="listing", related_entity_id=str(listing.id),
+        )
+        reminded += 1
+    if reminded:
+        db.commit()
+    return reminded
+
+
+def sync_internalised_external_leads(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Section 9 step 8: claimed rooms whose listing passed
+    the platform's gates and was published become internal inventory."""
+    from app.services.provider_journey import sync_internalised
+
+    return sync_internalised(db)
+
+
+def expire_external_outreach(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Phase 1.3: expire SENT outreach with no response in TTL."""
+    from app.services.outreach_worker import outreach_worker
+
+    return outreach_worker.check_expired_outreach(db)
+
+
+def sync_partner_feeds(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Tier A: pull every approved partner feed (UK BLM,
+    US RESO, CSV/JSON) and apply it as the partner's current inventory."""
+    from app.services.feed_sync import sync_partner_feeds as _sync
+
+    return _sync(db)
+
+
+def purge_stale_external_opportunities(db: Session) -> int:
+    """ZR-AI-SEARCH-001 Section 12 retention: drop discovered external
+    opportunities past their source TTL that were never acted on."""
+    from app.services.outreach_worker import outreach_worker
+
+    return outreach_worker.purge_stale_opportunities(db)
 
 
 def remind_hosts_of_unconfirmed_payments(db: Session, *, now: datetime | None = None) -> int:
@@ -239,8 +361,19 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("purge_identity_evidence", purge_identity_evidence),
     ("process_identity_webhooks", process_identity_webhooks),
     ("reconcile_identity_sessions", reconcile_identity_sessions),
+    ("expire_property_verifications", expire_property_verifications),
+    ("purge_property_location_evidence", purge_property_location_evidence),
+    ("expire_authority_verifications", expire_authority_verifications),
+    ("recheck_authority_verifications", recheck_authority_verifications),
+    ("purge_authority_evidence", purge_authority_evidence),
     ("remind_hosts_of_unconfirmed_payments", remind_hosts_of_unconfirmed_payments),
     ("reconcile_listing_fee_refunds", reconcile_listing_fee_refunds),
+    ("process_external_outreach", process_external_outreach),
+    ("expire_external_outreach", expire_external_outreach),
+    ("sync_partner_feeds", sync_partner_feeds),
+    ("sync_internalised_external_leads", sync_internalised_external_leads),
+    ("remind_hosts_to_reconfirm_availability", remind_hosts_to_reconfirm_availability),
+    ("purge_stale_external_opportunities", purge_stale_external_opportunities),
 )
 
 

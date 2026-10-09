@@ -19,13 +19,14 @@ class TestSharingScopeSurfaced:
         db_session.add(party)
         db_session.commit()
 
-        r = client.post(
-            "/api/verification/occupancy-eligibility-checks",
-            json={"partyId": party.id, "jurisdictionCode": "England", "method": "MANUAL_DOCUMENT_CHECK"},
-            cookies=auth_admin_cookie(admin),
-        )
-        assert r.status_code == 201, r.text
-        assert "Host" in r.json()["sharingScope"]
+        from app.crud.occupancy_eligibility import open_occupancy_eligibility_check
+
+        open_occupancy_eligibility_check(db_session, None, party_id=party.id, jurisdiction_code="England",
+                                         method="IDENTITY_DOCUMENT")
+        r = client.get(f"/api/verification/occupancy-eligibility-checks/party/{party.id}",
+                       cookies=auth_admin_cookie(admin))
+        assert r.status_code == 200, r.text
+        assert "Host" in r.json()[0]["sharingScope"]
 
     def test_screening_check_includes_sharing_scope(self, client, db_session: Session):
         admin = _make_admin(db_session, email="sscope-admin-02@test.com", role="super_admin")

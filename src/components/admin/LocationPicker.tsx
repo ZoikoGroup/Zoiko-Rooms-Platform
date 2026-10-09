@@ -1,40 +1,19 @@
 "use client";
 
-import "leaflet/dist/leaflet.css";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Search } from "lucide-react";
-import L from "leaflet";
-import { MapContainer, Marker, TileLayer, useMap, useMapEvents } from "react-leaflet";
+import { apiClientFetch } from "@/lib/api-client";
+import { browserMapProvider } from "@/lib/map-provider";
+import { PropertyPinMap } from "@/components/user/PropertyPinMap";
 
-// Leaflet's default marker icon references image files that don't resolve under
-// Next.js's bundler, so the icon URLs must be set explicitly.
-const markerIcon = L.icon({
-  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-});
+const DEFAULT_CENTER = { latitude: 20.5937, longitude: 78.9629 }; // India centroid
 
-const DEFAULT_CENTER: [number, number] = [20.5937, 78.9629]; // India centroid
-
-function ClickHandler({ onPick }: { onPick: (lat: number, lng: number) => void }) {
-  useMapEvents({
-    click(e) {
-      onPick(e.latlng.lat, e.latlng.lng);
-    },
-  });
-  return null;
-}
-
-function MapRefSetter({ mapRef }: { mapRef: React.MutableRefObject<L.Map | null> }) {
-  const map = useMap();
-  useEffect(() => {
-    mapRef.current = map;
-  }, [map, mapRef]);
-  return null;
-}
-
+/**
+ * Admin property pin picker. Search goes through the backend location
+ * adapter (ZR-PROPERTY-VERIFY-001: Google Maps Platform primary, Mapbox /
+ * HERE fallback); the map is the shared PropertyPinMap. Client-only -- load
+ * through next/dynamic with ssr: false.
+ */
 export function LocationPicker({
   latitude,
   longitude,
@@ -46,18 +25,11 @@ export function LocationPicker({
   onChange: (lat: number, lng: number) => void;
   onAddressResolved?: (address: string) => void;
 }) {
-  const [position, setPosition] = useState<[number, number]>(
-    latitude != null && longitude != null ? [latitude, longitude] : DEFAULT_CENTER
-  );
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState("");
-  const mapRef = useRef<L.Map | null>(null);
-
-  function handlePick(lat: number, lng: number) {
-    setPosition([lat, lng]);
-    onChange(lat, lng);
-  }
+  const hasPin = latitude != null && longitude != null;
+  const marker = hasPin ? { latitude, longitude } : DEFAULT_CENTER;
 
   async function handleSearch() {
     const q = query.trim();
@@ -65,21 +37,17 @@ export function LocationPicker({
     setSearching(true);
     setSearchError("");
     try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`
+      const r = await apiClientFetch<{ found: boolean; location?: { latitude: number; longitude: number }; formatted?: string }>(
+        "/api/admin/location/geocode", { method: "POST", body: JSON.stringify({ query: q }) },
       );
-      const results: Array<{ lat: string; lon: string; display_name: string }> = await res.json();
-      if (!results.length) {
+      if (!r.found || !r.location) {
         setSearchError("No location found for that search");
         return;
       }
-      const lat = Number(results[0].lat);
-      const lng = Number(results[0].lon);
-      handlePick(lat, lng);
-      onAddressResolved?.(results[0].display_name);
-      mapRef.current?.flyTo([lat, lng], 14);
+      onChange(r.location.latitude, r.location.longitude);
+      if (r.formatted) onAddressResolved?.(r.formatted);
     } catch {
-      setSearchError("Location search failed — try clicking the map instead");
+      setSearchError("Location search is unavailable -- place the pin on the map instead");
     } finally {
       setSearching(false);
     }
@@ -113,28 +81,15 @@ export function LocationPicker({
         </button>
       </div>
       {searchError && <p className="bg-slate-50 px-3 pb-2 text-[11px] text-accent-600 dark:bg-slate-800">{searchError}</p>}
-      <MapContainer center={position} zoom={latitude != null ? 12 : 5} style={{ height: "220px", width: "100%" }}>
-        <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
-        <ClickHandler onPick={handlePick} />
-        <MapRefSetter mapRef={mapRef} />
-        {latitude != null && longitude != null && (
-          <Marker
-            position={position}
-            icon={markerIcon}
-            draggable
-            eventHandlers={{
-              dragend: (e) => {
-                const marker = e.target as L.Marker;
-                const { lat, lng } = marker.getLatLng();
-                handlePick(lat, lng);
-              },
-            }}
-          />
-        )}
-      </MapContainer>
+      {browserMapProvider() === "none" ? (
+        <p className="bg-slate-50 px-3 py-3 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+          {hasPin ? `Pin: ${latitude.toFixed(6)}, ${longitude.toFixed(6)}` : "No pin yet."} No browser map key is configured --
+          use search to set the location.
+        </p>
+      ) : (
+        <PropertyPinMap original={null} marker={marker} adjustable height={220}
+                        onMove={(p) => onChange(p.latitude, p.longitude)} />
+      )}
       <p className="bg-slate-50 px-3 py-1.5 text-[11px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">
         Search for an address, click the map to drop a pin, or drag the pin to fine-tune the location.
       </p>

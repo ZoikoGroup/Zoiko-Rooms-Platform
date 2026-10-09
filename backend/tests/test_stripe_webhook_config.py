@@ -1,9 +1,8 @@
 """Stripe webhook production readiness: an endpoint with no signing secret
 rejects every delivery, and production refuses to boot with real Stripe on
-but the Listing Fee webhook secret missing. The rent webhook secret and the
-Connect URLs are only required with the card rent rail on
-(RENT_CARD_CHECKOUT_ENABLED) -- rent is otherwise paid to hosts directly and
-neither is used."""
+but the Listing Fee webhook secret missing. Rent is paid directly (bank
+transfer / UPI / cash) -- there is no rent webhook, and the rent-era Stripe
+settings are never required."""
 
 from __future__ import annotations
 
@@ -21,7 +20,6 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 WEBHOOK_PATHS = (
     "/api/finance/payments/stripe/webhook",
     "/api/finance/listing-fees/stripe/webhook",
-    "/api/finance/rental-payments/stripe/webhook",
 )
 
 
@@ -29,7 +27,6 @@ WEBHOOK_PATHS = (
 def test_webhook_without_any_signing_secret_is_rejected(client, monkeypatch, path):
     monkeypatch.setattr(settings, "stripe_webhook_secret", "")
     monkeypatch.setattr(settings, "stripe_listing_fee_webhook_secret", "")
-    monkeypatch.setattr(settings, "stripe_rental_payment_webhook_secret", "")
 
     r = client.post(path, headers={"stripe-signature": "t=1,v1=forged"}, content=b'{"type": "account.updated"}')
     assert r.status_code == 400, r.text
@@ -86,14 +83,6 @@ RENT_ONLY_GAPS = [
 def test_rent_only_stripe_settings_are_not_required_while_rent_is_paid_directly(overrides, expected):
     p = _boot_production(**overrides)
     assert "booted" in p.stdout, p.stderr
-
-
-@pytest.mark.parametrize("overrides, expected", RENT_ONLY_GAPS)
-def test_rent_only_stripe_settings_are_required_with_the_card_rent_rail_on(overrides, expected):
-    p = _boot_production(RENT_CARD_CHECKOUT_ENABLED="true", **overrides)
-    assert p.returncode != 0
-    assert "Refusing to boot in production" in p.stderr
-    assert expected in p.stderr
 
 
 def test_shared_webhook_secret_satisfies_both_endpoints():

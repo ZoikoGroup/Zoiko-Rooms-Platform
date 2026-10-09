@@ -134,6 +134,37 @@ def original_renter_party_id(db: Session, occupancy) -> int | None:
     return user.party_id if user is not None else None
 
 
+def sublet_for_agreement(db: Session, agreement_id: int | None):
+    """The sublet request whose approval created `agreement_id`, if any."""
+    from app.models.sublet_request import SubletRequest
+
+    if agreement_id is None:
+        return None
+    return db.scalar(
+        select(SubletRequest).where(SubletRequest.new_agreement_id == agreement_id).order_by(SubletRequest.id.desc()).limit(1)
+    )
+
+
+def sublet_collection_blocked(db: Session, obligation: RentalPaymentObligation) -> bool:
+    """ZR-SUBLET-PAY-003 Section 17: once the sublet that made the original
+    renter the payee is no longer approved (cancelled by authority,
+    superseded, expired, withdrawn...), new payments to them are blocked --
+    never silently rerouted, history preserved -- until the arrangement is
+    reviewed."""
+    sublet = sublet_for_agreement(db, _agreement_id_for_obligation(obligation))
+    return (
+        sublet is not None
+        and sublet.arrangement_type in SUBLET_ARRANGEMENTS_PAID_TO_ORIGINAL_RENTER
+        and sublet.payee_model == "ORIGINAL_RENTER_PAYEE"
+        and sublet.status != "approved"
+    )
+
+
+SUBLET_COLLECTION_BLOCKED_MESSAGE = (
+    "The sublet that named this payee is no longer approved, so payments to them are paused until it's reviewed"
+)
+
+
 def sublet_payee_party_id(db: Session, agreement_id: int | None) -> int | None:
     """If `agreement_id` is a sublease/lodger agreement created by an approved
     sublet under the ORIGINAL_RENTER_PAYEE model, the original renter's party
@@ -190,6 +221,10 @@ def create_obligation(
         status="UPCOMING" if due_date > date.today() else "DUE",
     )
     db.add(obligation)
+    db.flush()
+    from app.services.sublet_payments import on_obligation_created
+
+    on_obligation_created(db, obligation)
     db.commit()
     db.refresh(obligation)
     return obligation
@@ -397,21 +432,6 @@ def _recompute_single_or_joint_status(db: Session, obligation: RentalPaymentObli
         .limit(1)
     )
     if latest_record is None:
-        # ZR-PAY-LINK-003 Section 16: PAYMENT_SESSION_STARTED -- an online
-        # payment session in flight takes priority over the plain due-date
-        # derivation below, both so the tenant sees it's actually in
-        # progress and so canMarkPaid-style UI checks (only ever true for
-        # UPCOMING/DUE/OVERDUE) stop offering a second, conflicting payment
-        # action while one is already underway. Deferred import, same
-        # cross-module-boundary discipline as resolve_rent_recipient_party_id
-        # below.
-        from app.crud.external_payment_session import get_latest_session_for_obligation
-
-        latest_session = get_latest_session_for_obligation(db, obligation.id)
-        if latest_session is not None and latest_session.status == "STARTED":
-            obligation.status = "PAYMENT_SESSION_STARTED"
-            return
-
         obligation.status = "UPCOMING" if obligation.due_date > date.today() else (
             "OVERDUE" if obligation.due_date < date.today() else "DUE"
         )
@@ -690,6 +710,8 @@ def recipient_holds_payment_receipt_authority(db: Session, obligation: RentalPay
     from app.core.config import settings
     from app.crud.authority import get_valid_authority_for_room
 
+    if sublet_collection_blocked(db, obligation):
+        return False
     if not settings.payment_receipt_authority_required:
         return True
     room = obligation.room
@@ -707,11 +729,24 @@ def recipient_holds_payment_receipt_authority(db: Session, obligation: RentalPay
 
 
 def assert_recipient_holds_payment_receipt_authority(db: Session, obligation: RentalPaymentObligation, party_id: int) -> None:
+    if sublet_collection_blocked(db, obligation):
+        raise HTTPException(status.HTTP_409_CONFLICT, SUBLET_COLLECTION_BLOCKED_MESSAGE)
     if not recipient_holds_payment_receipt_authority(db, obligation, party_id):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "The host's authority for this room hasn't been verified yet",
         )
+
+
+def _payer_share_outstanding(obligation: RentalPaymentObligation, guest_id: str) -> float:
+    """What this payer can still pay: the whole outstanding amount, or for a
+    joint obligation their allocated share less what they've had confirmed."""
+    allocation = next((a for a in obligation.payer_allocations if a.payer_guest_id == guest_id), None)
+    if allocation is None:
+        return obligation.outstanding_amount
+    confirmed = sum(float(r.confirmed_amount or 0) for r in obligation.records
+                    if r.declared_by_guest_id == guest_id and r.status in ("CONFIRMED", "PARTIALLY_PAID"))
+    return max(float(allocation.allocated_amount) - confirmed, 0.0)
 
 
 def mark_paid(
@@ -730,6 +765,31 @@ def mark_paid(
         raise HTTPException(status.HTTP_409_CONFLICT, f"This obligation is {obligation.status.lower()} and cannot be marked paid")
     if payment_method_category not in RENTAL_PAYMENT_METHOD_CATEGORIES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"paymentMethodCategory must be one of {RENTAL_PAYMENT_METHOD_CATEGORIES}")
+    if sublet_collection_blocked(db, obligation):
+        raise HTTPException(status.HTTP_409_CONFLICT, SUBLET_COLLECTION_BLOCKED_MESSAGE)
+    from app.services.sublet_payments import payment_gate
+
+    payment_gate(db, obligation)
+    # ZR-SUBLET-PAY-003 Section 17: the payment currency is the obligation's
+    # currency, and a report can't exceed what is still owed (counting
+    # declarations already awaiting the payee's confirmation).
+    if (currency or "").upper() != (obligation.currency or "").upper():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"This payment is owed in {obligation.currency} -- report it in {obligation.currency}")
+    if amount is None or _round2(amount) <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Enter the amount you paid")
+    joint = any(a.payer_guest_id == guest.id for a in obligation.payer_allocations)
+    awaiting = sum(float(r.declared_amount or 0) for r in obligation.records
+                   if r.status in ("PAYER_RECORDED", "RECIPIENT_CONFIRMATION_PENDING")
+                   and (not joint or r.declared_by_guest_id == guest.id))
+    owed = _payer_share_outstanding(obligation, guest.id) - awaiting
+    if _round2(amount) > _round2(max(owed, 0.0)):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"That's more than the {max(_round2(owed), 0.0):.2f} {obligation.currency} still owed"
+            + (" (including payments already waiting for confirmation)" if awaiting else ""),
+        )
+    currency = obligation.currency
 
     record = RentalPaymentRecord(
         obligation_id=obligation.id, status="PAYER_RECORDED", provenance="TENANT_DECLARATION",
@@ -949,6 +1009,9 @@ def confirm_receipt(
         notification_type="rental_payment.receipt_confirmed",
         related_entity_type="rental_payment_record", related_entity_id=str(record.id),
     )
+    from app.services.sublet_payments import on_payment_confirmed
+
+    on_payment_confirmed(db, record.obligation)
     return record
 
 
@@ -1032,6 +1095,9 @@ def record_receipt_as_recipient(
         notification_type="rental_payment.receipt_confirmed",
         related_entity_type="rental_payment_record", related_entity_id=str(record.id),
     )
+    from app.services.sublet_payments import on_payment_confirmed
+
+    on_payment_confirmed(db, record.obligation)
     return record
 
 
@@ -1082,6 +1148,9 @@ def admin_confirm_receipt(
         notification_type="rental_payment.receipt_confirmed",
         related_entity_type="rental_payment_record", related_entity_id=str(record.id),
     )
+    from app.services.sublet_payments import on_payment_confirmed
+
+    on_payment_confirmed(db, record.obligation)
     return record
 
 
@@ -1139,6 +1208,9 @@ def confirm_receipt_as_provider(
         notification_type="rental_payment.receipt_confirmed",
         related_entity_type="rental_payment_record", related_entity_id=str(record.id),
     )
+    from app.services.sublet_payments import on_payment_confirmed
+
+    on_payment_confirmed(db, record.obligation)
     return record
 
 
@@ -1658,6 +1730,13 @@ def submit_rental_payment_instruction(
     the clear."""
     if method not in RENTAL_PAYMENT_INSTRUCTION_METHODS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"method must be one of {RENTAL_PAYMENT_INSTRUCTION_METHODS}")
+    # ZR-AI-SEARCH-001 SRCH-12: unverified external providers never receive
+    # Zoiko-issued payment instructions.
+    from app.services.provider_journey import payment_block_reason
+
+    blocked = payment_block_reason(db, party.id)
+    if blocked:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, blocked)
     recipient_name = recipient_name.strip()
     if not recipient_name:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Recipient name is required")

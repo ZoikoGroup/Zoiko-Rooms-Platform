@@ -572,6 +572,10 @@ class SubletRequestRead(CamelModel):
     policy_snapshot: dict = {}
     new_agreement_id: int | None = None
     payee_model: str = ""
+    # Incoming occupant's overlap risk (crud/sublet.py:evaluate_sublet_overlap):
+    # live while pending, as recorded once decided. NONE / REVIEW / BLOCK.
+    occupant_risk_tier: str = "NONE"
+    occupant_risk_reason: str = ""
 
     listing_name: str = ""
     listing_city: str = ""
@@ -621,6 +625,9 @@ class SubletRequestDecision(CamelModel):
     # occupant approval. Required (re-verified against the deciding actor's
     # own account password) only for that approval; ignored everywhere else.
     step_up_password: str = ""
+    # Approval only: the approver's reason for going ahead when the incoming
+    # occupant's overlap check is BLOCK (crud/sublet.py:approve_sublet_request).
+    override_reason: str = ""
 
 
 class SubletDecisionAuthorityCancel(CamelModel):

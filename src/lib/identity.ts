@@ -1,8 +1,10 @@
 /**
- * ZR-IDENTITY-001 global identity verification -- types and API client for
- * the person's step-by-step flow (/api/users/identity) and the reviewer
- * case view. Every status here is server-authoritative; the client never
- * decides whether someone is verified.
+ * ZR-IDENTITY-001 / ZR-IDV-ADR-001 identity verification -- types and API
+ * client for the person's flow (/api/users/identity) and the admin case
+ * view. The document and selfie are photographed in Zoiko's own capture
+ * screens; each photo goes from our backend straight to Veriff (never
+ * stored) and only Veriff's decision can verify someone -- there is no
+ * manual-review route. The client never decides whether someone is verified.
  */
 
 import { apiClientFetch } from "@/lib/api-client";
@@ -19,16 +21,17 @@ export type IdentityState =
   | "REVERIFICATION_REQUIRED"
   | "FAILED";
 
-export type IdentityMethod = "DIGITAL_IDENTITY" | "DOCUMENT" | "MANUAL";
+export type IdentityMethod = "DOCUMENT";
 export type IdentityRole = "OWNER" | "AGENT" | "SUBLETTER";
-export type AlternativeReason = "NO_CAMERA" | "ACCESSIBILITY" | "NO_ACCEPTED_DOCUMENT" | "PROVIDER_UNAVAILABLE" | "OTHER";
 
-/** UPLOAD: the document is uploaded to Zoiko. PROVIDER_HOSTED: the document
- *  and selfie are captured inside the provider's flow (Veriff). */
-export type CaptureMode = "UPLOAD" | "PROVIDER_HOSTED";
+/** A provider (Veriff) session decides the verification. */
+export type CaptureMode = "PROVIDER_HOSTED";
+/** The photos taken in Zoiko's capture screens (Veriff media contexts). */
+export type CaptureContext = "document-front" | "document-back" | "face";
 
 export interface IdentityPack {
   captureMode: CaptureMode;
+  /** False when Veriff isn't configured / enabled: nobody can verify now. */
   providerAvailable: boolean;
   selfieCheck: boolean;
   countryCode: string;
@@ -64,10 +67,12 @@ export interface IdentitySession {
   reasonCodes: string[];
   message: string;
   actions: string[];
-  /** Hosted capture: the provider flow can be (re)opened now. */
-  launchAvailable: boolean;
-  /** Only on submit / launch responses -- never stored client-side. */
-  launchUrl: string | null;
+  /** Photos can be taken now (in progress, or Veriff asked for new ones). */
+  captureAvailable: boolean;
+  /** Which photos were already sent to Veriff for this attempt. */
+  captured: CaptureContext[];
+  /** The chosen document has a back side Veriff needs. */
+  backRequired: boolean;
   canRestart: boolean;
   createdAt: string;
   submittedAt: string | null;
@@ -137,14 +142,6 @@ export function getIdentitySession(id: number): Promise<IdentitySession> {
   return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}`);
 }
 
-export function uploadIdentityDocument(id: number, documentType: string, documentNumber: string, file: File): Promise<IdentitySession> {
-  const form = new FormData();
-  form.append("document_type", documentType);
-  form.append("document_number", documentNumber);
-  form.append("file", file);
-  return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/document`, { method: "POST", body: form });
-}
-
 export function submitIdentitySession(id: number, attested: boolean): Promise<IdentitySession> {
   return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/submit`, {
     method: "POST",
@@ -152,16 +149,19 @@ export function submitIdentitySession(id: number, attested: boolean): Promise<Id
   });
 }
 
-export function requestIdentityAlternative(id: number, reasonCode: AlternativeReason, note: string): Promise<IdentitySession> {
-  return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/alternative`, {
-    method: "POST",
-    body: JSON.stringify({ reasonCode, note }),
-  });
+/** Send one photo from the capture screen; the backend relays it straight
+ *  to Veriff. `documentType` is required with the document's front. */
+export function captureIdentityPhoto(id: number, context: CaptureContext, photo: Blob, documentType = ""): Promise<IdentitySession> {
+  const form = new FormData();
+  form.append("context", context);
+  form.append("document_type", documentType);
+  form.append("file", photo, photo.type === "image/png" ? "photo.png" : "photo.jpg");
+  return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/capture`, { method: "POST", body: form });
 }
 
-/** Reopen the provider's capture flow for an unfinished session. */
-export function launchIdentitySession(id: number): Promise<IdentitySession> {
-  return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/launch`, { method: "POST" });
+/** All photos taken: Veriff starts deciding. The result arrives later. */
+export function completeIdentityCapture(id: number): Promise<IdentitySession> {
+  return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/complete`, { method: "POST" });
 }
 
 /** Ask the server to check with the provider for a decision (rate-limited). */
@@ -182,9 +182,7 @@ export function claimIdentityHandoff(token: string): Promise<IdentitySession> {
   return apiClientFetch<IdentitySession>(`${BASE}/handoff/claim`, { method: "POST", body: JSON.stringify({ token }) });
 }
 
-// --- Reviewer (admin) ---------------------------------------------------------
-
-export type ReviewerDecision = "APPROVE" | "ACTION_REQUIRED" | "REJECT" | "ESCALATE";
+// --- Admin case view (read-only: Veriff decides) -------------------------------
 
 export interface IdentityCaseHistoryItem {
   eventType: string;
@@ -221,8 +219,6 @@ export interface IdentityCase {
   hasDocument: boolean;
   documentContentType: string;
   evidencePurgedAt: string | null;
-  alternativeReason: string;
-  escalated: boolean;
   verifierNotes: string;
   submittedAt: string | null;
   decidedAt: string | null;
@@ -250,16 +246,11 @@ export interface IdentityMetrics {
   submitted: number;
   verified: number;
   startToVerifiedRate: number | null;
-  manualReviewRate: number | null;
   actionRequiredRecoveryRate: number | null;
   providerErrorRate: number | null;
-  timeToDecisionHours: {
-    automated: { median: number | null; p90: number | null };
-    manual: { median: number | null; p90: number | null };
-  };
+  timeToDecisionHours: { median: number | null; p90: number | null };
   byMethod: Record<string, { submitted: number; verified: number }>;
   reasonCodes: Record<string, number>;
-  pendingReview: number;
   providerOutcomes: Record<string, number>;
   providerSessionsCreated: number;
   webhookAuthFailures: number;
@@ -270,6 +261,15 @@ export interface IdentityMetrics {
   webhookFailed: number;
   reconciledSessions: number;
   staleSessions: number;
+  /** Null until VERIFF_COST_PER_SESSION is configured. */
+  providerCost: {
+    currency: string;
+    perSession: number;
+    sessions: number;
+    total: number;
+    perCompletedVerification: number | null;
+    perApprovedAccount: number | null;
+  } | null;
 }
 
 export interface IdentityPackAdmin extends IdentityPack {
@@ -283,8 +283,6 @@ export interface IdentityPackAdmin extends IdentityPack {
 
 export const PROVIDER_OPTIONS: { value: string; label: string }[] = [
   { value: "veriff", label: "Veriff (document + selfie)" },
-  { value: "zoiko_document_check", label: "Built-in document check" },
-  { value: "signed_webhook", label: "Other signed-webhook provider" },
 ];
 
 export function listIdentityPacks(): Promise<IdentityPackAdmin[]> {
@@ -316,17 +314,6 @@ export function listIdentityQueue(filter: string): Promise<IdentityQueueItem[]> 
 
 export function getIdentityCase(id: number): Promise<IdentityCase> {
   return apiClientFetch<IdentityCase>(`/api/identity-verifications/${id}/case`);
-}
-
-export function getReviewerReasonCodes(): Promise<{ decisions: ReviewerDecision[]; reasonCodes: { code: string; message: string }[] }> {
-  return apiClientFetch(`/api/identity-verifications/reason-codes`);
-}
-
-export function decideIdentityCase(id: number, decision: ReviewerDecision, reasonCode: string, note: string) {
-  return apiClientFetch(`/api/identity-verifications/${id}/decision`, {
-    method: "POST",
-    body: JSON.stringify({ decision, reasonCode, note }),
-  });
 }
 
 export function getIdentityMetrics(days = 30): Promise<IdentityMetrics> {
@@ -369,19 +356,8 @@ export const roleLabel: Record<IdentityRole, string> = {
   SUBLETTER: "Tenant / subletter",
 };
 
-export const alternativeReasonLabel: Record<AlternativeReason, string> = {
-  NO_CAMERA: "My device doesn't have a suitable camera",
-  ACCESSIBILITY: "I need an accessible alternative",
-  NO_ACCEPTED_DOCUMENT: "I don't have an accepted document",
-  PROVIDER_UNAVAILABLE: "The check isn't working for me",
-  OTHER: "Something else",
-};
-
 export const remediationLabel: Record<string, string> = {
-  RETRY_CAPTURE: "Retry the photo or scan",
-  UPLOAD_ANOTHER_DOCUMENT: "Upload another accepted document",
-  CHOOSE_ANOTHER_METHOD: "Choose another verification option",
-  REQUEST_REVIEW: "Ask for a manual review",
+  RETRY_CAPTURE: "Take new photos of your document and a selfie",
   EDIT_DETAILS: "Review your details",
   CONTACT_SUPPORT: "Contact support",
   TRY_LATER: "Try again later",

@@ -137,6 +137,8 @@ export interface Property {
   jurisdictionCode: string;
   /** True once a live listing or tenancy is bound to the region's rules -- the region can no longer change. */
   regionLocked: boolean;
+  /** Send back as If-Match when editing, so a stale window can't overwrite a newer address. */
+  locationVersion: number;
   createdAt: string;
 }
 
@@ -741,9 +743,6 @@ export interface PaymentCapabilities {
   escrow_enabled: boolean;
   wallet_enabled: boolean;
   split_settlement_enabled: boolean;
-  /** Off by default: rent is paid directly to the host, so there's no
-   *  Zoiko rent checkout and no Stripe account needed for rent. */
-  rent_card_checkout_enabled: boolean;
   platform_fee_rate: null;
   host_commission_enabled: false;
 }
@@ -889,13 +888,11 @@ export type RentalPaymentObligationType = "RENT" | "DEPOSIT" | "OTHER";
 /** ZR-PAY-LINK-003 Section 16. CONFIRMED collapses the ZR-PAY-002-era
  *  CONFIRMED_BY_RECIPIENT/CONFIRMED_BY_PROVIDER pair -- "who confirmed" is
  *  still available on RentalPaymentRecord.provenance, rendered as its own
- *  field wherever status is shown. PROVIDER_PROCESSING has no producing
- *  backend code path yet (see models/rental_payment.py's own docstring). */
+ *  field wherever status is shown. Rent is paid directly (bank transfer /
+ *  UPI / cash) -- there is no card or payment-provider state. */
 export type RentalPaymentStatus =
   | "UPCOMING"
   | "DUE"
-  | "PAYMENT_SESSION_STARTED"
-  | "PROVIDER_PROCESSING"
   | "PAYER_RECORDED"
   | "RECIPIENT_CONFIRMATION_PENDING"
   | "CONFIRMED"
@@ -913,7 +910,7 @@ export type RentalPaymentProvenance =
   | "ADMIN_CORRECTION"
   | "SYSTEM_DERIVATION";
 
-export type RentalPaymentMethodCategory = "BANK_TRANSFER" | "UPI" | "CASH" | "CARD" | "OTHER";
+export type RentalPaymentMethodCategory = "BANK_TRANSFER" | "UPI" | "CASH" | "OTHER";
 
 export interface RentalPaymentRecord {
   id: number;
@@ -933,16 +930,6 @@ export interface RentalPaymentRecord {
   /** Set only when provenance is PROVIDER_CONFIRMATION -- the external
    *  provider's own transaction/reconciliation reference. */
   providerReference: string;
-  /** Set once a card payment was refunded -- straight from the host's own
-   *  Stripe account, never through Zoiko Rooms (e.g. a booking cancelled
-   *  before move-in). */
-  refundedAmount: number | null;
-  providerRefundId: string;
-  /** A card chargeback the tenant raised with their bank, as reported by
-   *  Stripe -- blank if none. Status is Stripe's own (needs_response,
-   *  under_review, won, lost...). */
-  providerDisputeId: string;
-  providerDisputeStatus: string;
   confirmedAt: string | null;
   createdAt: string;
   /** ZR-PAY-LINK-003 Section 19/Wireframe PAY-18 -- previously only ever
@@ -985,6 +972,19 @@ export interface RentalPaymentObligation {
   waivedReason: string;
   waivedAt: string | null;
   createdAt: string;
+  /** ZR-SUBLET-PAY-003 ledger fields: who the payee is and why, the period,
+   *  the reference to quote on the transfer, and the Zoiko fee (always 0). */
+  payeeType: "LANDLORD_AGENT" | "SUBLESSOR" | "CUSTODIAN";
+  payeeBasis: string;
+  payeeAuthorityRef: string;
+  periodStart: string | null;
+  periodEnd: string | null;
+  arrangementId: number | null;
+  arrangementVersion: number | null;
+  agreementVersionNo: number | null;
+  paymentReference: string;
+  platformFeeAmount: number;
+  version: number;
   records: RentalPaymentRecord[];
   /** Empty for the ordinary single-payer obligation (the default). */
   payerAllocations: RentalPaymentAllocation[];
@@ -1158,57 +1158,6 @@ export interface RentalPaymentInstruction {
   highRiskReason: string;
   reviewedAt: string | null;
   reviewReason: string;
-}
-
-/** SUPERSEDED never appears on the account a recipient's own GET/change
- *  routes return (those always resolve the current row) -- listed here
- *  only because it's a real value the type could carry in principle. */
-export type RentalPaymentProviderAccountStatus = "ONBOARDING" | "COMPLETE" | "SUPERSEDED";
-
-/** ZR-PAY-LINK-003 Section 6/Wireframe C: a recipient's own connected Stripe
- *  account for receiving rent/deposit payments directly -- never the raw
- *  account id, same masking posture as RentalPaymentInstruction. */
-export interface RentalPaymentProviderAccount {
-  id: number;
-  status: RentalPaymentProviderAccountStatus;
-  detailsSubmitted: boolean;
-  chargesEnabled: boolean;
-  payoutsEnabled: boolean;
-  /** ZR-PAY-LINK-003 Section 14.1: set only on the row created by a
-   *  confirmed account change, same as RentalPaymentInstruction's own
-   *  isHighRisk/highRiskReason. */
-  isHighRisk: boolean;
-  highRiskReason: string;
-  createdAt: string;
-  updatedAt: string;
-  /** True only while the backend has no real Stripe key -- the dev-only
-   *  "simulate onboarding complete" action is refused otherwise. */
-  canSimulateOnboarding: boolean;
-}
-
-export interface RentalPaymentProviderAccountConnectResult {
-  account: RentalPaymentProviderAccount;
-  onboardingUrl: string;
-}
-
-export type ExternalPaymentSessionStatus = "STARTED" | "SUCCEEDED" | "FAILED";
-
-/** ZR-PAY-LINK-003 Section 6/10.1/Wireframe F: a short-lived,
- *  provider-hosted payment handoff for one obligation. */
-export interface ExternalPaymentSession {
-  id: number;
-  obligationId: number;
-  status: ExternalPaymentSessionStatus;
-  amount: number;
-  currency: string;
-  failureMessage: string;
-  createdAt: string;
-  resolvedAt: string | null;
-}
-
-export interface ExternalPaymentSessionCreateResult {
-  session: ExternalPaymentSession;
-  checkoutUrl: string;
 }
 
 export interface EvidenceArtifact {
@@ -1896,6 +1845,10 @@ export interface SubletRequest {
   // E_SIGNATURE for this jurisdiction, it's left unsigned until both
   // parties actually sign it (see signOwnAgreement/signHostedAgreement).
   newAgreementId: number | null;
+  // The incoming occupant's overlap with their other tenancies -- live while
+  // pending, as recorded once decided. BLOCK needs an override reason to approve.
+  occupantRiskTier: "NONE" | "REVIEW" | "BLOCK";
+  occupantRiskReason: string;
 }
 
 export interface SubletChronologyEvent {
@@ -1989,7 +1942,8 @@ export interface NotificationPreference {
 
 // --- Verification (ZR-ENG-CLR-012) ---
 
-export type OccupancyEligibilityMethod = "DIGITAL_SHARE_CODE" | "MANUAL_DOCUMENT_CHECK";
+export type OccupancyEligibilityMethod = "IDENTITY_DOCUMENT" | "DIGITAL_SHARE_CODE" | "MANUAL_DOCUMENT_CHECK";
+
 export type OccupancyEligibilityStatus =
   | "IN_PROGRESS"
   | "PASS"
@@ -2160,6 +2114,8 @@ export interface MarketPolicyPack {
   occupancyEligibilityRequired: boolean;
   occupancyEligibilityMethodNote: string;
   occupancyEligibilityFollowUpDays: number | null;
+  occupancyEligibilityAutoPassCountries: string[];
+  occupancyEligibilityDocumentKeywords: string[];
   identityEvidenceRetentionDays: number;
   requiredPropertyComplianceCodes: string[];
   identityRequiredAtApplication: boolean;

@@ -22,6 +22,11 @@ const floaters = [
   { icon: ShieldCheck, className: "left-[12%] bottom-[16%]", delay: "1.6s", size: "h-9 w-9" },
 ];
 
+/** Only same-site account paths are followed after login (no open redirect). */
+function safeNextPath(next: string | null): string {
+  return next && next.startsWith("/account/") && !next.startsWith("//") && !next.includes("://") ? next : "/account";
+}
+
 export default function UserLoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -40,7 +45,7 @@ export default function UserLoginPage() {
     setSubmitting(true);
     try {
       await userLogin(email.trim(), password);
-      router.push("/account");
+      router.push(safeNextPath(new URLSearchParams(window.location.search).get("next")));
       router.refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong. Please try again.");

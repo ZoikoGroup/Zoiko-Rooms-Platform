@@ -105,6 +105,11 @@ class TestCheckoutRequiresEveryOtherRequirement:
         listing.room_id = room.id
         listing.state = "APPROVED"
         db_session.commit()
+        # The fee publishes only once identity / property / authority also pass
+        # (ZR-AUTHORITY-002 Section 2.4 -- paying never stands in for them).
+        from tests.conftest import make_room_publishable
+
+        make_room_publishable(db_session, room)
         quote = lf_crud.create_quote(db_session, listing, party)
         r = client.post(
             "/api/users/listing-fees/checkout-sessions",

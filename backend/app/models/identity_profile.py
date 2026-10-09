@@ -28,7 +28,8 @@ IDENTITY_STATES = (
 # Section 2.3 -- internal assurance levels (not NIST IAL claims).
 ASSURANCE_LEVELS = ("IV-0", "IV-1", "IV-2")
 # Section 12.1 verification_method, normalized.
-VERIFICATION_METHODS = ("DIGITAL_IDENTITY", "DOCUMENT", "MANUAL")
+# Document + Selfie through the identity provider (Veriff) is the only method.
+VERIFICATION_METHODS = ("DOCUMENT",)
 # Section 8.2 normalized_outcome.
 NORMALIZED_OUTCOMES = ("PASS", "REVIEW", "ACTION_REQUIRED", "FAIL")
 # Section 3 -- the property role the person is verifying for. Routing
@@ -111,8 +112,8 @@ class IdentityRegulatoryPack(Base):
     # Periodic renewal; None = no time-based re-verification (Section 7.3).
     reverification_interval_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reverify_on_account_recovery: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Which provider adapter handles DOCUMENT verifications here.
-    document_provider_code: Mapped[str] = mapped_column(String(50), default="zoiko_document_check")
+    # Which provider adapter handles DOCUMENT verifications here (Veriff).
+    document_provider_code: Mapped[str] = mapped_column(String(50), default="veriff")
     # Server-enforced retry policy (ZR-IDV-ADR-001 Section 10 /restart).
     max_attempts_per_day: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
 

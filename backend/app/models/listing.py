@@ -81,6 +81,13 @@ class Listing(Base):
     # never touched by a later pause/republish. Exists so alert-matching can ask
     # "what's newly published since I last checked", not just "what's live now".
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ZR-AI-SEARCH-001 Section 5.1 "Freshness": timestamp of the most recent
+    # (host/party) confirmation that the listing is still available. Search
+    # ranks freshly-confirmed inventory above stale-unknown records; a value
+    # older than settings/availability_freshness_days is treated as
+    # stale-unknown (downgraded, never "confirmed available"). Written only via
+    # SearchOrchestrator.confirm_availability -- never by a search read.
+    availability_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Set by an admin/super admin when moving REVIEW -> REJECTED; cleared again on
     # resubmission. Empty for every other state.
     rejection_reason: Mapped[str] = mapped_column(String(1000), default="")

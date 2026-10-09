@@ -61,6 +61,12 @@ def to_sublet_request_read(db: Session, sr: SubletRequest) -> SubletRequestRead:
         if sr.proposed_renter_party_id is not None
         else None
     )
+    # While the request awaits a decision the reviewer sees the live risk
+    # (what approving now would record); afterwards, what was recorded.
+    if sr.status in DECIDABLE_SUBLET_REQUEST_STATUSES and occupancy is not None:
+        risk_tier, risk_reason = evaluate_sublet_overlap(db, sr)
+    else:
+        risk_tier, risk_reason = sr.occupant_risk_tier, sr.occupant_risk_reason
 
     return SubletRequestRead(
         id=sr.id,
@@ -96,6 +102,8 @@ def to_sublet_request_read(db: Session, sr: SubletRequest) -> SubletRequestRead:
         policy_snapshot=sr.policy_snapshot,
         new_agreement_id=sr.new_agreement_id,
         payee_model=sr.payee_model,
+        occupant_risk_tier=risk_tier,
+        occupant_risk_reason=risk_reason,
         listing_name=listing.name if listing else "",
         listing_city=listing.city if listing else "",
         room_type=listing.room_type if listing else "",
@@ -654,26 +662,23 @@ def _create_co_tenancy_agreement(
     return agreement
 
 
-def _assert_can_decide_sublet(db: Session, sublet_request: SubletRequest, actor: "AdminUser | UserAccount") -> None:
+def _assert_can_decide_sublet(db: Session, sublet_request: SubletRequest, actor: UserAccount) -> None:
     """ZR-SUB-003 IMPLEMENTATION LOCK: 'A tenant's request for permission to
     sublet must be sent to the verified landlord, agent or other authorized
     property representative. Zoiko Rooms records and routes the request; it
-    does not grant permission on the owner's behalf.' The Host (the party that
-    owns the listing) is the real decision-maker; a super_admin deciding is
-    kept only as a legal-ops override, per the doc's permissions matrix
-    ('Admin/Support: Never on behalf of owner except approved legal ops
-    workflow'), not the ordinary path."""
-    if isinstance(actor, AdminUser):
-        if actor.role != "super_admin":
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only super admins can decide sublet requests on the platform's behalf")
-        return
+    does not grant permission on the owner's behalf.' Approval, decline and
+    requests for more information stay between the Host (the party that owns
+    the listing) and the renter -- Zoiko staff, super admins included, never
+    decide one."""
+    if not isinstance(actor, UserAccount):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Sublet requests are decided by the host")
     listing = sublet_request.current_occupancy.listing
     if not actor.party_id or party_id_for_listing(listing) != actor.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only decide sublet requests for your own listings")
     _assert_current_decision_authority(db, listing.room_id)
 
 
-def _assert_step_up_password(actor: "AdminUser | UserAccount", step_up_password: str) -> None:
+def _assert_step_up_password(actor: UserAccount, step_up_password: str) -> None:
     """ZR-SUB-003 Section 10 step-up authentication -- see
     approve_sublet_request's own docstring for exactly when this is called.
     Re-verifies the deciding actor's own current password; there is no
@@ -733,13 +738,53 @@ def _reassign_open_rent_to(db: Session, occupancy: Occupancy, guest_id: str) -> 
             obligation.tenant_guest_id = guest_id
 
 
+def evaluate_sublet_overlap(db: Session, sublet_request: SubletRequest) -> tuple[str, str]:
+    """ZR-ENG-CLR-001 Rule 6 / Section 9 for the incoming occupant: the same
+    risk tier crud/leasing.py:_accept_offer_and_hold_room computes when an
+    offer is accepted, so taking a tenancy over by sublet can't skip the
+    check an ordinary application gets. The window is what they'd actually
+    occupy -- the proposed dates, else from today to the end of the current
+    tenancy. ADDITIONAL_OCCUPANT creates no tenancy, so never overlaps.
+    Read-only: safe to call while just displaying a pending request."""
+    if sublet_request.arrangement_type in NO_TENANCY_ARRANGEMENT_TYPES or sublet_request.proposed_renter_party_id is None:
+        return "NONE", ""
+    occupancy = sublet_request.current_occupancy
+    user = db.scalar(
+        select(UserAccount)
+        .where(UserAccount.party_id == sublet_request.proposed_renter_party_id, UserAccount.is_active.is_(True))
+        .order_by(UserAccount.id)
+    )
+    if user is None:
+        return "NONE", ""
+    guest = db.scalar(select(Guest).where(Guest.user_account_id == user.id)) or db.scalar(
+        select(Guest).where(Guest.email == user.email, Guest.user_account_id.is_(None))
+    )
+    if guest is None:
+        return "NONE", ""  # never rented anything, so nothing to overlap with
+
+    start = sublet_request.proposed_start_date or date.today()
+    end = sublet_request.proposed_end_date or occupancy.expected_end_date
+    if end is None and occupancy.offer is not None and occupancy.offer.terms:
+        terms = occupancy.offer.terms[-1]
+        end = _add_months(terms.start_date, terms.term_months)
+    if end is None or end <= start:
+        return "NONE", ""
+
+    from app.services.overlap import evaluate_occupant_overlap
+
+    return evaluate_occupant_overlap(
+        db, occupant_guest_id=guest.id, listing_id=occupancy.listing_id, start_date=start, end_date=end,
+    )
+
+
 def approve_sublet_request(
-    db: Session, sublet_request: SubletRequest, actor: "AdminUser | UserAccount", notes: str = "",
+    db: Session, sublet_request: SubletRequest, actor: UserAccount, notes: str = "",
     conditions: str = "", expires_at: datetime | None = None,
     condition_list: list[str] | None = None, authority_confirmed: bool = False, step_up_password: str = "",
+    override_reason: str = "",
 ) -> SubletRequest:
-    """The verified Host approves a sublet request (or, exceptionally, a super
-    admin acting as a legal-ops override -- see _assert_can_decide_sublet).
+    """The verified Host approves a sublet request (only the Host -- see
+    _assert_can_decide_sublet).
     ZR-SUB-003 Section 5.2: conditions/expires_at are optional, descriptive
     terms attached to the approval (see the model's own note on why expiry
     isn't automatically enforced). authority_confirmed mirrors the
@@ -753,7 +798,10 @@ def approve_sublet_request(
     only when approving a REPLACING_ARRANGEMENT_TYPES request, the one real
     "risk signal" already in this taxonomy: an irreversible full handover of
     the tenancy, unlike a lower-stakes co-tenancy/additional-occupant
-    approval."""
+    approval.
+    override_reason: only consulted when the incoming occupant's overlap
+    check (evaluate_sublet_overlap) comes back BLOCK -- the approver's
+    recorded exception, exactly like user_accept_offer's own."""
     _assert_can_decide_sublet(db, sublet_request, actor)
     if expires_at is not None and expires_at <= datetime.now(timezone.utc):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Approval expiry must be in the future")
@@ -765,6 +813,17 @@ def approve_sublet_request(
     if not verify_sublet_identity(db, sublet_request):
         raise HTTPException(status.HTTP_409_CONFLICT, "Proposed renter no longer has an approved identity verification")
     _assert_sublet_permitted(db, sublet_request.current_occupancy)
+
+    risk_tier, risk_reason = evaluate_sublet_overlap(db, sublet_request)
+    if risk_tier == "BLOCK" and not override_reason.strip():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"message": "The proposed renter already has an overlapping tenancy elsewhere", "reason": risk_reason},
+        )
+    sublet_request.occupant_risk_tier = risk_tier
+    sublet_request.occupant_risk_reason = (
+        f"{risk_reason} (approved with override: {override_reason.strip()})" if risk_tier == "BLOCK" else risk_reason
+    )[:500]
 
     listing = sublet_request.current_occupancy.listing
     proposed_guest = _guest_for_proposed_party(db, sublet_request.proposed_renter_party_id)
@@ -813,6 +872,8 @@ def approve_sublet_request(
             recipient_party_id=recipient_party_id,
         )
         sublet_request.new_agreement_id = new_agreement.id
+        new_agreement.offer.occupant_risk_tier = sublet_request.occupant_risk_tier
+        new_agreement.offer.occupant_risk_reason = sublet_request.occupant_risk_reason
         # Both tenants remain fully active and liable -- adding a co-tenant
         # doesn't release the original renter of anything. A licensee/lodger
         # has no tenancy rights (Section 3's canonical meaning), unlike a true
@@ -853,6 +914,8 @@ def approve_sublet_request(
             # keeps authorizing the released original renter instead of the
             # assignee who actually now holds the tenancy.
             sublet_request.current_occupancy.offer.guest_id = proposed_guest.id
+            sublet_request.current_occupancy.offer.occupant_risk_tier = sublet_request.occupant_risk_tier
+            sublet_request.current_occupancy.offer.occupant_risk_reason = sublet_request.occupant_risk_reason
             # The released renter owes nothing more -- rent that's open and
             # untouched (nothing recorded on it yet) now belongs to the assignee.
             _reassign_open_rent_to(db, sublet_request.current_occupancy, proposed_guest.id)
@@ -871,11 +934,14 @@ def approve_sublet_request(
     sublet_request.approval_condition_list = [c.strip() for c in (condition_list or []) if c.strip()]
     sublet_request.approval_expires_at = expires_at
     sublet_request.approved_with_authority_confirmation = authority_confirmed
-    if isinstance(actor, AdminUser):
-        sublet_request.decided_by_admin_id = actor.id
-    else:
-        sublet_request.decided_by_user_id = actor.id
+    sublet_request.decided_by_user_id = actor.id
     sublet_request.decided_at = datetime.now(timezone.utc)
+    db.flush()
+    # ZR-SUBLET-PAY-003: who receives each payment, where the deposit goes and
+    # how it's paid (bank / UPI / cash) -- derived from the approval.
+    from app.services.sublet_payments import on_sublet_approved
+
+    on_sublet_approved(db, sublet_request)
 
     _notify_sublet_requester(db, requester_guest_id, sublet_request.id, approved=True, notes=notes)
     _notify_sublet_host(db, sublet_request.current_occupancy, sublet_request.id, approved=True)
@@ -951,10 +1017,10 @@ def approve_sublet_request(
 
 
 def reject_sublet_request(
-    db: Session, sublet_request: SubletRequest, actor: "AdminUser | UserAccount", notes: str = "", reason_code: str = "",
+    db: Session, sublet_request: SubletRequest, actor: UserAccount, notes: str = "", reason_code: str = "",
 ) -> SubletRequest:
-    """The verified Host declines a sublet request (or, exceptionally, a super
-    admin acting as a legal-ops override -- see _assert_can_decide_sublet).
+    """The verified Host declines a sublet request (only the Host -- see
+    _assert_can_decide_sublet).
     ZR-SUB-003 Section 5.3 FAIRNESS CONTROL: reason_code must be one of
     models.sublet_request.SUBLET_DECLINE_REASON_CODES; OTHER additionally
     requires a non-blank `notes` explanation."""
@@ -970,10 +1036,7 @@ def reject_sublet_request(
     sublet_request.admin_decision = "rejected"
     sublet_request.admin_notes = notes
     sublet_request.decline_reason_code = reason_code
-    if isinstance(actor, AdminUser):
-        sublet_request.decided_by_admin_id = actor.id
-    else:
-        sublet_request.decided_by_user_id = actor.id
+    sublet_request.decided_by_user_id = actor.id
     sublet_request.decided_at = datetime.now(timezone.utc)
 
     _notify_sublet_requester(
@@ -994,12 +1057,12 @@ def reject_sublet_request(
 
 
 def request_more_sublet_info(
-    db: Session, sublet_request: SubletRequest, actor: "AdminUser | UserAccount", note: str,
+    db: Session, sublet_request: SubletRequest, actor: UserAccount, note: str,
     requested_document_types: list[str] | None = None, due_at: datetime | None = None,
 ) -> SubletRequest:
     """ZR-SUB-003 Section 5.1: 'MORE_INFORMATION_REQUESTED | Recipient needs
     additional information | Landlord/Agent.' The same decision authority as
-    approve/reject (Host, or an admin legal-ops override). requested_
+    approve/reject (the Host only). requested_
     document_types/due_at are Wireframe G's own fields -- descriptive only
     (no upload system to actually require a type against, and no scheduler
     to enforce the due date -- same honest caveat as approval_expires_at)."""
@@ -1203,7 +1266,8 @@ def list_sublet_requests_for_guest(db: Session, guest_id: str) -> list[SubletReq
 
 
 def list_pending_sublet_requests(db: Session, admin: AdminUser) -> list[SubletRequest]:
-    """List all pending sublet requests for admin review."""
+    """Read-only oversight list of sublet requests awaiting the host's
+    decision -- the decision itself is the host's alone."""
     if admin.role != "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only super admins can view all sublet requests")
 

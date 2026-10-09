@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, BarChart3, FileText, History, Lock, ShieldCheck } from "lucide-react";
+import { BarChart3, FileText, History, Lock, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -26,11 +26,8 @@ import {
   updateIdentityPack,
   IdentityQueueItem,
   IdentityState,
-  ReviewerDecision,
-  decideIdentityCase,
   getIdentityCase,
   getIdentityMetrics,
-  getReviewerReasonCodes,
   identityEvidenceUrl,
   identityStateLabel,
   identityStateTone,
@@ -41,43 +38,31 @@ import { IdentityDocumentType } from "@/lib/types";
 import { formatDate } from "@/lib/utils";
 
 /**
- * ZR-IDENTITY-001 Section 13 -- internal reviewer view (not customer-facing):
- * the review queue, a case with its header, a secure evidence viewer (inline,
- * never a download, watermarked), the normalized checks, the decision form
- * (Approve / Action required / Reject / Escalate, reason code + note always)
- * and the immutable history. Section 15 metrics sit above the queue.
+ * ZR-IDENTITY-001 / ZR-IDV-ADR-001 -- internal identity view (not
+ * customer-facing). Identities are decided only by Veriff: admins see the
+ * verifications, a read-only case (header, normalized checks, history), can
+ * reconcile a session with Veriff, erase data, and manage the country packs,
+ * go-live readiness and reason-code mappings. There is no approve / reject.
+ * Section 15 metrics sit above the list.
  */
 
 const FILTERS: { value: string; label: string }[] = [
-  { value: "needs_review", label: "Needs review" },
+  { value: "all", label: "All" },
+  { value: "PROCESSING", label: "Checking" },
   { value: "ACTION_REQUIRED", label: "Action required" },
   { value: "VERIFIED", label: "Verified" },
   { value: "FAILED", label: "Could not verify" },
   { value: "REVERIFICATION_REQUIRED", label: "Re-verification" },
-  { value: "all", label: "All" },
 ];
 
 const CHECK_LABELS: Record<string, string> = {
   document_authenticity: "Document authenticity",
   person_document_binding: "Person-document binding",
-  liveness_or_alternative_binding: "Liveness / alternative binding",
-  extracted_name_match: "Extracted-name match",
+  liveness_or_alternative_binding: "Liveness",
 };
 
 const CHECK_TONE: Record<string, "success" | "danger" | "neutral" | "warning"> = {
   PASS: "success", FAIL: "danger", NOT_CHECKED: "neutral", NOT_AVAILABLE: "neutral",
-};
-
-// Which reviewer reason codes fit which decision.
-const DECISION_CODES: Record<Exclude<ReviewerDecision, "ESCALATE">, string[]> = {
-  APPROVE: ["REVIEWER_APPROVED"],
-  ACTION_REQUIRED: ["DOCUMENT_UNREADABLE", "DOCUMENT_NUMBER_INVALID", "DOCUMENT_UNSUPPORTED", "DOCUMENT_EXPIRED",
-    "NAME_MISMATCH", "BINDING_FAILED", "MORE_INFORMATION_NEEDED"],
-  REJECT: ["REVIEWER_REJECTED", "DUPLICATE_EVIDENCE", "DOCUMENT_UNSUPPORTED", "BINDING_FAILED"],
-};
-
-const DECISION_LABEL: Record<ReviewerDecision, string> = {
-  APPROVE: "Approve", ACTION_REQUIRED: "Action required", REJECT: "Reject verification", ESCALATE: "Escalate",
 };
 
 function codeLabel(code: string): string {
@@ -85,7 +70,7 @@ function codeLabel(code: string): string {
 }
 
 export function IdentityVerificationsManager() {
-  const [filter, setFilter] = useState("needs_review");
+  const [filter, setFilter] = useState("all");
   const [queue, setQueue] = useState<IdentityQueueItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [admin, setAdmin] = useState<AdminProfile | null>(null);
@@ -127,8 +112,8 @@ export function IdentityVerificationsManager() {
     <section className="space-y-4 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
       <div className="flex items-center gap-2">
         <ShieldCheck className="h-5 w-5 text-primary-700 dark:text-primary-300" aria-hidden="true" />
-        <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Identity review</h2>
-        <span className="text-xs text-slate-400">Internal reviewer view -- not customer-facing</span>
+        <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Identity verifications</h2>
+        <span className="text-xs text-slate-400">Decided by Veriff -- internal view, not customer-facing</span>
       </div>
 
       {metrics && <MetricsStrip metrics={metrics} />}
@@ -167,9 +152,8 @@ export function IdentityVerificationsManager() {
                 <span className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-xs text-slate-400">#{item.id}</span>
                   <Badge tone={identityStateTone[item.sessionState] ?? "neutral"} dot>{identityStateLabel[item.sessionState] ?? item.sessionState}</Badge>
-                  {item.escalatedAt && <Badge tone="danger">Escalated</Badge>}
                   <span className="text-sm text-primary-900 dark:text-white">
-                    {item.methodType === "MANUAL" ? "Manual route" : documentTypeLabel[item.documentType as IdentityDocumentType] ?? (item.documentType || "No document yet")}
+                    {documentTypeLabel[item.documentType as IdentityDocumentType] ?? (item.documentType || "Document + selfie")}
                   </span>
                   {item.countryCode && <span className="text-xs text-slate-500">{item.countryCode}</span>}
                   {item.roleContext && <span className="text-xs text-slate-500">{roleLabel[item.roleContext as keyof typeof roleLabel] ?? item.roleContext}</span>}
@@ -188,12 +172,7 @@ export function IdentityVerificationsManager() {
         <CaseModal
           id={openId}
           admin={admin}
-          onClose={() => setOpenId(null)}
-          onDecided={(message) => {
-            showToast(message);
-            setOpenId(null);
-            void load();
-          }}
+          onClose={() => { setOpenId(null); void load(); }}
           showToast={showToast}
         />
       )}
@@ -210,6 +189,8 @@ export function IdentityVerificationsManager() {
 function MetricsStrip({ metrics }: { metrics: IdentityMetrics }) {
   const pct = (v: number | null) => (v === null ? "--" : `${v}%`);
   const hrs = (v: number | null) => (v === null ? "--" : v < 1 ? `${Math.round(v * 60)} min` : `${v} h`);
+  const money = (v: number | null, currency: string) =>
+    v === null ? "--" : new Intl.NumberFormat(undefined, { style: "currency", currency }).format(v);
   const topReasons = Object.entries(metrics.reasonCodes).slice(0, 3);
   return (
     <div className="space-y-2 rounded-xl bg-slate-50 p-4 dark:bg-slate-800/60">
@@ -217,18 +198,21 @@ function MetricsStrip({ metrics }: { metrics: IdentityMetrics }) {
         <BarChart3 className="h-3.5 w-3.5" aria-hidden="true" /> Last {metrics.periodDays} days
       </p>
       <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-        <Metric label="Waiting for review" value={String(metrics.pendingReview)} />
         <Metric label="Start to verified" value={pct(metrics.startToVerifiedRate)} />
-        <Metric label="Manual review rate" value={pct(metrics.manualReviewRate)} />
         <Metric label="Action-required recovery" value={pct(metrics.actionRequiredRecoveryRate)} />
-        <Metric label="Decision time (automated, median)" value={hrs(metrics.timeToDecisionHours.automated.median)} />
-        <Metric label="Decision time (manual, median)" value={hrs(metrics.timeToDecisionHours.manual.median)} />
+        <Metric label="Decision time (median / p90)" value={`${hrs(metrics.timeToDecisionHours.median)} / ${hrs(metrics.timeToDecisionHours.p90)}`} />
         <Metric label="Provider error rate" value={pct(metrics.providerErrorRate)} />
         <Metric label="Top reasons" value={topReasons.length ? topReasons.map(([c, n]) => `${codeLabel(c)} (${n})`).join(", ") : "--"} />
         <Metric label="Provider outcomes" value={Object.entries(metrics.providerOutcomes ?? {}).map(([k, v]) => `${codeLabel(k)} ${v}`).join(", ") || "--"} />
         <Metric label="Webhook auth failures" value={String(metrics.webhookAuthFailures ?? 0)} />
         <Metric label="Webhook duplicates / lag" value={`${pct(metrics.webhookDuplicateRate ?? null)} · ${metrics.webhookProcessingLagSeconds ?? "--"} s`} />
         <Metric label="Unprocessed / stale" value={`${metrics.webhookUnprocessed ?? 0} events · ${metrics.staleSessions ?? 0} sessions`} />
+        <Metric
+          label="Provider cost (per completed / per approved)"
+          value={metrics.providerCost
+            ? `${money(metrics.providerCost.perCompletedVerification, metrics.providerCost.currency)} / ${money(metrics.providerCost.perApprovedAccount, metrics.providerCost.currency)}`
+            : "Not configured"}
+        />
       </dl>
     </div>
   );
@@ -243,50 +227,20 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function CaseModal({ id, admin, onClose, onDecided, showToast }: {
-  id: number; admin: AdminProfile | null; onClose: () => void; onDecided: (message: string) => void; showToast: (m: string) => void;
+function CaseModal({ id, admin, onClose, showToast }: {
+  id: number; admin: AdminProfile | null; onClose: () => void; showToast: (m: string) => void;
 }) {
   const [record, setRecord] = useState<IdentityCase | null>(null);
   const [error, setError] = useState("");
-  const [reasonMessages, setReasonMessages] = useState<Record<string, string>>({});
-  const [decision, setDecision] = useState<Exclude<ReviewerDecision, "ESCALATE">>("APPROVE");
-  const [reasonCode, setReasonCode] = useState("REVIEWER_APPROVED");
-  const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
   const isSuperAdmin = admin?.role === "super_admin";
 
   useEffect(() => {
     if (!isSuperAdmin) return; // break-glass view below
     getIdentityCase(id).then(setRecord).catch(() => setError("Could not load this case."));
-    getReviewerReasonCodes()
-      .then((r) => setReasonMessages(Object.fromEntries(r.reasonCodes.map((c) => [c.code, c.message]))))
-      .catch(() => undefined);
   }, [id, isSuperAdmin]);
 
-  useEffect(() => {
-    setReasonCode(DECISION_CODES[decision][0]);
-  }, [decision]);
-
-  const decidable = record && ["PENDING_REVIEW", "PROCESSING", "ACTION_REQUIRED"].includes(record.state);
-
-  async function submit(chosen: ReviewerDecision) {
-    if (!note.trim()) {
-      showToast("Add a reviewer note explaining the decision");
-      return;
-    }
-    setBusy(true);
-    try {
-      await decideIdentityCase(id, chosen, chosen === "ESCALATE" ? "ESCALATED" : reasonCode, note.trim());
-      onDecided(chosen === "ESCALATE" ? "Escalated for a senior review" : `Decision recorded: ${DECISION_LABEL[chosen]}`);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Could not record the decision");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
-    <Modal open onClose={onClose} title={`Identity review #${id}`} size="xl">
+    <Modal open onClose={onClose} title={`Identity verification #${id}`} size="xl">
       {!isSuperAdmin ? (
         <BreakGlassView id={id} admin={admin} showToast={showToast} />
       ) : error ? (
@@ -310,12 +264,6 @@ function CaseModal({ id, admin, onClose, onDecided, showToast }: {
             {record.consentNoticeVersion && <HeaderItem label="Notice accepted" value={record.consentNoticeVersion} />}
           </dl>
           <CaseTools record={record} showToast={showToast} onChanged={() => getIdentityCase(id).then(setRecord)} />
-          {record.escalated && (
-            <p className="flex items-center gap-2 text-sm font-semibold text-accent-700">
-              <AlertTriangle className="h-4 w-4" aria-hidden="true" /> Escalated for a senior review
-            </p>
-          )}
-
           <div className="grid gap-5 lg:grid-cols-2">
             {/* Evidence workspace */}
             <div className="space-y-2">
@@ -333,13 +281,13 @@ function CaseModal({ id, admin, onClose, onDecided, showToast }: {
                 <SecureEvidenceViewer id={record.id} contentType={record.documentContentType} watermark={`${admin?.email ?? ""} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`} />
               ) : (
                 <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-800/60">
-                  {record.alternativeReason ? `Manual route requested: ${codeLabel(record.alternativeReason)}.` : "No document uploaded."}
+                  Captured and checked inside Veriff -- no copy is stored at Zoiko.
                 </p>
               )}
               {record.verifierNotes && <p className="text-xs text-slate-500">Note: {record.verifierNotes}</p>}
             </div>
 
-            {/* Normalized checks + decision */}
+            {/* Normalized checks (Veriff decides) */}
             <div className="space-y-4">
               <div className="space-y-2">
                 <h3 className="text-sm font-semibold text-primary-900 dark:text-white">Normalized checks</h3>
@@ -363,43 +311,9 @@ function CaseModal({ id, admin, onClose, onDecided, showToast }: {
                 </ul>
               </div>
 
-              {decidable ? (
-                <div className="space-y-3 rounded-xl bg-slate-50 p-4 dark:bg-slate-800/60">
-                  <h3 className="text-sm font-semibold text-primary-900 dark:text-white">Decision</h3>
-                  <fieldset className="flex flex-wrap gap-3 text-sm">
-                    <legend className="sr-only">Decision</legend>
-                    {(Object.keys(DECISION_CODES) as Exclude<ReviewerDecision, "ESCALATE">[]).map((d) => (
-                      <label key={d} className="flex items-center gap-1.5">
-                        <input type="radio" name="identity-decision" checked={decision === d} onChange={() => setDecision(d)} />
-                        {DECISION_LABEL[d]}
-                      </label>
-                    ))}
-                  </fieldset>
-                  <label className="block text-sm">
-                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Reason code</span>
-                    <select className="w-full rounded-xl bg-white px-3 py-2 text-sm ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
-                      value={reasonCode} onChange={(e) => setReasonCode(e.target.value)}>
-                      {DECISION_CODES[decision].map((c) => <option key={c} value={c}>{codeLabel(c)}</option>)}
-                    </select>
-                    {reasonMessages[reasonCode] && decision !== "APPROVE" && (
-                      <span className="mt-1 block text-xs text-slate-500">The person will see: &ldquo;{reasonMessages[reasonCode]}&rdquo;</span>
-                    )}
-                  </label>
-                  <label className="block text-sm">
-                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Reviewer note (required)</span>
-                    <textarea className="w-full rounded-xl bg-white px-3 py-2 text-sm ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
-                      rows={3} maxLength={2000} value={note} onChange={(e) => setNote(e.target.value)} />
-                  </label>
-                  <div className="flex flex-wrap justify-between gap-2">
-                    <Button variant="outline" loading={busy} disabled={record.state !== "PENDING_REVIEW"} onClick={() => submit("ESCALATE")}>
-                      Escalate
-                    </Button>
-                    <Button loading={busy} onClick={() => submit(decision)}>Submit decision</Button>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-sm text-slate-500">This verification is {identityStateLabel[record.state as IdentityState] ?? record.state} -- no decision needed.</p>
-              )}
+              <p className="text-sm text-slate-500">
+                Veriff decides this verification. To fetch a delayed decision, use &ldquo;Reconcile with provider&rdquo; above.
+              </p>
             </div>
           </div>
 

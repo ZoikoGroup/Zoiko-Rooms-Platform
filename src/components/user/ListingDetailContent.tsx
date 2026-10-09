@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Bath, BedDouble, MapPin, Ruler, Users } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -8,6 +9,7 @@ import { PublicListing } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils";
 import { ListingImageGallery } from "@/components/user/ListingImageGallery";
 import { Card } from "@/components/user/ui";
+import { useUserSession } from "@/components/user/UserSessionContext";
 
 /** The full listing/property detail body -- gallery, name/location/price, stats,
  *  description, amenities, host, and the Apply CTA. Shared by the standalone
@@ -22,6 +24,9 @@ export function ListingDetailContent({
   applied: boolean;
   onApplyClick: () => void;
 }) {
+  // Anyone can view a room; applying needs a verified identity (the backend
+  // enforces the same rule for every region).
+  const { identityVerified } = useUserSession();
   return (
     <div className="space-y-5">
       <ListingImageGallery images={listing.images} alt={listing.name} />
@@ -33,7 +38,7 @@ export function ListingDetailContent({
             <Badge tone="primary">{listing.roomType}</Badge>
           </div>
           <p className="mt-1 flex items-center gap-1.5 text-sm text-slate-500 dark:text-slate-400">
-            <MapPin className="h-4 w-4" /> {listing.location}, {listing.city}
+            <MapPin className="h-4 w-4" /> {[listing.location, listing.city].filter(Boolean).join(", ")}
           </p>
           {listing.reviewCount > 0 && (
             <div className="mt-1.5 flex items-center gap-1.5">
@@ -102,16 +107,18 @@ export function ListingDetailContent({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">Ready to apply?</p>
-            {/* ZR-ENG-CLR-012 Section 5/AC-03: progressive verification -- no
-               global requirement to verify identity before applying. Full
-               identity verification is only required later, before your
-               agreement can be prepared (see VerificationStatusSummary on
-               the dashboard for that check). */}
             <p className="text-xs text-emerald-700 dark:text-emerald-400">
-              You can apply without verifying your identity first — you&apos;ll need a verified identity later, before your agreement can be prepared.
+              {identityVerified ? (
+                "Your identity is verified — you can apply for this room."
+              ) : (
+                <>
+                  You need a verified identity to apply for a room.{" "}
+                  <Link href="/account/identity" className="font-semibold underline">Verify your identity</Link>
+                </>
+              )}
             </p>
           </div>
-          <Button disabled={applied} onClick={onApplyClick}>
+          <Button disabled={applied || !identityVerified} onClick={onApplyClick}>
             {applied ? "Applied" : "Apply for this room"}
           </Button>
         </div>

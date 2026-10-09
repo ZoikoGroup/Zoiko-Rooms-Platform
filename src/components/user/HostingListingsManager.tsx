@@ -22,16 +22,30 @@ import {
   updateHostedListing,
 } from "@/lib/user-api";
 import { IdentityGate } from "@/components/user/IdentityGate";
-import { ListARoomWizard } from "@/components/user/ListARoomWizard";
+import { ListARoomWizard, submitOutcomeMessage } from "@/components/user/ListARoomWizard";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
 import { ListingAgreementDetailsFields, toAgreementDetailsForm } from "@/components/user/ListingAgreementDetailsFields";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { ListingFeeCheckout, StripeReturn } from "@/components/user/ListingFeeCheckout";
-import { PropertyVerificationManager } from "@/components/user/PropertyVerificationManager";
-import { AuthorityRecordManager } from "@/components/user/AuthorityRecordManager";
+import { PropertyVerificationWizard } from "@/components/user/PropertyVerificationWizard";
+import {
+  PropertyVerificationState, getPropertyVerificationForProperty, getPropertyVerificationForRoom, propertyStateLabel,
+} from "@/lib/property-verification";
+
+/** ZR-PROPERTY-VERIFY-001 Section 11.2: the one CTA for each property exception. */
+const PROPERTY_CTA: Partial<Record<PropertyVerificationState, string>> = {
+  NOT_STARTED: "Verify property", IN_PROGRESS: "Continue verification", MANUAL_REVIEW: "View status",
+  ACTION_REQUIRED: "Fix verification", EXPIRING_SOON: "Renew verification", EXPIRED: "Renew verification",
+  REJECTED: "Review reason", INVALIDATED: "Reverify property",
+};
+import { AuthorityVerificationWizard } from "@/components/user/AuthorityVerificationWizard";
+import {
+  AuthorityState, authorityStateCta, authorityStateLabel, isAuthorityException, listPropertyAuthority,
+} from "@/lib/authority-verification";
 import { RentPaymentReadiness } from "@/components/user/RentPaymentReadiness";
+import { confirmListingAvailability } from "@/lib/external-search";
 
 const MAX_LISTING_IMAGES = 10;
 
@@ -109,6 +123,11 @@ export function HostingListingsManager() {
   const [stripeReturn, setStripeReturn] = useState<StripeReturn | undefined>(undefined);
   const [propertyVerificationRoomId, setPropertyVerificationRoomId] = useState<number | null>(null);
   const [authorityRecordRoomId, setAuthorityRecordRoomId] = useState<number | null>(null);
+  // ZR-AUTHORITY-002 Section 10.2: authority per property, surfaced only as exceptions.
+  const [authorityByProperty, setAuthorityByProperty] =
+    useState<Record<number, { state: AuthorityState; message: string }>>({});
+  const [propertyStatus, setPropertyStatus] =
+    useState<Record<number, { state: PropertyVerificationState; message: string }>>({});
 
   // Landed back here from Stripe's own hosted checkout page (see
   // ListingFeeCheckout.tsx's real redirect, and crud/listing_fee.py's
@@ -143,6 +162,23 @@ export function HostingListingsManager() {
       );
       setRoomsByProperty(Object.fromEntries(owned.map((property, i) => [property.id, roomLists[i]])));
       setListings(mine);
+      const verification = await Promise.all(owned.map((property) =>
+        getPropertyVerificationForProperty(property.id).catch(() => null)));
+      setPropertyStatus(Object.fromEntries(owned.flatMap((property, i) => {
+        const v = verification[i];
+        if (v === null) return []; // unknown -- don't claim an issue we couldn't load
+        const message = v.state === "INVALIDATED" && v.verification?.reasonCodes.includes("ADDRESS_CHANGED")
+          ? "The location changed, so the existing verification can't carry over."
+          : v.verification?.message ?? "";
+        return [[property.id, { state: v.state, message }]];
+      })));
+      const authority = await Promise.all(owned.map((property) => listPropertyAuthority(property.id).catch(() => null)));
+      setAuthorityByProperty(Object.fromEntries(owned.flatMap((property, i) => {
+        const rows = authority[i];
+        if (rows === null) return []; // unknown -- don't claim an issue we couldn't load
+        const current = rows.find((a) => a.state !== "SUPERSEDED");
+        return [[property.id, { state: current?.state ?? "NOT_STARTED", message: current?.reason.message ?? "" }]];
+      })));
     } catch (err) {
       showToast(errorMessage(err, "Could not load your listings."), "error");
     } finally {
@@ -164,6 +200,44 @@ export function HostingListingsManager() {
       ),
     [properties, roomsByProperty]
   );
+
+  // Section 11.2: one property-verification exception per property, naming
+  // the listings it affects; nothing when the property is verified.
+  const propertyExceptions = useMemo(() => {
+    const propertyOfRoom = new Map<number, Property>();
+    for (const property of properties) {
+      for (const room of roomsByProperty[property.id] ?? []) propertyOfRoom.set(room.id, property);
+    }
+    const byProperty = new Map<number, { property: Property; roomId: number; listings: HostedListing[] }>();
+    for (const listing of listings) {
+      const property = listing.roomId !== null ? propertyOfRoom.get(listing.roomId) : undefined;
+      const status = property ? propertyStatus[property.id] : undefined;
+      if (!property || !status || status.state === "VERIFIED") continue;
+      const entry = byProperty.get(property.id) ?? { property, roomId: listing.roomId as number, listings: [] };
+      entry.listings.push(listing);
+      byProperty.set(property.id, entry);
+    }
+    return Array.from(byProperty.values());
+  }, [listings, properties, roomsByProperty, propertyStatus]);
+
+  // One exception per property, naming the listings it affects -- never a
+  // warning repeated on every row, and nothing when authority is healthy.
+  const authorityExceptions = useMemo(() => {
+    const propertyOfRoom = new Map<number, Property>();
+    for (const property of properties) {
+      for (const room of roomsByProperty[property.id] ?? []) propertyOfRoom.set(room.id, property);
+    }
+    const byProperty = new Map<number, { property: Property; roomId: number; listings: HostedListing[] }>();
+    for (const listing of listings) {
+      const property = listing.roomId !== null ? propertyOfRoom.get(listing.roomId) : undefined;
+      const status = property ? authorityByProperty[property.id] : undefined;
+      if (!property || !status || !isAuthorityException(status.state)) continue;
+      const entry = byProperty.get(property.id) ?? { property, roomId: listing.roomId as number, listings: [] };
+      entry.listings.push(listing);
+      byProperty.set(property.id, entry);
+    }
+    return Array.from(byProperty.values());
+  }, [listings, properties, roomsByProperty, authorityByProperty]);
 
   function closeListingFee() {
     setPayingFeeListingId(null);
@@ -244,9 +318,10 @@ export function HostingListingsManager() {
     try {
       const submitted = await submitHostedListingForReview(listingId);
       setListings((prev) => prev.map((l) => (l.id === submitted.id ? submitted : l)));
-      showToast("Submitted for review — a Zoiko admin will approve or reject it.");
+      const { text, tone } = submitOutcomeMessage({ submitted: true, state: submitted.state });
+      showToast(text, tone);
     } catch (err) {
-      showToast(errorMessage(err, "Could not submit this listing for review."), "error");
+      showToast(errorMessage(err, "Could not submit this listing."), "error");
     } finally {
       setBusyListingId(null);
     }
@@ -267,12 +342,59 @@ export function HostingListingsManager() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SectionHeading
           title="Your listings"
-          subtitle="Use “List a Room” to create a new listing and submit it for review. Once a Zoiko admin approves it, pay the Listing Fee and it goes live automatically."
+          subtitle="Use “List a Room” to create a listing and submit it. Once your identity, property and authority are verified it’s approved automatically — pay the Listing Fee and it goes live."
         />
         <Button size="sm" onClick={() => setWizardOpen(true)}>
           <Plus className="h-4 w-4" /> List a Room
         </Button>
       </div>
+
+      {propertyExceptions.map(({ property, roomId, listings: affected }) => {
+        const status = propertyStatus[property.id];
+        const inReview = status.state === "MANUAL_REVIEW" || status.state === "IN_PROGRESS";
+        return (
+          <div key={`pv-${property.id}`} role="status"
+               className={inReview
+                 ? "flex flex-wrap items-start justify-between gap-3 rounded-xl bg-slate-50 px-4 py-3 text-xs text-slate-700 ring-1 ring-slate-200 dark:bg-slate-800/60 dark:text-slate-200 dark:ring-slate-700"
+                 : "flex flex-wrap items-start justify-between gap-3 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-800 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-500/20"}>
+            <div className="min-w-0">
+              <p className="flex items-center gap-1.5 font-semibold">
+                <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                {property.address}: {propertyStateLabel[status.state]}
+              </p>
+              {status.message && <p className="mt-0.5">{status.message}</p>}
+              <p className="mt-0.5">
+                Affects {affected.length === 1 ? "1 listing" : `${affected.length} listings`}: {affected.map((l) => l.name).join(", ")}
+              </p>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => setPropertyVerificationRoomId(roomId)}>
+              <ShieldCheck className="h-3.5 w-3.5" /> {PROPERTY_CTA[status.state] ?? "View status"}
+            </Button>
+          </div>
+        );
+      })}
+
+      {authorityExceptions.map(({ property, roomId, listings: affected }) => {
+        const status = authorityByProperty[property.id];
+        return (
+          <div key={property.id} role="status"
+               className="flex flex-wrap items-start justify-between gap-3 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-800 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-500/20">
+            <div className="min-w-0">
+              <p className="flex items-center gap-1.5 font-semibold">
+                <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                {property.address}: {authorityStateLabel[status.state]}
+              </p>
+              {status.message && <p className="mt-0.5">{status.message}</p>}
+              <p className="mt-0.5">
+                Affects {affected.length === 1 ? "1 listing" : `${affected.length} listings`}: {affected.map((l) => l.name).join(", ")}
+              </p>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => setAuthorityRecordRoomId(roomId)}>
+              <ShieldCheck className="h-3.5 w-3.5" /> {authorityStateCta[status.state] ?? "View status"}
+            </Button>
+          </div>
+        );
+      })}
 
       {listings.length === 0 ? (
         <Card>
@@ -318,16 +440,6 @@ export function HostingListingsManager() {
                     <Button size="sm" variant="ghost" onClick={() => openEdit(listing)}>
                       <Pencil className="h-3.5 w-3.5" /> Edit
                     </Button>
-                    {listing.roomId !== null && (
-                      <Button size="sm" variant="outline" onClick={() => setPropertyVerificationRoomId(listing.roomId)}>
-                        <ShieldCheck className="h-3.5 w-3.5" /> Property verification
-                      </Button>
-                    )}
-                    {listing.roomId !== null && (
-                      <Button size="sm" variant="outline" onClick={() => setAuthorityRecordRoomId(listing.roomId)}>
-                        <ShieldCheck className="h-3.5 w-3.5" /> Authority to list
-                      </Button>
-                    )}
                     {listing.state === "APPROVED" && (
                       <Button size="sm" variant="outline" onClick={() => setPayingFeeListingId(listing.id)}>
                         <Receipt className="h-3.5 w-3.5" /> Listing fee
@@ -335,7 +447,21 @@ export function HostingListingsManager() {
                     )}
                     {(listing.state === "DRAFT" || listing.state === "REJECTED") && (
                       <Button size="sm" loading={busy} onClick={() => submitForReview(listing.id)}>
-                        <Send className="h-3.5 w-3.5" /> Submit for Review
+                        <Send className="h-3.5 w-3.5" /> Submit
+                      </Button>
+                    )}
+                    {listing.state === "PUBLISHED" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        title="Recently confirmed listings are shown higher in search"
+                        onClick={() =>
+                          confirmListingAvailability(listing.id)
+                            .then(() => showToast("Thanks -- availability confirmed."))
+                            .catch((err) => showToast(errorMessage(err, "Could not confirm availability."), "error"))
+                        }
+                      >
+                        <ShieldCheck className="h-3.5 w-3.5" /> Still available
                       </Button>
                     )}
                   </div>
@@ -344,7 +470,7 @@ export function HostingListingsManager() {
                 {listing.state === "REVIEW" && (
                   <div className="mt-4 rounded-xl bg-primary-50 px-4 py-3 text-xs text-primary-700 ring-1 ring-primary-200 dark:bg-primary-500/10 dark:text-primary-300 dark:ring-primary-500/20">
                     <p className="flex items-center gap-1.5 font-semibold">
-                      <AlertTriangle className="h-3.5 w-3.5" /> Awaiting review by a Zoiko admin.
+                      <AlertTriangle className="h-3.5 w-3.5" /> This market reviews listings before they go live -- awaiting review.
                     </p>
                   </div>
                 )}
@@ -354,7 +480,7 @@ export function HostingListingsManager() {
                     <p className="flex items-center gap-1.5 font-semibold">
                       <Receipt className="h-3.5 w-3.5" /> Approved -- pay the Listing Fee
                     </p>
-                    <p className="mt-1">A Zoiko admin has approved this listing. Pay the Listing Fee and it will be published automatically for renters to see.</p>
+                    <p className="mt-1">Every verification passed and this listing was approved automatically. Pay the Listing Fee and it goes live straight away for renters to see.</p>
                   </div>
                 )}
 
@@ -570,14 +696,11 @@ export function HostingListingsManager() {
         open={wizardOpen}
         onClose={() => setWizardOpen(false)}
         contact={{ name: user?.fullName ?? "", phone: user?.phone ?? "", email: user?.email ?? "" }}
-        onCreated={async (submitted) => {
+        onCreated={async (outcome) => {
           setWizardOpen(false);
           await load();
-          showToast(
-            submitted
-              ? "Listing submitted for review — a Zoiko admin will approve or reject it."
-              : "Draft listing created."
-          );
+          const { text, tone } = submitOutcomeMessage(outcome);
+          showToast(text, tone);
         }}
       />
 
@@ -600,19 +723,55 @@ export function HostingListingsManager() {
         open={propertyVerificationRoomId !== null}
         onClose={() => setPropertyVerificationRoomId(null)}
         title="Property verification"
+        size="xl"
       >
-        {propertyVerificationRoomId !== null && <PropertyVerificationManager roomId={propertyVerificationRoomId} />}
+        {propertyVerificationRoomId !== null && (
+          <RoomPropertyVerification roomId={propertyVerificationRoomId} onClose={() => { setPropertyVerificationRoomId(null); void load(); }} />
+        )}
       </Modal>
 
       <Modal
         open={authorityRecordRoomId !== null}
-        onClose={() => setAuthorityRecordRoomId(null)}
+        onClose={() => { setAuthorityRecordRoomId(null); void load(); }}
         title="Authority to list"
+        size="xl"
       >
-        {authorityRecordRoomId !== null && <AuthorityRecordManager roomId={authorityRecordRoomId} />}
+        {authorityRecordRoomId !== null && (
+          <RoomAuthorityVerification roomId={authorityRecordRoomId} onClose={() => { setAuthorityRecordRoomId(null); void load(); }} />
+        )}
       </Modal>
 
       <Toast toast={toast} />
     </div>
   );
+}
+
+/** ZR-AUTHORITY-002: authority is verified per property (optionally scoped
+ *  to rooms), so a listing opens its room's property authority flow. */
+function RoomAuthorityVerification({ roomId, onClose }: { roomId: number; onClose: () => void }) {
+  const [target, setTarget] = useState<{ propertyId: number; propertyLabel: string } | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    getPropertyVerificationForRoom(roomId)
+      .then((r) => setTarget({ propertyId: r.propertyId, propertyLabel: r.propertyLabel }))
+      .catch((err) => setError(errorMessage(err, "Could not load this property.")));
+  }, [roomId]);
+  if (error) return <p className="text-sm text-accent-700" role="alert">{error}</p>;
+  if (!target) return <p className="text-sm text-slate-400" role="status">Loading authority verification...</p>;
+  return <AuthorityVerificationWizard propertyId={target.propertyId} propertyLabel={target.propertyLabel} onClose={onClose} />;
+}
+
+/** ZR-PROPERTY-VERIFY-001: verification is per property (it covers every
+ *  room), so a listing opens its room's property verification wizard. */
+function RoomPropertyVerification({ roomId, onClose }: { roomId: number; onClose: () => void }) {
+  const [target, setTarget] = useState<{ propertyId: number; propertyLabel: string } | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    getPropertyVerificationForRoom(roomId)
+      .then((r) => setTarget({ propertyId: r.propertyId, propertyLabel: r.propertyLabel }))
+      .catch((err) => setError(errorMessage(err, "Could not load this property's verification.")));
+  }, [roomId]);
+  if (error) return <p className="text-sm text-accent-700" role="alert">{error}</p>;
+  if (!target) return <p className="text-sm text-slate-400" role="status">Loading property verification...</p>;
+  return <PropertyVerificationWizard propertyId={target.propertyId} propertyLabel={target.propertyLabel} onClose={onClose} />;
 }

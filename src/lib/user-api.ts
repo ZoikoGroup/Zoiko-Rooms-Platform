@@ -25,8 +25,6 @@ import {
   DisputeSettlementRead,
   DisputeSettlementRespondAction,
   EvidenceArtifact,
-  ExternalPaymentSession,
-  ExternalPaymentSessionCreateResult,
   HandoverEvent,
   HostedListing,
   IdentityVerificationRecord,
@@ -55,8 +53,6 @@ import {
   RentalPaymentMethodCategory,
   RentalPaymentObligation,
   RentalPaymentObligationsPage,
-  RentalPaymentProviderAccount,
-  RentalPaymentProviderAccountConnectResult,
   RentalPaymentReturn,
   RentalPaymentReturnCandidate,
   RentalPaymentReturnKind,
@@ -498,9 +494,11 @@ export function createHostedProperty(payload: HostedPropertyInput): Promise<Prop
   });
 }
 
-export function updateHostedProperty(propertyId: number, payload: HostedPropertyInput): Promise<Property> {
+export function updateHostedProperty(propertyId: number, payload: HostedPropertyInput,
+                                     locationVersion?: number): Promise<Property> {
   return apiClientFetch<Property>(`/api/users/hosting/properties/${propertyId}`, {
     method: "PUT",
+    headers: locationVersion ? { "If-Match": String(locationVersion) } : undefined,
     body: JSON.stringify(payload),
   });
 }
@@ -712,13 +710,14 @@ export function approveHostedSubletRequest(
   subletRequestId: number,
   payload: {
     notes?: string; conditions?: string; expiresAt?: string | null; conditionList?: string[];
-    authorityConfirmed?: boolean; stepUpPassword?: string;
+    authorityConfirmed?: boolean; stepUpPassword?: string; overrideReason?: string;
   } = {}
 ): Promise<SubletRequest> {
   return apiClientFetch<SubletRequest>(`/api/users/hosting/sublet-requests/${subletRequestId}/approve`, {
     method: "POST",
     body: JSON.stringify({
-      notes: "", conditions: "", expiresAt: null, conditionList: [], authorityConfirmed: false, stepUpPassword: "", ...payload,
+      notes: "", conditions: "", expiresAt: null, conditionList: [], authorityConfirmed: false, stepUpPassword: "",
+      overrideReason: "", ...payload,
     }),
   });
 }
@@ -1151,75 +1150,13 @@ export function confirmRentalPaymentInstruction(instructionId: number, code: str
   });
 }
 
-/** ZR-PAY-LINK-003 Section 6/Wireframe C: the recipient's own connected
- *  Stripe account for the online-payment rail -- a second, independent
- *  destination alongside the direct-instruction functions above. */
-export function getRentalPaymentProviderAccount(): Promise<RentalPaymentProviderAccount> {
-  return apiClientFetch<RentalPaymentProviderAccount>("/api/users/rental-payments/recipient/provider-account");
-}
 
-export function connectRentalPaymentProviderAccount(payload: {
-  country: string;
-  email: string;
-}): Promise<RentalPaymentProviderAccountConnectResult> {
-  return apiClientFetch<RentalPaymentProviderAccountConnectResult>("/api/users/rental-payments/recipient/provider-account", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
 
-export function refreshRentalPaymentProviderAccount(): Promise<RentalPaymentProviderAccount> {
-  return apiClientFetch<RentalPaymentProviderAccount>("/api/users/rental-payments/recipient/provider-account/refresh", {
-    method: "POST",
-  });
-}
 
-/** A fresh hosted onboarding link for the account already on file -- for a
- *  host who closed the Stripe tab before finishing. Never creates a new
- *  account (unlike connectRentalPaymentProviderAccount). */
-export function resumeRentalPaymentProviderAccountOnboarding(): Promise<RentalPaymentProviderAccountConnectResult> {
-  return apiClientFetch<RentalPaymentProviderAccountConnectResult>(
-    "/api/users/rental-payments/recipient/provider-account/resume-onboarding",
-    { method: "POST" }
-  );
-}
 
-/** Dev/test-only -- refuses once real Stripe credentials are configured
- *  server-side, see crud/rental_payment_provider_account.py's own guard. */
-export function simulateRentalPaymentProviderAccountOnboardingComplete(): Promise<RentalPaymentProviderAccount> {
-  return apiClientFetch<RentalPaymentProviderAccount>(
-    "/api/users/rental-payments/recipient/provider-account/simulate-onboarding-complete",
-    { method: "POST" }
-  );
-}
 
-/** ZR-PAY-LINK-003 Section 14.1: the governed "change payment account" flow
- *  -- mailed step-up code, same shape as
- *  resendRentalPaymentInstructionCode/confirmRentalPaymentInstruction. The
- *  current account stays fully usable while a change is only requested,
- *  never confirmed. */
-export function requestRentalPaymentProviderAccountChange(): Promise<{ sent: boolean }> {
-  return apiClientFetch<{ sent: boolean }>("/api/users/rental-payments/recipient/provider-account/request-change", {
-    method: "POST",
-  });
-}
 
-export function resendRentalPaymentProviderAccountChangeCode(): Promise<{ sent: boolean }> {
-  return apiClientFetch<{ sent: boolean }>("/api/users/rental-payments/recipient/provider-account/resend-change-code", {
-    method: "POST",
-  });
-}
 
-export function confirmRentalPaymentProviderAccountChange(payload: {
-  code: string;
-  country: string;
-  email: string;
-}): Promise<RentalPaymentProviderAccountConnectResult> {
-  return apiClientFetch<RentalPaymentProviderAccountConnectResult>(
-    "/api/users/rental-payments/recipient/provider-account/confirm-change",
-    { method: "POST", body: JSON.stringify(payload) }
-  );
-}
 
 /** ZR-PAY-LINK-003 Section 3.1: the tenant-facing counterpart to
  *  getHostedRoomPaymentConnection -- lets the tenant Payments UI warn when
@@ -1229,29 +1166,8 @@ export function getRentalPaymentObligationConnection(obligationId: number): Prom
   return apiClientFetch<PaymentConnection>(`/api/users/rental-payments/obligations/${obligationId}/connection`);
 }
 
-/** ZR-PAY-LINK-003 Section 19/Wireframe F: starts a provider-hosted checkout
- *  for an obligation -- the tenant's own "Continue to secure payment." */
-export function startRentalPaymentSession(obligationId: number): Promise<ExternalPaymentSessionCreateResult> {
-  return apiClientFetch<ExternalPaymentSessionCreateResult>(
-    `/api/users/rental-payments/obligations/${obligationId}/payment-session`,
-    { method: "POST" }
-  );
-}
 
-/** The return-page resolve -- self-heals via the backend's own
- *  resolve_session rather than only waiting on the webhook. */
-export function getRentalPaymentSession(sessionId: number): Promise<ExternalPaymentSession> {
-  return apiClientFetch<ExternalPaymentSession>(`/api/users/rental-payments/payment-sessions/${sessionId}`);
-}
 
-/** Same role as resolveListingFeeCheckoutSession plays for the Listing Fee
- *  return leg -- looks up which of the tenant's own sessions a Stripe
- *  `checkoutSessionId` query param refers to, self-healing its status. */
-export function resolveRentalPaymentCheckoutSession(checkoutSessionId: string): Promise<ExternalPaymentSession> {
-  return apiClientFetch<ExternalPaymentSession>(
-    `/api/users/rental-payments/payment-sessions/by-checkout-session/${checkoutSessionId}`
-  );
-}
 
 /** Section 5 gap: autopay mandates existed only in the admin/backend --
  *  these are the renter's own self-service opt-in/list/revoke calls. */

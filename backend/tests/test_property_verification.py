@@ -159,21 +159,30 @@ class TestGetValidPropertyVerificationForRoom:
         db_session.commit()
         assert crud.get_valid_property_verification_for_room(db_session, room.id) is None
 
-    def test_returns_a_currently_valid_record(self, db_session: Session):
+    def test_returns_a_reviewer_verified_record(self, db_session: Session):
+        """ZR-PROPERTY-VERIFY-001 P0 #2: a legacy per-room record counts only
+        when a reviewer verified it -- never on a map hit alone."""
+        from tests.conftest import _make_admin
+
         user, room = _make_host_with_room(db_session, email="pv-valid-current@test.com")
-        record = PropertyVerification(
+        unreviewed = PropertyVerification(
             party_id=user.party_id, room_id=room.id, evidence_ref="deed.pdf", status="verified",
             expires_at=datetime.now(timezone.utc) + timedelta(days=1),
         )
-        db_session.add(record)
+        db_session.add(unreviewed)
+        db_session.commit()
+        assert crud.get_valid_property_verification_for_room(db_session, room.id) is None
+        admin = _make_admin(db_session, email="pv-legacy-reviewer@test.com", role="super_admin")
+        unreviewed.verifier_admin_id = admin.id
         db_session.commit()
         found = crud.get_valid_property_verification_for_room(db_session, room.id)
-        assert found is not None
-        assert found.id == record.id
+        assert found is not None and found.id == unreviewed.id
 
 
 class TestPropertyVerificationRoutes:
-    def test_host_can_submit_evidence_for_their_own_room(self, client, db_session: Session):
+    def test_per_room_submission_is_retired(self, client, db_session: Session):
+        """Properties are verified once per property (ZR-PROPERTY-VERIFY-001);
+        the old per-room upload, which auto-verified on a map hit, is gone."""
         user, room = _make_host_with_room(db_session, email="pv-route-owner@test.com")
         r = client.post(
             f"/api/users/hosting/rooms/{room.id}/property-verifications",
@@ -181,29 +190,7 @@ class TestPropertyVerificationRoutes:
             files={"file": ("deed.pdf", _PDF_BYTES, "application/pdf")},
             cookies=auth_user_cookie(user),
         )
-        assert r.status_code == 201, r.text
-        assert r.json()["status"] == "pending"
-        assert r.json()["hasDocument"] is True
-
-    def test_host_cannot_submit_for_a_room_they_dont_own(self, client, db_session: Session):
-        user, _room = _make_host_with_room(db_session, email="pv-route-outsider@test.com")
-        other_party = Party(party_type="provider", status="active", jurisdiction="IN")
-        db_session.add(other_party)
-        db_session.commit()
-        other_prop = Property(owner_party_id=other_party.id, address="9 Other Rd", city="Bengaluru", status="active")
-        db_session.add(other_prop)
-        db_session.flush()
-        other_room = Room(property_id=other_prop.id, room_type="private_room", size=100, has_ensuite=True, status="active")
-        db_session.add(other_room)
-        db_session.commit()
-
-        r = client.post(
-            f"/api/users/hosting/rooms/{other_room.id}/property-verifications",
-            data={"evidence_ref": "deed.pdf"},
-            files={"file": ("deed.pdf", _PDF_BYTES, "application/pdf")},
-            cookies=auth_user_cookie(user),
-        )
-        assert r.status_code == 403, r.text
+        assert r.status_code == 410, r.text
 
     def test_host_cannot_view_another_hosts_property_verifications(self, client, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-route-viewer-owner@test.com")
@@ -326,7 +313,7 @@ class TestRegexAutoVerify:
 
     def test_upload_waits_then_auto_verifies(self, db_session: Session):
         user, room = _make_host_with_room(db_session, email="pv-auto@test.com")
-        record = _declare(db_session, user, room, evidence_ref="title deed")
+        record = _declare(db_session, user, room, evidence_ref="Title deed\nProperty Address: 1 Verify Way, Bengaluru")
         assert record.status == "pending"
         assert record.verifier_notes == crud.AUTO_VERIFY_PENDING_NOTE
 

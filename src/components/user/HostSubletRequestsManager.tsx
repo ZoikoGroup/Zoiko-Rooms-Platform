@@ -1,5 +1,6 @@
 "use client";
 
+import { SubletPaymentsPanel } from "@/components/user/SubletPaymentsPanel";
 import { useCallback, useEffect, useState } from "react";
 import { Download, HelpCircle, Repeat, ThumbsDown, ThumbsUp } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
@@ -49,6 +50,7 @@ export function HostSubletRequestsManager() {
   const [approveExpiresAt, setApproveExpiresAt] = useState("");
   const [approveAuthorityConfirmed, setApproveAuthorityConfirmed] = useState(false);
   const [approveStepUpPassword, setApproveStepUpPassword] = useState("");
+  const [approveOverrideReason, setApproveOverrideReason] = useState("");
   const { toast, showToast } = useToast();
 
   const load = useCallback(async () => {
@@ -74,6 +76,7 @@ export function HostSubletRequestsManager() {
     setApproveExpiresAt("");
     setApproveAuthorityConfirmed(false);
     setApproveStepUpPassword("");
+    setApproveOverrideReason("");
   }
 
   function addApproveCondition() {
@@ -86,9 +89,14 @@ export function HostSubletRequestsManager() {
     approveTarget && (REPLACING_ARRANGEMENT_TYPES as readonly string[]).includes(approveTarget.arrangementType)
   );
 
+  // The incoming occupant already holds a tenancy covering nearly the same
+  // period -- the backend refuses approval without a recorded reason.
+  const approveNeedsOverride = approveTarget?.occupantRiskTier === "BLOCK";
+
   async function submitApprove() {
     if (!approveTarget || !approveAuthorityConfirmed) return;
     if (approveRequiresStepUp && !approveStepUpPassword) return;
+    if (approveNeedsOverride && !approveOverrideReason.trim()) return;
     setBusyId(approveTarget.id);
     try {
       const updated = await approveHostedSubletRequest(approveTarget.id, {
@@ -97,6 +105,7 @@ export function HostSubletRequestsManager() {
         expiresAt: approveExpiresAt ? new Date(approveExpiresAt).toISOString() : null,
         authorityConfirmed: approveAuthorityConfirmed,
         stepUpPassword: approveStepUpPassword,
+        overrideReason: approveNeedsOverride ? approveOverrideReason.trim() : "",
       });
       setRequests((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
       showToast("Sublet request approved — occupancy transferred.");
@@ -236,6 +245,20 @@ export function HostSubletRequestsManager() {
                         {request.proposedEndDate ? formatDate(request.proposedEndDate) : "—"}
                       </p>
                     )}
+                    {request.occupantRiskTier !== "NONE" && (
+                      <p
+                        className={`mt-2 rounded-lg px-3 py-2 text-xs ${
+                          request.occupantRiskTier === "BLOCK"
+                            ? "bg-red-50 text-red-800 dark:bg-red-500/10 dark:text-red-300"
+                            : "bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
+                        }`}
+                      >
+                        {request.occupantRiskTier === "BLOCK"
+                          ? "The proposed renter already has a tenancy elsewhere covering nearly the same period."
+                          : "The proposed renter's tenancy elsewhere partly overlaps this period."}{" "}
+                        {request.occupantRiskReason}
+                      </p>
+                    )}
                     {request.infoRequestNote && (
                       <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
                         You asked: &ldquo;{request.infoRequestNote}&rdquo;
@@ -262,6 +285,7 @@ export function HostSubletRequestsManager() {
                           {request.approvalExpiresAt && <>Expires {formatDate(request.approvalExpiresAt)}</>}
                         </p>
                       )}
+                    {request.status === "approved" && request.newAgreementId && <SubletPaymentsPanel subletId={request.id} />}
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <Badge tone={subletRequestStatusTone[request.status] ?? "neutral"}>
@@ -393,6 +417,25 @@ export function HostSubletRequestsManager() {
             />
             I confirm I am authorized to make this decision for this rental.
           </label>
+          {approveNeedsOverride && (
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">
+                Overlapping tenancy
+              </label>
+              <p className="mb-1.5 text-xs text-slate-500 dark:text-slate-400">
+                The proposed renter already has a tenancy elsewhere covering nearly the same period (
+                {approveTarget?.occupantRiskReason}). To approve anyway, say why — for example, they&apos;re moving out
+                of the other room. Your reason is kept on record.
+              </p>
+              <textarea
+                value={approveOverrideReason}
+                onChange={(e) => setApproveOverrideReason(e.target.value)}
+                rows={2}
+                placeholder="Why this overlap is acceptable"
+                className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              />
+            </div>
+          )}
           {approveRequiresStepUp && (
             <div>
               <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
@@ -418,7 +461,11 @@ export function HostSubletRequestsManager() {
             <Button
               variant="primary"
               loading={busyId === approveTarget?.id}
-              disabled={!approveAuthorityConfirmed || (approveRequiresStepUp && !approveStepUpPassword)}
+              disabled={
+                !approveAuthorityConfirmed ||
+                (approveRequiresStepUp && !approveStepUpPassword) ||
+                (approveNeedsOverride && !approveOverrideReason.trim())
+              }
               onClick={submitApprove}
             >
               <ThumbsUp className="h-3.5 w-3.5" /> Approve request

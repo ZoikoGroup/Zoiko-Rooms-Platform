@@ -91,6 +91,10 @@ def _make_active_tenancy(db: Session, *, suffix: str) -> tuple[object, object, s
     return tenant_user, proposed_user, proposed_party.id, occupancy.id
 
 
+def _host_for(db: Session, suffix: str) -> UserAccount:
+    return db.scalar(select(UserAccount).where(UserAccount.email == f"host-{suffix}@test.com"))
+
+
 class TestArrangementTypeValidation:
     def test_unsupported_arrangement_type_is_rejected(self, db_session: Session):
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="badtype")
@@ -173,9 +177,9 @@ class TestLiabilityAndDepositDisposition:
     def test_assignment_full_releases_original_renter_liability(self, client, db_session: Session):
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="assign")
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL")
-        super_admin = _make_admin(db_session, email="assign-admin@test.com", role="super_admin")
+        host_user = _host_for(db_session, "assign")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
         assert r.json()["originalRenterLiability"] == "RELEASED"
         assert r.json()["newOccupantLiability"] == "ASSIGNEE"
@@ -184,9 +188,9 @@ class TestLiabilityAndDepositDisposition:
     def test_replacement_occupant_keeps_original_renter_liable(self, client, db_session: Session):
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="replace")
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "REPLACEMENT_OCCUPANT")
-        super_admin = _make_admin(db_session, email="replace-admin@test.com", role="super_admin")
+        host_user = _host_for(db_session, "replace")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
         assert r.json()["originalRenterLiability"] == "LIMITED"
         assert r.json()["newOccupantLiability"] == "SUBORDINATE"
@@ -211,9 +215,9 @@ class TestProposedOccupantIsNotified:
     def test_proposed_occupant_is_notified_on_approval(self, client, db_session: Session):
         tenant_user, proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="notifyapp")
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL")
-        super_admin = _make_admin(db_session, email="notify-admin@test.com", role="super_admin")
+        host_user = _host_for(db_session, "notifyapp")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
 
         notification = db_session.scalar(
@@ -227,9 +231,9 @@ class TestProposedOccupantIsNotified:
     def test_proposed_occupant_is_notified_on_rejection(self, client, db_session: Session):
         tenant_user, proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="notifyrej")
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL")
-        super_admin = _make_admin(db_session, email="notify-rej-admin@test.com", role="super_admin")
+        host_user = _host_for(db_session, "notifyrej")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/reject", cookies=auth_admin_cookie(super_admin))
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/decline", cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
 
         notification = db_session.scalar(
@@ -249,9 +253,9 @@ class TestRequesterHistoryFixedAfterApproval:
     def test_original_requester_still_sees_their_request_after_approval(self, client, db_session: Session):
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="history")
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL")
-        super_admin = _make_admin(db_session, email="history-admin@test.com", role="super_admin")
+        host_user = _host_for(db_session, "history")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
 
         r = client.get("/api/users/rentals/sublet-requests", cookies=auth_user_cookie(tenant_user))
@@ -262,8 +266,8 @@ class TestRequesterHistoryFixedAfterApproval:
     def test_replacement_occupant_does_not_falsely_inherit_the_request_in_their_own_history(self, client, db_session: Session):
         tenant_user, proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="noinherit")
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL")
-        super_admin = _make_admin(db_session, email="noinherit-admin@test.com", role="super_admin")
-        client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        host_user = _host_for(db_session, "noinherit")
+        client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
 
         r = client.get("/api/users/rentals/sublet-requests", cookies=auth_user_cookie(proposed_user))
         assert r.status_code == 200, r.text
@@ -295,8 +299,8 @@ class TestSecondSubletOnSameOccupancyDoesNotCrash:
     def test_a_second_sublet_request_after_the_first_is_rejected_succeeds_cleanly(self, client, db_session: Session):
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="second")
         first = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL")
-        super_admin = _make_admin(db_session, email="second-admin@test.com", role="super_admin")
-        client.post(f"/api/occupancy/sublet-requests/{first.id}/reject", cookies=auth_admin_cookie(super_admin))
+        host_user = _host_for(db_session, "second")
+        client.post(f"/api/users/hosting/sublet-requests/{first.id}/decline", cookies=auth_user_cookie(host_user))
 
         # A second, later request for the same occupancy must not crash.
         second_party = Party(party_type="renter", status="active", jurisdiction="IN")
@@ -320,9 +324,9 @@ class TestLodgerOrLicensee:
         db_session.commit()
 
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "LODGER_OR_LICENSEE")
-        super_admin = _make_admin(db_session, email="lodger-admin@test.com", role="super_admin")
+        host_user = _host_for(db_session, "lodger")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["newOccupantLiability"] == "LICENSEE"
@@ -342,9 +346,9 @@ class TestPayeeModelResolution:
     def test_assignment_uses_the_assignment_payee_model(self, client, db_session: Session):
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="payeeassign")
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL")
-        super_admin = _make_admin(db_session, email="payeeassign-admin@test.com", role="super_admin")
+        host_user = _host_for(db_session, "payeeassign")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
         assert r.json()["payeeModel"] == "HOST_OR_LANDLORD_PAYEE"  # MarketPolicyPack's sublet_assignment_payee_model default
 
@@ -355,9 +359,9 @@ class TestPayeeModelResolution:
         db_session.commit()
 
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT")
-        super_admin = _make_admin(db_session, email="payeesublease-admin@test.com", role="super_admin")
+        host_user = _host_for(db_session, "payeesublease")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
         # A co-tenant is the host's own joint tenant -- they pay the host, not
         # the renter who brought them in.
@@ -370,8 +374,8 @@ class TestPayeeModelResolution:
         db_session.commit()
 
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "SUBLEASE_PARTIAL")
-        super_admin = _make_admin(db_session, email="payeesub2-admin@test.com", role="super_admin")
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        host_user = _host_for(db_session, "payeesub2")
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
         # Before the fix this came back HOST_OR_LANDLORD_PAYEE -- the
         # assignment field's default, not the sublease field's own.
@@ -384,9 +388,9 @@ class TestAdditionalOccupant:
         # Deliberately do NOT raise room capacity -- ADDITIONAL_OCCUPANT must not
         # be gated on it at all, since it creates no occupancy/tenancy record.
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADDITIONAL_OCCUPANT")
-        super_admin = _make_admin(db_session, email="addlocc-admin@test.com", role="super_admin")
+        host_user = _host_for(db_session, "addlocc")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["newAgreementId"] is None
@@ -427,9 +431,9 @@ class TestCoTenancyCreatesRealSeparateAgreement:
         original_offer_id = occupancy.offer_id
 
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT")
-        super_admin = _make_admin(db_session, email="cotenant-admin@test.com", role="super_admin")
+        host_user = _host_for(db_session, "realagreement")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["newAgreementId"] is not None
@@ -468,8 +472,8 @@ class TestCoTenancyCreatesRealSeparateAgreement:
         master_end = occupancy.expected_end_date
 
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT")
-        super_admin = _make_admin(db_session, email="dateinvariant-admin@test.com", role="super_admin")
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        host_user = _host_for(db_session, "dateinvariant")
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
 
         new_agreement = db_session.get(Agreement, r.json()["newAgreementId"])
@@ -500,8 +504,8 @@ class TestNoSecondSubletAfterAssignment:
     def test_new_occupant_cannot_sublet_the_same_room_again(self, client, db_session: Session):
         tenant_user, new_occupant_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="chainend")
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL")
-        super_admin = _make_admin(db_session, email="chainend-admin@test.com", role="super_admin")
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
+        host_user = _host_for(db_session, "chainend")
+        r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
 
         # A third party for the new occupant to (attempt to) sublet onward to --
@@ -522,8 +526,8 @@ class TestNoSecondSubletAfterAssignment:
         either arrangement type ends the chain."""
         tenant_user, new_occupant_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="chainend2")
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "REPLACEMENT_OCCUPANT")
-        super_admin = _make_admin(db_session, email="chainend2-admin@test.com", role="super_admin")
-        sublet_crud.approve_sublet_request(db_session, sublet_request, super_admin, step_up_password="password123")
+        host_user = _host_for(db_session, "chainend2")
+        sublet_crud.approve_sublet_request(db_session, sublet_request, host_user, step_up_password="password123")
 
         third_party = Party(party_type="renter", status="active", jurisdiction="IN")
         db_session.add(third_party)
@@ -578,17 +582,27 @@ class TestHostDecidesSubletRequest:
         r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(other_host))
         assert r.status_code == 403, r.text
 
-    def test_super_admin_can_still_decide_as_a_legal_ops_override(self, client, db_session: Session):
-        """The doc treats an Admin deciding as an exceptional override, not the
-        removed capability -- confirm it still works, distinctly from the Host path."""
+    def test_super_admin_cannot_decide_a_sublet_request(self, client, db_session: Session):
+        """Approval, decline and requests for more information stay between
+        the Host and the renter -- there is no admin decision route, and the
+        crud layer refuses an admin actor outright."""
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="adminoverride")
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ASSIGNMENT_FULL")
         super_admin = _make_admin(db_session, email="override-admin@test.com", role="super_admin")
 
-        r = client.post(f"/api/occupancy/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_admin_cookie(super_admin))
-        assert r.status_code == 200, r.text
-        assert r.json()["decidedByAdminId"] == super_admin.id
-        assert r.json()["decidedByUserId"] is None
+        for action in ("approve", "reject", "request-info"):
+            r = client.post(
+                f"/api/occupancy/sublet-requests/{sublet_request.id}/{action}",
+                json={"stepUpPassword": "password123", "notes": "x"}, cookies=auth_admin_cookie(super_admin),
+            )
+            assert r.status_code in (404, 405), (action, r.text)
+        try:
+            sublet_crud.approve_sublet_request(db_session, sublet_request, super_admin, step_up_password="password123")
+            assert False, "should have raised"
+        except Exception as e:
+            assert "decided by the host" in str(e)
+        db_session.refresh(sublet_request)
+        assert sublet_request.status == "pending_admin_review"
 
 
 class TestNoVerifiedHost:

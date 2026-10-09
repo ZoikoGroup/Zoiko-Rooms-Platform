@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from datetime import datetime, timezone
 
 from fastapi.responses import FileResponse, Response
@@ -18,12 +18,9 @@ from app.schemas.identity import (
     IdentityGateUpdate,
     IdentityPackUpdate,
     IdentityReasonMappingUpsert,
-    IdentityReviewerDecision,
 )
 from app.schemas.marketplace import (
     BreakGlassAccessRequest,
-    IdentityVerificationCreate,
-    IdentityVerificationReject,
     IdentityVerificationRead,
 )
 
@@ -40,37 +37,10 @@ def get_identity_verifications(
     return crud.list_identity_verifications(db, admin, party_id, status)
 
 
-@router.post("", response_model=IdentityVerificationRead, status_code=status.HTTP_201_CREATED)
-def post_identity_verification(payload: IdentityVerificationCreate, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    return crud.submit_identity_verification(db, admin, payload)
-
-
-@router.post("/{verification_id}/decision", response_model=IdentityVerificationRead, dependencies=[Depends(require_super_admin)])
-def post_identity_reviewer_decision(
-    verification_id: int,
-    payload: IdentityReviewerDecision,
-    request: Request,
-    admin: AdminUser = Depends(require_super_admin),
-    db: Session = Depends(get_db),
-):
-    """ZR-IDENTITY-001 Section 13: Approve / Action required / Reject /
-    Escalate, each with a reason code and a reviewer note."""
-    from app.services.identity import service as identity_service
-
-    record = crud.get_identity_verification(db, verification_id)
-    if not record:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Identity verification not found")
-    crud._ensure_reviewable(record)
-    updated = identity_service.reviewer_decision(
-        db, admin, record, decision=payload.decision, reason_code=payload.reason_code, note=payload.note,
-        correlation_id=get_correlation_id(request),
-    )
-    log_audit_event(
-        db, admin, f"identity_verification.decision.{payload.decision.lower()}", "identity_verification",
-        str(verification_id), get_correlation_id(request), reason=payload.reason_code,
-    )
-    db.commit()
-    return updated
+# ZR-IDV-ADR-001: identities are decided only by the identity provider
+# (Veriff). There are no admin create / approve / reject / request-evidence
+# routes -- admins can view cases, reconcile with the provider, erase data
+# and manage the country packs and provider configuration.
 
 
 @router.get("/metrics", dependencies=[Depends(require_super_admin)])
@@ -140,8 +110,6 @@ def get_identity_case(verification_id: int, admin: AdminUser = Depends(get_curre
         "hasDocument": record.has_document,
         "documentContentType": record.document_file_content_type,
         "evidencePurgedAt": record.evidence_purged_at,
-        "alternativeReason": record.alternative_reason,
-        "escalated": record.escalated_at is not None,
         "verifierNotes": record.verifier_notes,
         "submittedAt": record.submitted_at,
         "decidedAt": record.decided_at,
@@ -171,6 +139,13 @@ def post_identity_reconcile(verification_id: int, request: Request, admin: Admin
                     get_correlation_id(request), reason=outcome)
     db.commit()
     return {"result": outcome}
+
+
+# ZR-IDV-ADR-001 Section 10: the internal reconciliation action at the path
+# the ADR names. Not customer-facing: super admin only.
+internal_router = APIRouter(prefix="/internal/identity-verifications", tags=["identity-verifications"],
+                            dependencies=[Depends(require_super_admin)])
+internal_router.add_api_route("/{verification_id}/reconcile", post_identity_reconcile, methods=["POST"])
 
 
 @router.post("/parties/{party_id}/erase", dependencies=[Depends(require_super_admin)])
@@ -285,77 +260,6 @@ def put_reason_mapping(payload: IdentityReasonMappingUpsert, request: Request,
     return _camel({"id": row.id, "provider_code": row.provider_code, "provider_decision": row.provider_decision,
                    "provider_reason_code": row.provider_reason_code, "zoiko_reason_code": row.zoiko_reason_code,
                    "description": row.description})
-
-
-@router.get("/reason-codes")
-def get_reviewer_reason_codes():
-    from app.services.identity.reason_codes import REASON_CODES, REVIEWER_REASON_CODES
-    from app.services.identity.service import REVIEWER_DECISIONS
-
-    return {
-        "decisions": list(REVIEWER_DECISIONS),
-        "reasonCodes": [{"code": c, "message": REASON_CODES[c].message} for c in REVIEWER_REASON_CODES],
-    }
-
-
-@router.post("/{verification_id}/verify", response_model=IdentityVerificationRead, dependencies=[Depends(require_super_admin)])
-def verify_identity_verification(
-    verification_id: int,
-    request: Request,
-    admin: AdminUser = Depends(require_super_admin),
-    db: Session = Depends(get_db),
-):
-    record = crud.get_identity_verification(db, verification_id)
-    if not record:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Identity verification not found")
-    updated = crud.verify_identity_verification(db, record, admin)
-    log_audit_event(db, admin, "identity_verification.verify", "identity_verification", str(verification_id), get_correlation_id(request))
-    db.commit()
-    return updated
-
-
-@router.post("/{verification_id}/reject", response_model=IdentityVerificationRead, dependencies=[Depends(require_super_admin)])
-def reject_identity_verification(
-    verification_id: int,
-    request: Request,
-    payload: IdentityVerificationReject | None = Body(default=None),
-    admin: AdminUser = Depends(require_super_admin),
-    db: Session = Depends(get_db),
-):
-    record = crud.get_identity_verification(db, verification_id)
-    if not record:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Identity verification not found")
-    notes = payload.notes if payload else ""
-    updated = crud.reject_identity_verification(db, record, admin, notes)
-    log_audit_event(db, admin, "identity_verification.reject", "identity_verification", str(verification_id), get_correlation_id(request), reason=notes)
-    db.commit()
-    return updated
-
-
-@router.post("/{verification_id}/request-additional-evidence", response_model=IdentityVerificationRead, dependencies=[Depends(require_super_admin)])
-def post_request_additional_evidence(
-    verification_id: int,
-    request: Request,
-    payload: IdentityVerificationReject | None = Body(default=None),
-    admin: AdminUser = Depends(require_super_admin),
-    db: Session = Depends(get_db),
-):
-    """ZR-ENG-CLR-012 Section 17/31: the REQUEST_ALTERNATIVE decision path
-    alongside verify/reject -- crud.request_additional_evidence already
-    existed and IDENTITY_STATUSES/user_verification.py already handled its
-    result status, but no route ever called it, so an admin had no way to
-    actually choose this outcome instead of an outright reject."""
-    record = crud.get_identity_verification(db, verification_id)
-    if not record:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Identity verification not found")
-    notes = payload.notes if payload else ""
-    updated = crud.request_additional_evidence(db, record, admin, notes)
-    log_audit_event(
-        db, admin, "identity_verification.request_additional_evidence", "identity_verification", str(verification_id),
-        get_correlation_id(request), reason=notes,
-    )
-    db.commit()
-    return updated
 
 
 @router.get("/{verification_id}/document")

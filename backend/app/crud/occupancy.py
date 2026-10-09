@@ -624,34 +624,20 @@ def cancel_before_move_in(
     elif agreement is not None:
         fee_amount, fee_note = _resolve_pre_move_in_cancellation_fee(db, occupancy, agreement)
 
-    from app.crud import external_payment_session as eps_crud
-
-    # The booking's own online-rail rent/deposit (RentalPaymentObligation):
-    # settle any checkout still open on it first -- a payment that just went
-    # through is refunded below like any other, an unpaid checkout is closed
-    # at Stripe so a cancelled booking can never be paid afterwards.
+    # The booking's own direct-payment rent/deposit (RentalPaymentObligation).
+    # Money the renter paid the host directly (bank transfer / UPI / cash) is
+    # returned directly by the host and recorded through
+    # crud/rental_payment_return.py (CANCELLATION_RETURN) -- Zoiko Rooms never
+    # moves it.
     rental_obligations = _rental_payment_obligations_for_booking(db, occupancy, agreement)
-    for rental_obligation in rental_obligations:
-        eps_crud.close_open_sessions_for_obligation(db, rental_obligation)
 
     refunded_amount = 0.0
     remaining_fee = fee_amount
     if agreement is not None:
-        # One refund plan across both payment rails: a card payment made
-        # through Stripe Checkout (the money sits in the HOST's own Stripe
-        # account -- it's refunded straight from there) and a payment made
-        # through the legacy PSP rail (refunded via request_refund/
-        # decide_refund below). A card-paid legacy Obligation is only ever
-        # marked PAID by rental_payment._sync_legacy_obligation_from_
-        # confirmation, with no allocation -- so it's skipped on the legacy
-        # side and can never be refunded twice.
-        # Deposit is deducted from first (a fee is naturally a forfeiture of
-        # part of the security deposit in ordinary practice), then rent.
+        # Legacy PSP-rail payments (refunded via request_refund/decide_refund
+        # below). Deposit is deducted from first (a fee is naturally a
+        # forfeiture of part of the security deposit), then rent.
         refund_plan = []
-        for record in _card_paid_rental_payment_records(db, rental_obligations):
-            # Planned on what the tenant paid (gross), not on what's left after
-            # any refund the host already gave -- see the card loop below.
-            refund_plan.append(("card", record.obligation.obligation_type, float(record.declared_amount), record))
         for obligation in agreement.obligations:
             if obligation.status != "PAID" or obligation.obligation_type not in ("DEPOSIT", "RENT"):
                 continue
@@ -665,26 +651,6 @@ def cancel_before_move_in(
             applied_fee = min(remaining_fee, paid_amount)
             remaining_fee = round(remaining_fee - applied_fee, 2)
             planned.append((rail, target, round(paid_amount - applied_fee, 2)))
-
-        # Card refunds go first: they're the calls that can be refused by
-        # Stripe, and if one is, the booking stays PENDING_MOVE_IN and the
-        # whole cancellation can simply be retried. refund_amount is the
-        # tenant's TOTAL refund on that payment, so only the part not yet
-        # refunded is sent -- whether it went earlier in a failed attempt of
-        # this same cancellation (each successful refund is committed at
-        # once, so a later failure can't lose it) or from the host's own
-        # Stripe Dashboard. A retry therefore never refunds twice and never
-        # re-applies the fee.
-        for rail, record, refund_amount in planned:
-            if rail != "card" or refund_amount <= 0:
-                continue
-            already_refunded = round(float(record.refunded_amount or 0), 2)
-            outstanding_refund = round(refund_amount - already_refunded, 2)
-            if outstanding_refund > 0:
-                _refund_card_payment_from_host_account(
-                    db, occupancy, record, outstanding_refund, already_refunded=already_refunded, reason=reason,
-                )
-            refunded_amount = round(refunded_amount + max(refund_amount, already_refunded), 2)
 
         for rail, target, refund_amount in planned:
             if rail != "legacy" or refund_amount <= 0:
@@ -704,22 +670,6 @@ def cancel_before_move_in(
                     db, refund, admin or _system_admin_for_self_service_refund(db), RefundDecide(approve=True),
                 )
             refunded_amount = round(refunded_amount + refund_amount, 2)
-
-        # A card refund above sets the legacy counterpart the status sync had
-        # marked PAID back to PENDING (rental_payment._unsync_legacy_
-        # obligation_after_reversal) -- on a cancelled booking that money was
-        # refunded, not left owing, so record it as such.
-        from app.crud.rental_payment import _find_synced_legacy_obligation
-
-        for record in _card_paid_rental_payment_records(db, rental_obligations):
-            if not float(record.refunded_amount or 0):
-                continue
-            legacy_obligation = _find_synced_legacy_obligation(db, record.obligation)
-            if (
-                legacy_obligation is not None and legacy_obligation.status == "PENDING"
-                and not any(float(a.amount_allocated or 0) > 0 for a in legacy_obligation.allocations)
-            ):
-                legacy_obligation.status = "REFUNDED"
 
     # Nothing further is owed on a cancelled booking -- close every open
     # online-rail obligation so the tenant is never shown rent to pay for it.
@@ -782,89 +732,6 @@ def _rental_payment_obligations_for_booking(db: Session, occupancy: Occupancy, a
     if agreement is not None:
         scopes.append(RentalPaymentObligation.agreement_id == agreement.id)
     return list(db.scalars(select(RentalPaymentObligation).where(or_(*scopes)).order_by(RentalPaymentObligation.id)))
-
-
-def _card_paid_rental_payment_records(db: Session, rental_obligations: list) -> list:
-    """Stripe-confirmed card payments on these obligations whose money the
-    host still holds, fully or partly -- the only online-rail money Zoiko
-    Rooms can actually send back, since it knows exactly which Stripe charge
-    (and which host account) it's in. Includes ones already refunded in full
-    (REVERSED by refund), so a retried cancellation plans the fee exactly as
-    the first attempt did. Excludes a charge under an open chargeback or one
-    the bank already returned (lost) -- Stripe refuses to refund those, and
-    the tenant already has or may get that money back from their bank.
-    A tenant-declared bank transfer or cash payment never went through
-    Stripe, so there's nothing here to reverse; that's settled directly
-    between tenant and host."""
-    from app.models.rental_payment import RentalPaymentRecord
-
-    if not rental_obligations:
-        return []
-    return list(db.scalars(
-        select(RentalPaymentRecord).where(
-            RentalPaymentRecord.obligation_id.in_([o.id for o in rental_obligations]),
-            RentalPaymentRecord.provenance == "PROVIDER_CONFIRMATION",
-            RentalPaymentRecord.status.in_(("CONFIRMED", "PARTIALLY_PAID", "REVERSED")),
-            RentalPaymentRecord.provider_reference != "",
-            RentalPaymentRecord.provider_dispute_status != "lost",
-        ).order_by(RentalPaymentRecord.id)
-    ))
-
-
-def _refund_card_payment_from_host_account(
-    db: Session, occupancy: Occupancy, record, refund_amount: float, *, already_refunded: float, reason: str,
-) -> None:
-    """Refunds a Stripe Checkout rent/deposit payment straight out of the
-    host's own connected account -- where the money went -- never out of
-    Zoiko Rooms' balance. Raises 502 without touching anything on the
-    Zoiko side if Stripe refuses, so the cancellation can be retried. A
-    successful refund is committed immediately: it has already happened at
-    Stripe, so nothing that fails later in the cancellation may roll it
-    back out of our records."""
-    from app.crud.external_payment_session import apply_provider_state
-    from app.crud.rental_payment import recompute_obligation_status
-    from app.crud.events import emit_event
-    from app.models.external_payment_session import ExternalPaymentSession
-    from app.services import stripe_client
-
-    session = db.scalar(
-        select(ExternalPaymentSession).where(
-            ExternalPaymentSession.obligation_id == record.obligation_id,
-            ExternalPaymentSession.status == "SUCCEEDED",
-            ExternalPaymentSession.provider_payment_intent_id == record.provider_reference,
-        )
-    )
-    if session is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "Couldn't find the card payment to refund for this booking -- contact support before cancelling",
-        )
-    try:
-        refund_id = stripe_client.create_rent_payment_refund(
-            payment_intent_id=record.provider_reference, amount=refund_amount, currency=record.declared_currency,
-            connected_account_id=session.recipient_stripe_account_id,
-            metadata={"domain": "rental_payment", "occupancy_id": str(occupancy.id), "rental_payment_record_id": str(record.id)},
-            # Keyed on what was already refunded, so each distinct top-up is
-            # its own Stripe request while a retry of the same one is not.
-            idempotency_key=f"pre-move-in-cancel-occupancy-{occupancy.id}-rental-record-{record.id}-from-{already_refunded:.2f}",
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            "Couldn't refund the card payment from the host's Stripe account, so the booking was not cancelled. "
-            "Please try again.",
-        ) from exc
-    record.refunded_amount = round(already_refunded + refund_amount, 2)
-    record.provider_refund_id = refund_id
-    apply_provider_state(record)
-    db.flush()
-    recompute_obligation_status(db, record.obligation)
-    emit_event(
-        db, "rental_payment.card_refunded", "rental_payment_record", str(record.id),
-        {"occupancyId": occupancy.id, "amount": refund_amount, "totalRefunded": float(record.refunded_amount),
-         "providerRefundId": refund_id, "reason": reason or "pre-move-in cancellation"},
-    )
-    db.commit()
 
 
 def _system_admin_for_self_service_refund(db: Session) -> AdminUser:
