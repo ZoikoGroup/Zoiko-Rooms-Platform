@@ -471,3 +471,13 @@ def deliver_all_disclosures(client, admin_cookies: dict, agreement_id: int) -> N
             f"/api/leasing/agreements/{agreement_id}/disclosures/{disclosure['id']}/deliver", cookies=admin_cookies,
         )
         assert r.status_code == 200, r.text
+
+
+def stored_refs(db: Session, category: str) -> list[str]:
+    """The storage refs of every file kept in the database under `category`
+    (files live in stored_files, not on disk)."""
+    from sqlalchemy import select
+
+    from app.models.stored_file import StoredFile
+
+    return list(db.scalars(select(StoredFile.storage_ref).where(StoredFile.category == category)))

@@ -38,6 +38,7 @@ PRODUCTION_BASE_ENV = {
     "JWT_SECRET": "x" * 48,
     "SEED_ADMIN_PASSWORD": "y" * 16,
     "STRIPE_SECRET_KEY": "sk_live_example",
+    "FRONTEND_URL": "https://zoikorooms.example",
     "STRIPE_WEBHOOK_SECRET": "",
     "STRIPE_LISTING_FEE_WEBHOOK_SECRET": "whsec_listing",
     "STRIPE_RENTAL_PAYMENT_WEBHOOK_SECRET": "whsec_rental",

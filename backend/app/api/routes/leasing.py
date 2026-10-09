@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, 
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, require_super_admin
-from app.core.agreement_documents import resolve_agreement_document_path
+from app.core.agreement_documents import read_agreement_document
 from app.core.correlation import get_correlation_id
 from app.crud import agreement_amendments as amendment_crud
 from app.crud import agreement_legal_hold as legal_hold_crud
@@ -313,7 +313,7 @@ def get_disclosure_document(
     disclosure = crud.get_disclosure_or_404(db, agreement, disclosure_id)
     if not disclosure.document_storage_ref:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "This disclosure has not been delivered yet")
-    pdf_bytes = resolve_agreement_document_path(disclosure.document_storage_ref).read_bytes()
+    pdf_bytes = read_agreement_document(db, disclosure.document_storage_ref)
     return Response(
         content=pdf_bytes, media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="disclosure-{disclosure.id}.pdf"'},
@@ -347,7 +347,7 @@ def get_agreement_pdf(
 
     artifact = agreement.versions[-1].artifact if agreement.versions else None
     if artifact is not None:
-        pdf_bytes = resolve_agreement_document_path(artifact.storage_ref).read_bytes()
+        pdf_bytes = read_agreement_document(db, artifact.storage_ref)
     else:
         pdf_bytes = crud.generate_agreement_pdf(db, agreement)
     return Response(

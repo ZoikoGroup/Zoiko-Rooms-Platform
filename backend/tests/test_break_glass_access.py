@@ -26,11 +26,8 @@ def _verified_record_with_document(db: Session) -> IdentityVerification:
     db.add(record)
     db.commit()
 
-    from app.core.identity_uploads import resolve_identity_document_path
-    stored_filename = f"break-glass-test-{record.id}.pdf"
-    path = resolve_identity_document_path(stored_filename)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_PDF_BYTES)
+    from app.core import file_store
+    stored_filename = file_store.put(db, "identity_document", _PDF_BYTES, ref=f"break-glass-test-{record.id}.pdf")
     record.document_file_path = stored_filename
     record.document_file_content_type = "application/pdf"
     db.commit()

@@ -24,7 +24,7 @@ from app.models.identity_verification import IdentityVerification
 from app.models.party import Party
 from app.services.identity import policy
 from app.services.identity import service as identity_service
-from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
+from tests.conftest import stored_refs, _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
 
 API_KEY = "veriff-test-key"
 SECRET = "veriff-test-secret"
@@ -797,7 +797,7 @@ class TestZoikoCapture:
         assert sent["context"] == "document-front"
         assert base64.b64decode(sent["content"].split(",", 1)[1]) == photo
         record = _session(db_session, sid)
-        assert record.document_file_path is None and list(tmp_path.iterdir()) == []
+        assert record.document_file_path is None and stored_refs(db_session, "identity_document") == []
         assert photo.hex()[:64] not in json.dumps(record.match_results)
 
     def test_completing_needs_the_photos_and_then_veriff_decides(self, client, db_session, launched, veriff):

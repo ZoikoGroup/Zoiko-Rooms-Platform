@@ -22,12 +22,19 @@ export function ListingFeeInsights() {
   const [days, setDays] = useState<(typeof WINDOWS)[number]>(30);
   const [funnel, setFunnel] = useState<ListingFeeFunnel | null>(null);
   const [flags, setFlags] = useState<ListingFeeDuplicateFlag[] | null>(null);
+  const [funnelFailed, setFunnelFailed] = useState(false);
+  const [flagsFailed, setFlagsFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    setFunnelFailed(false);
     apiClientFetch<ListingFeeFunnel>(`/api/finance/listing-fees/funnel?days=${days}`)
       .then((f) => !cancelled && setFunnel(f))
-      .catch(() => !cancelled && setFunnel(null));
+      .catch(() => {
+        if (cancelled) return;
+        setFunnel(null);
+        setFunnelFailed(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -36,7 +43,7 @@ export function ListingFeeInsights() {
   useEffect(() => {
     apiClientFetch<ListingFeeDuplicateFlag[]>("/api/finance/listing-fees/duplicate-flags")
       .then(setFlags)
-      .catch(() => setFlags([]));
+      .catch(() => setFlagsFailed(true));
   }, []);
 
   const viewed = funnel?.stages.find((s) => s.name === "fee_viewed")?.listings ?? 0;
@@ -64,7 +71,9 @@ export function ListingFeeInsights() {
             ))}
           </div>
         </div>
-        {!funnel ? (
+        {funnelFailed ? (
+          <p className="mt-3 text-sm text-rose-600 dark:text-rose-400">Could not load the funnel.</p>
+        ) : !funnel ? (
           <p className="mt-3 text-sm text-slate-600 dark:text-slate-400">Loading...</p>
         ) : (
           <>
@@ -103,7 +112,9 @@ export function ListingFeeInsights() {
           A second listing for a room whose other listing already paid the fee. Check it isn&apos;t a copy made to avoid or
           reset the fee. Nothing is blocked automatically.
         </p>
-        {flags === null ? (
+        {flagsFailed ? (
+          <p className="mt-3 text-sm text-rose-600 dark:text-rose-400">Could not load flagged listings.</p>
+        ) : flags === null ? (
           <p className="mt-3 text-sm text-slate-600 dark:text-slate-400">Loading...</p>
         ) : flags.length === 0 ? (
           <p className="mt-3 text-sm text-slate-600 dark:text-slate-400">No listings flagged.</p>

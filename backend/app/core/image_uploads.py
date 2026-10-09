@@ -1,8 +1,7 @@
-import uuid
-from pathlib import Path
-
 from fastapi import HTTPException, UploadFile, status
+from sqlalchemy.orm import Session
 
+from app.core import file_store
 from app.core.config import settings
 from app.models.listing import MAX_LISTING_IMAGES
 
@@ -13,6 +12,9 @@ _JPEG = b"\xff\xd8\xff"
 _PNG = b"\x89PNG\r\n\x1a\n"
 _GIF87A = b"GIF87a"
 _GIF89A = b"GIF89a"
+
+
+_CONTENT_TYPES = {".jpg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
 
 
 def _sniff_image_extension(contents: bytes) -> str | None:
@@ -27,12 +29,12 @@ def _sniff_image_extension(contents: bytes) -> str | None:
     return None
 
 
-async def save_listing_image(file: UploadFile) -> str:
-    """Validates and stores one listing/property photo in the PUBLIC upload_dir,
-    returning its public /uploads URL. Shared by the admin (`/api/uploads/images`)
+async def save_listing_image(db: Session, file: UploadFile) -> str:
+    """Validates and stores one listing/property photo (in the database, category
+    listing_image), returning its public /uploads URL. Shared by the admin (`/api/uploads/images`)
     and USER hosting (`/api/users/hosting/uploads/images`) endpoints -- never for
-    identity documents, which use their own private storage and directory
-    (see identity_uploads.py); the two must never share a directory or endpoint."""
+    identity documents, which use their own private category
+    (see identity_uploads.py); the two must never share a category or endpoint."""
     contents = await file.read()
     if not contents:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"'{file.filename}' is empty")
@@ -51,12 +53,9 @@ async def save_listing_image(file: UploadFile) -> str:
             f"'{file.filename}' isn't a supported image type (jpg, png, webp, gif only)",
         )
 
-    upload_dir = Path(settings.upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    # Random, server-generated filename -- the client's original filename is
-    # never used to build a path or persisted anywhere.
-    filename = f"{uuid.uuid4().hex}{extension}"
-    (upload_dir / filename).write_bytes(contents)
+    # Random, server-generated name -- the client's original filename is
+    # never used or persisted anywhere.
+    filename = file_store.put(db, "listing_image", contents, extension=extension, content_type=_CONTENT_TYPES[extension])
 
     # Deliberately relative, not settings.public_api_url + "/uploads/..." --
     # that setting is an independently-configured backend env var that can (and,
@@ -67,10 +66,12 @@ async def save_listing_image(file: UploadFile) -> str:
     return f"/uploads/{filename}"
 
 
-async def save_listing_images(files: list[UploadFile]) -> list[str]:
+async def save_listing_images(db: Session, files: list[UploadFile]) -> list[str]:
     if len(files) > MAX_LISTING_IMAGES:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             f"You can upload at most {MAX_LISTING_IMAGES} images at a time",
         )
-    return [await save_listing_image(file) for file in files]
+    urls = [await save_listing_image(db, file) for file in files]
+    db.commit()
+    return urls
