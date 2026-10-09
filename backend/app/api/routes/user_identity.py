@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.core.identity_uploads import resolve_identity_document_path
+from app.core.identity_uploads import read_identity_document
 from app.crud import identity_verification as crud
 from app.db.session import get_db
 from app.models.identity_verification import IdentityVerification
@@ -85,12 +85,12 @@ def download_own_identity_document(
     if not record.document_file_path:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No document was uploaded for this verification")
 
-    path = resolve_identity_document_path(record.document_file_path)
-    if not path.is_file():
+    data = read_identity_document(db, record.document_file_path)
+    if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored document could not be found")
 
-    return FileResponse(
-        path,
+    return Response(
+        content=data,
         media_type=record.document_file_content_type or "application/octet-stream",
-        filename=record.document_file_original_name or "document",
+        headers={"Content-Disposition": f'attachment; filename="{record.document_file_original_name or "document"}"'},
     )

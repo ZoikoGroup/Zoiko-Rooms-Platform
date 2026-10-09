@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.identity_uploads import resolve_identity_document_path
+from app.core import file_store
 from app.crud.evidence_vault import register_evidence_artifact
 from app.models.identity_verification import IdentityVerification
 from app.models.market_policy import MarketPolicyPack
@@ -41,9 +41,8 @@ def _identity_record_with_artifact(db: Session, *, jurisdiction: str, stored_fil
     db.add(record)
     db.commit()
 
-    path = resolve_identity_document_path(stored_filename)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"fake identity document bytes")
+    file_store.put(db, "identity_document", b"fake identity document bytes", ref=stored_filename)
+    path = stored_filename
 
     artifact = register_evidence_artifact(
         db, related_entity_type="identity_verification", related_entity_id=str(record.id),
@@ -64,7 +63,7 @@ class TestEvidenceRetentionSweep:
 
         db_session.refresh(artifact)
         assert artifact.deleted_at is not None
-        assert not path.is_file()
+        assert not file_store.exists(db_session, "identity_document", path)
 
     def test_artifact_within_retention_is_not_deleted(self, db_session: Session):
         _policy_pack(db_session, jurisdiction="England", retention_days=90)
@@ -72,7 +71,7 @@ class TestEvidenceRetentionSweep:
 
         deleted = sweep_expired_evidence(db_session)
         assert deleted == []
-        assert path.is_file()
+        assert file_store.exists(db_session, "identity_document", path)
 
     def test_no_policy_pack_leaves_artifact_untouched(self, db_session: Session):
         record, artifact, path = _identity_record_with_artifact(db_session, jurisdiction="ZZ-NOWHERE", stored_filename="retention-test-3.pdf")
@@ -81,7 +80,7 @@ class TestEvidenceRetentionSweep:
 
         deleted = sweep_expired_evidence(db_session)
         assert deleted == []
-        assert path.is_file()
+        assert file_store.exists(db_session, "identity_document", path)
 
     def test_sweep_is_idempotent(self, db_session: Session):
         _policy_pack(db_session, jurisdiction="England", retention_days=90)

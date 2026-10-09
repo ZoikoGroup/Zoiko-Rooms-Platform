@@ -118,7 +118,7 @@ class TestPublicLocationPrivacy:
 
 
 class TestEvidenceEncryptedAtRest:
-    def test_the_stored_file_is_encrypted_and_reads_back_decrypted(self, tmp_path, monkeypatch):
+    def test_the_stored_file_is_encrypted_and_reads_back_decrypted(self, db_session, tmp_path, monkeypatch):
         import asyncio
         import io
 
@@ -128,17 +128,20 @@ class TestEvidenceEncryptedAtRest:
 
         monkeypatch.setattr(settings, "property_verification_upload_dir", str(tmp_path))
         original = b"%PDF-1.4\n" + b"Property Address: 1 Verify Way, Bengaluru\n" * 50
-        stored, _name, content_type, _size, _sha = asyncio.run(uploads.save_property_verification_document(
-            UploadFile(file=io.BytesIO(original), filename="deed.pdf")))
-        assert stored.endswith(".enc") and content_type == "application/pdf"
-        on_disk = (tmp_path / stored).read_bytes()
-        assert b"Verify Way" not in on_disk and b"%PDF" not in on_disk
-        assert uploads.read_property_verification_document(stored) == original
+        from app.core import file_store
 
-    def test_files_saved_before_encryption_still_read(self, tmp_path, monkeypatch):
+        stored, _name, content_type, _size, _sha = asyncio.run(uploads.save_property_verification_document(
+            db_session, UploadFile(file=io.BytesIO(original), filename="deed.pdf")))
+        assert stored.endswith(".enc") and content_type == "application/pdf"
+        at_rest = file_store.read(db_session, "property_verification", stored)
+        assert b"Verify Way" not in at_rest and b"%PDF" not in at_rest
+        assert uploads.read_property_verification_document(db_session, stored) == original
+
+    def test_files_saved_before_encryption_still_read(self, db_session, tmp_path, monkeypatch):
         from app.core import property_verification_uploads as uploads
 
         monkeypatch.setattr(settings, "property_verification_upload_dir", str(tmp_path))
         (tmp_path / "legacy.pdf").write_bytes(b"%PDF-1.4 legacy")
-        assert uploads.read_property_verification_document("legacy.pdf") == b"%PDF-1.4 legacy"
-        assert uploads.read_property_verification_document("missing.pdf.enc") is None
+        # A file still on disk (not yet copied into the database) is read from there.
+        assert uploads.read_property_verification_document(db_session, "legacy.pdf") == b"%PDF-1.4 legacy"
+        assert uploads.read_property_verification_document(db_session, "missing.pdf.enc") is None

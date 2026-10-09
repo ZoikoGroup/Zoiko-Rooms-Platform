@@ -73,3 +73,30 @@ class TestUploadImages:
             cookies=auth_admin_cookie(admin),
         )
         assert r.status_code == 400, r.text
+
+
+class TestServingPhotos:
+    def test_an_uploaded_photo_is_served_from_the_database_at_its_url(self, client, db_session: Session, tmp_path):
+        admin = _make_admin(db_session, email="uploads-serve@test.com", role="admin")
+        r = client.post("/api/uploads/images", files=[("files", ("p.png", _PNG_BYTES, "image/png"))], cookies=auth_admin_cookie(admin))
+        url = r.json()["urls"][0]
+        assert list(tmp_path.iterdir()) == []  # nothing written to disk
+
+        served = client.get(url)
+        assert served.status_code == 200
+        assert served.content == _PNG_BYTES
+        assert served.headers["content-type"] == "image/png"
+        assert "immutable" in served.headers["cache-control"]
+
+        again = client.get(url, headers={"If-None-Match": served.headers["etag"]})
+        assert again.status_code == 304
+
+    def test_an_unknown_photo_is_404(self, client):
+        assert client.get("/uploads/does-not-exist.png").status_code == 404
+
+    def test_private_documents_are_never_served_here(self, client, db_session: Session):
+        from app.core import file_store
+
+        ref = file_store.put(db_session, "identity_document", b"%PDF-1.4 private", extension=".pdf")
+        db_session.commit()
+        assert client.get(f"/uploads/{ref}").status_code == 404

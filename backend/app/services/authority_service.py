@@ -29,7 +29,6 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -822,19 +821,19 @@ def list_organizations(db: Session, user: UserAccount) -> list[Organization]:
 
 # -- evidence ---------------------------------------------------------------------
 
-def _evidence_dir() -> Path:
-    path = Path(settings.authority_upload_dir)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+EVIDENCE_FILE_CATEGORY = "authority_evidence"
 
 
 def read_evidence(evidence: AuthorityEvidence) -> bytes | None:
+    from sqlalchemy.orm import object_session
+
+    from app.core import file_store
     from app.core.field_encryption import decrypt_bytes
 
     if not evidence.stored_filename:
         return None
-    path = Path(settings.authority_upload_dir) / evidence.stored_filename
-    return decrypt_bytes(path.read_bytes()) if path.is_file() else None
+    data = file_store.read(object_session(evidence), EVIDENCE_FILE_CATEGORY, evidence.stored_filename)
+    return decrypt_bytes(data) if data is not None else None
 
 
 def _pdf_text(content: bytes, content_type: str) -> str:
@@ -1042,8 +1041,12 @@ def add_evidence(db: Session, user: UserAccount, v: AuthorityVerification, *, re
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Document to replace not found")
 
     file_hash = hashlib.sha256(content).hexdigest()
-    stored = f"{uuid.uuid4().hex}{extension}.enc"
-    (_evidence_dir() / stored).write_bytes(encrypt_bytes(content))
+    from app.core import file_store
+
+    stored = file_store.put(
+        db, EVIDENCE_FILE_CATEGORY, encrypt_bytes(content), extension=f"{extension}.enc",
+        content_type=content_type, encrypted=True,
+    )
     reused = db.scalar(select(func.count(AuthorityEvidence.id)).join(AuthorityVerification).where(
         AuthorityEvidence.file_hash == file_hash,
         (AuthorityVerification.property_id != v.property_id) | (AuthorityVerification.party_id != v.party_id),
@@ -1081,7 +1084,9 @@ def remove_evidence(db: Session, user: UserAccount, v: AuthorityVerification, ev
     if evidence is None or evidence.verification_id != v.id or evidence.source_type == "OWNER_CONFIRMATION":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
     if evidence.stored_filename:
-        (Path(settings.authority_upload_dir) / evidence.stored_filename).unlink(missing_ok=True)
+        from app.core import file_store
+
+        file_store.delete(db, EVIDENCE_FILE_CATEGORY, evidence.stored_filename)
     _event(db, "AUTHORITY_EVIDENCE_REMOVED", v, actor=user,
            extra={"evidenceId": evidence.id, "requirementId": evidence.requirement_id, "fileHash": evidence.file_hash})
     db.delete(evidence)
@@ -1911,7 +1916,9 @@ def purge_expired_evidence(db: Session) -> int:
         if not pack.evidence_retention_days or decided is None or v.state in OPEN_STATES:
             continue
         if decided + timedelta(days=pack.evidence_retention_days) <= _now():
-            (Path(settings.authority_upload_dir) / e.stored_filename).unlink(missing_ok=True)
+            from app.core import file_store
+
+            file_store.delete(db, EVIDENCE_FILE_CATEGORY, e.stored_filename)
             e.stored_filename, e.purged_at = None, _now()
             purged += 1
     db.commit()
