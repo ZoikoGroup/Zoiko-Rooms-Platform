@@ -235,6 +235,15 @@ def reconcile_listing_fee_refunds(db: Session) -> int:
     return reconcile_processing_refunds(db)
 
 
+def reconcile_listing_fee_checkouts(db: Session) -> int:
+    """Listing Fee payments still PENDING after their Stripe session ended
+    (webhook lost, host never came back) are settled from Stripe -- paid ones
+    complete and their listing goes live, expired ones are marked FAILED."""
+    from app.crud.listing_fee import reconcile_pending_checkouts
+
+    return reconcile_pending_checkouts(db)
+
+
 def process_external_outreach(db: Session) -> int:
     """ZR-AI-SEARCH-001 Section 9 step 3: email PENDING provider outreach
     (eligibility, market channel and suppression re-checked per row). Rows
@@ -368,6 +377,7 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("purge_authority_evidence", purge_authority_evidence),
     ("remind_hosts_of_unconfirmed_payments", remind_hosts_of_unconfirmed_payments),
     ("reconcile_listing_fee_refunds", reconcile_listing_fee_refunds),
+    ("reconcile_listing_fee_checkouts", reconcile_listing_fee_checkouts),
     ("process_external_outreach", process_external_outreach),
     ("expire_external_outreach", expire_external_outreach),
     ("sync_partner_feeds", sync_partner_feeds),
@@ -406,19 +416,27 @@ def run_scheduled_jobs_once() -> dict[str, int | str] | None:
     from app.db.session import SessionLocal
 
     db = SessionLocal()
+    engine = db.get_bind()
+    # An advisory lock belongs to the connection that took it, so it's held on
+    # its own connection for the whole run -- the jobs' session hands its
+    # connection back to the pool on every commit, so taking the lock there
+    # (and unlocking later on whatever connection it gets next) leaked it.
+    lock_conn = engine.connect() if engine.dialect.name == "postgresql" else None
     locked = False
     try:
-        if db.get_bind().dialect.name == "postgresql":
-            locked = bool(db.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _ADVISORY_LOCK_KEY}).scalar())
-            db.commit()
+        if lock_conn is not None:
+            locked = bool(lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _ADVISORY_LOCK_KEY}).scalar())
+            lock_conn.commit()
             if not locked:
                 return None
         return run_scheduled_jobs(db)
     finally:
-        if locked:
-            try:
-                db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _ADVISORY_LOCK_KEY})
-                db.commit()
-            except Exception:
-                logger.exception("scheduled jobs: could not release the run lock")
         db.close()
+        if lock_conn is not None:
+            if locked:
+                try:
+                    lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _ADVISORY_LOCK_KEY})
+                    lock_conn.commit()
+                except Exception:
+                    logger.exception("scheduled jobs: could not release the run lock")
+            lock_conn.close()

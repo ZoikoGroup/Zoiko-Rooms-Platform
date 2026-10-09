@@ -9,6 +9,8 @@ public, signature-verified Stripe endpoint for this domain's own events,
 kept separate from api/routes/finance.py's rent-domain webhook per Section
 12.1's architecture rule."""
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
@@ -42,6 +44,8 @@ from app.schemas.listing_fee import (
     ListingFeeRefundRead,
 )
 from app.services import stripe_client
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/users/listing-fees", tags=["user-listing-fees"], dependencies=[Depends(get_current_user)])
 admin_router = APIRouter(prefix="/api/finance/listing-fees", tags=["finance-listing-fees"], dependencies=[Depends(get_current_admin)])
@@ -436,7 +440,7 @@ async def post_listing_fee_stripe_webhook(request: Request, db: Session = Depend
     (falling back to the shared stripe_webhook_secret) before touching
     anything -- same fail-closed posture as
     api/routes/finance.py:post_stripe_webhook."""
-    from app.core.config import settings
+    import stripe as stripe_sdk
 
     payload = await request.body()
     signature_header = request.headers.get("stripe-signature", "")
@@ -445,8 +449,12 @@ async def post_listing_fee_stripe_webhook(request: Request, db: Session = Depend
             payload=payload, signature_header=signature_header,
             secret=settings.stripe_listing_fee_webhook_secret or settings.stripe_webhook_secret,
         )
-    except Exception:
+    except stripe_sdk.SignatureVerificationError:
+        logger.warning("listing_fee webhook: rejected a delivery with an invalid Stripe signature")
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid webhook signature")
+    except ValueError:
+        logger.warning("listing_fee webhook: rejected a delivery whose body isn't a valid Stripe event")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid webhook payload")
 
     listing_fee_crud.ingest_stripe_webhook_event(db, event, correlation_id=get_correlation_id(request))
     return {"received": True}

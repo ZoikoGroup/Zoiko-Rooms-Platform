@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session
 
@@ -619,10 +619,11 @@ def is_listing_fee_payment_refund_eligible(db: Session, payment: ListingFeePayme
     restricted admin may call request_refund -- 'role/policy' in Section
     11's permission table is the admin's own restricted judgment, informed
     by this signal, not mechanically blocked by it."""
-    if payment.status != "SUCCEEDED":
+    if payment.status != "SUCCEEDED" or payment.dispute_status in ("OPEN", "LOST"):
         return False
     already_refunded = sum(
-        _round2(r.amount) for r in payment.refunds if r.status in ("PROCESSING", "PARTIALLY_REFUNDED", "REFUNDED")
+        _round2(r.amount) for r in payment.refunds
+        if r.status in ("REQUESTED", "PROCESSING", "PARTIALLY_REFUNDED", "REFUNDED")
     )
     if already_refunded >= _round2(float(payment.amount)):
         return False
@@ -891,7 +892,14 @@ def latest_listing_fee_payment(db: Session, listing_id: str) -> ListingFeePaymen
 
 
 def _complete_payment_success(db: Session, payment: ListingFeePayment, *, correlation_id: str = "") -> None:
+    # The webhook and the host's return trip can both get here at once -- lock
+    # the row so only one of them records the success and notifies.
+    db.refresh(payment, with_for_update=True)
     if payment.status == "SUCCEEDED":
+        db.commit()
+        # A redelivered event finishes a publish an earlier attempt didn't
+        # get to (a no-op once the listing is live).
+        _publish_approved_listing_after_fee(db, payment, correlation_id=correlation_id)
         return
     payment.status = "SUCCEEDED"
     payment.paid_at = datetime.now(timezone.utc)
@@ -919,14 +927,19 @@ def _complete_payment_success(db: Session, payment: ListingFeePayment, *, correl
         db.rollback()
         logger.exception("listing_fee: receipt generation failed (payment_id=%s)", payment.id)
 
-    notif_crud.notify_user_by_party(
-        db, payment.party_id,
-        title="Listing Fee paid",
-        message=f"We received your Listing Fee payment of {payment.currency} {payment.amount:.2f}.",
-        notification_type="listing_fee.paid",
-        related_entity_type="listing_fee_payment", related_entity_id=str(payment.id),
-    )
-    db.commit()
+    # Best-effort too: a failed notification must not stop the listing going live.
+    try:
+        notif_crud.notify_user_by_party(
+            db, payment.party_id,
+            title="Listing Fee paid",
+            message=f"We received your Listing Fee payment of {payment.currency} {payment.amount:.2f}.",
+            notification_type="listing_fee.paid",
+            related_entity_type="listing_fee_payment", related_entity_id=str(payment.id),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("listing_fee: paid notification failed (payment_id=%s)", payment.id)
 
     _publish_approved_listing_after_fee(db, payment, correlation_id=correlation_id)
 
@@ -943,14 +956,20 @@ def _publish_approved_listing_after_fee(db: Session, payment: ListingFeePayment,
     from app.crud.listing import publish_listing
     from app.models.listing import Listing
 
-    listing = db.get(Listing, payment.listing_id)
+    # Locked and re-read: the webhook and the host's return trip can both get
+    # here for the same payment, and only one of them may publish.
+    listing = db.scalar(
+        select(Listing).where(Listing.id == payment.listing_id).with_for_update().execution_options(populate_existing=True)
+    )
     if listing is None or listing.state != "APPROVED":
+        db.commit()  # release the lock
         return
     try:
         # "Zoiko Automation" -- self-healing system actor, always available.
         publish_listing(db, listing, _get_system_actor(db))
     except HTTPException as exc:
         logger.warning("listing_fee: auto-publish after payment skipped (listing_id=%s): %s", listing.id, exc.detail)
+        db.commit()  # release the listing lock -- publish raises before changing anything
         return
     log_audit_event(
         db, None, "listing.publish", "listing", listing.id, correlation_id, reason="listing_fee_paid",
@@ -969,7 +988,10 @@ def _publish_approved_listing_after_fee(db: Session, payment: ListingFeePayment,
 def _complete_payment_failure(
     db: Session, payment: ListingFeePayment, message: str, *, correlation_id: str = "", notify: bool = True,
 ) -> None:
-    if payment.status == "FAILED":
+    db.refresh(payment, with_for_update=True)
+    if payment.status != "PENDING":
+        # Never overwrite a payment that already succeeded (or already failed).
+        db.commit()
         return
     payment.status = "FAILED"
     payment.failed_at = datetime.now(timezone.utc)
@@ -991,13 +1013,17 @@ def _complete_payment_failure(
 
     if not notify:
         return
-    notif_crud.notify_user_by_party(
-        db, payment.party_id,
-        title="Listing Fee payment failed",
-        message="Your Listing Fee payment did not go through. You can try again with the same or a different payment method.",
-        notification_type="listing_fee.payment_failed",
-        related_entity_type="listing_fee_payment", related_entity_id=str(payment.id),
-    )
+    try:
+        notif_crud.notify_user_by_party(
+            db, payment.party_id,
+            title="Listing Fee payment failed",
+            message="Your Listing Fee payment did not go through. You can try again with the same or a different payment method.",
+            notification_type="listing_fee.payment_failed",
+            related_entity_type="listing_fee_payment", related_entity_id=str(payment.id),
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("listing_fee: payment-failed notification failed (payment_id=%s)", payment.id)
 
 
 # Real Stripe event types this module understands -> our own vocabulary --
@@ -1055,6 +1081,21 @@ def ingest_stripe_webhook_event(db: Session, event, *, correlation_id: str = "")
     except IntegrityError:
         return  # already-seen event id -- idempotent no-op
 
+    try:
+        _handle_stripe_event(db, event_type, stripe_object, provider_event_id, correlation_id=correlation_id)
+    except Exception:
+        # The handlers commit as they go, which also commits the event row
+        # above -- un-record it so Stripe's retry (after our 500) is processed
+        # rather than skipped as a duplicate. Every handler is safe to re-run.
+        db.rollback()
+        db.execute(delete(ListingFeeProviderEvent).where(ListingFeeProviderEvent.provider_event_id == provider_event_id))
+        db.commit()
+        raise
+
+
+def _handle_stripe_event(
+    db: Session, event_type: str, stripe_object, provider_event_id: str, *, correlation_id: str = "",
+) -> None:
     if event_type in ("PAYMENT_SUCCEEDED", "PAYMENT_FAILED"):
         payment = db.scalar(
             select(ListingFeePayment).where(ListingFeePayment.provider_payment_intent_id == stripe_object["id"])
@@ -1388,8 +1429,14 @@ def request_refund(
 
     if payment.status != "SUCCEEDED":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a succeeded payment can be refunded")
+    if payment.dispute_status in ("OPEN", "LOST"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This payment has a chargeback -- the bank has already pulled the money back, so it can't be refunded too",
+        )
     already_refunded = sum(
-        _round2(r.amount) for r in payment.refunds if r.status in ("PROCESSING", "PARTIALLY_REFUNDED", "REFUNDED")
+        _round2(r.amount) for r in payment.refunds
+        if r.status in ("REQUESTED", "PROCESSING", "PARTIALLY_REFUNDED", "REFUNDED")
     )
     if _round2(data.amount) > _round2(float(payment.amount)) - already_refunded:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Refund amount exceeds the amount still refundable")
@@ -1430,6 +1477,15 @@ def request_refund(
             idempotency_key=f"listing_fee_refund:{data.idempotency_key}",
         )
     except Exception as exc:
+        if stripe_client.is_ambiguous_error(exc):
+            # A timeout or Stripe 5xx: the refund may already exist. Marking it
+            # FAILED would invite a retry under a new key -- a second refund.
+            # It stays REQUESTED and reconcile_processing_refunds settles it.
+            logger.warning("listing_fee: refund %s outcome unknown, will reconcile: %s", refund.id, exc)
+            refund.failure_message = "Waiting for the payment provider to confirm this refund."
+            db.commit()
+            db.refresh(refund)
+            return refund
         # ZR-PAY-002 Section 8.4: REFUND_FAILED -- 'Route to controlled
         # retry/support process; retain provider error internally.' The
         # refund row itself must reach a terminal state, never stay stuck
@@ -1658,37 +1714,188 @@ def apply_refund_status_from_provider(
 # A refund still PROCESSING this long after it was sent is checked with
 # Stripe directly -- in case its webhook never arrived.
 REFUND_RECONCILE_AFTER = timedelta(hours=1)
+# A refund left REQUESTED (its create call timed out) is looked up sooner --
+# nothing has been confirmed to anyone yet.
+REQUESTED_REFUND_RECONCILE_AFTER = timedelta(minutes=10)
+# ...but only re-sent within this window -- after that an admin decides.
+REQUESTED_REFUND_RESEND_WITHIN = timedelta(hours=24)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _fail_unsent_refund(db: Session, refund: ListingFeeRefund) -> None:
+    """A refund Stripe never received and that is no longer safe to send
+    automatically -- FAILED, so an admin can issue it again if it's still owed."""
+    refund.status = "FAILED"
+    refund.failure_message = "Never reached the payment provider -- issue it again if it's still owed."
+    db.commit()
+    log_audit_event(
+        db, None, "listing_fee.refund_failed", "listing_fee_refund", str(refund.id), "job:reconcile_refunds",
+        reason=refund.failure_message, before_state="REQUESTED", after_state="FAILED",
+    )
+    db.commit()
 
 
 def reconcile_processing_refunds(db: Session, *, now: datetime | None = None) -> int:
-    """Hourly job (services/scheduled_jobs.py): settles every refund stuck in
-    PROCESSING against what Stripe says -- succeeded confirms it (and issues
-    its credit note), failed/canceled marks it FAILED. Returns how many
-    changed."""
+    """Hourly job (services/scheduled_jobs.py): settles every refund Stripe
+    hasn't reported back on.
+
+    - PROCESSING (webhook never arrived): succeeded confirms it (and issues its
+      credit note), failed/canceled marks it FAILED.
+    - REQUESTED (the create call timed out, so we don't know if Stripe made
+      it): found again by its metadata and settled the same way; if Stripe has
+      no such refund, it's created now under the same idempotency key.
+
+    Afterwards any refund made straight in the Stripe dashboard on the same
+    payment is recorded. Returns how many changed."""
     if not stripe_client.is_configured():
         return 0
     now = now or datetime.now(timezone.utc)
     stuck = db.scalars(
-        select(ListingFeeRefund).where(
-            ListingFeeRefund.status == "PROCESSING",
-            ListingFeeRefund.provider_refund_id.is_not(None),
-            ListingFeeRefund.created_at <= now - REFUND_RECONCILE_AFTER,
-        )
+        select(ListingFeeRefund).where(or_(
+            (ListingFeeRefund.status == "PROCESSING")
+            & ListingFeeRefund.provider_refund_id.is_not(None)
+            & (ListingFeeRefund.created_at <= now - REFUND_RECONCILE_AFTER),
+            (ListingFeeRefund.status == "REQUESTED")
+            & (ListingFeeRefund.created_at <= now - REQUESTED_REFUND_RECONCILE_AFTER),
+        ))
     ).all()
     changed = 0
     for refund in stuck:
+        try:
+            if _reconcile_one_refund(db, refund, now):
+                changed += 1
+        except Exception:
+            db.rollback()
+            logger.exception("listing_fee: refund reconciliation failed (refund_id=%s)", refund.id)
+    return changed
+
+
+def _reconcile_one_refund(db: Session, refund: ListingFeeRefund, now: datetime) -> bool:
+    payment = refund.payment
+    moved = False
+    if refund.status == "REQUESTED":
+        state = stripe_client.find_refund_by_metadata(
+            payment_intent_id=payment.provider_payment_intent_id, key="listing_fee_refund_id", value=str(refund.id),
+        )
+        if state is None:
+            # Stripe never made it. Only send it now while the request is
+            # fresh and still fits what's refundable -- an old one (or one an
+            # admin has since covered another way) goes back to an admin.
+            other_refunds = sum(
+                _round2(r.amount) for r in payment.refunds
+                if r.id != refund.id and r.status in ("REQUESTED", "PROCESSING", "PARTIALLY_REFUNDED", "REFUNDED")
+            )
+            too_old = refund.created_at is not None and _as_utc(refund.created_at) < now - REQUESTED_REFUND_RESEND_WITHIN
+            # Stripe's own total catches a dashboard refund we haven't recorded
+            # (it isn't recorded while this one is REQUESTED) -- if anything was
+            # refunded that our rows don't explain, a person decides.
+            refunded_minor = stripe_client.retrieve_amount_refunded(payment_intent_id=payment.provider_payment_intent_id)
+            if refunded_minor is None:
+                return False
+            stripe_refunded = stripe_client.from_minor_units(refunded_minor, payment.currency)
+            accounted = sum(
+                _round2(r.amount) for r in payment.refunds
+                if r.id != refund.id and r.status in ("PROCESSING", "PARTIALLY_REFUNDED", "REFUNDED")
+            )
+            unexplained = _round2(stripe_refunded) > _round2(accounted)
+            if (
+                too_old or unexplained
+                or _round2(other_refunds + _round2(refund.amount)) > _round2(float(payment.amount))
+                or _round2(stripe_refunded + _round2(refund.amount)) > _round2(float(payment.amount))
+            ):
+                _fail_unsent_refund(db, refund)
+                return True
+            # Same key, so a concurrent retry still can't produce two.
+            refund_id = stripe_client.create_refund(
+                payment_intent_id=payment.provider_payment_intent_id, amount=float(refund.amount),
+                currency=payment.currency, metadata={"domain": "listing_fee", "listing_fee_refund_id": str(refund.id)},
+                idempotency_key=f"listing_fee_refund:{refund.idempotency_key}",
+            )
+            state = stripe_client.retrieve_refund(refund_id=refund_id) or {"id": refund_id, "status": "pending"}
+            state["id"] = refund_id
+        refund.provider_refund_id = state["id"]
+        refund.status = "PROCESSING"
+        refund.failure_message = ""
+        db.commit()
+        moved = True
+    else:
         state = stripe_client.retrieve_refund(refund_id=refund.provider_refund_id)
         if state is None:
-            continue
-        if state["status"] == "succeeded":
-            payment = refund.payment
-            _apply_refund_confirmation(
-                db, payment, _confirmed_refund_total(payment) + _round2(float(refund.amount)), refund=refund,
-            )
-            changed += 1
-        elif state["status"] in ("failed", "canceled"):
-            apply_refund_status_from_provider(
-                db, refund.provider_refund_id, state["status"], failure_reason=state.get("failure_reason") or "",
-            )
-            changed += 1
+            return False
+
+    if state["status"] == "succeeded":
+        _apply_refund_confirmation(
+            db, payment, _confirmed_refund_total(payment) + _round2(float(refund.amount)), refund=refund,
+        )
+        try:
+            _record_dashboard_refunds(db, payment)
+        except Exception:
+            db.rollback()
+            logger.exception("listing_fee: dashboard refund catch-up failed (payment_id=%s)", payment.id)
+        return True
+    if state["status"] in ("failed", "canceled"):
+        apply_refund_status_from_provider(
+            db, refund.provider_refund_id, state["status"], failure_reason=state.get("failure_reason") or "",
+        )
+        return True
+    return moved
+
+
+def _record_dashboard_refunds(db: Session, payment: ListingFeePayment) -> None:
+    """The webhook skips recording a dashboard refund while one of ours is
+    still in flight; once ours has settled, catch up from Stripe's own total."""
+    if not payment.provider_payment_intent_id:
+        return
+    refunded_minor = stripe_client.retrieve_amount_refunded(payment_intent_id=payment.provider_payment_intent_id)
+    if refunded_minor is None:
+        return
+    _record_refund_issued_outside_the_app(
+        db, payment, stripe_client.from_minor_units(refunded_minor, payment.currency),
+        provider_event_id=f"reconcile:{payment.id}:{refunded_minor}",
+    )
+
+
+# A checkout this old is past its 31-minute Stripe session lifetime, so Stripe
+# has a final answer for it.
+PENDING_CHECKOUT_RECONCILE_AFTER = timedelta(minutes=45)
+
+
+def reconcile_pending_checkouts(db: Session, *, now: datetime | None = None) -> int:
+    """Hourly job (services/scheduled_jobs.py): a payment still PENDING after
+    its Stripe session has ended means the webhook never arrived (and the host
+    never came back to the page). Ask Stripe and settle it -- paid completes
+    it (receipt, notification, auto-publish), expired marks it FAILED.
+    Returns how many changed."""
+    if not stripe_client.is_configured():
+        return 0
+    now = now or datetime.now(timezone.utc)
+    pending = db.scalars(
+        select(ListingFeePayment).where(
+            ListingFeePayment.status == "PENDING",
+            ListingFeePayment.provider_checkout_session_id.is_not(None),
+            ListingFeePayment.created_at <= now - PENDING_CHECKOUT_RECONCILE_AFTER,
+        )
+    ).all()
+    changed = 0
+    for payment in pending:
+        try:
+            try:
+                _reconcile_pending_checkout(db, payment, correlation_id="job:reconcile_pending_checkouts")
+            except Exception as exc:
+                if not stripe_client.is_missing_resource_error(exc):
+                    raise
+                # Made under another Stripe account/mode (e.g. test keys before
+                # going live) -- it can never be paid here.
+                _complete_payment_failure(
+                    db, payment, CHECKOUT_EXPIRED_MESSAGE, correlation_id="job:reconcile_pending_checkouts", notify=False,
+                )
+            db.refresh(payment)
+            if payment.status != "PENDING":
+                changed += 1
+        except Exception:
+            db.rollback()
+            logger.exception("listing_fee: pending checkout reconciliation failed (payment_id=%s)", payment.id)
     return changed
