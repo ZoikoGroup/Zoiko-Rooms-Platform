@@ -271,3 +271,4 @@ from app.models.authority_verification import (  # noqa: E402,F401
 )
 
 from app.models.sublet_payment import SubletPaymentArrangement  # noqa: E402,F401
+from app.models.stored_file import StoredFile  # noqa: E402,F401

@@ -23,7 +23,7 @@ from app.models.party import Party
 from app.models.property import Property
 from app.models.room import Room
 from app.services import authority_service as svc
-from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
+from tests.conftest import stored_refs, _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
 
 PROP_URL = "/api/users/properties/{}/authority-verifications"
 BASE = "/api/users/authority-verifications"
@@ -256,7 +256,7 @@ class TestOwnerRoute:
             r = client.post(url, cookies=auth_user_cookie(user), data={"requirementId": "OWNER_PROPERTY_RIGHT"},
                             files={"file": (name, content, "application/octet-stream")})
             assert r.status_code == 400, (name, r.text)
-        assert list(tmp_path.iterdir()) == []
+        assert stored_refs(db_session, "authority_evidence") == []
 
     def test_scanner_verdicts(self, client, db_session, monkeypatch):
         from app.core import upload_scan

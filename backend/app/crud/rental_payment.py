@@ -830,7 +830,7 @@ async def _store_payment_evidence(
     hash) and the shared EvidenceArtifact vault (Section 12.1 explicitly
     allows sharing generic evidence utilities across domains), same async
     shape as crud/dispute_evidence.py:upload_evidence."""
-    stored_filename, original_filename, content_type, size_bytes, sha256_hash = await save_dispute_evidence_file(file)
+    stored_filename, original_filename, content_type, size_bytes, sha256_hash = await save_dispute_evidence_file(db, file)
 
     artifact = EvidenceArtifact(
         related_entity_type="rental_payment_record", related_entity_id=str(record.id),

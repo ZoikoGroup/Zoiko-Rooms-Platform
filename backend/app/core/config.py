@@ -413,6 +413,10 @@ class Settings(BaseSettings):
         gaps: list[str] = []
         if not (self.stripe_listing_fee_webhook_secret or self.stripe_webhook_secret):
             gaps.append("STRIPE_LISTING_FEE_WEBHOOK_SECRET (or STRIPE_WEBHOOK_SECRET) must be set when STRIPE_SECRET_KEY is")
+        # Stripe sends a paying host back here whenever the browser's Origin
+        # isn't one of the allowed CORS origins.
+        if not self.frontend_url.startswith("https://") or "localhost" in self.frontend_url:
+            gaps.append("FRONTEND_URL must be the public https:// site -- Stripe Checkout returns paying hosts to it")
 
         if self.stripe_secret_key.startswith(("sk_live_", "rk_live_")):
             return gaps

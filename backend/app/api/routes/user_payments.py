@@ -4,8 +4,8 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.services.payment_boundary import assert_capability, capabilities_snapshot, require_capability
 from app.api.deps import get_current_user
-from app.core.receipt_documents import resolve_receipt_document_path
-from app.core.rent_invoice_documents import resolve_rent_invoice_document_path
+from app.core.receipt_documents import read_receipt_document
+from app.core.rent_invoice_documents import read_rent_invoice_document
 from app.crud import finance as finance_crud
 from app.crud import payment_provider as payment_provider_crud
 from app.crud.finance import (
@@ -119,7 +119,7 @@ def download_own_payment_receipt(
     receipt = get_or_create_payment_receipt(db, payment)
     db.commit()
 
-    pdf_bytes = resolve_receipt_document_path(receipt.storage_ref).read_bytes()
+    pdf_bytes = read_receipt_document(db, receipt.storage_ref)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -148,7 +148,7 @@ def download_own_rent_invoice(
     invoice = get_or_create_rent_invoice(db, obligation)
     db.commit()
 
-    pdf_bytes = resolve_rent_invoice_document_path(invoice.storage_ref).read_bytes()
+    pdf_bytes = read_rent_invoice_document(db, invoice.storage_ref)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

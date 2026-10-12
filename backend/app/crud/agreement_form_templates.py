@@ -97,7 +97,7 @@ def create_form_template_draft(
 
     storage_ref, content_hash = ("", "")
     if source_document_bytes:
-        storage_ref, content_hash = save_agreement_document(source_document_bytes)
+        storage_ref, content_hash = save_agreement_document(db, source_document_bytes)
 
     row = AgreementFormTemplate(
         jurisdiction_scope=jurisdiction_scope, agreement_class=agreement_class, form_mode=form_mode,

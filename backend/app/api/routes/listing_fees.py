@@ -9,13 +9,15 @@ public, signature-verified Stripe endpoint for this domain's own events,
 kept separate from api/routes/finance.py's rent-domain webhook per Section
 12.1's architecture rule."""
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user, require_super_admin
 from app.core.config import settings
 from app.core.correlation import get_correlation_id
-from app.core.listing_fee_receipt_documents import resolve_listing_fee_receipt_document_path
+from app.core.listing_fee_receipt_documents import read_listing_fee_receipt_document
 from app.crud import listing as listing_crud
 from app.crud import billing_entity as billing_entity_crud
 from app.crud import listing_fee as listing_fee_crud
@@ -42,6 +44,8 @@ from app.schemas.listing_fee import (
     ListingFeeRefundRead,
 )
 from app.services import stripe_client
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/users/listing-fees", tags=["user-listing-fees"], dependencies=[Depends(get_current_user)])
 admin_router = APIRouter(prefix="/api/finance/listing-fees", tags=["finance-listing-fees"], dependencies=[Depends(get_current_admin)])
@@ -248,7 +252,7 @@ def _credit_note_response(db: Session, refund) -> Response:
     if refund.status not in ("PARTIALLY_REFUNDED", "REFUNDED"):
         raise HTTPException(status.HTTP_409_CONFLICT, "A credit note exists only once the refund is confirmed")
     refund = listing_fee_crud.issue_credit_note(db, refund)
-    pdf_bytes = resolve_listing_fee_receipt_document_path(refund.credit_note_storage_ref).read_bytes()
+    pdf_bytes = read_listing_fee_receipt_document(db, refund.credit_note_storage_ref)
     return Response(
         content=pdf_bytes, media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{refund.credit_note_number}.pdf"'},
@@ -282,7 +286,7 @@ def download_own_listing_fee_receipt(payment_id: int, user: UserAccount = Depend
     receipt = listing_fee_crud.get_or_create_listing_fee_receipt(db, payment)
     db.commit()
 
-    pdf_bytes = resolve_listing_fee_receipt_document_path(receipt.storage_ref).read_bytes()
+    pdf_bytes = read_listing_fee_receipt_document(db, receipt.storage_ref)
     return Response(
         content=pdf_bytes, media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{receipt.receipt_number}.pdf"'},
@@ -436,7 +440,7 @@ async def post_listing_fee_stripe_webhook(request: Request, db: Session = Depend
     (falling back to the shared stripe_webhook_secret) before touching
     anything -- same fail-closed posture as
     api/routes/finance.py:post_stripe_webhook."""
-    from app.core.config import settings
+    import stripe as stripe_sdk
 
     payload = await request.body()
     signature_header = request.headers.get("stripe-signature", "")
@@ -445,8 +449,12 @@ async def post_listing_fee_stripe_webhook(request: Request, db: Session = Depend
             payload=payload, signature_header=signature_header,
             secret=settings.stripe_listing_fee_webhook_secret or settings.stripe_webhook_secret,
         )
-    except Exception:
+    except stripe_sdk.SignatureVerificationError:
+        logger.warning("listing_fee webhook: rejected a delivery with an invalid Stripe signature")
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid webhook signature")
+    except ValueError:
+        logger.warning("listing_fee webhook: rejected a delivery whose body isn't a valid Stripe event")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid webhook payload")
 
     listing_fee_crud.ingest_stripe_webhook_event(db, event, correlation_id=get_correlation_id(request))
     return {"received": True}

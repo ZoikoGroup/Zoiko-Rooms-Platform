@@ -50,7 +50,9 @@ function saveBlob(blob: Blob, filename: string) {
   a.href = url;
   a.download = filename;
   a.click();
-  URL.revokeObjectURL(url);
+  // Revoked on the next tick -- revoking straight away can cancel the
+  // download in Firefox and older Safari.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /** Moves focus to a screen's heading when the screen changes, so keyboard
@@ -238,7 +240,13 @@ export function ListingFeeCheckout({
     async function poll() {
       attempt += 1;
       try {
-        const latest = await getListingFeePayment(payment!.id);
+        // Ask Stripe directly now and then (the resolve call reconciles with
+        // it) so a late or lost webhook can't leave the host waiting; plain
+        // reads of our own record in between.
+        const askStripe = returningCheckoutSessionId && (attempt === 1 || attempt % 5 === 0);
+        const latest = askStripe
+          ? await resolveListingFeeCheckoutSession(returningCheckoutSessionId)
+          : await getListingFeePayment(payment!.id);
         if (cancelled) return;
         if (latest.status === "SUCCEEDED") {
           await showCurrentState();
@@ -265,7 +273,7 @@ export function ListingFeeCheckout({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [view, payment, pollRound, showCurrentState, fetchQuote]);
+  }, [view, payment, pollRound, returningCheckoutSessionId, showCurrentState, fetchQuote]);
 
   /** Gets a fresh quote. Returns it when the total is unchanged (safe to
    *  continue), or null after flagging a changed total for re-confirmation
@@ -432,6 +440,16 @@ export function ListingFeeCheckout({
         {payment.refundedAmount > 0 && (
           <p className="mt-3 text-sm text-slate-700 dark:text-slate-200">
             {formatMoney(payment.refundedAmount, payment.currency)} of this fee has been refunded.
+          </p>
+        )}
+        {(payment.refundStatus === "REQUESTED" || payment.refundStatus === "PROCESSING") && (
+          <p className="mt-3 text-sm text-slate-700 dark:text-slate-200">
+            A refund on this fee is being processed -- it usually reaches your card within 5-10 business days.
+          </p>
+        )}
+        {payment.refundStatus === "FAILED" && (
+          <p className="mt-3 text-sm text-amber-800 dark:text-amber-300">
+            A refund on this fee didn&apos;t go through at your bank. Zoiko Rooms will retry it.
           </p>
         )}
         <p className="mt-4 text-sm font-medium text-emerald-900 dark:text-emerald-200">

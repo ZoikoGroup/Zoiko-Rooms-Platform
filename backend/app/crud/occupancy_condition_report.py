@@ -46,7 +46,7 @@ async def add_condition_report_item(
     stored_filename = original_filename = content_type = ""
     size_bytes = 0
     if file is not None:
-        stored_filename, original_filename, content_type, size_bytes, _sha256 = await save_dispute_evidence_file(file)
+        stored_filename, original_filename, content_type, size_bytes, _sha256 = await save_dispute_evidence_file(db, file)
 
     item = OccupancyConditionReportItem(
         occupancy_id=occupancy.id,
@@ -88,6 +88,6 @@ def delete_condition_report_item(db: Session, item: OccupancyConditionReportItem
     the ROOM, not personal content about the renter, so no legal-hold/
     erasure-request machinery applies here)."""
     if item.stored_filename:
-        delete_dispute_evidence_file(item.stored_filename)
+        delete_dispute_evidence_file(db, item.stored_filename)
     db.delete(item)
     db.commit()

@@ -9,10 +9,9 @@ scanned."""
 from __future__ import annotations
 
 from fastapi import HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.core.dispute_evidence_uploads import delete_dispute_evidence_file, resolve_dispute_evidence_path, save_dispute_evidence_file
+from app.core.dispute_evidence_uploads import delete_dispute_evidence_file, dispute_evidence_response, save_dispute_evidence_file
 from app.core.signed_urls import generate_signed_download_token
 from app.crud import evidence_vault as evidence_vault_crud
 from app.models.evidence_artifact import EvidenceArtifact
@@ -26,7 +25,7 @@ async def upload_sublet_document(
     db: Session, sublet_request: SubletRequest, file: UploadFile, *,
     uploaded_by_admin_id: int | None = None, uploaded_by_user_id: int | None = None,
 ) -> EvidenceArtifact:
-    stored_filename, original_filename, content_type, file_size, sha256_hash = await save_dispute_evidence_file(file)
+    stored_filename, original_filename, content_type, file_size, sha256_hash = await save_dispute_evidence_file(db, file)
     return evidence_vault_crud.register_evidence_artifact(
         db, related_entity_type=RELATED_ENTITY_TYPE, related_entity_id=str(sublet_request.id),
         stored_filename=stored_filename, sha256_hash=sha256_hash, original_filename=original_filename,
@@ -74,10 +73,8 @@ def to_sublet_document_read(document: EvidenceArtifact, *, download_path: str) -
     )
 
 
-def sublet_document_file_response(document: EvidenceArtifact) -> FileResponse:
-    return FileResponse(
-        resolve_dispute_evidence_path(document.stored_filename), media_type=document.content_type, filename=document.original_filename,
-    )
+def sublet_document_file_response(db: Session, document: EvidenceArtifact):
+    return dispute_evidence_response(db, document.stored_filename, document.content_type, document.original_filename)
 
 
 def delete_sublet_document(db: Session, document: EvidenceArtifact) -> EvidenceArtifact:
@@ -86,7 +83,7 @@ def delete_sublet_document(db: Session, document: EvidenceArtifact) -> EvidenceA
     deletion in this codebase (see models/evidence_artifact.py)."""
     from datetime import datetime, timezone
 
-    delete_dispute_evidence_file(document.stored_filename)
+    delete_dispute_evidence_file(db, document.stored_filename)
     document.deleted_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(document)

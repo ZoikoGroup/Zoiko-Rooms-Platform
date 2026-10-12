@@ -4,32 +4,26 @@ any publicly served directory, never derived from client input or reused
 across artifacts. Its own module/directory (not a shared call into
 receipt_documents.py) matches this codebase's one-module-per-document-series
 convention (rent_invoice_documents.py, payout_statement_documents.py,
-service_fee_invoice_documents.py all follow the same pattern)."""
+service_fee_invoice_documents.py all follow the same pattern).
+
+Kept in the database (core/file_store.py, category "listing_fee_document")."""
 
 import hashlib
-import uuid
-from pathlib import Path
 
-from app.core.config import settings
+from sqlalchemy.orm import Session
 
+from app.core import file_store
 
-def save_listing_fee_receipt_document(pdf_bytes: bytes) -> tuple[str, str]:
-    """Persists a rendered Listing Fee receipt PDF exactly once. Returns
-    (storage_ref, content_hash). Callers must never call this twice for the
-    same ListingFeePayment -- see models.listing_fee.ListingFeeReceipt's
-    unique payment_id."""
-    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
-
-    upload_dir = Path(settings.listing_fee_receipt_document_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    storage_ref = f"{uuid.uuid4().hex}.pdf"
-    (upload_dir / storage_ref).write_bytes(pdf_bytes)
-
-    return storage_ref, content_hash
+CATEGORY = "listing_fee_document"
 
 
-def resolve_listing_fee_receipt_document_path(storage_ref: str) -> Path:
-    """`storage_ref` only ever originates from save_listing_fee_receipt_document
-    above (a uuid4 hex we generated), never from client input, so this can't
-    be used for path traversal."""
-    return Path(settings.listing_fee_receipt_document_dir) / storage_ref
+def save_listing_fee_receipt_document(db: Session, pdf_bytes: bytes) -> tuple[str, str]:
+    """Stores a rendered PDF once, in the caller's transaction (so it is saved
+    together with the row that records it). Returns (storage_ref, content_hash)."""
+    storage_ref = file_store.put(db, CATEGORY, pdf_bytes, extension=".pdf", content_type="application/pdf")
+    return storage_ref, hashlib.sha256(pdf_bytes).hexdigest()
+
+
+def read_listing_fee_receipt_document(db: Session, storage_ref: str) -> bytes:
+    """The stored PDF; 404 if it's missing."""
+    return file_store.read_or_404(db, CATEGORY, storage_ref)

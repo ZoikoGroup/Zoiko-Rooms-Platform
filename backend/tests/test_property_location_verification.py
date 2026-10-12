@@ -20,7 +20,7 @@ from app.models.property_location import PropertyLocationVerification
 from app.models.room import Room
 from app.services import location as loc
 from app.services import property_location_service as svc
-from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
+from tests.conftest import stored_refs, _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
 
 BASE = "/api/users/property-verifications"
 ADDRESS = {"addressLine1": "2-599 Madupally", "locality": "Madhira", "administrativeArea": "Telangana",
@@ -456,9 +456,11 @@ class TestEvidenceSecurity:
     def test_evidence_is_encrypted_and_reuse_is_flagged(self, client, db_session, host, provider, uploads):
         doc = _pdf("Tax record", "2-599 Madupally, Madhira 507116")
         _flow(client, host).happy_path(evidence=doc)
-        stored = [p for p in uploads.iterdir()]
-        assert stored and all(p.name.endswith(".enc") for p in stored)
-        assert all(b"Madupally" not in p.read_bytes() for p in stored)
+        from app.core import file_store
+
+        stored = stored_refs(db_session, "property_location")
+        assert stored and all(ref.endswith(".enc") for ref in stored)
+        assert all(b"Madupally" not in file_store.read(db_session, "property_location", ref) for ref in stored)
         other = _host(db_session, "plv-reuse@test.com")
         body = Flow(client, other[0], other[1]).happy_path(evidence=doc)
         assert body["state"] == "ACTION_REQUIRED" and "EVIDENCE_REUSED" in body["reasonCodes"]

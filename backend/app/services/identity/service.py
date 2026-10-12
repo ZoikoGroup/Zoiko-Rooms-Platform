@@ -1132,7 +1132,7 @@ def erase_identity_data(db: Session, admin: AdminUser, party_id: int, *, reason:
     names and dates of birth on Zoiko's side, asks the provider to delete its
     sessions, and leaves the person unverified. Decisions and the audit trail
     (which hold no identity content) are kept."""
-    from app.core.identity_uploads import resolve_identity_document_path
+    from app.core.identity_uploads import delete_identity_document
 
     if admin.role != "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
@@ -1143,9 +1143,7 @@ def erase_identity_data(db: Session, admin: AdminUser, party_id: int, *, reason:
     for session in sessions:
         if session.document_file_path:
             try:
-                path = resolve_identity_document_path(session.document_file_path)
-                if path.is_file():
-                    path.unlink()
+                delete_identity_document(db, session.document_file_path)
             except (OSError, ValueError):
                 pass
         provider = providers.get_provider(session.provider_code) if session.provider_session_id else None
@@ -1188,7 +1186,7 @@ def purge_expired_evidence(db: Session) -> int:
     period after the decision has passed. The decision, masked number and
     hashes are kept; nothing is purged while undecided or under a pack
     without a retention period."""
-    from app.core.identity_uploads import resolve_identity_document_path
+    from app.core.identity_uploads import delete_identity_document
 
     purged = 0
     now = _now()
@@ -1204,9 +1202,7 @@ def purge_expired_evidence(db: Session) -> int:
         if not days or decided is None or decided + timedelta(days=days) > now:
             continue
         try:
-            path = resolve_identity_document_path(session.document_file_path)
-            if path.is_file():
-                path.unlink()
+            delete_identity_document(db, session.document_file_path)
         except (OSError, ValueError):
             logger.warning("identity_verification #%s: could not delete evidence file", session.id)
             continue

@@ -8,17 +8,19 @@ import { Modal } from "@/components/ui/Modal";
 import { ApiError, apiClientFetch } from "@/lib/api-client";
 import { ListingFeePayment, ListingFeeRefund } from "@/lib/types";
 import { listingFeePaymentStatusTone, listingFeeRefundStatusTone } from "@/lib/status";
+import { formatDate, formatMoney } from "@/lib/utils";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 /** One payment's refund history -- loaded when the admin opens it. */
 function RefundHistory({ paymentId, showToast }: { paymentId: number; showToast: (message: string) => void }) {
   const [refunds, setRefunds] = useState<ListingFeeRefund[] | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     apiClientFetch<ListingFeeRefund[]>(`/api/finance/listing-fees/payments/${paymentId}/refunds`)
       .then(setRefunds)
-      .catch(() => setRefunds([]));
+      .catch(() => setLoadFailed(true));
   }, [paymentId]);
 
   async function openCreditNote(refund: ListingFeeRefund) {
@@ -33,6 +35,7 @@ function RefundHistory({ paymentId, showToast }: { paymentId: number; showToast:
     }
   }
 
+  if (loadFailed) return <p className="mt-2 text-xs text-rose-600 dark:text-rose-400">Could not load the refunds for this payment.</p>;
   if (refunds === null) return <p className="mt-2 text-xs text-slate-400">Loading refunds...</p>;
   if (refunds.length === 0) return <p className="mt-2 text-xs text-slate-400">No refunds on this payment.</p>;
   return (
@@ -40,7 +43,7 @@ function RefundHistory({ paymentId, showToast }: { paymentId: number; showToast:
       {refunds.map((r) => (
         <div key={r.id} className="flex flex-wrap items-center justify-between gap-2 text-xs">
           <span className="text-slate-600 dark:text-slate-300">
-            {formatCurrency(r.amount, r.currency)} · {formatDate(r.createdAt)}
+            {formatMoney(r.amount, r.currency)} · {formatDate(r.createdAt)}
             {r.reason ? ` · ${r.reason}` : ""}
             {r.status === "FAILED" && r.failureMessage ? ` · failed: ${r.failureMessage}` : ""}
           </span>
@@ -62,7 +65,11 @@ function RefundHistory({ paymentId, showToast }: { paymentId: number; showToast:
     </div>
   );
 }
-import { formatCurrency, formatDate } from "@/lib/utils";
+/** What's still refundable -- the fee less refunds already confirmed (the
+ *  backend also subtracts any still in flight and has the final say). */
+function refundable(payment: ListingFeePayment) {
+  return Math.max(0, Math.round((payment.amount - (payment.refundedAmount || 0)) * 100) / 100);
+}
 
 /** Listing Fees are the one payment Zoiko itself collects (through
  *  Stripe) -- so they're the one payment support can refund from here.
@@ -91,7 +98,7 @@ export function ListingFeePaymentsAdmin({ showToast }: { showToast: (message: st
 
   function open(payment: ListingFeePayment) {
     setRefunding(payment);
-    setAmount(String(payment.amount));
+    setAmount(String(refundable(payment)));
     setReason("");
   }
 
@@ -99,8 +106,9 @@ export function ListingFeePaymentsAdmin({ showToast }: { showToast: (message: st
     e.preventDefault();
     if (!refunding) return;
     const value = Number(amount);
-    if (!Number.isFinite(value) || value <= 0 || value > refunding.amount) {
-      showToast(`Enter an amount between 0 and ${formatCurrency(refunding.amount, refunding.currency)}`);
+    const max = refundable(refunding);
+    if (!Number.isFinite(value) || value <= 0 || value > max) {
+      showToast(`Enter an amount between 0 and ${formatMoney(max, refunding.currency)}`);
       return;
     }
     if (!reason.trim()) {
@@ -155,9 +163,17 @@ export function ListingFeePaymentsAdmin({ showToast }: { showToast: (message: st
             <div>
               <div className="flex items-center gap-2">
                 <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                  #{p.id} · {formatCurrency(p.amount, p.currency)} · {p.listingId}
+                  #{p.id} · {formatMoney(p.amount, p.currency)} · {p.listingId}
                 </p>
                 <Badge tone={listingFeePaymentStatusTone[p.status] ?? "neutral"}>{p.status.replace(/_/g, " ").toLowerCase()}</Badge>
+                {p.disputeStatus && (
+                  <Badge tone={p.disputeStatus === "WON" ? "neutral" : "danger"}>chargeback {p.disputeStatus.toLowerCase()}</Badge>
+                )}
+                {p.refundStatus && (
+                  <Badge tone={listingFeeRefundStatusTone[p.refundStatus as keyof typeof listingFeeRefundStatusTone] ?? "neutral"}>
+                    refund {p.refundStatus.replace(/_/g, " ").toLowerCase()}
+                  </Badge>
+                )}
               </div>
               <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
                 {p.paidAt ? `Paid ${formatDate(p.paidAt)}` : `Started ${formatDate(p.createdAt)}`}
@@ -169,7 +185,7 @@ export function ListingFeePaymentsAdmin({ showToast }: { showToast: (message: st
                   {expanded === p.id ? "Hide refunds" : "Refunds"}
                 </Button>
               )}
-              {p.refundEligible && (
+              {p.refundEligible && p.disputeStatus !== "OPEN" && p.disputeStatus !== "LOST" && (
                 <Button size="sm" variant="outline" onClick={() => open(p)}>Refund</Button>
               )}
             </div>
@@ -187,14 +203,20 @@ export function ListingFeePaymentsAdmin({ showToast }: { showToast: (message: st
         {refunding && (
           <form onSubmit={submit} className="space-y-3.5">
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Payment #{refunding.id} for listing {refunding.listingId} -- {formatCurrency(refunding.amount, refunding.currency)}.
+              Payment #{refunding.id} for listing {refunding.listingId} -- {formatMoney(refunding.amount, refunding.currency)}
+              {refunding.refundedAmount > 0 && `, ${formatMoney(refunding.refundedAmount, refunding.currency)} already refunded`}.
             </p>
+            <label htmlFor="lf-refund-amount" className="block text-xs font-semibold text-slate-600 dark:text-slate-300">
+              Amount to refund (up to {formatMoney(refundable(refunding), refunding.currency)})
+            </label>
             <input
-              type="number" step="0.01" min="0.01" max={refunding.amount} value={amount} onChange={(e) => setAmount(e.target.value)}
+              id="lf-refund-amount" type="number" step="0.01" min="0.01" max={refundable(refunding)} value={amount}
+              onChange={(e) => setAmount(e.target.value)}
               className="w-full rounded-xl bg-slate-50 px-3 py-2 text-sm ring-1 ring-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
             />
+            <label htmlFor="lf-refund-reason" className="block text-xs font-semibold text-slate-600 dark:text-slate-300">Reason</label>
             <textarea
-              value={reason} onChange={(e) => setReason(e.target.value)} rows={3} required placeholder="Reason"
+              id="lf-refund-reason" value={reason} onChange={(e) => setReason(e.target.value)} rows={3} required placeholder="Reason"
               className="w-full resize-none rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
             />
             <div className="flex justify-end gap-2">

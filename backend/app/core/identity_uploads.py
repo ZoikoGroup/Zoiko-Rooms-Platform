@@ -1,16 +1,19 @@
 import hashlib
 import io
-import uuid
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
+from sqlalchemy.orm import Session
 from PIL import Image
 
+from app.core import file_store
 from app.core.config import settings
 
 # (magic bytes, stored extension, canonical content type). Checked against the
 # actual file contents -- never the filename extension or the client-declared
 # Content-Type header, both of which are trivially spoofable.
+CATEGORY = "identity_document"
+
 _SIGNATURES: list[tuple[bytes, str, str]] = [
     (b"%PDF-", ".pdf", "application/pdf"),
     (b"\xff\xd8\xff", ".jpg", "image/jpeg"),
@@ -55,7 +58,7 @@ def _strip_image_metadata(contents: bytes, extension: str) -> bytes:
         return contents
 
 
-async def save_identity_document(file: UploadFile) -> tuple[str, str, str, int, str]:
+async def save_identity_document(db: Session, file: UploadFile) -> tuple[str, str, str, int, str]:
     """Validates and persists an uploaded identity document outside any publicly
     served directory. Returns (stored_filename, original_filename, content_type,
     size, sha256_hash). Only `stored_filename` (a random name with no relation to
@@ -88,18 +91,18 @@ async def save_identity_document(file: UploadFile) -> tuple[str, str, str, int, 
     # hash and the stored file must describe the exact same bytes.
     contents = _strip_image_metadata(contents, extension)
 
-    upload_dir = Path(settings.identity_upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    stored_filename = f"{uuid.uuid4().hex}{extension}"
-    (upload_dir / stored_filename).write_bytes(contents)
+    stored_filename = file_store.put(db, CATEGORY, contents, extension=extension, content_type=content_type)
 
     original_filename = Path(file.filename or "document").name
     sha256_hash = hashlib.sha256(contents).hexdigest()
     return stored_filename, original_filename, content_type, len(contents), sha256_hash
 
 
-def resolve_identity_document_path(stored_filename: str) -> Path:
-    """`stored_filename` only ever originates from `save_identity_document` above
-    (a uuid4 hex we generated), never from client input, so this can't be used
-    for path traversal."""
-    return Path(settings.identity_upload_dir) / stored_filename
+def read_identity_document(db: Session, stored_filename: str | None) -> bytes | None:
+    """The stored document, or None when there's no such file."""
+    return file_store.read(db, CATEGORY, stored_filename)
+
+
+def delete_identity_document(db: Session, stored_filename: str | None) -> None:
+    """Erases the document (joins the caller's transaction); missing is fine."""
+    file_store.delete(db, CATEGORY, stored_filename)

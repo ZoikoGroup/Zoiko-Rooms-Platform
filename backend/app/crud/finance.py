@@ -679,7 +679,7 @@ def get_or_create_payment_receipt(db: Session, payment: SimulatedPayment) -> Pay
 
     receipt_number = f"RCPT-{payment.id:08d}"
     pdf_bytes = _generate_payment_receipt_pdf(payment, receipt_number)
-    storage_ref, content_hash = save_receipt_document(pdf_bytes)
+    storage_ref, content_hash = save_receipt_document(db, pdf_bytes)
 
     try:
         with db.begin_nested():
@@ -765,7 +765,7 @@ def get_or_create_rent_invoice(db: Session, obligation: Obligation) -> RentInvoi
     listing, guest = _listing_and_guest_for_obligation(obligation)
     invoice_number = f"RINV-{obligation.id:08d}"
     pdf_bytes = _generate_rent_invoice_pdf(obligation, invoice_number, listing=listing, guest=guest)
-    storage_ref, content_hash = save_rent_invoice_document(pdf_bytes)
+    storage_ref, content_hash = save_rent_invoice_document(db, pdf_bytes)
 
     try:
         with db.begin_nested():
@@ -1875,7 +1875,7 @@ def get_or_create_payout_statement(db: Session, payout: PayoutRecord) -> PayoutS
 
     statement_number = f"STMT-{payout.id:08d}"
     pdf_bytes = _generate_payout_statement_pdf(payout, statement_number)
-    storage_ref, content_hash = save_payout_statement_document(pdf_bytes)
+    storage_ref, content_hash = save_payout_statement_document(db, pdf_bytes)
 
     try:
         with db.begin_nested():
@@ -1979,7 +1979,7 @@ def get_or_create_service_fee_invoice(db: Session, payout: PayoutRecord) -> Serv
         legal_entity_name=policy.zoiko_legal_entity_name, tax_registration_number=policy.zoiko_tax_registration_number,
         fee_amount=fee_amount, tax_rate=tax_rate, tax_amount=tax_amount,
     )
-    storage_ref, content_hash = save_service_fee_invoice_document(pdf_bytes)
+    storage_ref, content_hash = save_service_fee_invoice_document(db, pdf_bytes)
 
     try:
         with db.begin_nested():

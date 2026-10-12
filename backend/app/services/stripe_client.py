@@ -214,6 +214,48 @@ def create_refund(
     return refund.id
 
 
+def is_ambiguous_error(exc: Exception) -> bool:
+    """A network failure or Stripe-side 5xx: the request may or may not have
+    been applied, so the caller must not treat it as a definite failure."""
+    import stripe
+
+    return isinstance(exc, (stripe.APIConnectionError, stripe.APIError))
+
+
+def is_missing_resource_error(exc: Exception) -> bool:
+    """Stripe says the object doesn't exist on this account (e.g. it was made
+    with test keys and we're now live)."""
+    import stripe
+
+    return isinstance(exc, stripe.InvalidRequestError) and getattr(exc, "code", None) == "resource_missing"
+
+
+def find_refund_by_metadata(*, payment_intent_id: str, key: str, value: str) -> dict | None:
+    """The refund on this PaymentIntent whose metadata[key] == value, as
+    {id, status, failure_reason} -- how a refund whose create call timed out is
+    found again. None when there is none (or Stripe isn't configured)."""
+    if not is_configured():
+        return None
+    stripe = _client()
+    for refund in stripe.Refund.list(payment_intent=payment_intent_id, limit=100).auto_paging_iter():
+        if (refund.metadata or {}).get(key) == value:
+            return {"id": refund.id, "status": refund.status, "failure_reason": getattr(refund, "failure_reason", None) or ""}
+    return None
+
+
+def retrieve_amount_refunded(*, payment_intent_id: str) -> int | None:
+    """The PaymentIntent's charge's cumulative amount_refunded, in minor units.
+    None when not configured or there is no charge."""
+    if not is_configured():
+        return None
+    stripe = _client()
+    intent = stripe.PaymentIntent.retrieve(payment_intent_id, expand=["latest_charge"])
+    charge = intent.latest_charge
+    if not charge or isinstance(charge, str):
+        return None
+    return int(charge.amount_refunded)
+
+
 def retrieve_refund(*, refund_id: str) -> dict | None:
     """A platform refund's current status ({status, failure_reason}) -- used
     to settle a Listing Fee refund whose webhook never arrived. None when not

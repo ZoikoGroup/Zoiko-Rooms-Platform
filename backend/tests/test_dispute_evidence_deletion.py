@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from tests.conftest import _make_admin, auth_admin_cookie, auth_user_cookie
+from tests.conftest import stored_refs, _make_admin, auth_admin_cookie, auth_user_cookie
 from tests.test_disputes import _make_occupancy_with_parties
 
 _PDF_BYTES = b"%PDF-1.4 fake deletable evidence content"
@@ -43,7 +43,7 @@ class TestGrantedDeletion:
         )
         assert r.status_code == 201, r.text
         evidence_id = r.json()["id"]
-        stored_files_before = list(tmp_path.iterdir())
+        stored_files_before = stored_refs(db_session, "dispute_evidence")
         assert len(stored_files_before) == 1
 
         r = client.post(f"/api/users/rentals/disputes/{case_id}/evidence/{evidence_id}/delete", cookies=renter_cookies)
@@ -55,7 +55,7 @@ class TestGrantedDeletion:
         assert body["originalFilename"] == ""
 
         # The file bytes are actually gone from disk.
-        assert list(tmp_path.iterdir()) == []
+        assert stored_refs(db_session, "dispute_evidence") == []
 
         # The row survives -- still listed, just with content erased.
         r = client.get(f"/api/users/rentals/disputes/{case_id}/evidence", cookies=renter_cookies)

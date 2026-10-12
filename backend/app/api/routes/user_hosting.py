@@ -66,13 +66,14 @@ router = APIRouter(prefix="/api/users/hosting", tags=["user-hosting"], dependenc
 async def upload_user_listing_images(
     files: list[UploadFile],
     user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Lets a host upload photos for their own listings. USER-authenticated
     (get_current_user) -- deliberately never get_current_admin, and shares
     validation/storage with the admin upload endpoint via save_listing_images
-    rather than duplicating it. Stores into the same PUBLIC upload_dir as the
+    rather than duplicating it. Stored as public listing photos, same as the
     admin path; identity documents never pass through here."""
-    urls = await save_listing_images(files)
+    urls = await save_listing_images(db, files)
     return {"urls": urls}
 
 
@@ -975,7 +976,7 @@ def download_hosted_sublet_document(
     sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
     document = sublet_documents_crud.get_sublet_document_or_404(db, sublet_request, document_id)
     verify_signed_download_token(token, "sublet_document", str(document.id))
-    return sublet_documents_crud.sublet_document_file_response(document)
+    return sublet_documents_crud.sublet_document_file_response(db, document)
 
 
 # --- Lister, Property & Authority Verification: Host self-service submission ---
@@ -1074,7 +1075,7 @@ def download_hosted_property_verification_document(
     if not record.document_file_path:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No document was uploaded for this verification")
 
-    return document_response(record.document_file_path, record.document_file_content_type,
+    return document_response(db, record.document_file_path, record.document_file_content_type,
                              record.document_file_original_name)
 
 

@@ -24,12 +24,12 @@ chargeback mechanism)."""
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user, require_super_admin
 from app.core.correlation import get_correlation_id
-from app.core.dispute_evidence_uploads import resolve_dispute_evidence_path
+from app.core.dispute_evidence_uploads import dispute_evidence_response
 from app.crud import dispute_deadline as deadline_crud
 from app.crud import dispute_evidence as evidence_crud
 from app.crud import dispute_external_proceeding as proceeding_crud
@@ -93,14 +93,14 @@ def _to_evidence_read(db: Session, evidence: DisputeEvidenceItem) -> DisputeEvid
     return data.model_copy(update={"claim_ids": evidence_crud.claim_ids_for_evidence(db, evidence)})
 
 
-def _evidence_file_response(evidence: DisputeEvidenceItem) -> FileResponse:
+def _evidence_file_response(db: Session, evidence: DisputeEvidenceItem) -> Response:
     # assert_evidence_downloadable already gates disclosure -- this only
     # narrows stored_filename (None for a text-only ADMIN_NOTE) so an admin
     # (who bypasses the disclosure check) can't be handed a path that was
     # never actually written to disk.
     if evidence.stored_filename is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "This evidence item has no downloadable file")
-    return FileResponse(resolve_dispute_evidence_path(evidence.stored_filename), media_type=evidence.content_type, filename=evidence.original_filename)
+    return dispute_evidence_response(db, evidence.stored_filename, evidence.content_type, evidence.original_filename)
 
 
 def _to_proceeding_read(db: Session, proceeding: DisputeExternalProceeding) -> DisputeExternalProceedingRead:
@@ -227,7 +227,7 @@ def get_evidence_file_as_renter(
     if evidence.case_id != case_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Evidence item not found on this case")
     evidence_crud.assert_evidence_downloadable(evidence, guest=guest)
-    return _evidence_file_response(evidence)
+    return _evidence_file_response(db, evidence)
 
 
 @renter_router.post("/{case_id}/evidence/{evidence_id}/delete", response_model=DisputeEvidenceRead)
@@ -528,7 +528,7 @@ def get_evidence_file_as_host(
     if evidence.case_id != case_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Evidence item not found on this case")
     evidence_crud.assert_evidence_downloadable(evidence, party_id=party_id)
-    return _evidence_file_response(evidence)
+    return _evidence_file_response(db, evidence)
 
 
 @host_router.post("/{case_id}/evidence/{evidence_id}/delete", response_model=DisputeEvidenceRead)
@@ -875,7 +875,7 @@ def get_evidence_as_admin(case_id: int, admin: AdminUser = Depends(get_current_a
 def get_evidence_file_as_admin(evidence_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     evidence = evidence_crud.get_evidence_or_404(db, evidence_id)
     evidence_crud.assert_evidence_downloadable(evidence, admin=admin)
-    return _evidence_file_response(evidence)
+    return _evidence_file_response(db, evidence)
 
 
 @admin_router.post("/evidence/{evidence_id}/redact", response_model=DisputeEvidenceRead, status_code=status.HTTP_201_CREATED)

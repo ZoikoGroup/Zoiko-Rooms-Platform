@@ -72,7 +72,7 @@ async def upload_evidence(
     stored_filename = original_filename = content_type = sha256_hash = ""
     size_bytes = 0
     if file is not None:
-        stored_filename, original_filename, content_type, size_bytes, sha256_hash = await save_dispute_evidence_file(file)
+        stored_filename, original_filename, content_type, size_bytes, sha256_hash = await save_dispute_evidence_file(db, file)
 
     if admin is not None:
         resolved_provenance = provenance or "ADMIN_NOTE"
@@ -173,7 +173,7 @@ async def create_redaction(db: Session, original: DisputeEvidenceItem, admin: Ad
     here -- the redaction is a brand new, independently disclosable row."""
     if original.deleted_at is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot redact evidence that has already been deleted")
-    stored_filename, original_filename, content_type, size_bytes, sha256_hash = await save_dispute_evidence_file(file)
+    stored_filename, original_filename, content_type, size_bytes, sha256_hash = await save_dispute_evidence_file(db, file)
 
     redaction = DisputeEvidenceItem(
         case_id=original.case_id,
@@ -302,7 +302,7 @@ def request_deletion(
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot delete evidence under an active legal hold")
 
     if evidence.stored_filename:
-        delete_dispute_evidence_file(evidence.stored_filename)
+        delete_dispute_evidence_file(db, evidence.stored_filename)
     evidence.stored_filename = None
     evidence.original_filename = ""
     evidence.note_text = ""

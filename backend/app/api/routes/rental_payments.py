@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user, require_super_admin, require_super_admin_or_payment_staff
 from app.core.correlation import get_correlation_id
-from app.core.dispute_evidence_uploads import resolve_dispute_evidence_path
+from app.core import file_store
 from app.core.field_encryption import decrypt_json
 from app.crud import payment_connection as payment_connection_crud
 from app.crud import rental_payment as rp_crud
@@ -466,7 +466,7 @@ def download_rental_payment_evidence(
         db, artifact, actor_kind="guest" if is_tenant else "party", actor_id=str(guest.id if is_tenant else user.party_id),
         correlation_id=get_correlation_id(request),
     )
-    file_bytes = resolve_dispute_evidence_path(artifact.stored_filename).read_bytes()
+    file_bytes = file_store.read_or_404(db, "dispute_evidence", artifact.stored_filename)
     return Response(content=file_bytes, media_type=artifact.content_type or "application/octet-stream")
 
 
@@ -712,7 +712,7 @@ def download_admin_rental_payment_evidence(
     rp_crud.log_evidence_access(
         db, artifact, actor_kind="admin", actor_id=str(admin.id), correlation_id=get_correlation_id(request),
     )
-    file_bytes = resolve_dispute_evidence_path(artifact.stored_filename).read_bytes()
+    file_bytes = file_store.read_or_404(db, "dispute_evidence", artifact.stored_filename)
     return Response(content=file_bytes, media_type=artifact.content_type or "application/octet-stream")
 
 

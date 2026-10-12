@@ -91,6 +91,7 @@ class TestRefundFailures:
         db_session.commit()
         monkeypatch.setattr(stripe_client, "is_configured", lambda: True)
         monkeypatch.setattr(stripe_client, "retrieve_refund", lambda **_kw: {"status": "succeeded", "failure_reason": ""})
+        monkeypatch.setattr(stripe_client, "retrieve_amount_refunded", lambda **_kw: 500)
 
         assert lf_crud.reconcile_processing_refunds(db_session) == 1
         db_session.refresh(refund)

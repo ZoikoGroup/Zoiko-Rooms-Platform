@@ -1,14 +1,13 @@
 import asyncio
 import contextlib
-from pathlib import Path
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.routes import (
+    public_files,
     admin_notifications,
     admin_contact,
     admin_users,
@@ -145,18 +144,10 @@ app.add_middleware(
     allow_headers=["*"],
 ) 
 
-Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
- 
-# Identity documents live in their own directory and are deliberately never
-# mounted here -- they're only reachable through the authenticated
-# /api/users/identity-verifications/{id}/document and
-# /api/identity-verifications/{id}/document routes.
-Path(settings.identity_upload_dir).mkdir(parents=True, exist_ok=True)
-
-# Property/lister evidence -- same never-mounted convention, reachable only
-# through the authenticated property-verification document routes.
-Path(settings.property_verification_upload_dir).mkdir(parents=True, exist_ok=True)
+# Every file lives in the database (core/file_store.py). Listing photos keep
+# their public /uploads/<name> URLs through api/routes/public_files.py; every
+# private document is reachable only through its own authenticated route.
+app.include_router(public_files.router)
 
 app.include_router(auth.router)
 app.include_router(user_auth.router)

@@ -161,7 +161,7 @@ def download_property_verification_document(
     record = property_verification_crud.get_property_verification_or_404(db, verification_id)
     if not record.document_file_path:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No document was uploaded for this verification")
-    return document_response(record.document_file_path, record.document_file_content_type,
+    return document_response(db, record.document_file_path, record.document_file_content_type,
                              record.document_file_original_name)
 
 

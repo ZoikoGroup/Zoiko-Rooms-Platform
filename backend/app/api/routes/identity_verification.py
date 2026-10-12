@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from datetime import datetime, timezone
 
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, require_super_admin
 from app.core.correlation import get_correlation_id
-from app.core.identity_uploads import resolve_identity_document_path
+from app.core.identity_uploads import read_identity_document
 from app.crud import break_glass_access as break_glass_crud
 from app.crud import identity_verification as crud
 from app.crud.audit import log_audit_event
@@ -278,8 +278,8 @@ def download_identity_document(verification_id: int, admin: AdminUser = Depends(
     if not record.document_file_path:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No document was uploaded for this verification")
 
-    path = resolve_identity_document_path(record.document_file_path)
-    if not path.is_file():
+    data = read_identity_document(db, record.document_file_path)
+    if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored document could not be found")
 
     # ZR-IDENTITY-001 Section 13: a secure viewer, not a download -- shown
@@ -290,13 +290,13 @@ def download_identity_document(verification_id: int, admin: AdminUser = Depends(
     headers = {"Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff",
                "Content-Disposition": "inline"}
     media_type = record.document_file_content_type or "application/octet-stream"
-    watermarked = _watermark_image(path, media_type, f"{admin.email} · {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC")
+    watermarked = _watermark_image(data, media_type, f"{admin.email} · {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC")
     if watermarked is not None:
         return Response(content=watermarked, media_type="image/png", headers=headers)
-    return FileResponse(path, media_type=media_type, headers=headers)
+    return Response(content=data, media_type=media_type, headers=headers)
 
 
-def _watermark_image(path, media_type: str, label: str) -> bytes | None:
+def _watermark_image(data: bytes, media_type: str, label: str) -> bytes | None:
     """Tiles the reviewer/time label over an image document. PDFs are
     watermarked by the reviewer screen's overlay instead."""
     if not media_type.startswith("image/"):
@@ -306,7 +306,7 @@ def _watermark_image(path, media_type: str, label: str) -> bytes | None:
 
         from PIL import Image, ImageDraw
 
-        image = Image.open(path).convert("RGBA")
+        image = Image.open(io.BytesIO(data)).convert("RGBA")
         layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(layer)
         step = max(120, image.size[1] // 6)

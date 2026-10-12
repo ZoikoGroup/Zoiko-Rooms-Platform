@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.core.agreement_documents import resolve_agreement_document_path, save_agreement_document
+from app.core.agreement_documents import read_agreement_document, save_agreement_document
 from app.core.mailer import (
     send_agreement_executed_email, send_agreement_ready_email, send_application_decided_email,
     send_offer_issued_email, send_offer_outcome_email, send_signature_status_email,
@@ -1566,7 +1566,7 @@ def deliver_disclosure(
 
     if not disclosure.document_storage_ref:
         pdf_bytes = _generate_disclosure_document(disclosure)
-        storage_ref, content_hash = save_agreement_document(pdf_bytes)
+        storage_ref, content_hash = save_agreement_document(db, pdf_bytes)
         disclosure.document_storage_ref = storage_ref
         disclosure.document_content_hash = content_hash
 
@@ -1977,7 +1977,7 @@ def record_wet_ink_signature(
     assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
     if as_party == "renter":
         _assert_renter_has_no_account(db, agreement.offer.guest_id, action="sign this agreement")
-    storage_ref, content_hash = save_agreement_document(scan_bytes)
+    storage_ref, content_hash = save_agreement_document(db, scan_bytes)
     return _apply_signature(db, agreement, as_party, method="WET_INK", evidence_ref=storage_ref, evidence_hash=content_hash)
 
 
@@ -2065,7 +2065,7 @@ def generate_agreement_pdf(db: Session, agreement: Agreement) -> bytes:
             )
         return _generate_native_agreement_pdf(agreement)
 
-    source_bytes = resolve_agreement_document_path(template.source_document_storage_ref).read_bytes()
+    source_bytes = read_agreement_document(db, template.source_document_storage_ref)
     if form_mode == "B":
         return render_mode_b_overlay(source_bytes, template.field_anchor_map, snapshot)
     if form_mode == "D":
@@ -2120,7 +2120,7 @@ def freeze_agreement_version(db: Session, agreement: Agreement) -> DocumentArtif
         return version.artifact
 
     pdf_bytes = generate_agreement_pdf(db, agreement)
-    storage_ref, content_hash = save_agreement_document(pdf_bytes)
+    storage_ref, content_hash = save_agreement_document(db, pdf_bytes)
 
     # The insert must happen inside the SAVEPOINT -- entering begin_nested()
     # flushes whatever's already pending into the *outer* transaction first,

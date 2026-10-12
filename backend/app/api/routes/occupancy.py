@@ -674,7 +674,7 @@ def download_sublet_document_as_admin(sublet_request_id: int, document_id: int, 
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
     document = sublet_documents_crud.get_sublet_document_or_404(db, sublet_request, document_id)
     verify_signed_download_token(token, "sublet_document", str(document.id))
-    return sublet_documents_crud.sublet_document_file_response(document)
+    return sublet_documents_crud.sublet_document_file_response(db, document)
 
 
 @router.post(
