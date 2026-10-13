@@ -42,7 +42,7 @@ const navGroups = [
     items: [
       { href: "/account/rent", label: "Find a Room", icon: Search },
       { href: "/account/applications", label: "My Applications", icon: ClipboardList },
-      { href: "/account/room-requests", label: "Room Requests", icon: MessagesSquare },
+      // { href: "/account/room-requests", label: "Room Requests", icon: MessagesSquare },
       { href: "/account/rentals", label: "My Rentals", icon: DoorOpen },
       { href: "/account/rent-payments", label: "Rent & Deposit Payments", icon: Receipt },
       { href: "/account/sublets", label: "Sublet Requests", icon: Repeat },
@@ -55,8 +55,9 @@ const navGroups = [
       { href: "/account/host/listings", label: "Listings", icon: Menu },
       { href: "/account/host/applications", label: "Applications", icon: MailOpen },
       { href: "/account/host/payments", label: "Payments", icon: CreditCardIcon },
-       { href: "/account/host/verification", label: "Verification", icon: ShieldCheckIcon },
-      { href: "/account/host/sublet-requests", label: "Sublet Requests", icon: Repeat },
+      { href: "/account/host/verification", label: "Verification", icon: ShieldCheckIcon },
+      { href: "/account/host/disputes", label: "Disputes", icon: Scale },
+       { href: "/account/host/sublet-requests", label: "Sublet Requests", icon: Repeat },
      
     ],
   },
@@ -64,7 +65,7 @@ const navGroups = [
     label: "ACCOUNT",
     items: [
       { href: "/account/identity", label: "Identity Verification", icon: ShieldCheck },
-      { href: "/account/payments", label: "Payment History", icon: CreditCard },
+      // { href: "/account/payments", label: "Payment History", icon: CreditCard },
       { href: "/account/profile", label: "Profile", icon: UserCircle2 },
     ],
   },

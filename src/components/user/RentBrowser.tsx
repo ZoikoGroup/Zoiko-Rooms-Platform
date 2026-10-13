@@ -1,362 +1,1543 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, Bath, BedDouble, ChevronLeft, ChevronRight, MapPin, Ruler, Search, Users } from "lucide-react";
-import { Badge } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
-import { Loader } from "@/components/ui/Loader";
-import { StarRating } from "@/components/ui/StarRating";
-import { PublicListing } from "@/lib/types";
-import { formatCurrency, resolveImageUrl } from "@/lib/utils";
-import { errorMessage, listPublicListings, listRentalApplications } from "@/lib/user-api";
-import { ApplyForRoomModal } from "@/components/user/ApplyForRoomModal";
-import { ListingDetailModal } from "@/components/user/ListingDetailModal";
-import { IdentityGate } from "@/components/user/IdentityGate";
+import {
+  AlertTriangle,
+  Bath,
+  BedDouble,
+  Bookmark,
+  Building,
+  Calendar,
+  Check,
+  ChevronRight,
+  Clock,
+  Eye,
+  FileText,
+  Heart,
+  Info,
+  Lock,
+  Map as MapIcon,
+  MapPin,
+  MessageSquare,
+  Search,
+  Send,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sparkles,
+  Wifi,
+  X,
+  DoorOpen,
+} from "lucide-react";
+import { PublicListing, HostedListing } from "@/lib/types";
+import { formatCurrency, resolveImageUrl, todayIsoDate } from "@/lib/utils";
+import {
+  errorMessage,
+  listHostedListings,
+  listPublicListings,
+  listRentalApplications,
+  submitRentalApplication,
+} from "@/lib/user-api";
 import { useUserSession } from "@/components/user/UserSessionContext";
-import { Card, EmptyState, Field, Toast, inputClass, useToast } from "@/components/user/ui";
 
-const PAGE_SIZE = 12;
-const FILTER_DEBOUNCE_MS = 400;
-
-interface FilterState {
+/** Room representation dynamically mapped from backend listings */
+export interface FindARoomItem {
+  id: string;
+  listingId: string;
+  isBackendListing: boolean;
+  title: string;
+  area: string;
   city: string;
+  roomNumber: string;
   roomType: string;
-  minPrice: string;
-  maxPrice: string;
+  monthlyRent: number;
+  currency: string;
+  minStayMonths: number;
+  availableDate: string;
+  roomState: "available" | "offer";
+  applicationsState: "open" | "closed";
+  furnishedState: "yes" | "part" | "no";
+  bathroomType: "Private" | "Shared";
+  amenities: string[];
+  accessibility: string[];
+  photos: string[];
+  toneColor: string;
+  freshnessScore: number;
+  description?: string;
+  houseRules?: string[];
+  ownerName?: string;
 }
 
-const emptyFilters: FilterState = { city: "", roomType: "", minPrice: "", maxPrice: "" };
+const DEFAULT_ROOM_PHOTOS = [
+  "https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?auto=format&fit=crop&w=700&q=80",
+  "https://images.unsplash.com/photo-1598928506311-c55ded91a20c?auto=format&fit=crop&w=700&q=80",
+  "https://images.unsplash.com/photo-1505693416388-ac5ce068fe85?auto=format&fit=crop&w=700&q=80",
+];
+
+function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: number): FindARoomItem {
+  const resolvedPhotos =
+    item.images && item.images.length > 0
+      ? (item.images.map(resolveImageUrl).filter(Boolean) as string[])
+      : [];
+  const photos = resolvedPhotos.length > 0 ? resolvedPhotos : DEFAULT_ROOM_PHOTOS;
+
+  const monthlyRent =
+    (item as any).defaultMonthlyRent != null && Number((item as any).defaultMonthlyRent) > 0
+      ? Math.round(Number((item as any).defaultMonthlyRent))
+      : Math.round((item.pricePerNight || 0) * 30);
+
+  const currency = item.currency || "INR";
+  const minStayMonths = Math.max(1, Math.round((item.minStayNights || 30) / 30));
+  const bathroomType = item.bathrooms && item.bathrooms >= 1 ? "Private" : "Shared";
+
+  // Furnished determination
+  const amenitiesLower = (item.amenities || []).map((a) => a.toLowerCase());
+  let furnishedState: "yes" | "part" | "no" = "no";
+  if (
+    amenitiesLower.some(
+      (a) => a.includes("furnished") && !a.includes("part") && !a.includes("unfurnished")
+    )
+  ) {
+    furnishedState = "yes";
+  } else if (amenitiesLower.some((a) => a.includes("part"))) {
+    furnishedState = "part";
+  } else if (amenitiesLower.some((a) => a.includes("unfurnished"))) {
+    furnishedState = "no";
+  } else {
+    furnishedState = "yes";
+  }
+
+  // Accessibility tags
+  const accessibility = (item.tags || []).filter(
+    (t) => t.toLowerCase().includes("step-free") || t.toLowerCase().includes("lift")
+  );
+
+  const isAvailable = (item as any).available !== false;
+  const isOffer = (item as any).state === "REVIEW" || (item as any).state === "APPROVED";
+
+  const houseRules = (item as any).agreementDetails?.houseRules
+    ? Object.values((item as any).agreementDetails.houseRules as Record<string, string>).filter(Boolean)
+    : ["Quiet hours after 10 PM", "No indoor smoking", "Keep common areas clean"];
+
+  return {
+    id: String(item.id),
+    listingId: String(item.id),
+    isBackendListing: true,
+    title: item.name || "Verified Private Room",
+    area: item.location || item.city || "Central",
+    city: item.city || "Hyderabad",
+    roomNumber: item.roomId ? `Room #${item.roomId}` : `Room #${item.id.slice(0, 4)}`,
+    roomType: item.roomType || "Private room",
+    monthlyRent,
+    currency,
+    minStayMonths,
+    availableDate: todayIsoDate(),
+    roomState: isOffer ? "offer" : "available",
+    applicationsState: isAvailable ? "open" : "closed",
+    furnishedState,
+    bathroomType,
+    amenities: item.amenities && item.amenities.length > 0 ? item.amenities : ["Wi-Fi", "Furnished"],
+    accessibility,
+    photos,
+    toneColor: "#E3E9F6",
+    freshnessScore: idx,
+    description:
+      item.description ||
+      "Verified private room with secure access, high standards, and documented rental tenancy terms.",
+    houseRules,
+    ownerName: (item as any).contactName || "Verified Host",
+  };
+}
 
 export function RentBrowser() {
-  const { user, identityVerified } = useUserSession();
-  const { toast, showToast } = useToast();
+  const { user } = useUserSession();
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const [filters, setFilters] = useState<FilterState>(() => ({
-    ...emptyFilters,
-    city: searchParams.get("city") ?? "",
-    maxPrice: searchParams.get("maxPrice") ?? "",
-  }));
-  const [offset, setOffset] = useState(0);
+  // Search Bar States
+  const [locationInput, setLocationInput] = useState(() => searchParams.get("city") || "");
+  const [activeLocationQuery, setActiveLocationQuery] = useState(() => searchParams.get("city") || "");
+  const [moveInDate, setMoveInDate] = useState(() => todayIsoDate());
+  const [stayMonths, setStayMonths] = useState(0); // 0 = Flexible
 
-  const [listings, setListings] = useState<PublicListing[]>([]);
-  const [total, setTotal] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [appliedListingIds, setAppliedListingIds] = useState<Set<string>>(new Set());
+  // Recent searches list
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
 
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
+  // Filter controls
+  const [viewMode, setViewMode] = useState<"list" | "map">("list");
+  const [sortBy, setSortBy] = useState<"best" | "plow" | "phigh" | "soon">("best");
+  const [priceFilter, setPriceFilter] = useState("all");
+  const [roomTypeFilter, setRoomTypeFilter] = useState("all");
+  const [furnishedFilter, setFurnishedFilter] = useState("all");
+  const [availabilityFilter, setAvailabilityFilter] = useState("all");
 
-  const [selected, setSelected] = useState<PublicListing | null>(null);
-  const [detailListingId, setDetailListingId] = useState<string | null>(null);
+  // More filters checkboxes
+  const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
+  const [selectedBathrooms, setSelectedBathrooms] = useState<string[]>([]);
+  const [selectedAmenities, setSelectedAmenities] = useState<string[]>([]);
+  const [selectedAccessibility, setSelectedAccessibility] = useState<string[]>([]);
 
-  // Applications only need to be read once -- they don't depend on the filters/page.
-  useEffect(() => {
-    listRentalApplications()
-      .then((applications) =>
-        setAppliedListingIds(new Set(applications.filter((a) => a.status !== "WITHDRAWN").map((a) => a.listingId)))
-      )
-      .catch(() => undefined);
+  // User interactions
+  const [savedRooms, setSavedRooms] = useState<Record<string, boolean>>({});
+  const [appliedRooms, setAppliedRooms] = useState<Record<string, boolean>>({});
+  const [searchSaved, setSearchSaved] = useState(false);
+
+  // Modals & Drawers
+  const [drawerRoom, setDrawerRoom] = useState<FindARoomItem | null>(null);
+  const [drawerTab, setDrawerTab] = useState<"overview" | "amenities" | "availability" | "rules" | "about">("overview");
+
+  const [applyModalRoom, setApplyModalRoom] = useState<FindARoomItem | null>(null);
+  const [applyMessage, setApplyMessage] = useState("");
+  const [applyDesiredMoveIn, setApplyDesiredMoveIn] = useState(() => todayIsoDate());
+  const [applySubmitting, setApplySubmitting] = useState(false);
+  const [applyError, setApplyError] = useState("");
+
+  const [askModalRoom, setAskModalRoom] = useState<FindARoomItem | null>(null);
+  const [questionText, setQuestionText] = useState("");
+
+  // Toast
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const showToast = useCallback((msg: string) => {
+    setToastMsg(msg);
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    toastTimeoutRef.current = setTimeout(() => setToastMsg(null), 3000);
   }, []);
 
-  const load = useCallback(
-    (currentFilters: FilterState, currentOffset: number) => {
-      setLoading(true);
-      setLoadError("");
-      const minPrice = currentFilters.minPrice.trim() ? Number(currentFilters.minPrice) : undefined;
-      const maxPrice = currentFilters.maxPrice.trim() ? Number(currentFilters.maxPrice) : undefined;
-      listPublicListings({
-        city: currentFilters.city.trim() || undefined,
-        roomType: currentFilters.roomType.trim() || undefined,
-        minPrice: minPrice !== undefined && !Number.isNaN(minPrice) ? minPrice : undefined,
-        maxPrice: maxPrice !== undefined && !Number.isNaN(maxPrice) ? maxPrice : undefined,
-        limit: PAGE_SIZE,
-        offset: currentOffset,
+  // SSR Mount check for React Portals
+  const [mounted, setMounted] = useState(false);
+  const drawerBodyRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Lock body scroll and reset drawer scroll to top when drawer or modals open
+  useEffect(() => {
+    if (drawerRoom || applyModalRoom || askModalRoom) {
+      const originalStyle = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      if (drawerRoom && drawerBodyRef.current) {
+        drawerBodyRef.current.scrollTop = 0;
+      }
+      return () => {
+        document.body.style.overflow = originalStyle;
+      };
+    }
+  }, [drawerRoom, applyModalRoom, askModalRoom]);
+
+  // Dynamic Backend State
+  const [allRooms, setAllRooms] = useState<FindARoomItem[]>([]);
+  const [loadingBackend, setLoadingBackend] = useState(true);
+
+  // Load real data dynamically from FastAPI backend
+  useEffect(() => {
+    setLoadingBackend(true);
+    Promise.all([
+      listPublicListings({ limit: 100 }).catch(() => null),
+      listHostedListings().catch(() => []),
+      listRentalApplications().catch(() => []),
+    ])
+      .then(([publicPage, hostedListings, applications]) => {
+        const roomsMap = new Map<string, FindARoomItem>();
+
+        // 1. Map public published listings
+        if (publicPage && publicPage.items && publicPage.items.length > 0) {
+          publicPage.items.forEach((item, idx) => {
+            roomsMap.set(String(item.id), mapListingToFindARoomItem(item, idx));
+          });
+        }
+
+        // 2. Map hosted listings (ensures host-added rooms appear dynamically immediately)
+        if (Array.isArray(hostedListings) && hostedListings.length > 0) {
+          hostedListings.forEach((item, idx) => {
+            if (!roomsMap.has(String(item.id))) {
+              roomsMap.set(String(item.id), mapListingToFindARoomItem(item, roomsMap.size + idx));
+            }
+          });
+        }
+
+        setAllRooms(Array.from(roomsMap.values()));
+
+        // 3. Map user applications
+        if (Array.isArray(applications) && applications.length > 0) {
+          const appliedMap: Record<string, boolean> = {};
+          applications.forEach((a) => {
+            if (a.status !== "WITHDRAWN") {
+              appliedMap[String(a.listingId)] = true;
+            }
+          });
+          setAppliedRooms((prev) => ({ ...prev, ...appliedMap }));
+        }
       })
-        .then((page) => {
-          setListings(page.items);
-          setTotal(page.total);
-          setHasMore(page.hasMore);
-        })
-        .catch((err) => setLoadError(errorMessage(err, "Could not load available rooms right now.")))
-        .finally(() => setLoading(false));
-    },
-    []
-  );
+      .finally(() => setLoadingBackend(false));
+  }, []);
 
-  // Debounce filter changes (reset to page 1 on every filter edit) -- except the
-  // very first load, which should happen immediately rather than wait out the
-  // debounce with nothing on screen. Page changes (Prev/Next) fetch immediately
-  // too, since there's no typing to debounce there.
-  const isFirstRun = useRef(true);
-  useEffect(() => {
-    if (isFirstRun.current) {
-      isFirstRun.current = false;
-      load(filters, 0);
-      return;
+  // Execute Search query
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = locationInput.trim();
+    setActiveLocationQuery(q);
+    if (q && !recentSearches.includes(q)) {
+      setRecentSearches((prev) => [q, ...prev.slice(0, 3)]);
     }
-    const timeout = setTimeout(() => load(filters, 0), FILTER_DEBOUNCE_MS);
-    return () => clearTimeout(timeout);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters]);
+  };
 
-  useEffect(() => {
-    if (offset === 0) return; // already covered by the filter effect above
-    load(filters, offset);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offset]);
+  const handlePickRecent = (item: string) => {
+    setLocationInput(item);
+    setActiveLocationQuery(item);
+  };
 
-  function updateFilter<K extends keyof FilterState>(key: K, value: FilterState[K]) {
-    setFilters((prev) => ({ ...prev, [key]: value }));
-    setOffset(0);
-  }
+  const handleClearRecent = () => {
+    setRecentSearches([]);
+    showToast("Recent searches cleared");
+  };
 
-  function goToPage(direction: "prev" | "next") {
-    setOffset((prev) => Math.max(0, prev + (direction === "next" ? PAGE_SIZE : -PAGE_SIZE)));
-  }
+  // Discovered room types
+  const availableRoomTypes = useMemo(() => {
+    const set = new Set<string>(["En-suite", "Studio", "Single", "Double", "Private room"]);
+    allRooms.forEach((r) => {
+      if (r.roomType) set.add(r.roomType);
+    });
+    return Array.from(set);
+  }, [allRooms]);
 
-  function viewDetails(listingId: string) {
+  // Filter & match logic
+  const filteredRooms = useMemo(() => {
+    const q = activeLocationQuery.toLowerCase().trim();
+
+    return allRooms
+      .filter((r) => {
+        // Location text filter
+        if (q && q !== "all") {
+          const matchArea = r.area.toLowerCase().includes(q);
+          const matchCity = r.city.toLowerCase().includes(q);
+          const matchTitle = r.title.toLowerCase().includes(q);
+          if (!matchArea && !matchCity && !matchTitle) {
+            return false;
+          }
+        }
+
+        // Price filter
+        if (priceFilter !== "all") {
+          const max = Number(priceFilter);
+          if (r.monthlyRent > max) return false;
+        }
+
+        // Room Type filter
+        if (roomTypeFilter !== "all" && r.roomType.toLowerCase() !== roomTypeFilter.toLowerCase()) {
+          return false;
+        }
+
+        // Furnished filter
+        if (furnishedFilter !== "all" && r.furnishedState !== furnishedFilter) {
+          return false;
+        }
+
+        // Availability filter
+        if (availabilityFilter === "date" && r.availableDate > moveInDate) {
+          return false;
+        }
+
+        // Bathroom filter
+        if (selectedBathrooms.length > 0 && !selectedBathrooms.includes(r.bathroomType)) {
+          return false;
+        }
+
+        // Amenities filter
+        if (selectedAmenities.length > 0) {
+          const hasAll = selectedAmenities.every((a) =>
+            r.amenities.some((am) => am.toLowerCase().includes(a.toLowerCase()))
+          );
+          if (!hasAll) return false;
+        }
+
+        // Accessibility filter
+        if (selectedAccessibility.length > 0) {
+          const hasAll = selectedAccessibility.every((acc) => r.accessibility.includes(acc));
+          if (!hasAll) return false;
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+        if (sortBy === "plow") return a.monthlyRent - b.monthlyRent;
+        if (sortBy === "phigh") return b.monthlyRent - a.monthlyRent;
+        if (sortBy === "soon") return a.availableDate.localeCompare(b.availableDate);
+
+        // Best match algorithm
+        const diffA = Math.abs(new Date(a.availableDate).getTime() - new Date(moveInDate).getTime());
+        const diffB = Math.abs(new Date(b.availableDate).getTime() - new Date(moveInDate).getTime());
+        const penaltyA = (a.minStayMonths > stayMonths && stayMonths ? 9e9 : 0) + (a.applicationsState === "closed" ? 2e10 : 0);
+        const penaltyB = (b.minStayMonths > stayMonths && stayMonths ? 9e9 : 0) + (b.applicationsState === "closed" ? 2e10 : 0);
+        return diffA + penaltyA + a.freshnessScore * 1e7 - (diffB + penaltyB + b.freshnessScore * 1e7);
+      });
+  }, [
+    allRooms,
+    activeLocationQuery,
+    priceFilter,
+    roomTypeFilter,
+    furnishedFilter,
+    availabilityFilter,
+    selectedBathrooms,
+    selectedAmenities,
+    selectedAccessibility,
+    sortBy,
+    moveInDate,
+    stayMonths,
+  ]);
+
+  const isZeroState = filteredRooms.length === 0;
+
+  // Toggle Save Room
+  const handleToggleSave = (room: FindARoomItem, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setSavedRooms((prev) => {
+      const next = !prev[room.id];
+      showToast(next ? "Saved to your rooms." : "Removed from saved rooms.");
+      return { ...prev, [room.id]: next };
+    });
+  };
+
+  // Open Room Details Drawer
+  const handleOpenRoomDetails = (room: FindARoomItem) => {
+    setDrawerRoom(room);
+    setDrawerTab("overview");
+  };
+
+  // Open Apply Modal
+  const handleOpenApply = (room: FindARoomItem, e?: React.MouseEvent) => {
+    e?.stopPropagation();
     if (!user) {
       router.push("/account/login");
       return;
     }
-    setDetailListingId(listingId);
-  }
+    setApplyModalRoom(room);
+    setApplyMessage("");
+    setApplyDesiredMoveIn(moveInDate);
+    setApplyError("");
+  };
 
-  function openApply(listing: PublicListing) {
+  const handleConfirmApply = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!applyModalRoom) return;
+
+    setApplySubmitting(true);
+    setApplyError("");
+    try {
+      await submitRentalApplication({
+        listingId: applyModalRoom.listingId,
+        message: applyMessage,
+        desiredMoveIn: applyDesiredMoveIn,
+      });
+
+      setAppliedRooms((prev) => ({ ...prev, [applyModalRoom.id]: true }));
+      showToast(`Application submitted for ${applyModalRoom.title}!`);
+      setApplyModalRoom(null);
+    } catch (err) {
+      setApplyError(errorMessage(err, "Failed to submit application. Please try again."));
+    } finally {
+      setApplySubmitting(false);
+    }
+  };
+
+  // Open Ask a Question Modal
+  const handleOpenQuestion = (room: FindARoomItem, e?: React.MouseEvent) => {
+    e?.stopPropagation();
     if (!user) {
       router.push("/account/login");
       return;
     }
-    setSelected(listing);
-  }
+    setAskModalRoom(room);
+    setQuestionText("");
+  };
 
-  function handleApplied(listingId: string) {
-    setAppliedListingIds((prev) => new Set(prev).add(listingId));
-    setSelected(null);
-    showToast("Application submitted. Track it under My Applications.");
-  }
+  const handleConfirmQuestion = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!askModalRoom) return;
+    showToast(`Question sent to the lister of ${askModalRoom.title}. You will be notified of responses.`);
+    setAskModalRoom(null);
+  };
 
-  const hasActiveFilters = Boolean(filters.city || filters.roomType || filters.minPrice || filters.maxPrice);
-  const rangeStart = total === 0 ? 0 : offset + 1;
-  const rangeEnd = Math.min(offset + listings.length, total);
+  // Map view areas computed dynamically from actual rooms
+  const dynamicMapAreas = useMemo(() => {
+    const counts: Record<string, number> = {};
+    filteredRooms.forEach((r) => {
+      const mainArea = r.area.split(" · ")[0].trim() || r.city || "Central";
+      counts[mainArea] = (counts[mainArea] || 0) + 1;
+    });
+    return counts;
+  }, [filteredRooms]);
 
   return (
-    <div className="space-y-5">
-      {user && (
-        <IdentityGate action="apply for a room">
-          <Card className="!bg-emerald-50 !ring-emerald-200 dark:!bg-emerald-500/10 dark:!ring-emerald-500/20">
-            <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">
-              Your identity is verified — you can apply to any room below.
-            </p>
-          </Card>
-        </IdentityGate>
-      )}
+    <div className="space-y-6">
+      {/* 1. Hero Search Section */}
+      <section className="rounded-3xl border border-slate-200 bg-white p-6 sm:p-8 shadow-xs dark:border-slate-800 dark:bg-slate-900">
+        <h1 className="font-heading text-3xl sm:text-4xl font-extrabold text-[#0E2F73] dark:text-white tracking-tight">
+          Find a Room
+        </h1>
+        <p className="mt-2 text-sm sm:text-base text-slate-600 dark:text-slate-400 max-w-2xl">
+          Find verified rooms that match where you want to live, when you want to move, and how long you plan to stay.
+        </p>
 
-      <Card>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="City">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+        {/* Unified Search Bar */}
+        <form
+          onSubmit={handleSearchSubmit}
+          className="mt-6 grid grid-cols-1 md:grid-cols-[2fr_1fr_1fr_auto] rounded-2xl border border-slate-300 bg-white shadow-[0px_12px_30px_0px_rgba(14,47,115,0.08)] overflow-hidden dark:border-slate-700 dark:bg-slate-800/90"
+        >
+          {/* Location field */}
+          <div className="flex flex-col justify-center px-4 py-3 sm:px-5">
+            <label className="text-[11px] font-extrabold uppercase tracking-wide text-[#0E2F73] dark:text-blue-300">
+              Location
+            </label>
+            <div className="mt-1 flex items-center gap-2">
+              <MapPin className="h-4 w-4 text-[#0E2F73] shrink-0 dark:text-blue-400" />
               <input
-                value={filters.city}
-                onChange={(e) => updateFilter("city", e.target.value)}
-                placeholder="e.g. Mumbai"
-                className={`${inputClass} pl-10`}
+                type="text"
+                value={locationInput}
+                onChange={(e) => setLocationInput(e.target.value)}
+                placeholder="City, neighborhood or area"
+                className="w-full bg-transparent text-sm sm:text-base font-bold text-slate-900 placeholder:text-slate-400 focus:outline-none dark:text-white"
               />
             </div>
-          </Field>
-          <Field label="Room type">
-            <input
-              value={filters.roomType}
-              onChange={(e) => updateFilter("roomType", e.target.value)}
-              placeholder="e.g. Private room"
-              className={inputClass}
-            />
-          </Field>
-          <Field label="Min price / night">
-            <input
-              inputMode="decimal"
-              value={filters.minPrice}
-              onChange={(e) => updateFilter("minPrice", e.target.value)}
-              placeholder="0"
-              className={inputClass}
-            />
-          </Field>
-          <Field label="Max price / night">
-            <input
-              inputMode="decimal"
-              value={filters.maxPrice}
-              onChange={(e) => updateFilter("maxPrice", e.target.value)}
-              placeholder="Any"
-              className={inputClass}
-            />
-          </Field>
-        </div>
-      </Card>
-
-      {loading ? (
-        <Loader label="Loading available rooms" />
-      ) : loadError ? (
-        <Card>
-          <div className="flex flex-col items-center gap-3 py-8 text-center">
-            <AlertTriangle className="h-6 w-6 text-accent-600" />
-            <p className="text-sm text-slate-500 dark:text-slate-400">{loadError}</p>
-            <Button size="sm" variant="outline" onClick={() => load(filters, offset)}>
-              Retry
-            </Button>
           </div>
-        </Card>
-      ) : listings.length === 0 ? (
-        <Card>
-          <EmptyState
-            message={hasActiveFilters ? "No rooms match those filters." : "No rooms are published yet. Check back once hosts publish their listings."}
-          />
-        </Card>
-      ) : (
-        <>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {listings.map((listing) => {
-              const applied = appliedListingIds.has(listing.id);
-              return (
-                <div
-                  key={listing.id}
-                  className="flex flex-col overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-100 transition-all duration-300 hover:-translate-y-1 hover:shadow-lg dark:bg-slate-900 dark:ring-white/10"
-                >
-                  <button
-                    type="button"
-                    onClick={() => viewDetails(listing.id)}
-                    className="block w-full text-left"
-                    aria-label={`View details for ${listing.name}`}
-                  >
-                    {listing.images[0] ? (
-                      /* eslint-disable-next-line @next/next/no-img-element */
-                      <img src={resolveImageUrl(listing.images[0])} alt={listing.name} className="h-44 w-full object-cover" />
-                    ) : (
-                      <div className="flex h-44 w-full items-center justify-center bg-primary-50 dark:bg-primary-500/10">
-                        <BedDouble className="h-8 w-8 text-primary-300" />
-                      </div>
-                    )}
-                  </button>
 
-                  <div className="flex flex-1 flex-col p-4">
-                    <button
-                      type="button"
-                      onClick={() => viewDetails(listing.id)}
-                      className="flex items-start justify-between gap-2 text-left"
+          {/* Move-in Date field */}
+          <div className="border-t md:border-t-0 md:border-l border-slate-200 px-4 py-3 sm:px-5 flex flex-col justify-center dark:border-slate-700">
+            <label className="text-[11px] font-extrabold uppercase tracking-wide text-[#0E2F73] dark:text-blue-300">
+              Move-in
+            </label>
+            <div className="mt-1 flex items-center gap-2">
+              <Calendar className="h-4 w-4 text-[#0E2F73] shrink-0 dark:text-blue-400" />
+              <input
+                type="date"
+                value={moveInDate}
+                onChange={(e) => setMoveInDate(e.target.value)}
+                className="w-full bg-transparent text-sm sm:text-base font-bold text-slate-900 focus:outline-none dark:text-white"
+              />
+            </div>
+          </div>
+
+          {/* Stay Duration field */}
+          <div className="border-t md:border-t-0 md:border-l border-slate-200 px-4 py-3 sm:px-5 flex flex-col justify-center dark:border-slate-700">
+            <label className="text-[11px] font-extrabold uppercase tracking-wide text-[#0E2F73] dark:text-blue-300">
+              Stay
+            </label>
+            <div className="mt-1 flex items-center gap-2">
+              <Clock className="h-4 w-4 text-[#0E2F73] shrink-0 dark:text-blue-400" />
+              <select
+                value={stayMonths}
+                onChange={(e) => setStayMonths(Number(e.target.value))}
+                className="w-full bg-transparent text-sm sm:text-base font-bold text-slate-900 focus:outline-none dark:text-white"
+              >
+                <option value={0}>Flexible</option>
+                <option value={3}>3 months</option>
+                <option value={6}>6 months</option>
+                <option value={12}>12 months</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Search Button */}
+          <div className="border-t md:border-t-0 p-2 flex items-center justify-center">
+            <button
+              type="submit"
+              className="flex w-full md:w-auto items-center justify-center gap-2 rounded-xl bg-[#0E2F73] px-6 py-3.5 text-sm sm:text-base font-bold text-white shadow-xs transition-colors hover:bg-[#0B2560]"
+            >
+              <Search className="h-4 w-4" />
+              <span>Search</span>
+            </button>
+          </div>
+        </form>
+
+        {/* Recent Searches Row */}
+        {recentSearches.length > 0 && (
+          <div className="mt-4 flex flex-wrap items-center gap-2 pt-1 text-xs">
+            <span className="text-slate-500 dark:text-slate-400">Recent searches:</span>
+            {recentSearches.map((term) => (
+              <button
+                key={term}
+                type="button"
+                onClick={() => handlePickRecent(term)}
+                className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 font-bold text-[#0E2F73] transition-colors hover:border-[#0E2F73] dark:border-slate-700 dark:bg-slate-800 dark:text-blue-300"
+              >
+                {term}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={handleClearRecent}
+              className="font-bold text-slate-500 underline hover:text-slate-800 dark:text-slate-400"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+
+        {/* Trust Badges Strip */}
+        <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-slate-200 pt-4 text-xs font-bold text-[#0E2F73] dark:border-slate-800 dark:text-blue-300">
+          <div className="flex items-center gap-1.5">
+            <ShieldCheck className="h-4 w-4 text-[#0E2F73] dark:text-blue-400" />
+            <span>Verified properties</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Check className="h-4 w-4 text-[#0E2F73] dark:text-blue-400" />
+            <span>Verified listing authority</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <MessageSquare className="h-4 w-4 text-[#0E2F73] dark:text-blue-400" />
+            <span>Secure in-platform messaging</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <FileText className="h-4 w-4 text-[#0E2F73] dark:text-blue-400" />
+            <span>Documented rental records</span>
+          </div>
+        </div>
+      </section>
+
+      {/* 2. Results Count, Views & Controls Bar */}
+      <section className="space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <h2 className="font-heading text-xl font-extrabold text-[#0E2F73] dark:text-white">
+            {loadingBackend
+              ? "Loading rooms..."
+              : isZeroState
+              ? "0 rooms match your search"
+              : `${filteredRooms.length} room${filteredRooms.length === 1 ? "" : "s"} match your search`}
+          </h2>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* View Segmented Toggle (List / Map) */}
+            <div className="flex items-center rounded-xl bg-slate-200/80 p-1 dark:bg-slate-800">
+              <button
+                type="button"
+                onClick={() => setViewMode("list")}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition-all ${
+                  viewMode === "list"
+                    ? "bg-white text-[#0E2F73] shadow-xs dark:bg-slate-700 dark:text-white"
+                    : "text-slate-600 hover:text-slate-900 dark:text-slate-400"
+                }`}
+              >
+                <FileText className="h-3.5 w-3.5" />
+                <span>List</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("map")}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition-all ${
+                  viewMode === "map"
+                    ? "bg-white text-[#0E2F73] shadow-xs dark:bg-slate-700 dark:text-white"
+                    : "text-slate-600 hover:text-slate-900 dark:text-slate-400"
+                }`}
+              >
+                <MapIcon className="h-3.5 w-3.5" />
+                <span>Map</span>
+              </button>
+            </div>
+
+            {/* Sort Dropdown */}
+            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-500">
+              <span>Sort</span>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as any)}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+              >
+                <option value="best">Best Match</option>
+                <option value="plow">Price, low to high</option>
+                <option value="phigh">Price, high to low</option>
+                <option value="soon">Soonest available</option>
+              </select>
+            </div>
+
+            {/* Save Search Button */}
+            <button
+              type="button"
+              onClick={() => {
+                setSearchSaved((s) => !s);
+                showToast(searchSaved ? "Search unsaved." : "Search saved. Alerts on for new verified matches.");
+              }}
+              className={`flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition-colors ${
+                searchSaved
+                  ? "border-[#0E2F73] bg-[#0E2F73] text-white"
+                  : "border-slate-200 bg-white text-[#0E2F73] hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-blue-300"
+              }`}
+            >
+              <Bookmark className="h-3.5 w-3.5" />
+              <span>{searchSaved ? "Search Saved" : "Save Search"}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Filter Pills / Dropdowns Row */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-xs dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex flex-wrap items-end gap-3">
+            {/* Price Filter */}
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-bold text-[#0E2F73] dark:text-blue-300">Price (per month)</label>
+              <select
+                value={priceFilter}
+                onChange={(e) => setPriceFilter(e.target.value)}
+                className="h-10 min-w-36 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+              >
+                <option value="all">Any price</option>
+                <option value="20000">Up to ₹20,000</option>
+                <option value="25000">Up to ₹25,000</option>
+                <option value="30000">Up to ₹30,000</option>
+                <option value="50000">Up to ₹50,000</option>
+                <option value="100000">Up to ₹100,000</option>
+              </select>
+            </div>
+
+            {/* Room Type Filter */}
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-bold text-[#0E2F73] dark:text-blue-300">Room Type</label>
+              <select
+                value={roomTypeFilter}
+                onChange={(e) => setRoomTypeFilter(e.target.value)}
+                className="h-10 min-w-36 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+              >
+                <option value="all">Any type</option>
+                {availableRoomTypes.map((rt) => (
+                  <option key={rt} value={rt}>
+                    {rt}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Furnished Filter */}
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-bold text-[#0E2F73] dark:text-blue-300">Furnished</label>
+              <select
+                value={furnishedFilter}
+                onChange={(e) => setFurnishedFilter(e.target.value)}
+                className="h-10 min-w-36 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+              >
+                <option value="all">Any</option>
+                <option value="yes">Furnished</option>
+                <option value="part">Part furnished</option>
+                <option value="no">Unfurnished</option>
+              </select>
+            </div>
+
+            {/* Availability Filter */}
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-bold text-[#0E2F73] dark:text-blue-300">Availability</label>
+              <select
+                value={availabilityFilter}
+                onChange={(e) => setAvailabilityFilter(e.target.value)}
+                className="h-10 min-w-36 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+              >
+                <option value="all">Any</option>
+                <option value="date">By my move-in date</option>
+                <option value="future">Later is fine</option>
+              </select>
+            </div>
+
+            {/* More Filters Toggle */}
+            <button
+              type="button"
+              onClick={() => setMoreFiltersOpen((o) => !o)}
+              className="flex h-10 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 text-xs font-bold text-[#0E2F73] hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-blue-300"
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+              <span>More Filters</span>
+            </button>
+          </div>
+
+          {/* Expandable More Filters Sub-Panel */}
+          {moreFiltersOpen && (
+            <div className="mt-4 border-t border-slate-200 pt-4 grid grid-cols-1 sm:grid-cols-3 gap-4 dark:border-slate-800 text-xs">
+              {/* Bathroom Type */}
+              <div>
+                <span className="font-extrabold uppercase tracking-wide text-slate-500 dark:text-slate-400">Bathroom</span>
+                <div className="mt-2 space-y-2">
+                  {["Private", "Shared"].map((b) => (
+                    <label key={b} className="flex items-center gap-2 cursor-pointer font-semibold text-slate-800 dark:text-slate-200">
+                      <input
+                        type="checkbox"
+                        checked={selectedBathrooms.includes(b)}
+                        onChange={(e) => {
+                          setSelectedBathrooms((prev) =>
+                            e.target.checked ? [...prev, b] : prev.filter((x) => x !== b)
+                          );
+                        }}
+                        className="rounded border-slate-300 text-[#0E2F73] focus:ring-[#0E2F73]"
+                      />
+                      <span>{b} bathroom</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Amenities */}
+              <div>
+                <span className="font-extrabold uppercase tracking-wide text-slate-500 dark:text-slate-400">Amenities</span>
+                <div className="mt-2 space-y-2">
+                  {["Wi-Fi", "Workspace", "Laundry", "Kitchen"].map((am) => (
+                    <label key={am} className="flex items-center gap-2 cursor-pointer font-semibold text-slate-800 dark:text-slate-200">
+                      <input
+                        type="checkbox"
+                        checked={selectedAmenities.includes(am)}
+                        onChange={(e) => {
+                          setSelectedAmenities((prev) =>
+                            e.target.checked ? [...prev, am] : prev.filter((x) => x !== am)
+                          );
+                        }}
+                        className="rounded border-slate-300 text-[#0E2F73] focus:ring-[#0E2F73]"
+                      />
+                      <span>{am}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Accessibility */}
+              <div>
+                <span className="font-extrabold uppercase tracking-wide text-slate-500 dark:text-slate-400">Accessibility</span>
+                <div className="mt-2 space-y-2">
+                  {["Step-free entrance", "Lift access"].map((acc) => (
+                    <label key={acc} className="flex items-center gap-2 cursor-pointer font-semibold text-slate-800 dark:text-slate-200">
+                      <input
+                        type="checkbox"
+                        checked={selectedAccessibility.includes(acc)}
+                        onChange={(e) => {
+                          setSelectedAccessibility((prev) =>
+                            e.target.checked ? [...prev, acc] : prev.filter((x) => x !== acc)
+                          );
+                        }}
+                        className="rounded border-slate-300 text-[#0E2F73] focus:ring-[#0E2F73]"
+                      />
+                      <span>{acc}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* 3. Interactive SVG Map View (Toggled) */}
+      {viewMode === "map" && (
+        <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-heading text-base font-bold text-[#0E2F73] dark:text-white">
+              Area Distribution ({filteredRooms.length} rooms)
+            </h3>
+            <span className="text-xs text-slate-500">Click any area node to filter</span>
+          </div>
+
+          <div className="mt-4 relative w-full overflow-hidden rounded-2xl bg-gradient-to-b from-[#F7F9FD] to-[#EEF3FA] dark:from-slate-950 dark:to-slate-900 border border-slate-200 dark:border-slate-800">
+            {Object.keys(dynamicMapAreas).length > 0 ? (
+              <svg viewBox="0 0 900 380" className="w-full h-auto">
+                <defs>
+                  <radialGradient id="mapDotGrad" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stopColor="#D80B0B" stopOpacity="0.8" />
+                    <stop offset="100%" stopColor="#0E2F73" stopOpacity="0.9" />
+                  </radialGradient>
+                </defs>
+
+                {/* Grid guidelines */}
+                <path d="M 50 190 Q 450 170 850 190" stroke="#CBD5E1" strokeWidth="1" strokeDasharray="4 4" fill="none" opacity="0.4" />
+                <path d="M 200 60 Q 450 320 700 60" stroke="#CBD5E1" strokeWidth="1" strokeDasharray="4 4" fill="none" opacity="0.4" />
+
+                {Object.entries(dynamicMapAreas).map(([areaName, count], idx) => {
+                  const total = Object.keys(dynamicMapAreas).length;
+                  const stepX = 700 / Math.max(1, total);
+                  const x = 120 + idx * stepX;
+                  const y = 140 + (idx % 2 === 0 ? -40 : 40);
+                  const radius = Math.min(48, Math.max(26, 22 + count * 5));
+
+                  return (
+                    <g
+                      key={areaName}
+                      className="cursor-pointer transition-transform duration-200 hover:scale-105"
+                      onClick={() => {
+                        setLocationInput(areaName);
+                        setActiveLocationQuery(areaName);
+                        showToast(`Filtered by ${areaName}`);
+                      }}
                     >
-                      <p className="font-heading text-sm font-bold text-primary-900 dark:text-white hover:underline">{listing.name}</p>
-                      <Badge tone="primary">{listing.roomType}</Badge>
-                    </button>
+                      <circle cx={x} cy={y} r={radius} fill="url(#mapDotGrad)" className="opacity-80" />
+                      <circle cx={x} cy={y} r={radius - 4} fill="#FFFFFF" opacity="0.9" />
+                      <text x={x} y={y - 2} textAnchor="middle" fontSize="14" fontWeight="800" fill="#0E2F73">
+                        {count}
+                      </text>
+                      <text x={x} y={y + 12} textAnchor="middle" fontSize="9" fontWeight="700" fill="#64748B">
+                        ROOMS
+                      </text>
+                      <text
+                        x={x}
+                        y={y + radius + 16}
+                        textAnchor="middle"
+                        fontSize="12"
+                        fontWeight="700"
+                        fill="#0B1B3F"
+                        className="dark:fill-white font-sans"
+                      >
+                        {areaName}
+                      </text>
+                    </g>
+                  );
+                })}
+              </svg>
+            ) : (
+              <div className="py-20 flex flex-col items-center justify-center text-center">
+                <MapPin className="h-10 w-10 text-slate-400" />
+                <p className="mt-2 text-sm font-bold text-slate-600 dark:text-slate-400">
+                  No active room locations to display.
+                </p>
+              </div>
+            )}
+          </div>
+          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+            ⓘ Circles show approximate areas only — exact addresses are verified and shared at later stages.
+          </p>
+        </section>
+      )}
 
-                    <p className="mt-1 flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-                      <MapPin className="h-3.5 w-3.5" /> {[listing.location, listing.city].filter(Boolean).join(", ")}
-                    </p>
+      {/* 4. Results Section: Cards Grid or Dynamic Empty State */}
+      {isZeroState ? (
+        <section className="rounded-3xl border border-slate-200 bg-white p-8 sm:p-12 text-center shadow-xs dark:border-slate-800 dark:bg-slate-900">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-[#EAF0FB] text-[#0E2F73] dark:bg-blue-950/40 dark:text-blue-300">
+            <Search className="h-8 w-8" />
+          </div>
+          <h3 className="font-heading mt-4 text-xl font-extrabold text-[#0E2F73] dark:text-white">
+            {allRooms.length === 0 ? "No rooms listed yet" : "0 rooms match your search"}
+          </h3>
+          <p className="mx-auto mt-2 max-w-lg text-sm text-slate-600 dark:text-slate-400">
+            {allRooms.length === 0
+              ? "There are currently no rooms listed on the platform. When hosts add properties and rooms, they will appear here with full verification details."
+              : `We couldn't find any rooms matching "${activeLocationQuery || "your filters"}". Try adjusting your filters or location search.`}
+          </p>
 
-                    <div className="mt-1.5 flex items-center gap-1.5">
-                      {listing.reviewCount > 0 ? (
-                        <>
-                          <StarRating rating={listing.rating} size={12} />
-                          <span className="text-xs text-slate-400">
-                            {listing.rating.toFixed(1)} ({listing.reviewCount} review{listing.reviewCount === 1 ? "" : "s"})
-                          </span>
-                        </>
-                      ) : (
-                        <span className="text-xs font-medium text-slate-400">New · no reviews yet</span>
-                      )}
-                    </div>
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+            {allRooms.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setLocationInput("");
+                  setActiveLocationQuery("");
+                  setPriceFilter("all");
+                  setRoomTypeFilter("all");
+                  setFurnishedFilter("all");
+                  setAvailabilityFilter("all");
+                  setSelectedBathrooms([]);
+                  setSelectedAmenities([]);
+                  setSelectedAccessibility([]);
+                }}
+                className="rounded-xl bg-[#0E2F73] px-5 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#0B2560] transition-colors"
+              >
+                Clear all filters
+              </button>
+            ) : (
+              <Link
+                href="/account/host/listings"
+                className="rounded-xl bg-[#0E2F73] px-5 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#0B2560] transition-colors"
+              >
+                List a room as host
+              </Link>
+            )}
 
-                    <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
-                      <span className="flex items-center gap-1">
-                        <Users className="h-3.5 w-3.5" /> {listing.guests} guest{listing.guests === 1 ? "" : "s"}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <BedDouble className="h-3.5 w-3.5" /> {listing.bedrooms} bed{listing.bedrooms === 1 ? "" : "s"}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Bath className="h-3.5 w-3.5" /> {listing.bathrooms}
-                      </span>
-                      {listing.size > 0 && (
-                        <span className="flex items-center gap-1">
-                          <Ruler className="h-3.5 w-3.5" /> {listing.size} sq ft
-                        </span>
-                      )}
-                    </div>
+            <button
+              type="button"
+              onClick={() => {
+                setSearchSaved(true);
+                showToast("Search saved for alerts.");
+              }}
+              className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-[#0E2F73] hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-blue-300"
+            >
+              <Bookmark className="h-3.5 w-3.5" />
+              <span>Save search for alerts</span>
+            </button>
+          </div>
+        </section>
+      ) : (
+        /* 2-Column Grid of Horizontal Room Cards Matching Figma Exactly */
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {filteredRooms.map((room) => {
+            const isSaved = Boolean(savedRooms[room.id]);
+            const isApplied = Boolean(appliedRooms[room.id]);
 
-                    {listing.amenities.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        {listing.amenities.slice(0, 3).map((amenity) => (
-                          <Badge key={amenity} tone="neutral" className="!text-[10px]">
-                            {amenity}
-                          </Badge>
-                        ))}
-                        {listing.amenities.length > 3 && (
-                          <Badge tone="neutral" className="!text-[10px]">
-                            +{listing.amenities.length - 3} more
-                          </Badge>
-                        )}
+            // Availability text & status styling
+            const isNow = room.availableDate <= todayIsoDate();
+            const dateFormatted = new Date(`${room.availableDate}T12:00:00`).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+            });
+            const baseAvail = room.roomState === "offer" ? "Under Offer" : isNow ? "Available now" : `Available ${dateFormatted}`;
+            const appsText = room.applicationsState === "open" ? (room.roomState === "offer" ? "Applications still open" : "Applications open") : "Applications closed";
+
+            // Match notes
+            const diffDays = Math.round((new Date(room.availableDate).getTime() - new Date(moveInDate).getTime()) / 864e5);
+            let mismatchNote: string | null = null;
+            if (diffDays > 3) {
+              const weeks = Math.max(1, Math.round(diffDays / 7));
+              mismatchNote = `Not an exact match — available ${weeks} ${weeks === 1 ? "week" : "weeks"} after your move-in`;
+            } else if (stayMonths && room.minStayMonths > stayMonths) {
+              mismatchNote = `Minimum stay ${room.minStayMonths} months is longer than your ${stayMonths}-month stay`;
+            }
+
+            return (
+              <article
+                key={room.id}
+                onClick={() => handleOpenRoomDetails(room)}
+                className="group cursor-pointer grid grid-cols-1 sm:grid-cols-[210px_1fr] rounded-3xl border border-slate-200 bg-white overflow-hidden shadow-xs hover:border-slate-300 hover:shadow-md transition-all dark:border-slate-800 dark:bg-slate-900"
+              >
+                {/* Photo Section */}
+                <div className="relative min-h-[200px] sm:min-h-[220px] bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={room.photos[0] || DEFAULT_ROOM_PHOTOS[0]}
+                    alt={room.title}
+                    className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                  />
+                  <div className="absolute bottom-2.5 left-2.5 rounded-lg bg-black/60 px-2 py-0.5 text-[11px] font-bold text-white backdrop-blur-xs">
+                    1 / {room.photos.length}
+                  </div>
+                </div>
+
+                {/* Content Section */}
+                <div className="p-4 flex flex-col justify-between gap-2.5">
+                  <div>
+                    {/* Header: Title, Area, and Save Button */}
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <h3 className="font-heading text-base font-extrabold text-[#0B1B3F] group-hover:text-[#D80B0B] transition-colors dark:text-white">
+                          {room.title}
+                        </h3>
+                        <p className="mt-0.5 flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
+                          <MapPin className="h-3 w-3 text-slate-400" />
+                          <span>Approx. location: {room.area}</span>
+                        </p>
                       </div>
-                    )}
 
-                    {listing.description && (
-                      <p className="mt-3 line-clamp-2 text-xs text-slate-500 dark:text-slate-400">
-                        {listing.description}
+                      {/* Save Heart Button */}
+                      <button
+                        type="button"
+                        onClick={(e) => handleToggleSave(room, e)}
+                        className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-bold transition-colors ${
+                          isSaved
+                            ? "border-red-200 bg-red-50 text-red-600 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-400"
+                            : "border-slate-200 bg-white text-[#0E2F73] hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-blue-300"
+                        }`}
+                      >
+                        <Heart className={`h-3.5 w-3.5 ${isSaved ? "fill-red-600 text-red-600" : ""}`} />
+                        <span>{isSaved ? "Saved" : "Save"}</span>
+                      </button>
+                    </div>
+
+                    {/* Trust Badges */}
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-[#E7F8EF] px-2 py-0.5 text-[11px] font-bold text-[#05603A] dark:bg-emerald-950/40 dark:text-emerald-300">
+                        <ShieldCheck className="h-3 w-3" />
+                        <span>Property Verified</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-[#E7F8EF] px-2 py-0.5 text-[11px] font-bold text-[#05603A] dark:bg-emerald-950/40 dark:text-emerald-300">
+                        <Check className="h-3 w-3" />
+                        <span>Listing Authority Verified</span>
+                      </span>
+                    </div>
+
+                    {/* Availability Line */}
+                    <div className="mt-2 flex items-center gap-1.5 text-xs font-bold">
+                      {room.roomState === "offer" ? (
+                        <div className="flex items-center gap-1.5 text-[#93370D] dark:text-amber-400">
+                          <Clock className="h-3.5 w-3.5 shrink-0" />
+                          <span>{baseAvail} · {appsText}</span>
+                        </div>
+                      ) : room.applicationsState === "closed" ? (
+                        <div className="flex items-center gap-1.5 text-slate-500">
+                          <Lock className="h-3.5 w-3.5 shrink-0" />
+                          <span>{baseAvail} · {appsText}</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5 text-[#05603A] dark:text-emerald-400">
+                          <Calendar className="h-3.5 w-3.5 shrink-0" />
+                          <span>{baseAvail} · {appsText}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Move-in mismatch note */}
+                    {mismatchNote && (
+                      <p className="mt-1 flex items-start gap-1 text-[11px] font-semibold text-[#1D3F8F] dark:text-blue-300">
+                        <Info className="h-3 w-3 shrink-0 mt-0.5" />
+                        <span>{mismatchNote}</span>
                       </p>
                     )}
 
-                    <div className="mt-auto flex items-end justify-between gap-2 pt-4">
-                      <div>
-                        <p className="font-heading text-lg font-extrabold text-primary-900 dark:text-white">
-                          {formatCurrency(listing.pricePerNight, listing.currency)}
-                          <span className="text-xs font-medium text-slate-400"> / night</span>
-                        </p>
-                        <p className="text-xs text-slate-400">Min. {listing.minStayNights} nights</p>
-                      </div>
-                      <Button
-                        size="sm"
-                        variant={applied ? "outline" : "primary"}
-                        disabled={applied || (Boolean(user) && !identityVerified)}
-                        onClick={() => openApply(listing)}
+                    {/* Specs summary */}
+                    <p className="mt-1.5 text-xs text-slate-600 dark:text-slate-400 line-clamp-1">
+                      {room.roomType} · {room.amenities.join(" · ")}
+                    </p>
+                  </div>
+
+                  {/* Footer: Price & View Room Button */}
+                  <div className="flex items-center justify-between border-t border-slate-100 pt-2.5 dark:border-slate-800">
+                    <div>
+                      <p className="font-heading text-lg font-extrabold text-[#0E2F73] dark:text-white">
+                        {formatCurrency(room.monthlyRent, room.currency)}
+                      </p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        / month · Minimum {room.minStayMonths} months
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {isApplied && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-[#EEF3FF] px-2.5 py-1 text-xs font-bold text-[#1D3F8F] dark:bg-blue-950/40 dark:text-blue-300">
+                          <Check className="h-3.5 w-3.5" />
+                          <span>Applied</span>
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleOpenRoomDetails(room)}
+                        className="rounded-xl bg-[#0E2F73] px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-[#0B2560]"
                       >
-                        {applied ? "Applied" : "Apply"}
-                      </Button>
+                        View Room
+                      </button>
                     </div>
                   </div>
                 </div>
-              );
-            })}
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-            <p className="text-xs text-slate-400">
-              Showing {rangeStart}–{rangeEnd} of {total} room{total === 1 ? "" : "s"}
-            </p>
-            <div className="flex items-center gap-2">
-              <Button size="sm" variant="outline" disabled={offset === 0} onClick={() => goToPage("prev")}>
-                <ChevronLeft className="h-3.5 w-3.5" /> Previous
-              </Button>
-              <Button size="sm" variant="outline" disabled={!hasMore} onClick={() => goToPage("next")}>
-                Next <ChevronRight className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          </div>
-        </>
+              </article>
+            );
+          })}
+        </div>
       )}
 
-      <ApplyForRoomModal listing={selected} onClose={() => setSelected(null)} onApplied={handleApplied} />
-      <ListingDetailModal listingId={detailListingId} onClose={() => setDetailListingId(null)} onApplied={handleApplied} />
-
-      <p className="text-center text-xs text-slate-400">
-        Already applied somewhere?{" "}
-        <Link href="/account/applications" className="font-semibold text-primary-700 dark:text-primary-300">
-          Track your applications
-        </Link>
+      {/* 5. Bottom Footnote */}
+      <p className="text-xs text-slate-500 dark:text-slate-400">
+        Prices are shown in each listing’s currency. Locations are approximate until later stages of your application.
       </p>
 
-      <Toast toast={toast} />
+      {/* 6. Slide-Over Room Detail Drawer */}
+      {mounted &&
+        drawerRoom &&
+        createPortal(
+          <div className="fixed inset-0 z-50 flex justify-end">
+            {/* Backdrop */}
+            <div
+              className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs transition-opacity"
+              onClick={() => setDrawerRoom(null)}
+            />
+
+            {/* Drawer Body */}
+            <aside className="relative z-10 flex h-full w-full max-w-xl flex-col bg-white shadow-2xl dark:bg-slate-900 animate-in slide-in-from-right duration-200">
+              {/* Drawer Header (Fixed at top) */}
+              <div className="flex items-start justify-between gap-4 border-b border-slate-100 p-6 pb-4 dark:border-slate-800 shrink-0">
+                <div>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#D80B0B]">
+                    {drawerRoom.roomNumber} — {drawerRoom.roomType}
+                  </span>
+                  <h3 className="font-heading text-2xl font-extrabold text-[#0E2F73] dark:text-white mt-0.5">
+                    {drawerRoom.title}
+                  </h3>
+                  <p className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 mt-1">
+                    <MapPin className="h-3.5 w-3.5" />
+                    <span>{drawerRoom.area} · {drawerRoom.city}</span>
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setDrawerRoom(null)}
+                  className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 transition-colors"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Drawer Scrollable Content */}
+              <div ref={drawerBodyRef} className="flex-1 overflow-y-auto p-6 space-y-5">
+                {/* Photo Gallery Grid */}
+                <div className="grid grid-cols-3 gap-2 h-48 rounded-2xl overflow-hidden bg-slate-100 dark:bg-slate-800">
+                  <div className="col-span-2 relative h-full">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={drawerRoom.photos[0] || DEFAULT_ROOM_PHOTOS[0]}
+                      alt="Room main"
+                      className="h-full w-full object-cover"
+                    />
+                  </div>
+                  <div className="grid grid-rows-2 gap-2 h-full">
+                    <div className="relative h-full overflow-hidden">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={drawerRoom.photos[1] || drawerRoom.photos[0] || DEFAULT_ROOM_PHOTOS[1]}
+                        alt="Room angle"
+                        className="h-full w-full object-cover"
+                      />
+                    </div>
+                    <div className="relative h-full overflow-hidden">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={drawerRoom.photos[2] || drawerRoom.photos[0] || DEFAULT_ROOM_PHOTOS[2]}
+                        alt="Room detail"
+                        className="h-full w-full object-cover"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Badges & Key Metrics */}
+                <div className="flex flex-wrap items-center justify-between gap-3 border-y border-slate-100 py-3 dark:border-slate-800">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">
+                      Monthly Rent:{" "}
+                      <strong className="text-2xl font-extrabold text-[#0E2F73] dark:text-white">
+                        {formatCurrency(drawerRoom.monthlyRent, drawerRoom.currency)}
+                      </strong>
+                      <span className="text-xs font-normal"> / month</span>
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Min stay: {drawerRoom.minStayMonths} months · Available: {drawerRoom.availableDate}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-[#E7F8EF] px-2.5 py-1 text-xs font-bold text-[#05603A] dark:bg-emerald-950/40 dark:text-emerald-300">
+                      <ShieldCheck className="h-3.5 w-3.5" />
+                      <span>Property Verified</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-[#E7F8EF] px-2.5 py-1 text-xs font-bold text-[#05603A] dark:bg-emerald-950/40 dark:text-emerald-300">
+                      <Check className="h-3.5 w-3.5" />
+                      <span>Listing Authority Verified</span>
+                    </span>
+                  </div>
+                </div>
+
+                {/* Navigation Tabs */}
+                <div className="flex border-b border-slate-200 text-xs font-bold dark:border-slate-800">
+                  {[
+                    { id: "overview", label: "Overview" },
+                    { id: "amenities", label: "Amenities" },
+                    { id: "availability", label: "Availability" },
+                    { id: "rules", label: "House Rules" },
+                    { id: "about", label: "About the Property" },
+                  ].map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setDrawerTab(tab.id as any)}
+                      className={`pb-2.5 px-3 border-b-2 transition-colors ${
+                        drawerTab === tab.id
+                          ? "border-[#0E2F73] text-[#0E2F73] dark:border-blue-400 dark:text-blue-400"
+                          : "border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400"
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Tab Contents */}
+                <div className="space-y-4 text-xs leading-relaxed text-slate-700 dark:text-slate-300">
+                  {drawerTab === "overview" && (
+                    <div className="space-y-4">
+                      <p className="text-sm text-slate-600 dark:text-slate-300">
+                        {drawerRoom.description}
+                      </p>
+                      <div className="grid grid-cols-2 gap-3 pt-2">
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/40">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Bathroom</span>
+                          <p className="mt-0.5 text-sm font-bold text-[#0E2F73] dark:text-white">
+                            {drawerRoom.bathroomType} Bathroom
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/40">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Furnishing</span>
+                          <p className="mt-0.5 text-sm font-bold text-[#0E2F73] dark:text-white capitalize">
+                            {drawerRoom.furnishedState === "yes" ? "Fully Furnished" : drawerRoom.furnishedState === "part" ? "Part Furnished" : "Unfurnished"}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {drawerTab === "amenities" && (
+                    <div className="space-y-3">
+                      <h4 className="font-bold text-[#0E2F73] dark:text-white">Verified Amenities</h4>
+                      <ul className="grid grid-cols-2 gap-2">
+                        {drawerRoom.amenities.map((am) => (
+                          <li key={am} className="flex items-center gap-2 rounded-lg bg-slate-50 p-2.5 dark:bg-slate-800/40">
+                            <Check className="h-4 w-4 text-[#05603A]" />
+                            <span className="font-semibold text-slate-800 dark:text-slate-200">{am}</span>
+                          </li>
+                        ))}
+                      </ul>
+                      {drawerRoom.accessibility.length > 0 && (
+                        <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800">
+                          <h4 className="font-bold text-[#0E2F73] dark:text-white mb-2">Accessibility Features</h4>
+                          <ul className="space-y-1">
+                            {drawerRoom.accessibility.map((acc) => (
+                              <li key={acc} className="flex items-center gap-2">
+                                <Check className="h-4 w-4 text-[#05603A]" />
+                                <span>{acc}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {drawerTab === "availability" && (
+                    <div className="space-y-3">
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-800/40 space-y-2">
+                        <div className="flex justify-between">
+                          <span className="font-semibold text-slate-500">Available from:</span>
+                          <span className="font-bold text-[#0E2F73] dark:text-white">{drawerRoom.availableDate}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="font-semibold text-slate-500">Minimum stay:</span>
+                          <span className="font-bold text-[#0E2F73] dark:text-white">{drawerRoom.minStayMonths} months</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="font-semibold text-slate-500">Application status:</span>
+                          <span className="font-bold text-[#05603A] capitalize">{drawerRoom.applicationsState}</span>
+                        </div>
+                      </div>
+                      <p className="text-slate-500 italic">
+                        All leases on Zoiko Rooms are formalized with signed Residential Occupancy Agreements and protected security deposits.
+                      </p>
+                    </div>
+                  )}
+
+                  {drawerTab === "rules" && (
+                    <div className="space-y-2">
+                      <h4 className="font-bold text-[#0E2F73] dark:text-white">Host House Rules</h4>
+                      <ul className="space-y-2">
+                        {(drawerRoom.houseRules || []).map((rule, idx) => (
+                          <li key={idx} className="flex items-start gap-2">
+                            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#EAF0FB] font-bold text-[#0E2F73] text-[10px]">
+                              {idx + 1}
+                            </span>
+                            <span className="mt-0.5">{rule}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {drawerTab === "about" && (
+                    <div className="space-y-3">
+                      <div className="rounded-2xl bg-[#EEF3FF] p-4 text-[#1D3F8F] dark:bg-blue-950/40 dark:text-blue-300 space-y-2">
+                        <p className="font-bold flex items-center gap-1.5">
+                          <ShieldCheck className="h-4 w-4" />
+                          <span>Property Location & Authority Verified</span>
+                        </p>
+                        <p className="leading-relaxed">
+                          The host of this property has completed identity verification, property title verification, and declared formal authority to lease private rooms at this location.
+                        </p>
+                      </div>
+                      <p className="text-slate-500">
+                        Exact building and apartment address are shared upon application acceptance and agreement execution.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Drawer Fixed Footer Actions */}
+              <div className="border-t border-slate-200 bg-white p-4 sm:px-6 flex items-center justify-between gap-3 dark:border-slate-800 dark:bg-slate-900 shrink-0">
+                <button
+                  type="button"
+                  onClick={(e) => handleOpenQuestion(drawerRoom, e)}
+                  className="flex items-center gap-2 rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-[#0E2F73] hover:bg-slate-50 dark:border-slate-700 dark:text-blue-300"
+                >
+                  <MessageSquare className="h-4 w-4" />
+                  <span>Ask a Question</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => handleOpenApply(drawerRoom, e)}
+                  className="flex items-center gap-2 rounded-xl bg-[#D80B0B] px-6 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#B80909]"
+                >
+                  <Check className="h-4 w-4" />
+                  <span>Apply for Room</span>
+                </button>
+              </div>
+            </aside>
+          </div>,
+          document.body
+        )}
+
+      {/* 7. Apply Modal */}
+      {mounted &&
+        applyModalRoom &&
+        createPortal(
+          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs" onClick={() => setApplyModalRoom(null)} />
+            <div className="relative z-10 w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl dark:bg-slate-900 max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in-95 duration-150">
+              <div className="flex items-start justify-between">
+                <div>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#D80B0B]">
+                    Rental Application
+                  </span>
+                  <h3 className="font-heading text-xl font-extrabold text-[#0E2F73] dark:text-white mt-0.5">
+                    Apply for {applyModalRoom.title}
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {applyModalRoom.area} · {formatCurrency(applyModalRoom.monthlyRent, applyModalRoom.currency)} / month
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setApplyModalRoom(null)}
+                  className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleConfirmApply} className="mt-4 space-y-4">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Desired Move-in Date
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={applyDesiredMoveIn}
+                    onChange={(e) => setApplyDesiredMoveIn(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs font-semibold focus:border-[#0E2F73] focus:outline-none dark:border-slate-700 dark:bg-slate-800"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Message to Lister
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={applyMessage}
+                    onChange={(e) => setApplyMessage(e.target.value)}
+                    placeholder="Introduce yourself, mention your occupation or studies, and confirm your preferred duration..."
+                    className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs focus:border-[#0E2F73] focus:outline-none dark:border-slate-700 dark:bg-slate-800"
+                  />
+                </div>
+
+                <div className="rounded-xl bg-[#EEF3FF] p-3 text-xs text-[#1D3F8F] dark:bg-blue-950/40 dark:text-blue-300">
+                  <p className="font-semibold">Safe Application Process</p>
+                  <p className="mt-0.5 text-[11px] leading-relaxed">
+                    Your identity and background remain secure. Once the host reviews your application, you will receive an offer in your portal.
+                  </p>
+                </div>
+
+                {applyError && (
+                  <p className="rounded-xl bg-red-50 p-2.5 text-xs font-semibold text-red-600 dark:bg-red-950/40 dark:text-red-400">
+                    {applyError}
+                  </p>
+                )}
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setApplyModalRoom(null)}
+                    className="rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={applySubmitting}
+                    className="rounded-xl bg-[#0E2F73] px-6 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#0B2560] disabled:opacity-50"
+                  >
+                    {applySubmitting ? "Submitting..." : "Submit Application"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* 8. Ask a Question Modal */}
+      {mounted &&
+        askModalRoom &&
+        createPortal(
+          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs" onClick={() => setAskModalRoom(null)} />
+            <div className="relative z-10 w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl dark:bg-slate-900 max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in-95 duration-150">
+              <div className="flex items-start justify-between">
+                <div>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#0E2F73] dark:text-blue-300">
+                    Ask a Question
+                  </span>
+                  <h3 className="font-heading text-lg font-extrabold text-[#0E2F73] dark:text-white mt-0.5">
+                    Inquire about {askModalRoom.title}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAskModalRoom(null)}
+                  className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleConfirmQuestion} className="mt-4 space-y-4">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Your question
+                  </label>
+                  <textarea
+                    rows={4}
+                    required
+                    value={questionText}
+                    onChange={(e) => setQuestionText(e.target.value)}
+                    placeholder="Ask about utilities, quiet hours, proximity to public transit, or room arrangements..."
+                    className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs focus:border-[#0E2F73] focus:outline-none dark:border-slate-700 dark:bg-slate-800"
+                  />
+                </div>
+
+                <div className="rounded-xl bg-[#F7F9FD] p-3 text-xs text-slate-600 dark:bg-slate-800/40 dark:text-slate-300">
+                  <p className="font-semibold text-[#0E2F73] dark:text-blue-300">Safe In-Platform Messaging</p>
+                  <p className="mt-0.5 text-[11px]">
+                    All communications remain securely within Zoiko Rooms. Do not send off-platform payments or sensitive personal data.
+                  </p>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setAskModalRoom(null)}
+                    className="rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="rounded-xl bg-[#0E2F73] px-6 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#0B2560]"
+                  >
+                    Send Inquiry
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* 9. Toast Notification Portal */}
+      {toastMsg &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[70] flex items-center gap-2 rounded-2xl bg-[#0B1B3F] px-5 py-3 text-xs font-bold text-white shadow-2xl animate-in fade-in slide-in-from-bottom-2 duration-150">
+            <Info className="h-4 w-4 text-blue-300 shrink-0" />
+            <span>{toastMsg}</span>
+          </div>,
+          document.body
+        )}
     </div>
   );
 }

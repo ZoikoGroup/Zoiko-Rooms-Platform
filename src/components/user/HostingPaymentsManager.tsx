@@ -286,6 +286,8 @@ export function HostingPaymentsManager({
           return {
             propertyName: "Riverside House · Room #7",
             rentalCode: "Rental #ZR-R-10491",
+            tenantName: "Alex Morgan",
+            tenantVerified: true,
             recipientName: "Riverside Homes LLP",
             recipientVerified: true,
           };
@@ -293,6 +295,8 @@ export function HostingPaymentsManager({
         return {
           propertyName: "Banjara Hills · Room #8",
           rentalCode: "Rental #ZR-R-10482",
+          tenantName: "Priya Sharma",
+          tenantVerified: true,
           recipientName: "Banjara Hills Property Ltd",
           recipientVerified: true,
         };
@@ -306,11 +310,14 @@ export function HostingPaymentsManager({
         ? `${o.payeeBasis} · Room #${o.occupancyId || 1}`
         : `Rental #${o.occupancyId || o.id}`;
       const rentalCode = `Rental #ZR-R-${o.occupancyId || o.agreementId || o.id}`;
+      const tenantName = o.tenantGuestId ? `Tenant #${o.tenantGuestId.replace("guest_", "")}` : "Tenant";
       const recipientName = o.payeeBasis || (prop ? prop.city : "Verified Landlord");
 
       return {
         propertyName: propName,
         rentalCode,
+        tenantName,
+        tenantVerified: true,
         recipientName,
         recipientVerified: true,
       };
@@ -346,9 +353,10 @@ export function HostingPaymentsManager({
           const matchesProp = info.propertyName.toLowerCase().includes(q);
           const matchesCode = info.rentalCode.toLowerCase().includes(q);
           const matchesLabel = o.displayLabel.toLowerCase().includes(q);
+          const matchesTenant = info.tenantName.toLowerCase().includes(q);
           const matchesRecipient = info.recipientName.toLowerCase().includes(q);
           const matchesRef = (o.paymentReference || "").toLowerCase().includes(q);
-          if (!matchesProp && !matchesCode && !matchesLabel && !matchesRecipient && !matchesRef) {
+          if (!matchesProp && !matchesCode && !matchesLabel && !matchesTenant && !matchesRecipient && !matchesRef) {
             return false;
           }
         }
@@ -422,13 +430,13 @@ export function HostingPaymentsManager({
     return Array.from(set);
   }, [activeObligations, getObligationPropertyInfo]);
 
-  const rentalOptions = useMemo(
-    () => [
-      { value: "ALL", label: "All rentals" },
-      ...distinctRentals.map((r) => ({ value: r, label: r })),
-    ],
-    [distinctRentals]
-  );
+  // const rentalOptions = useMemo(
+  //   () => [
+  //     { value: "ALL", label: "All rentals" },
+  //     ...distinctRentals.map((r) => ({ value: r, label: r })),
+  //   ],
+  //   [distinctRentals]
+  // );
 
   const sortOptions = useMemo(
     () => [
@@ -456,7 +464,7 @@ export function HostingPaymentsManager({
       "Amount",
       "Currency",
       "Status",
-      "Verified Recipient",
+      "Tenant / Payer",
     ];
 
     const rows = filteredObligations.map((o) => {
@@ -469,7 +477,7 @@ export function HostingPaymentsManager({
         o.amount,
         `"${o.currency || "INR"}"`,
         `"${rentalPaymentStatusLabel[o.status] || o.status}"`,
-        `"${info.recipientName.replace(/"/g, '""')}"`,
+        `"${info.tenantName.replace(/"/g, '""')}"`,
       ];
     });
 
@@ -541,7 +549,7 @@ export function HostingPaymentsManager({
             Payments
           </h1>
           <p className="mt-1 text-xs sm:text-sm text-slate-500 dark:text-slate-400 max-w-3xl leading-relaxed">
-            Track rent and deposits, view verified payment instructions, record payments you have made, and see when receipt is confirmed.
+            Track rent and deposits for your properties, manage tenant payment instructions, review payment declarations, and confirm receipts.
           </p>
         </div>
 
@@ -558,11 +566,11 @@ export function HostingPaymentsManager({
 
       {/* 2. 4 KPI Metric Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        {/* Card 1: NEXT PAYMENT (Solid Dark Navy Card #0C2B4E) */}
+        {/* Card 1: NEXT INCOMING PAYMENT (Solid Dark Navy Card #0C2B4E) */}
         <div className="bg-[#0C2B4E] text-white rounded-[20px] p-3 shadow-sm flex flex-col justify-between gap-2 border border-[#0C2B4E]">
           <div>
             <div className="text-[11px] font-extrabold text-sky-300 uppercase tracking-wider">
-              NEXT PAYMENT
+              NEXT INCOMING PAYMENT
             </div>
             <div className="text-2xl sm:text-xl font-extrabold text-white mt-1">
               {nextPayment
@@ -573,7 +581,7 @@ export function HostingPaymentsManager({
           <div className="text-xs text-slate-300 truncate">
             {nextPayment && nextPropInfo
               ? `${nextPayment.displayLabel} · ${nextPropInfo.propertyName}`
-              : "All obligations settled"}
+              : "All tenant payments up to date"}
           </div>
         </div>
 
@@ -612,7 +620,7 @@ export function HostingPaymentsManager({
               Overdue
             </div>
             <div className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
-              Past due, not marked paid
+              Tenant past due, unpaid
             </div>
           </div>
         </div>
@@ -633,7 +641,7 @@ export function HostingPaymentsManager({
               Action Required
             </div>
             <div className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
-              Mismatch or changed details
+              Discrepancy or mismatch
             </div>
           </div>
         </div>
@@ -653,7 +661,7 @@ export function HostingPaymentsManager({
           ) : awaitingConfirmationCount > 0 ? (
             <>
               <span className="font-bold text-[#0C2B4E] dark:text-white">
-                {awaitingConfirmationCount} payment awaiting confirmation.
+                {awaitingConfirmationCount} payment awaiting your confirmation.
               </span>
               <span> A tenant has declared payment. Verify your bank receipt and confirm.</span>
             </>
@@ -662,10 +670,10 @@ export function HostingPaymentsManager({
               <span className="font-bold text-[#0C2B4E] dark:text-white">No payment action required.</span>
               <span>
                 {nextPayment && nextPropInfo
-                  ? ` Your next payment is ${formatCurrency(nextPayment.amount, nextPayment.currency)} due ${formatDate(
+                  ? ` Next expected payment is ${formatCurrency(nextPayment.amount, nextPayment.currency)} due ${formatDate(
                       nextPayment.dueDate
-                    )} (${nextPayment.displayLabel}, ${nextPropInfo.propertyName}). Payment instructions are available from the verified recipient.`
-                  : " All property rent and deposit obligations are up to date."}
+                    )} (${nextPayment.displayLabel}, ${nextPropInfo.propertyName}) from ${nextPropInfo.tenantName}.`
+                  : " All property rent and deposit obligations from tenants are up to date."}
               </span>
             </>
           )}
@@ -723,7 +731,7 @@ export function HostingPaymentsManager({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search payments"
+              placeholder="Search by property, tenant, room or reference"
               className="w-full pl-10 pr-4 py-2 text-xs sm:text-sm bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-full outline-none focus:border-indigo-400 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 transition shadow-2xs"
             />
             {searchQuery && (
@@ -737,14 +745,14 @@ export function HostingPaymentsManager({
           </div>
 
           {/* Rental Select */}
-          <RoundedFilterDropdown
+          {/* <RoundedFilterDropdown
             label="Rental"
             value={rentalFilter}
             onChange={setRentalFilter}
             options={rentalOptions}
             size="sm"
             className="flex-initial min-w-[150px]"
-          />
+          /> */}
 
           {/* Sort Select */}
           <RoundedFilterDropdown
@@ -790,7 +798,7 @@ export function HostingPaymentsManager({
                     <th className="py-3 px-4">DUE</th>
                     <th className="py-3 px-4">AMOUNT</th>
                     <th className="py-3 px-4">STATUS</th>
-                    <th className="py-3 px-4">VERIFIED RECIPIENT</th>
+                    <th className="py-3 px-4">TENANT / PAYER</th>
                     <th className="py-3 px-5 text-right">NEXT ACTION</th>
                   </tr>
                 </thead>
@@ -853,8 +861,8 @@ export function HostingPaymentsManager({
                               </span>
                               <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
                                 {lastRecord?.declaredDate
-                                  ? `Marked paid ${formatShortDueDate(lastRecord.declaredDate)}`
-                                  : "Tenant marked paid"}
+                                   ? `Marked paid ${formatShortDueDate(lastRecord.declaredDate)}`
+                                   : "Tenant marked paid"}
                               </div>
                             </div>
                           )}
@@ -888,14 +896,14 @@ export function HostingPaymentsManager({
                           )}
                         </td>
 
-                        {/* Column 6: Verified Recipient */}
+                        {/* Column 6: Tenant / Payer */}
                         <td className="py-4 px-4 align-top">
                           <div className="font-bold text-slate-900 dark:text-slate-100">
-                            {info.recipientName}
+                            {info.tenantName}
                           </div>
                           <div className="flex items-center gap-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
                             <ShieldCheck className="h-3.5 w-3.5 stroke-[2.5]" />
-                            <span>Recipient Verified</span>
+                            <span>Tenant Verified</span>
                           </div>
                         </td>
 
@@ -904,16 +912,16 @@ export function HostingPaymentsManager({
                           {isAwaitingConfirmation && lastRecord ? (
                             <button
                               onClick={() => setViewingRecord({ obligation: o, record: lastRecord })}
-                              className="inline-flex items-center justify-center px-4 py-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[#0C2B4E] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700/60 text-xs font-bold shadow-sm transition cursor-pointer"
+                              className="inline-flex items-center justify-center px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition cursor-pointer"
                             >
-                              View Payment
+                              Confirm Receipt
                             </button>
                           ) : isUpcoming || dueSoon || isOverdue ? (
                             <button
                               onClick={() => setViewingInstructions(o)}
                               className="inline-flex items-center justify-center px-4 py-2.5 rounded-xl bg-[#0C2B4E] hover:bg-[#071c33] text-white text-xs font-bold shadow-sm transition cursor-pointer"
                             >
-                              View Instructions
+                              Payment Instructions
                             </button>
                           ) : (
                             <button
@@ -986,11 +994,11 @@ export function HostingPaymentsManager({
                     <div className="flex items-center justify-between text-xs pt-1">
                       <div>
                         <div className="font-bold text-slate-800 dark:text-slate-200">
-                          {info.recipientName}
+                          {info.tenantName}
                         </div>
                         <div className="flex items-center gap-1 text-[11px] text-emerald-600 font-bold">
                           <ShieldCheck className="h-3 w-3" />
-                          <span>Recipient Verified</span>
+                          <span>Tenant Verified</span>
                         </div>
                       </div>
 
@@ -1022,16 +1030,16 @@ export function HostingPaymentsManager({
                       {isAwaitingConfirmation && lastRecord ? (
                         <button
                           onClick={() => setViewingRecord({ obligation: o, record: lastRecord })}
-                          className="w-full py-2.5 rounded-xl bg-white border border-slate-200 text-[#0C2B4E] text-xs font-bold shadow-sm"
+                          className="w-full py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-bold shadow-sm cursor-pointer"
                         >
-                          View Payment
+                          Confirm Receipt
                         </button>
                       ) : (
                         <button
                           onClick={() => setViewingInstructions(o)}
-                          className="w-full py-2.5 rounded-xl bg-[#0C2B4E] text-white text-xs font-bold shadow-sm"
+                          className="w-full py-2.5 rounded-xl bg-[#0C2B4E] text-white text-xs font-bold shadow-sm cursor-pointer"
                         >
-                          View Instructions
+                          Payment Instructions
                         </button>
                       )}
                     </div>
@@ -1047,7 +1055,7 @@ export function HostingPaymentsManager({
       <div className="flex items-start gap-2 pt-2 pb-6 text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
         <Lock className="h-3.5 w-3.5 shrink-0 mt-0.5 text-slate-400" />
         <p>
-          Under the current model, rent and deposits go directly to the verified recipient. Zoiko Rooms records obligations, your declarations and recipient confirmations — it does not receive or hold this money.
+          Under the current model, rent and deposits are paid directly to your designated account by tenants. Zoiko Rooms records obligations, tenant declarations and your receipt confirmations — it does not receive or hold this money.
         </p>
       </div>
 
@@ -1058,7 +1066,7 @@ export function HostingPaymentsManager({
         <Modal
           open={Boolean(viewingInstructions)}
           onClose={() => setViewingInstructions(null)}
-          title={`Payment Instructions · ${viewingInstructions.displayLabel}`}
+          title={`Payment Instructions for Tenant · ${viewingInstructions.displayLabel}`}
         >
           <div className="space-y-4 text-xs">
             <div className="p-3.5 bg-slate-50 dark:bg-slate-800 rounded-xl space-y-2">
@@ -1096,13 +1104,13 @@ export function HostingPaymentsManager({
             <div className="p-3.5 bg-emerald-50/70 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800 rounded-xl space-y-1.5">
               <div className="flex items-center gap-1.5 font-bold text-emerald-800 dark:text-emerald-300">
                 <ShieldCheck className="h-4 w-4" />
-                <span>Verified Payee Information</span>
+                <span>Designated Host Payee Information</span>
               </div>
               <div className="text-slate-700 dark:text-slate-300">
                 Payee: {getObligationPropertyInfo(viewingInstructions).recipientName}
               </div>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 pt-1">
-                Please transfer rent directly using bank transfer or UPI quoting the exact reference above.
+                These payment instructions and reference code are provided to the tenant for direct bank transfer or UPI.
               </p>
             </div>
 
@@ -1125,10 +1133,16 @@ export function HostingPaymentsManager({
         <Modal
           open={Boolean(viewingRecord)}
           onClose={() => setViewingRecord(null)}
-          title={`Payment Record · ${viewingRecord.obligation.displayLabel}`}
+          title={`Tenant Payment Declaration · ${viewingRecord.obligation.displayLabel}`}
         >
           <div className="space-y-4 text-xs">
             <div className="p-3.5 bg-slate-50 dark:bg-slate-800 rounded-xl space-y-2">
+              <div className="flex justify-between">
+                <span className="text-slate-400 font-semibold">Tenant / Payer:</span>
+                <span className="font-bold text-slate-800 dark:text-slate-200">
+                  {getObligationPropertyInfo(viewingRecord.obligation).tenantName}
+                </span>
+              </div>
               <div className="flex justify-between">
                 <span className="text-slate-400 font-semibold">Declared Amount:</span>
                 <span className="font-extrabold text-base text-[#0C2B4E] dark:text-white">
@@ -1152,7 +1166,7 @@ export function HostingPaymentsManager({
               </div>
               {viewingRecord.record.externalReference && (
                 <div className="flex justify-between">
-                  <span className="text-slate-400 font-semibold">Reference:</span>
+                  <span className="text-slate-400 font-semibold">Bank / Transaction Reference:</span>
                   <span className="font-mono text-slate-800 dark:text-slate-200">
                     {viewingRecord.record.externalReference}
                   </span>

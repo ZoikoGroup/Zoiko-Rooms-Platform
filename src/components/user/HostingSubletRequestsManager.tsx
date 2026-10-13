@@ -778,44 +778,32 @@ export function HostingSubletRequestsManager({
 
         {/* Expandable More Filters Row */}
         {moreFiltersOpen && (
-          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center gap-3">
-            <div className="w-48">
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-                Arrangement Type
-              </label>
-              <select
-                value={arrangementFilter}
-                onChange={(e) => setArrangementFilter(e.target.value)}
-                aria-label="Filter by arrangement type"
-                className="w-full px-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer"
-              >
-                <option value="ALL">All arrangements</option>
-                {Object.entries(subletArrangementTypeAdminLabel).map(([key, label]) => (
-                  <option key={key} value={key}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-end gap-3 animate-fade-in">
+            {/* Arrangement Type */}
+            <RoundedFilterDropdown
+              label="Arrangement Type"
+              value={arrangementFilter}
+              onChange={setArrangementFilter}
+              options={arrangementFilterOptions}
+              size="sm"
+              className="flex-1 sm:w-56"
+              labelClassName="text-[10px] font-bold text-slate-400 uppercase tracking-wider"
+            />
 
-            <div className="w-48">
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-                Subtenant ID Status
-              </label>
-              <select
-                value={subtenantVerificationFilter}
-                onChange={(e) => setSubtenantVerificationFilter(e.target.value)}
-                aria-label="Filter by subtenant ID status"
-                className="w-full px-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-800 dark:text-slate-200 outline-none cursor-pointer"
-              >
-                <option value="ALL">All statuses</option>
-                <option value="VERIFIED">Verified</option>
-                <option value="PENDING">Pending / Incomplete</option>
-              </select>
-            </div>
+            {/* Subtenant ID Status */}
+            <RoundedFilterDropdown
+              label="Subtenant ID Status"
+              value={subtenantVerificationFilter}
+              onChange={setSubtenantVerificationFilter}
+              options={subtenantVerificationOptions}
+              size="sm"
+              className="flex-1 sm:w-52"
+              labelClassName="text-[10px] font-bold text-slate-400 uppercase tracking-wider"
+            />
 
-            <div className="pt-4">
+            <div className="pb-1">
               <button
+                type="button"
                 onClick={() => {
                   setArrangementFilter("ALL");
                   setSubtenantVerificationFilter("ALL");
@@ -824,7 +812,7 @@ export function HostingSubletRequestsManager({
                   setPropertyFilter("ALL");
                   setAuthorityFilter("ALL");
                 }}
-                className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-semibold cursor-pointer"
+                className="inline-flex items-center text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-semibold cursor-pointer h-10 px-2"
               >
                 Reset all filters
               </button>

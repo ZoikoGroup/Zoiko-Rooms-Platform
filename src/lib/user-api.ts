@@ -374,6 +374,38 @@ export function tenantSubletDecisionRecordUrl(subletRequestId: number): string {
   return `${API_URL}/api/users/rentals/sublet-requests/${subletRequestId}/record`;
 }
 
+export interface SubletDocument {
+  id: number;
+  originalFilename: string;
+  contentType: string;
+  fileSize: number;
+  sha256Hash: string;
+  scanStatus: string;
+  uploadedByAdminId: number | null;
+  uploadedByUserId: number | null;
+  createdAt: string;
+  downloadUrl: string;
+}
+
+export function createSubletRequestDraft(occupancyId: number): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/rentals/occupancies/${occupancyId}/sublet-request/draft`, {
+    method: "POST",
+  });
+}
+
+export function listSubletDocuments(subletRequestId: number): Promise<SubletDocument[]> {
+  return apiClientFetch<SubletDocument[]>(`/api/users/rentals/sublet-requests/${subletRequestId}/documents`);
+}
+
+export function uploadSubletDocument(subletRequestId: number, file: File): Promise<SubletDocument> {
+  const form = new FormData();
+  form.set("file", file);
+  return apiClientFetch<SubletDocument>(`/api/users/rentals/sublet-requests/${subletRequestId}/documents`, {
+    method: "POST",
+    body: form,
+  });
+}
+
 /** ZR-ENG-CLR-004 Section 4.10: "All contractual parties must have continuing
  *  access." The renter's own copy of their agreement PDF -- the backend route
  *  already existed with no frontend caller anywhere. */

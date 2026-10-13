@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { BadgeCheck, Bell, Lock, Mail, Phone, User } from "lucide-react";
+import { BadgeCheck, Bell, Eye, EyeOff, Lock, Mail, Phone, User } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { identityStatusLabel, identityStatusTone } from "@/lib/status";
@@ -12,6 +12,8 @@ import { getNotificationPreferences, updateNotificationPreferences, USER_NOTIFIC
 import { NotificationCategory, NotificationPreference } from "@/lib/types";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Card, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
+import { PhoneInputWithCountry } from "@/components/ui/PhoneInputWithCountry";
+import { splitPhoneNumber, validatePhoneWithCountry } from "@/lib/phone-validation";
 
 // Section 11 gap: DISPUTES_AND_SAFETY is deliberately absent here -- the
 // backend (models/notification.py:NOTIFICATION_OPTABLE_CATEGORIES) silently
@@ -40,12 +42,16 @@ export function ProfileManager() {
 
   const [fullName, setFullName] = useState(user?.fullName ?? "");
   const [phone, setPhone] = useState(user?.phone ?? "");
+  const [phoneError, setPhoneError] = useState("");
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileError, setProfileError] = useState("");
 
   const [currentPassword, setCurrentPassword] = useState("");
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [newPassword, setNewPassword] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [savingPassword, setSavingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState("");
 
@@ -93,7 +99,15 @@ export function ProfileManager() {
       setProfileError("Your full name cannot be empty.");
       return;
     }
+    const { countryCode, digits } = splitPhoneNumber(phone);
+    const phoneValidationMsg = validatePhoneWithCountry(countryCode, digits);
+    if (phoneValidationMsg) {
+      setPhoneError(phoneValidationMsg);
+      setProfileError(phoneValidationMsg);
+      return;
+    }
     setProfileError("");
+    setPhoneError("");
     setSavingProfile(true);
     try {
       await updateUserProfile(fullName.trim(), phone.trim());
@@ -123,6 +137,9 @@ export function ProfileManager() {
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
+      setShowCurrentPassword(false);
+      setShowNewPassword(false);
+      setShowConfirmPassword(false);
       showToast("Password changed.");
     } catch (err) {
       setPasswordError(errorMessage(err, "Could not change your password."));
@@ -179,18 +196,15 @@ export function ProfileManager() {
             </div>
           </Field>
 
-          <Field label="Phone">
-            <div className="relative">
-              <Phone className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <input
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                placeholder="+91 98200 11223"
-                className={`${inputClass} pl-10`}
-                autoComplete="tel"
-              />
-            </div>
-          </Field>
+          <PhoneInputWithCountry
+            value={phone}
+            onChange={(fullPhone) => {
+              setPhone(fullPhone);
+              if (phoneError) setPhoneError("");
+            }}
+            error={phoneError}
+            onErrorChange={setPhoneError}
+          />
 
           <Field label="Email" hint="Your email is the identifier for your account and cannot be changed here.">
             <input value={user?.email ?? ""} disabled className={`${inputClass} opacity-60`} />
@@ -215,33 +229,66 @@ export function ProfileManager() {
             <div className="relative">
               <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               <input
-                type="password"
+                type={showCurrentPassword ? "text" : "password"}
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
-                className={`${inputClass} pl-10`}
+                placeholder="••••••••"
+                className={`${inputClass} pl-10 pr-10`}
                 autoComplete="current-password"
               />
+              <button
+                type="button"
+                onClick={() => setShowCurrentPassword((s) => !s)}
+                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 transition-colors hover:text-primary-600 dark:hover:text-primary-300 cursor-pointer"
+                aria-label={showCurrentPassword ? "Hide current password" : "Show current password"}
+              >
+                {showCurrentPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
             </div>
           </Field>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field label="New password">
-              <input
-                type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                className={inputClass}
-                autoComplete="new-password"
-              />
+              <div className="relative">
+                <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  type={showNewPassword ? "text" : "password"}
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="At least 8 characters"
+                  className={`${inputClass} pl-10 pr-10`}
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPassword((s) => !s)}
+                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 transition-colors hover:text-primary-600 dark:hover:text-primary-300 cursor-pointer"
+                  aria-label={showNewPassword ? "Hide new password" : "Show new password"}
+                >
+                  {showNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </Field>
             <Field label="Confirm new password">
-              <input
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                className={inputClass}
-                autoComplete="new-password"
-              />
+              <div className="relative">
+                <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  type={showConfirmPassword ? "text" : "password"}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Re-enter new password"
+                  className={`${inputClass} pl-10 pr-10`}
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPassword((s) => !s)}
+                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 transition-colors hover:text-primary-600 dark:hover:text-primary-300 cursor-pointer"
+                  aria-label={showConfirmPassword ? "Hide confirm password" : "Show confirm password"}
+                >
+                  {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </Field>
           </div>
 
