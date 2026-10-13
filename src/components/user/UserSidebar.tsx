@@ -10,11 +10,13 @@ import {
   ClipboardCheck,
   ClipboardList,
   CreditCard,
+  CreditCardIcon,
   DoorOpen,
   Home,
   LayoutDashboard,
   LogOut,
   MailOpen,
+  Menu,
   MessageCircle,
   MessagesSquare,
   Receipt,
@@ -22,6 +24,7 @@ import {
   Scale,
   Search,
   ShieldCheck,
+  ShieldCheckIcon,
   UserCircle2,
   X,
 } from "lucide-react";
@@ -49,11 +52,12 @@ const navGroups = [
     label: "HOST",
     items: [
       { href: "/account/host", label: "Properties & Rooms", icon: Home },
-      { href: "/account/host/listings", label: "My Listings", icon: BedDouble },
+      { href: "/account/host/listings", label: "Listings", icon: Menu },
       { href: "/account/host/applications", label: "Applications", icon: MailOpen },
-      { href: "/account/host/payments", label: "Payments", icon: Receipt },
+      { href: "/account/host/payments", label: "Payments", icon: CreditCardIcon },
+       { href: "/account/host/verification", label: "Verification", icon: ShieldCheckIcon },
       { href: "/account/host/sublet-requests", label: "Sublet Requests", icon: Repeat },
-      { href: "/account/host/disputes", label: "Disputes", icon: Scale },
+     
     ],
   },
   {
