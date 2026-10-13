@@ -1277,7 +1277,11 @@ export interface UserApplication {
 export interface UserOccupancy {
   id: number;
   listingId: string;
+  listingName?: string;
   roomId: number;
+  propertyAddress?: string;
+  propertyCity?: string;
+  hostName?: string;
   status: OccupancyStatus;
   moveInDate: string | null;
   expectedEndDate: string | null;

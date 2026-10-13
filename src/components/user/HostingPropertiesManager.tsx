@@ -61,7 +61,7 @@ import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Field, Toast, inputClass, useToast } from "@/components/user/ui";
-import { formatDate } from "@/lib/utils";
+import { formatDate, resolveImageUrl } from "@/lib/utils";
 
 type PropertyForm = {
   id: number | null;
@@ -1283,7 +1283,7 @@ export function HostingPropertiesManager() {
                                 {/* 1. Room info + thumbnail */}
                                 <div className="w-56 shrink-0 flex items-center gap-3">
                                   <img
-                                    src={room.image}
+                                    src={resolveImageUrl(room.image)}
                                     alt={room.title}
                                     className="w-13 h-11 rounded-xl object-cover bg-slate-100 shrink-0 border border-slate-200/60 dark:border-slate-700"
                                   />
@@ -1544,7 +1544,7 @@ export function HostingPropertiesManager() {
             {/* Room Photo Thumbnail */}
             <div className="h-36 rounded-2xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex flex-col items-center justify-center gap-2 text-slate-400 overflow-hidden">
               <img
-                src={selectedRoomForDrawer.room.image}
+                src={resolveImageUrl(selectedRoomForDrawer.room.image)}
                 alt="Room"
                 className="w-full h-full object-cover"
               />
