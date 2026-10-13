@@ -77,6 +77,17 @@ export function UserSessionProvider({
 
 export function useUserSession(): UserSession {
   const ctx = useContext(UserSessionContext);
-  if (!ctx) throw new Error("useUserSession must be used inside a UserSessionProvider");
+  if (!ctx) {
+    return {
+      user: null,
+      identityRecords: [],
+      identityStatus: "not_submitted",
+      identityProfile: null,
+      identityVerified: false,
+      loading: false,
+      refreshUser: async () => null,
+      refreshIdentity: async () => {},
+    };
+  }
   return ctx;
 }
