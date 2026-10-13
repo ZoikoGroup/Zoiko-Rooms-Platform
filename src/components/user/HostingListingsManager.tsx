@@ -48,7 +48,7 @@ import {
   Property,
   Room,
 } from "@/lib/types";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate, resolveImageUrl } from "@/lib/utils";
 import {
   HostedListingInput,
   createHostedListing,
@@ -1602,7 +1602,7 @@ export function HostingListingsManager() {
                 {/* 1. Header: Image + Title + Location */}
                 <div className="flex items-start gap-3">
                   <img
-                    src={l.image}
+                    src={resolveImageUrl(l.image)}
                     alt={l.title}
                     className="size-16 rounded-xl object-cover bg-slate-100 shrink-0 border border-slate-200/60 dark:border-slate-700"
                   />
@@ -1635,7 +1635,7 @@ export function HostingListingsManager() {
                       Price / Term
                     </span>
                     <p className="font-extrabold text-sm text-[#0E2F73] dark:text-white font-heading mt-0.5">
-                      ${l.monthlyPrice.toLocaleString()}{" "}
+                      {formatCurrency(l.monthlyPrice, l.currency)}{" "}
                       <span className="text-[11px] font-normal text-slate-500">/ mo</span>
                     </p>
                     <p className="text-[11px] text-slate-500 dark:text-slate-400">
@@ -1718,7 +1718,7 @@ export function HostingListingsManager() {
                   {/* 1. Listing / Room */}
                   <div className="w-72 shrink-0 flex items-center gap-3.5">
                     <img
-                      src={l.image}
+                      src={resolveImageUrl(l.image)}
                       alt={l.title}
                       className="w-16 h-13 rounded-xl object-cover bg-slate-100 shrink-0 border border-slate-200/60 dark:border-slate-700"
                     />
@@ -1782,7 +1782,7 @@ export function HostingListingsManager() {
                   {/* 5. Price / Term */}
                   <div className="w-36 shrink-0 space-y-0.5">
                     <p className="text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading">
-                      ${l.monthlyPrice.toLocaleString()}{" "}
+                      {formatCurrency(l.monthlyPrice, l.currency)}{" "}
                       <span className="text-xs font-normal text-slate-500">/ month</span>
                     </p>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -1794,8 +1794,9 @@ export function HostingListingsManager() {
                   <div className="flex-1 flex items-center justify-end gap-2 relative">
                     {renderActionButton(l, false)}
 
-                    {/* Three-dots menu trigger */}
-                    <div className="relative" ref={openMenuListingId === l.id ? menuContainerRef : null}>
+                    {/* Three-dots menu trigger (hidden for listings under review) */}
+                    {l.actionLabel !== "View Review" && (
+                      <div className="relative" ref={openMenuListingId === l.id ? menuContainerRef : null}>
                       <button
                         type="button"
                         onClick={(e) => {
@@ -1864,6 +1865,7 @@ export function HostingListingsManager() {
                         </div>
                       )}
                     </div>
+                  )}
                   </div>
                 </div>
               ))}
@@ -1994,7 +1996,7 @@ export function HostingListingsManager() {
                         Price
                       </span>
                       <p className="text-xs font-extrabold text-[#0E2F73] dark:text-white">
-                        ${selectedListingForDrawer.monthlyPrice.toLocaleString()} / month · Min{" "}
+                        {formatCurrency(selectedListingForDrawer.monthlyPrice, selectedListingForDrawer.currency)} / month · Min{" "}
                         {selectedListingForDrawer.minMonths} months
                       </p>
                     </div>
@@ -2099,7 +2101,7 @@ export function HostingListingsManager() {
                       ).map((imgUrl: string, i: number) => (
                         <img
                           key={i}
-                          src={imgUrl}
+                          src={resolveImageUrl(imgUrl)}
                           alt="Room photo"
                           className="w-full h-24 rounded-xl object-cover border border-slate-200 dark:border-slate-700 bg-slate-100"
                         />
@@ -2429,6 +2431,16 @@ export function HostingListingsManager() {
               />
             </Field>
           </div>
+
+          {Number(form?.pricePerNight) > 0 && (
+            <div className="rounded-xl border border-primary-200 bg-primary-50/60 p-3 text-xs text-primary-900 dark:border-primary-900/40 dark:bg-primary-950/20 dark:text-white">
+              <span className="font-semibold">Calculated Total: </span>
+              {formatCurrency(Number(form?.pricePerNight) * (Number(form?.minStayNights) || 30), form?.currency || "USD")} ({form?.minStayNights || 30} nights)
+              <span className="mx-2 text-slate-400">·</span>
+              <span className="font-semibold">Monthly: </span>
+              {formatCurrency(Number(form?.pricePerNight) * 30, form?.currency || "USD")}/mo
+            </div>
+          )}
 
           <Field label="Description">
             <textarea

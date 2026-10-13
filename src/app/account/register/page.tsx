@@ -7,6 +7,8 @@ import { BedDouble, Building2, Eye, EyeOff, Lock, Mail, Phone, ShieldCheck, Spar
 import { Logo } from "@/components/ui/Logo";
 import { Button } from "@/components/ui/Button";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
+import { PhoneInputWithCountry } from "@/components/ui/PhoneInputWithCountry";
+import { splitPhoneNumber, validatePhoneWithCountry } from "@/lib/phone-validation";
 import { userLogin, userRegister } from "@/lib/user-auth";
 import { ApiError } from "@/lib/api-client";
 
@@ -20,9 +22,10 @@ export default function UserRegisterPage() {
   const router = useRouter();
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
+  const [phone, setPhone] = useState("+91");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [phoneError, setPhoneError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -32,11 +35,23 @@ export default function UserRegisterPage() {
       setError("Please fill in your name, email and password.");
       return;
     }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+    const { countryCode, digits } = splitPhoneNumber(phone);
+    const phoneValidationMsg = validatePhoneWithCountry(countryCode, digits);
+    if (phoneValidationMsg) {
+      setPhoneError(phoneValidationMsg);
+      setError(phoneValidationMsg);
+      return;
+    }
     if (password.length < 8) {
       setError("Password must be at least 8 characters.");
       return;
     }
     setError("");
+    setPhoneError("");
     setSubmitting(true);
     try {
       await userRegister(fullName.trim(), email.trim(), phone.trim(), password);
@@ -127,21 +142,15 @@ export default function UserRegisterPage() {
               </div>
             </label>
 
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                Phone (optional)
-              </span>
-              <div className="group flex items-center gap-2 rounded-xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200 transition-all duration-200 hover:ring-primary-300 focus-within:bg-white focus-within:ring-2 focus-within:ring-primary-400 dark:bg-slate-800 dark:ring-slate-700 dark:focus-within:bg-slate-800">
-                <Phone className="h-4 w-4 shrink-0 text-slate-400 transition-colors group-focus-within:text-primary-600" />
-                <input
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder="+91 98200 11223"
-                  autoComplete="tel"
-                  className="w-full bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400 dark:text-slate-100"
-                />
-              </div>
-            </label>
+            <PhoneInputWithCountry
+              value={phone}
+              onChange={(fullPhone) => {
+                setPhone(fullPhone);
+                if (phoneError) setPhoneError("");
+              }}
+              error={phoneError}
+              onErrorChange={setPhoneError}
+            />
 
             <label className="block">
               <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">

@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
 import { Application, HostedListing, Property, Offer } from "@/lib/types";
-import { formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   decideHostedApplication,
   errorMessage,
@@ -124,11 +124,12 @@ function buildApplicationRecord(
     ? `${property.address}, ${property.city}`
     : listing?.location || "India";
 
+  const curr = listing?.currency || "INR";
   const rentText = listing?.defaultMonthlyRent
-    ? `₹${listing.defaultMonthlyRent.toLocaleString()}`
+    ? formatCurrency(listing.defaultMonthlyRent, curr)
     : listing?.pricePerNight
-    ? `₹${(listing.pricePerNight * 30).toLocaleString()}`
-    : "₹24,000";
+    ? formatCurrency(listing.pricePerNight * 30, curr)
+    : formatCurrency(24000, curr);
 
   const termText = listing?.defaultTermMonths
     ? `Minimum ${listing.defaultTermMonths} months`

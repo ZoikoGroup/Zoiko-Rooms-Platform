@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Building2, Check, ChevronLeft, ChevronRight, FileEdit, Send, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Building2, Calculator, Check, ChevronLeft, ChevronRight, FileEdit, Send, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -22,7 +22,7 @@ import {
 import { RegionSelect } from "@/components/user/RegionSelect";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, resolveImageUrl } from "@/lib/utils";
 import { Field, inputClass } from "@/components/user/ui";
 import { useUserSession } from "@/components/user/UserSessionContext";
 
@@ -42,7 +42,41 @@ export function submitOutcomeMessage(outcome: SubmitOutcome): { text: string; to
   if (outcome.note) return { text: `Saved as a draft. ${outcome.note}`, tone: "error" };
   return { text: "Draft listing created -- submit it from My Listings when you're ready.", tone: "success" };
 }
-const SUPPORTED_CURRENCIES = ["INR", "GBP", "USD", "EUR", "CAD", "AUD", "AED", "SGD", "NZD"];
+export const SUPPORTED_CURRENCIES = ["INR", "GBP", "USD", "EUR", "CAD", "AUD", "AED", "SGD", "NZD"];
+
+export function jurisdictionToCurrency(code?: string): string {
+  if (!code) return "GBP";
+  switch (code.toUpperCase()) {
+    case "IN":
+      return "INR";
+    case "GB":
+    case "UK":
+      return "GBP";
+    case "US":
+      return "USD";
+    case "AU":
+      return "AUD";
+    case "CA":
+      return "CAD";
+    case "NZ":
+      return "NZD";
+    case "SG":
+      return "SGD";
+    case "AE":
+      return "AED";
+    case "EU":
+    case "DE":
+    case "FR":
+    case "ES":
+    case "IT":
+    case "NL":
+    case "IE":
+      return "EUR";
+    default:
+      return "GBP";
+  }
+}
+
 const STEPS = ["Property", "Room", "Listing", "Photos", "Review"] as const;
 
 type PropertyChoice =
@@ -131,6 +165,11 @@ export function ListARoomWizard({
 
   const { identityVerified } = useUserSession();
 
+  const numericPrice = Number(details.pricePerNight) || 0;
+  const numericMinStay = Math.max(1, Number(details.minStayNights) || 30);
+  const totalStayPrice = numericPrice * numericMinStay;
+  const totalMonthlyPrice = numericPrice * 30;
+
   useEffect(() => {
     if (!open) return;
     setStep(0);
@@ -148,10 +187,24 @@ export function ListARoomWizard({
               // so the host must pick it even when only one region is open.
               { mode: "new", address: "", city: "", landmark: "", jurisdictionCode: "" }
         );
+        if (owned.length > 0 && owned[0].jurisdictionCode) {
+          setDetails((d) => ({ ...d, currency: jurisdictionToCurrency(owned[0].jurisdictionCode) }));
+        }
       })
       .finally(() => setLoadingContext(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  useEffect(() => {
+    if (propertyChoice.mode === "existing") {
+      const prop = properties.find((p) => p.id === propertyChoice.propertyId);
+      if (prop?.jurisdictionCode) {
+        setDetails((d) => ({ ...d, currency: jurisdictionToCurrency(prop.jurisdictionCode) }));
+      }
+    } else if (propertyChoice.mode === "new" && propertyChoice.jurisdictionCode) {
+      setDetails((d) => ({ ...d, currency: jurisdictionToCurrency(propertyChoice.jurisdictionCode) }));
+    }
+  }, [propertyChoice, properties]);
 
   useEffect(() => {
     if (propertyChoice.mode !== "existing") {
@@ -283,6 +336,8 @@ export function ListARoomWizard({
         contactName: details.contactName.trim(),
         contactPhone: details.contactPhone.trim(),
         contactEmail: details.contactEmail.trim(),
+        defaultMonthlyRent: Math.round(price * 30),
+        defaultTermMonths: Math.max(1, Math.round(minStay / 30)),
       };
       const created = await createHostedListing(payload);
       let outcome: SubmitOutcome = { submitted: submitForReview, state: "DRAFT" };
@@ -544,6 +599,63 @@ export function ListARoomWizard({
                       className={inputClass}
                     />
                   </Field>
+                  <div className="flex flex-col justify-center rounded-xl bg-slate-50 px-4 py-3 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+                    <span className="font-semibold text-slate-700 dark:text-slate-200">Long-stay marketplace policy</span>
+                    <span>Zoiko hosts long-term stays with a mandatory minimum of 30 nights.</span>
+                  </div>
+
+                  {/* Dynamic Total Room Price Calculation Box */}
+                  <div className="sm:col-span-2 overflow-hidden rounded-2xl border border-primary-200 bg-gradient-to-br from-primary-50/70 via-white to-blue-50/40 p-4 shadow-xs dark:border-primary-900/40 dark:from-primary-950/30 dark:via-slate-900/50 dark:to-slate-800/40">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-primary-700 dark:text-primary-300 font-heading">
+                            <Calculator className="h-3.5 w-3.5 text-primary-600 dark:text-primary-400" />
+                            Total Room Price
+                          </span>
+                          <span className="rounded-full bg-primary-100 px-2 py-0.5 text-[10px] font-bold text-primary-800 dark:bg-primary-900/60 dark:text-primary-200">
+                            {details.currency}
+                          </span>
+                        </div>
+                        <div className="flex items-baseline gap-2">
+                          <span className="font-heading text-2xl font-extrabold text-primary-900 dark:text-white">
+                            {numericPrice > 0 ? formatCurrency(totalStayPrice, details.currency) : "—"}
+                          </span>
+                          <span className="text-xs text-slate-500 dark:text-slate-400">
+                            total for {numericMinStay} nights stay
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-primary-100 bg-white/90 px-4 py-2.5 text-right shadow-xs dark:border-white/10 dark:bg-slate-800/90 sm:self-center">
+                        <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                          Estimated Monthly Rent (30 nights)
+                        </div>
+                        <div className="font-heading text-base font-bold text-primary-900 dark:text-white">
+                          {numericPrice > 0 ? formatCurrency(totalMonthlyPrice, details.currency) : "—"}
+                          <span className="text-xs font-normal text-slate-400"> / month</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-primary-100/70 pt-2.5 text-xs text-slate-600 dark:border-white/5 dark:text-slate-300">
+                      <span>
+                        Nightly rate: <strong className="font-semibold text-primary-950 dark:text-white">{numericPrice > 0 ? formatCurrency(numericPrice, details.currency) : "—"}</strong> / night
+                      </span>
+                      <span className="text-slate-300 dark:text-slate-600">•</span>
+                      <span>
+                        Selected currency: <strong className="font-semibold text-primary-950 dark:text-white">{details.currency}</strong>
+                      </span>
+                      {numericPrice > 0 && (
+                        <>
+                          <span className="text-slate-300 dark:text-slate-600">•</span>
+                          <span>
+                            Calculation: <span className="font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-200">{formatCurrency(numericPrice, details.currency)} × {numericMinStay} nights = {formatCurrency(totalStayPrice, details.currency)}</span>
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
                   <Field label="Guests">
                     <input
                       inputMode="numeric"
@@ -674,7 +786,7 @@ export function ListARoomWizard({
                 <div className="overflow-hidden rounded-xl ring-1 ring-slate-100 dark:ring-white/10">
                   {details.images[0] ? (
                     /* eslint-disable-next-line @next/next/no-img-element */
-                    <img src={details.images[0]} alt={details.name} className="h-40 w-full object-cover" />
+                    <img src={resolveImageUrl(details.images[0])} alt={details.name} className="h-40 w-full object-cover" />
                   ) : (
                     <div className="flex h-24 w-full items-center justify-center bg-slate-50 text-xs text-slate-400 dark:bg-slate-800">
                       No photos added
@@ -695,10 +807,22 @@ export function ListARoomWizard({
                           ? ` — ${propertyChoice.address}, ${propertyChoice.city}`
                           : ""}
                     </p>
-                    <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                      {details.pricePerNight ? formatCurrency(Number(details.pricePerNight) || 0, details.currency) : "—"}
-                      <span className="text-xs font-normal text-slate-400"> / night · min. {details.minStayNights} nights</span>
-                    </p>
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-baseline gap-2">
+                        <p className="font-heading text-base font-bold text-primary-900 dark:text-white">
+                          {details.pricePerNight ? formatCurrency(totalStayPrice, details.currency) : "—"}
+                        </p>
+                        <span className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                          total room price for {details.minStayNights} nights ({details.currency})
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        {details.pricePerNight ? formatCurrency(numericPrice, details.currency) : "—"} / night ·{" "}
+                        <span className="font-medium text-slate-700 dark:text-slate-200">
+                          {details.pricePerNight ? formatCurrency(totalMonthlyPrice, details.currency) : "—"} / month
+                        </span>
+                      </p>
+                    </div>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
                       {details.guests} guest{details.guests === "1" ? "" : "s"} · {details.bedrooms} bedroom
                       {details.bedrooms === "1" ? "" : "s"} · {details.bathrooms} bathroom{details.bathrooms === "1" ? "" : "s"}
