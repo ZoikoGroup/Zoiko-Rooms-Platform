@@ -168,3 +168,103 @@ class TestHostSelfServiceMoveInConfirmation:
         assert r.status_code == 403, r.text
         r = client.post(f"/api/users/hosting/occupancies/{occupancy_id}/handover/possession-delivered", json={}, cookies=outsider_cookies)
         assert r.status_code == 403, r.text
+
+
+class TestRenterHandoverReceipt:
+    def test_renter_cannot_confirm_receipt_before_host_delivers_possession(self, client, db_session: Session):
+        from app.models.occupancy_activation import OccupancyHandoverEvent
+
+        _host, _renter, _host_cookies, renter_cookies, occupancy_id = _drive_agreement_to_signed(
+            client, db_session, host_email="receipt-host1@test.com", renter_email="receipt-renter1@test.com",
+        )
+        # Rewind to "host prepared the handover but hasn't delivered yet".
+        db_session.query(OccupancyHandoverEvent).filter(
+            OccupancyHandoverEvent.occupancy_id == occupancy_id,
+            OccupancyHandoverEvent.event_type.in_(("POSSESSION_DELIVERED", "RENTER_RECEIPT")),
+        ).delete(synchronize_session=False)
+        db_session.commit()
+
+        r = client.post(
+            f"/api/users/rentals/occupancies/{occupancy_id}/handover/receipt", json={}, cookies=renter_cookies,
+        )
+        assert r.status_code == 409, r.text
+
+    def test_renter_occupancy_lists_recorded_handover_steps(self, client, db_session: Session):
+        _host, _renter, _host_cookies, renter_cookies, occupancy_id = _drive_agreement_to_signed(
+            client, db_session, host_email="receipt-host2@test.com", renter_email="receipt-renter2@test.com",
+        )
+
+        r = client.get("/api/users/rentals/occupancies", cookies=renter_cookies)
+        assert r.status_code == 200, r.text
+        occupancy = next(o for o in r.json() if o["id"] == occupancy_id)
+        assert occupancy["handoverEventTypes"] == ["HANDOVER_READY", "POSSESSION_DELIVERED", "RENTER_RECEIPT"]
+
+
+class TestRenterPaymentRecipientReview:
+    def test_renter_review_is_recorded_once_and_returned_on_their_occupancy(self, client, db_session: Session):
+        _host, _renter, _host_cookies, renter_cookies, occupancy_id = _drive_agreement_to_signed(
+            client, db_session, host_email="recip-host1@test.com", renter_email="recip-renter1@test.com",
+        )
+        url = f"/api/users/rentals/occupancies/{occupancy_id}/payment-recipient/review"
+
+        r = client.post(url, cookies=renter_cookies)
+        assert r.status_code == 200, r.text
+        reviewed_at = r.json()["paymentRecipientReviewedAt"]
+        assert reviewed_at is not None
+
+        r = client.post(url, cookies=renter_cookies)
+        assert r.json()["paymentRecipientReviewedAt"] == reviewed_at
+
+        r = client.get("/api/users/rentals/occupancies", cookies=renter_cookies)
+        occupancy = next(o for o in r.json() if o["id"] == occupancy_id)
+        assert occupancy["paymentRecipientReviewedAt"] == reviewed_at
+
+    def test_host_cannot_record_the_renters_review(self, client, db_session: Session):
+        _host, _renter, host_cookies, _renter_cookies, occupancy_id = _drive_agreement_to_signed(
+            client, db_session, host_email="recip-host2@test.com", renter_email="recip-renter2@test.com",
+        )
+        r = client.post(f"/api/users/rentals/occupancies/{occupancy_id}/payment-recipient/review", cookies=host_cookies)
+        assert r.status_code == 403, r.text
+
+
+class TestFullHandoverAgreementVersion:
+    def test_full_handover_reissues_the_agreement_in_the_new_tenants_name(self, client, db_session: Session):
+        """A full sublet handover adds a new version of the same agreement naming
+        the incoming tenant, frozen as a PDF on approval -- no new signing and no
+        new payments. The previous version stays as the original renter's record."""
+        from app.crud import sublet as sublet_crud
+        from app.models.finance import Obligation
+
+        host, renter, host_cookies, _renter_cookies, occupancy_id = _drive_agreement_to_signed(
+            client, db_session, host_email="handover-host@test.com", renter_email="handover-renter@test.com",
+        )
+        assert client.post(
+            f"/api/users/hosting/occupancies/{occupancy_id}/confirm-move-in", cookies=host_cookies,
+        ).status_code == 200
+        new_tenant = _make_verified_renter(db_session, email="handover-newtenant@test.com")
+        db_session.commit()
+
+        occupancy = db_session.get(Occupancy, occupancy_id)
+        agreement_id = occupancy.offer.agreement.id
+        obligations_before = db_session.query(Obligation).filter(Obligation.agreement_id == agreement_id).count()
+
+        sublet_request = sublet_crud.submit_sublet_request(db_session, renter, occupancy_id, new_tenant.party_id, "ASSIGNMENT_FULL")
+        r = client.post(
+            f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve",
+            json={"stepUpPassword": "password123", "authorityConfirmed": True}, cookies=host_cookies,
+        )
+        assert r.status_code == 200, r.text
+
+        db_session.expire_all()
+        agreement = db_session.get(Agreement, agreement_id)
+        assert [v.version_no for v in agreement.versions] == [1, 2]
+        original, reissued = agreement.versions
+        assert original.snapshot["renter_email"] == "handover-renter@test.com"
+        assert reissued.snapshot["renter_email"] == "handover-newtenant@test.com"
+        assert reissued.snapshot["document"]["renter"]["email"] == "handover-newtenant@test.com"
+        assert reissued.status == "EXECUTED_IMMUTABLE" and reissued.artifact is not None
+        assert agreement.status == "SIGNED"
+        assert db_session.query(Obligation).filter(Obligation.agreement_id == agreement_id).count() == obligations_before
+
+        r = client.get(f"/api/users/rentals/agreements/{agreement_id}/pdf", cookies=auth_user_cookie(new_tenant))
+        assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"

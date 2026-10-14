@@ -48,6 +48,9 @@ class Occupancy(Base):
     move_out_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Renter's move-in checklist: when they reviewed the verified payment
+    # recipient (POST /api/users/rentals/occupancies/{id}/payment-recipient/review).
+    payment_recipient_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     offer: Mapped["Offer"] = relationship()
     listing: Mapped["Listing"] = relationship()

@@ -127,6 +127,8 @@ const STATUS_META: Record<string, StatusBadgeMeta> = {
 export function SubletRequestsList() {
   const [requests, setRequests] = useState<SubletRequest[]>([]);
   const [occupancies, setOccupancies] = useState<UserOccupancy[]>([]);
+  // Captured once so render stays pure.
+  const [todayIso] = useState(() => new Date().toISOString().slice(0, 10));
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
@@ -166,6 +168,7 @@ export function SubletRequestsList() {
   const [wizardStep, setWizardStep] = useState(1);
   const [wizardRentalId, setWizardRentalId] = useState<number | null>(null);
   const [wizardScope, setWizardScope] = useState<"named" | "principle">("named");
+  const [wizardArrangement, setWizardArrangement] = useState<SubletArrangementType>("ASSIGNMENT_FULL");
   const [wizardFrom, setWizardFrom] = useState("");
   const [wizardTo, setWizardTo] = useState("");
   const [wizardSubtenantEmail, setWizardSubtenantEmail] = useState("");
@@ -466,12 +469,35 @@ export function SubletRequestsList() {
   }
 
   // Open creation wizard
+  /** Mirrors backend crud/sublet.py:_assert_sublet_permitted (plus "one open
+   *  request at a time"), so a rental that can't be sublet is shown with the
+   *  reason instead of failing only after all seven steps. */
+  function subletBlockReason(occ: UserOccupancy): string | null {
+    if (occ.reassignedViaSubletRequestId) {
+      return "You received this room through a sublet handover -- it can't be sublet again.";
+    }
+    if (occ.status !== "ACTIVE") return "Only an active rental can be sublet.";
+    const daysLeft = occ.expectedEndDate
+      ? Math.round((Date.parse(occ.expectedEndDate) - Date.parse(todayIso)) / 86400000)
+      : null;
+    if (daysLeft === null || daysLeft < 30) return "A sublet needs at least 30 nights left on the agreement.";
+    const OPEN = ["pending_verification", "pending_admin_review", "more_information_requested", "tenant_response_submitted"];
+    if (requests.some((r) => r.currentOccupancyId === occ.id && OPEN.includes(r.status))) {
+      return "There's already an open sublet request for this rental.";
+    }
+    return null;
+  }
+
   function openCreateWizard(preselectedRentalId?: number) {
     setWizardStep(1);
-    setWizardRentalId(preselectedRentalId ?? (occupancies[0]?.id || null));
+    const preselected = occupancies.find((o) => o.id === preselectedRentalId);
+    const defaultOcc =
+      (preselected && !subletBlockReason(preselected) ? preselected : undefined) ??
+      occupancies.find((o) => !subletBlockReason(o));
+    setWizardRentalId(defaultOcc?.id ?? null);
     setWizardScope("named");
-    const defaultOcc = occupancies.find((o) => o.id === preselectedRentalId) || occupancies[0];
-    setWizardFrom(defaultOcc?.moveInDate || "");
+    setWizardArrangement("ASSIGNMENT_FULL");
+    setWizardFrom(defaultOcc ? (defaultOcc.moveInDate && defaultOcc.moveInDate > todayIso ? defaultOcc.moveInDate : todayIso) : "");
     setWizardTo(defaultOcc?.expectedEndDate || "");
     setWizardSubtenantEmail("");
     setWizardSubtenantName("");
@@ -516,6 +542,12 @@ export function SubletRequestsList() {
     if (wizardStep === 1) {
       if (!wizardRentalId) {
         setWizardError("Choose a rental.");
+        return;
+      }
+      const chosen = occupancies.find((o) => o.id === wizardRentalId);
+      const blocked = chosen ? subletBlockReason(chosen) : "Choose a rental.";
+      if (blocked) {
+        setWizardError(blocked);
         return;
       }
       setWizardStep(2);
@@ -574,7 +606,7 @@ export function SubletRequestsList() {
       try {
         const payload = {
           proposedRenterPartyId: wizardSubtenantPartyId || 0,
-          arrangementType: "SUBLEASE_PARTIAL" as SubletArrangementType,
+          arrangementType: wizardArrangement,
           proposedMonthlyRent: wizardRent ? Number(wizardRent.replace(/\D/g, "")) : undefined,
           proposedStartDate: wizardFrom,
           proposedEndDate: wizardTo,
@@ -2351,7 +2383,11 @@ export function SubletRequestsList() {
                         <div>
                           <span>Parent Rental term</span>
                           <strong>
-                            {safeFormatDate(occupancyMap.get(activeRequest.currentOccupancyId)?.moveInDate)} →{" "}
+                            {safeFormatDate(
+                              occupancyMap.get(activeRequest.currentOccupancyId)?.leaseStartDate ||
+                                occupancyMap.get(activeRequest.currentOccupancyId)?.moveInDate
+                            )}{" "}
+                            →{" "}
                             {safeFormatDate(occupancyMap.get(activeRequest.currentOccupancyId)?.expectedEndDate)}
                           </strong>
                         </div>
@@ -2949,16 +2985,19 @@ export function SubletRequestsList() {
                         No active rentals found. You must have an active occupancy to request a sublet.
                       </p>
                     ) : (
-                      occupancies.map((occ) => (
-                        <label key={occ.id} className="radio">
+                      occupancies.map((occ) => {
+                        const blocked = subletBlockReason(occ);
+                        return (
+                        <label key={occ.id} className="radio" style={blocked ? { opacity: 0.55, cursor: "not-allowed" } : undefined}>
                           <input
                             type="radio"
                             name="wizard_occ"
                             value={occ.id}
+                            disabled={Boolean(blocked)}
                             checked={wizardRentalId === occ.id}
                             onChange={() => {
                               setWizardRentalId(occ.id);
-                              if (occ.moveInDate) setWizardFrom(occ.moveInDate);
+                              setWizardFrom(occ.moveInDate && occ.moveInDate > todayIso ? occ.moveInDate : todayIso);
                               if (occ.expectedEndDate) setWizardTo(occ.expectedEndDate);
                             }}
                           />
@@ -2973,13 +3012,20 @@ export function SubletRequestsList() {
                               {occ.moveInDate ? formatDate(occ.moveInDate) : "—"} →{" "}
                               {occ.expectedEndDate ? formatDate(occ.expectedEndDate) : "—"}
                             </span>
+                            {blocked && (
+                              <>
+                                <br />
+                                <span className="small" style={{ color: "#B42318" }}>{blocked}</span>
+                              </>
+                            )}
                           </span>
                         </label>
-                      ))
+                        );
+                      })
                     )}
                   </fieldset>
                   <p className="muted small">
-                    Only your current eligible rentals are shown. Ended rentals can’t create sublet requests.
+                    Rentals that can't be sublet are shown greyed out with the reason.
                   </p>
                 </div>
               )}
@@ -3020,24 +3066,69 @@ export function SubletRequestsList() {
                       </span>
                     </label>
                   </fieldset>
-                  <p className="muted small">
-                    Partial-term requests only. Subletting part of the premises isn’t supported for this rental.
-                  </p>
+                  {(() => {
+                    const roomHasSpace = Boolean(
+                      occupancies.find((o) => o.id === wizardRentalId)?.roomHasSpaceForCoTenant
+                    );
+                    const options: { value: SubletArrangementType; title: string; hint: string; needsSpace: boolean }[] = [
+                      { value: "ASSIGNMENT_FULL", title: "Full handover", hint: "You move out and they take over the room completely", needsSpace: false },
+                      { value: "REPLACEMENT_OCCUPANT", title: "Replacement occupant", hint: "They replace you as the occupant", needsSpace: false },
+                      { value: "SUBLEASE_PARTIAL", title: "Sublease part of the room", hint: "You stay on; they get their own agreement", needsSpace: true },
+                      { value: "ADD_CO_TENANT", title: "Add a co-tenant", hint: "You both hold your own tenancy", needsSpace: true },
+                    ];
+                    return (
+                      <fieldset className="roles">
+                        <legend>How will the room be used?</legend>
+                        {options.map((opt) => {
+                          const disabled = opt.needsSpace && !roomHasSpace;
+                          return (
+                            <label key={opt.value} className="radio" style={disabled ? { opacity: 0.5 } : undefined}>
+                              <input
+                                type="radio"
+                                name="wizard_arrangement"
+                                value={opt.value}
+                                disabled={disabled}
+                                checked={wizardArrangement === opt.value}
+                                onChange={() => setWizardArrangement(opt.value)}
+                              />
+                              <span className="rdot" />
+                              <span>
+                                <strong>{opt.title}</strong>
+                                <br />
+                                <span className="muted small">
+                                  {disabled ? "Not available — this room is already at its occupant limit" : opt.hint}
+                                </span>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </fieldset>
+                    );
+                  })()}
                 </div>
               )}
 
               {/* STEP 3: Requested Dates */}
               {wizardStep === 3 && (
                 <div className="space-y-3">
-                  {occupancies.find((o) => o.id === wizardRentalId) && (
-                    <p className="muted">
-                      Parent Rental term:{" "}
-                      <strong>
-                        {safeFormatDate(occupancies.find((o) => o.id === wizardRentalId)?.moveInDate)} →{" "}
-                        {safeFormatDate(occupancies.find((o) => o.id === wizardRentalId)?.expectedEndDate)}
-                      </strong>
-                    </p>
-                  )}
+                  {occupancies.find((o) => o.id === wizardRentalId) && (() => {
+                    const occ = occupancies.find((o) => o.id === wizardRentalId)!;
+                    return (
+                      <>
+                        {/* The host-renter agreement's own term, not the move-in date. */}
+                        <p className="muted">
+                          Parent Rental term:{" "}
+                          <strong>
+                            {safeFormatDate(occ.leaseStartDate || occ.moveInDate)} → {safeFormatDate(occ.expectedEndDate)}
+                          </strong>
+                        </p>
+                        <p className="muted small">
+                          A sublet can run from today until the agreement ends ({safeFormatDate(occ.expectedEndDate)}) --
+                          it can&apos;t start in the past or go beyond your own agreement.
+                        </p>
+                      </>
+                    );
+                  })()}
                   <div className="fgrid2">
                     <div className="field">
                       <label htmlFor="f-from">From</label>

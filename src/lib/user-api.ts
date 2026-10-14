@@ -220,6 +220,13 @@ export function getRentalTransactionRecord(occupancyId: number): Promise<RentalT
   return apiClientFetch<RentalTransactionRecord>(`/api/users/rentals/occupancies/${occupancyId}/transaction-record`);
 }
 
+/** Move-in checklist: records that the renter reviewed the verified payment recipient. */
+export function reviewPaymentRecipient(occupancyId: number): Promise<UserOccupancy> {
+  return apiClientFetch<UserOccupancy>(`/api/users/rentals/occupancies/${occupancyId}/payment-recipient/review`, {
+    method: "POST",
+  });
+}
+
 export function confirmHandoverReceipt(occupancyId: number): Promise<HandoverEvent> {
   return apiClientFetch<HandoverEvent>(`/api/users/rentals/occupancies/${occupancyId}/handover/receipt`, {
     method: "POST",
@@ -761,6 +768,11 @@ export function declineHostedSubletRequest(subletRequestId: number, notes = "", 
   });
 }
 
+/** The host's copy of the agreement PDF (same document the renter downloads). */
+export function hostAgreementPdfUrl(agreementId: number): string {
+  return `${API_URL}/api/users/hosting/agreements/${agreementId}/pdf`;
+}
+
 /** The Host's own copy of the same downloadable decision record. */
 export function hostSubletDecisionRecordUrl(subletRequestId: number): string {
   return `${API_URL}/api/users/hosting/sublet-requests/${subletRequestId}/record`;
@@ -939,11 +951,11 @@ export function listMyRentalPaymentObligations(
   page?: { limit?: number; offset?: number; agreementId?: number; occupancyId?: number }
 ): Promise<RentalPaymentObligationsPage> {
   const params = new URLSearchParams();
-  if (obligationType) params.set("obligationType", obligationType);
+  if (obligationType) params.set("obligation_type", obligationType);
   if (page?.limit != null) params.set("limit", String(page.limit));
   if (page?.offset != null) params.set("offset", String(page.offset));
-  if (page?.agreementId != null) params.set("agreementId", String(page.agreementId));
-  if (page?.occupancyId != null) params.set("occupancyId", String(page.occupancyId));
+  if (page?.agreementId != null) params.set("agreement_id", String(page.agreementId));
+  if (page?.occupancyId != null) params.set("occupancy_id", String(page.occupancyId));
   const query = params.toString() ? `?${params.toString()}` : "";
   return apiClientFetch<RentalPaymentObligationsPage>(`/api/users/rental-payments/obligations${query}`);
 }
@@ -1040,10 +1052,10 @@ export function listRecipientRentalPaymentObligations(
   page?: { limit?: number; offset?: number; agreementId?: number }
 ): Promise<RentalPaymentObligationsPage> {
   const params = new URLSearchParams();
-  if (obligationType) params.set("obligationType", obligationType);
+  if (obligationType) params.set("obligation_type", obligationType);
   if (page?.limit != null) params.set("limit", String(page.limit));
   if (page?.offset != null) params.set("offset", String(page.offset));
-  if (page?.agreementId != null) params.set("agreementId", String(page.agreementId));
+  if (page?.agreementId != null) params.set("agreement_id", String(page.agreementId));
   const query = params.toString() ? `?${params.toString()}` : "";
   return apiClientFetch<RentalPaymentObligationsPage>(`/api/users/rental-payments/recipient/obligations${query}`);
 }
