@@ -1291,6 +1291,15 @@ export interface UserOccupancy {
   agreementId: number | null;
   currency: string;
   reassignedViaSubletRequestId: number | null;
+  /** Move-in handover steps recorded so far (HANDOVER_READY, POSSESSION_DELIVERED, RENTER_RECEIPT, ...). */
+  handoverEventTypes?: HandoverEventType[];
+  /** When the renter reviewed the verified payment recipient (move-in checklist). */
+  paymentRecipientReviewedAt?: string | null;
+  /** Agreed lease start date and monthly rent (latest offer terms). */
+  leaseStartDate?: string | null;
+  monthlyRent?: number | null;
+  /** Room has a free place for another tenancy (needed by the share-the-room sublet types). */
+  roomHasSpaceForCoTenant?: boolean;
 }
 
 export interface PreMoveInCancellationResult {
@@ -1830,6 +1839,8 @@ export interface SubletRequest {
   reason: string;
   arrangementType: SubletArrangementType;
   listingName: string;
+  /** The room's property (matches the host's authority record). */
+  propertyId: number | null;
   listingCity: string;
   roomType: string;
   guests: number;

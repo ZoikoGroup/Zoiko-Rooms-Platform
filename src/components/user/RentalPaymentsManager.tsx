@@ -1103,8 +1103,8 @@ export function RentalPaymentsManager() {
   );
 }
 
-/** Modernized Instructions Modal View */
-function InstructionsModalView({
+/** Modernized Instructions Modal View -- also used by My Rentals. */
+export function InstructionsModalView({
   obligation,
   onClose,
   onRecordPayment,
@@ -1197,6 +1197,18 @@ function InstructionsModalView({
               <span className="font-semibold text-slate-700 dark:text-slate-200">{payeeTypeLabel[view.payee.type] || view.payee.type}</span>
             </div>
           </div>
+
+          {/* The payee hasn't added bank/UPI details yet -- say so instead of showing nothing. */}
+          {detailRows.length === 0 && !view.method && (
+            <div className="p-3.5 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-xl text-amber-900 dark:text-amber-200 space-y-1">
+              <span className="font-bold block">Payment details not added yet</span>
+              <span>
+                {view.payee.name} hasn&apos;t added bank or UPI details for this room yet. Don&apos;t send money to details
+                shared anywhere else -- they&apos;ll appear here once added. If you pay another accepted way (such as cash),
+                record it below.
+              </span>
+            </div>
+          )}
 
           {/* Bank / UPI / Cash Details */}
           {detailRows.length > 0 && (

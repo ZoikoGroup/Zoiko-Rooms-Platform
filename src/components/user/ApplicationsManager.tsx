@@ -9,6 +9,8 @@ import {
   DisclosureRequirement,
   PublicListing,
   BookingChangeRequest,
+  PaymentPreview,
+  RentalPaymentObligation,
 } from "@/lib/types";
 import {
   listRentalApplications,
@@ -24,7 +26,14 @@ import {
   listPublicListings,
   listMyChangeRequests,
   errorMessage,
+  getOwnAgreementPaymentPreview,
+  getObligationAvailableMethods,
+  listMyRentalPaymentObligations,
+  payOwnObligation,
 } from "@/lib/user-api";
+import { matchRentalPaymentObligation } from "@/lib/rentalPaymentMatch";
+import { SingleObligationPaymentCard } from "@/components/user/RentalPaymentsManager";
+import { DirectPaymentNotice, usePaymentCapabilities } from "@/components/user/DirectPaymentNotice";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 
@@ -35,6 +44,34 @@ function safeFormatDate(date?: string | null): string {
   } catch {
     return String(date);
   }
+}
+
+/** Latest version of an offer's terms (the one the renter accepts / signs). */
+function latestOfferTerms(offer: Offer): Offer["terms"][number] | null {
+  return offer.terms.reduce<Offer["terms"][number] | null>(
+    (best, t) => (!best || t.version > best.version ? t : best),
+    null
+  );
+}
+
+/** Display strings for an offer, built from its real latest terms. */
+function toOfferView(offer: Offer) {
+  const t = latestOfferTerms(offer);
+  if (!t) return null;
+  const pendingCounter = offer.counterProposals.some((c) => c.status === "PENDING");
+  return {
+    id: `ZR-O-${String(offer.id).padStart(5, "0")} · v${t.version}`,
+    rent: `${formatCurrency(t.monthlyRent, t.currency)} / month`,
+    start: safeFormatDate(t.startDate),
+    term: `${t.termMonths} ${t.termMonths === 1 ? "month" : "months"} (fixed)`,
+    deposit: formatCurrency(t.depositAmount, t.currency),
+    currency: t.currency,
+    exp: pendingCounter
+      ? "Your counter-proposal is awaiting the host"
+      : offer.status === "SENT"
+      ? "Awaiting your response"
+      : offer.status.charAt(0) + offer.status.slice(1).toLowerCase(),
+  };
 }
 
 // Coordinate paths from Figma prototype
@@ -137,6 +174,20 @@ interface AppItem {
 }
 
 const RENTER_SIGNABLE_AGREEMENT_STATUSES = ["SENT", "PARTIALLY_EXECUTED", "AMENDMENT_PENDING"];
+// Both parties have signed; the renter's move-in payment is what's left.
+const RENTER_PAYABLE_AGREEMENT_STATUSES = ["PAYMENT_IN_PROGRESS", "PAYMENT_PENDING"];
+
+// Human-readable labels for the backend's normalized method classes -- the
+// actual available set per obligation is always resolved server-side.
+const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  CARD: "Card",
+  BANK_DEBIT: "Bank debit",
+  BANK_TRANSFER: "Bank transfer",
+  PAY_BY_BANK: "Pay by bank",
+  DIGITAL_WALLET: "Digital wallet",
+  LOCAL_REAL_TIME: "UPI / instant transfer",
+  EXTERNAL: "Cash / cheque (recorded by host)",
+};
 
 export function ApplicationsManager() {
   const [applications, setApplications] = useState<UserApplication[]>([]);
@@ -160,6 +211,27 @@ export function ApplicationsManager() {
   const [activeDrawerTab, setActiveDrawerTab] = useState<"overview" | "application" | "messages" | "offer" | "history">("overview");
   const [offerDetails, setOfferDetails] = useState<Offer | null>(null);
   const [offerLoading, setOfferLoading] = useState(false);
+  const capabilities = usePaymentCapabilities();
+  const [paymentPreview, setPaymentPreview] = useState<PaymentPreview | null>(null);
+  const [rentalPaymentObligations, setRentalPaymentObligations] = useState<RentalPaymentObligation[]>([]);
+  const [obligationMethods, setObligationMethods] = useState<Record<number, string[]>>({});
+  const [selectedMethod, setSelectedMethod] = useState<Record<number, string>>({});
+  const [payingObligationId, setPayingObligationId] = useState<number | null>(null);
+
+  // The real latest offer terms (and any counter the renter has pending), from
+  // getOwnOffer. Falls back to the list-row summary until the offer loads.
+  const latestTerms = useMemo(
+    () =>
+      offerDetails && offerDetails.applicationId === selectedApp?.rawApp.id
+        ? latestOfferTerms(offerDetails)
+        : null,
+    [offerDetails, selectedApp]
+  );
+  const displayOffer = useMemo(() => {
+    if (!selectedApp?.offer) return null;
+    if (!offerDetails || offerDetails.applicationId !== selectedApp.rawApp.id) return selectedApp.offer;
+    return toOfferView(offerDetails) ?? selectedApp.offer;
+  }, [selectedApp, offerDetails]);
   const [disclosures, setDisclosures] = useState<DisclosureRequirement[]>([]);
   const [acknowledgingId, setAcknowledgingId] = useState<number | null>(null);
 
@@ -173,9 +245,40 @@ export function ApplicationsManager() {
 
   // Modals
   const [acceptModalApp, setAcceptModalApp] = useState<AppItem | null>(null);
+  // The accept modal is opened from the drawer, so it shows the same real terms.
+  const acceptOffer =
+    acceptModalApp && acceptModalApp.rawApp.id === selectedApp?.rawApp.id
+      ? displayOffer
+      : acceptModalApp?.offer ?? null;
   const [declineModalApp, setDeclineModalApp] = useState<AppItem | null>(null);
   const [withdrawModalApp, setWithdrawModalApp] = useState<AppItem | null>(null);
   const [signModalApp, setSignModalApp] = useState<AppItem | null>(null);
+  // The sign modal can open straight from a list row, before the drawer has
+  // loaded the offer -- fetch it so the card shows the real agreed terms.
+  const [signOffer, setSignOffer] = useState<Offer | null>(null);
+  useEffect(() => {
+    if (!signModalApp) {
+      setSignOffer(null);
+      return;
+    }
+    if (offerDetails && offerDetails.applicationId === signModalApp.rawApp.id) {
+      setSignOffer(offerDetails);
+      return;
+    }
+    let cancelled = false;
+    getOwnOffer(signModalApp.rawApp.id)
+      .then((loaded) => {
+        if (!cancelled) setSignOffer(loaded);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [signModalApp, offerDetails]);
+  const signOfferView = signOffer ? toOfferView(signOffer) : null;
+  const signAgreementLabel = signOffer?.agreement
+    ? `ZR-AGR-${String(signOffer.agreement.id).padStart(5, "0")} · v${signOffer.agreement.version}`
+    : null;
   const [signAck, setSignAck] = useState(false);
   const [signError, setSignError] = useState(false);
   const [counterModalApp, setCounterModalApp] = useState<AppItem | null>(null);
@@ -257,11 +360,11 @@ export function ApplicationsManager() {
       const listing = publicListings.find((l) => l.id === raw.listingId);
       const propertyName = listing?.name || raw.listingName || `Listing #${raw.listingId}`;
       const roomType = listing?.roomType || "En-suite";
-      const city = listing?.city || "Hyderabad";
-      const roomLabel = `Room #${(raw.id % 12) + 1}`;
+      const city = listing?.city || "";
+      const roomLabel = listing?.roomId ? `Room #${listing.roomId}` : "Room";
       const appliedDate = safeFormatDate(raw.submittedAt);
       const moveInDate = raw.desiredMoveIn ? raw.desiredMoveIn.split("T")[0] : "2026-10-15";
-      const rentAmount = listing ? formatCurrency(listing.pricePerNight * 30, listing.currency) : "₹24,000";
+      const rentAmount = listing ? formatCurrency(listing.pricePerNight * 30, listing.currency) : "—";
 
       // Status resolution
       let st = "submitted";
@@ -269,10 +372,19 @@ export function ApplicationsManager() {
       let actionText: string | null = null;
       let outText: string | null = null;
 
+      // An approved application is also DECIDED, and stays DECIDED while its
+      // offer/agreement is in flight -- only treat DECIDED as closed when there
+      // is no live offer or unsigned agreement, otherwise the renter loses the
+      // Accept / Propose Different Terms / Sign actions.
+      const hasLiveDeal =
+        (raw.offerStatus === "SENT" || raw.offerStatus === "ACCEPTED" || raw.offerStatus === "COUNTERED") &&
+        raw.agreementStatus !== "SIGNED" &&
+        raw.agreementStatus !== "ACTIVE";
+
       if (raw.status === "WITHDRAWN") {
         st = "withdrawn";
         outText = `You withdrew this application on ${appliedDate}.`;
-      } else if (raw.status === "DECIDED") {
+      } else if (raw.status === "DECIDED" && !hasLiveDeal) {
         if (raw.offerStatus === "DECLINED") {
           st = "odecl";
           outText = "You declined the offer.";
@@ -287,12 +399,15 @@ export function ApplicationsManager() {
           outText = "This application is no longer active.";
         }
       } else {
-        // Status SUBMITTED
+        // Status SUBMITTED, or DECIDED (approved) with a live offer/agreement
         if (raw.agreementStatus) {
           stage = "agreement";
           if (RENTER_SIGNABLE_AGREEMENT_STATUSES.includes(raw.agreementStatus)) {
             st = "sign";
             actionText = `Your agreement for ${roomLabel} at ${propertyName} is ready to review and sign.`;
+          } else if (RENTER_PAYABLE_AGREEMENT_STATUSES.includes(raw.agreementStatus)) {
+            st = "pay";
+            actionText = `Both parties signed the agreement for ${roomLabel} at ${propertyName}. Pay your move-in amount to confirm it.`;
           } else if (raw.agreementStatus === "SIGNED") {
             st = "formal";
           } else {
@@ -352,18 +467,18 @@ export function ApplicationsManager() {
         rawApp: raw,
         offer: raw.offerId
           ? {
-              id: `ZR-O-${String(raw.offerId).padStart(5, "0")} · v1`,
+              id: `ZR-O-${String(raw.offerId).padStart(5, "0")}`,
               rent: rentAmount + " / month",
               start: safeFormatDate(moveInDate),
-              term: "6 months (fixed)",
-              deposit: "₹30,000 — proposed, held by Landlord",
-              exp: "In 5 days at 6:00 PM IST",
+              term: "—",
+              deposit: "—",
+              exp: "—",
             }
           : null,
         agr: raw.agreementId
           ? {
-              id: `ZR-AGR-${String(raw.agreementId).padStart(5, "0")} · v1`,
-              note: "After you sign, the host signs. For Telangana, stamp duty and registration may still be required before the agreement is effective.",
+              id: `ZR-AGR-${String(raw.agreementId).padStart(5, "0")}`,
+              note: "After you sign, the host signs. Depending on where the property is, stamp duty or registration may still be required before the agreement is effective.",
             }
           : null,
       };
@@ -389,7 +504,7 @@ export function ApplicationsManager() {
     currentList.forEach((x) => {
       if (x.st === "submitted") submitted++;
       if (x.st === "review" || x.st === "info") review++;
-      if (["offer", "sign", "agrpending", "formal"].includes(x.st)) offers++;
+      if (["offer", "sign", "pay", "agrpending", "formal"].includes(x.st)) offers++;
       if (x.actionText) action++;
     });
 
@@ -419,7 +534,7 @@ export function ApplicationsManager() {
         // Card filter (current view only)
         if (activeView === "current" && selectedCard) {
           if (selectedCard === "action" && !x.actionText) return false;
-          if (selectedCard === "offers" && !["offer", "sign", "agrpending", "formal"].includes(x.st)) return false;
+          if (selectedCard === "offers" && !["offer", "sign", "pay", "agrpending", "formal"].includes(x.st)) return false;
           if (selectedCard === "review" && x.st !== "review" && x.st !== "info") return false;
           if (selectedCard === "submitted" && x.st !== "submitted") return false;
         }
@@ -470,6 +585,44 @@ export function ApplicationsManager() {
     selectedSort,
   ]);
 
+  // Move-in payment for a fully signed agreement: what's due now, each
+  // obligation's server-resolved payment methods, and the rental-payment
+  // obligations (Stripe checkout) they map onto.
+  const loadAgreementPayments = useCallback((agreementId: number) => {
+    listMyRentalPaymentObligations(undefined, { agreementId })
+      .then((page) => setRentalPaymentObligations(page.items))
+      .catch(() => undefined);
+    getOwnAgreementPaymentPreview(agreementId)
+      .then((preview) => {
+        setPaymentPreview(preview);
+        preview.amountDueNow.forEach((o) => {
+          getObligationAvailableMethods(o.id)
+            .then(({ methodClasses }) => {
+              setObligationMethods((prev) => ({ ...prev, [o.id]: methodClasses }));
+              setSelectedMethod((prev) => ({ ...prev, [o.id]: prev[o.id] ?? methodClasses[0] }));
+            })
+            .catch(() => undefined);
+        });
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const handlePayObligation = async (obligationId: number) => {
+    if (!offerDetails?.agreement || !selectedApp) return;
+    setPayingObligationId(obligationId);
+    try {
+      await payOwnObligation(obligationId, selectedMethod[obligationId] ?? "CARD");
+      showToast("Payment successful.");
+      setOfferDetails(await getOwnOffer(selectedApp.rawApp.id));
+      loadAgreementPayments(offerDetails.agreement.id);
+      loadData();
+    } catch (err) {
+      showToast(errorMessage(err, "Payment failed."));
+    } finally {
+      setPayingObligationId(null);
+    }
+  };
+
   // Open Drawer and load real offer / disclosures
   const handleOpenDrawer = async (item: AppItem, tab: "overview" | "application" | "messages" | "offer" | "history" = "overview") => {
     setSelectedApp(item);
@@ -477,6 +630,9 @@ export function ApplicationsManager() {
     setOfferDetails(null);
     setDisclosures([]);
     setInfoSubmitted(false);
+    setPaymentPreview(null);
+    setRentalPaymentObligations([]);
+    setObligationMethods({});
 
     if (item.rawApp.offerId || item.st === "offer" || item.stage === "agreement") {
       setOfferLoading(true);
@@ -484,6 +640,7 @@ export function ApplicationsManager() {
         const loaded = await getOwnOffer(item.rawApp.id);
         setOfferDetails(loaded);
         if (loaded.agreement) {
+          loadAgreementPayments(loaded.agreement.id);
           const loadedDisclosures = await listOwnAgreementDisclosures(loaded.agreement.id);
           setDisclosures(loadedDisclosures);
         }
@@ -683,6 +840,7 @@ export function ApplicationsManager() {
       offer: { l: "Offer Received", fg: "#05603A", bg: "#E7F8EF", bd: "#8FD9B4", i: "file" },
       agrpending: { l: "Agreement Pending", fg: "#1D3F8F", bg: "#EEF3FF", bd: "#AFC2EE", i: "clock" },
       sign: { l: "Signature Required", fg: "#93370D", bg: "#FFF4E0", bd: "#F2B866", i: "file" },
+      pay: { l: "Payment Due", fg: "#93370D", bg: "#FFF4E0", bd: "#F2B866", i: "file" },
       formal: { l: "Formalities Pending", fg: "#1D3F8F", bg: "#EEF3FF", bd: "#AFC2EE", i: "clock" },
       notsel: { l: "Not Selected", fg: "#344054", bg: "#F0F2F6", bd: "#C3CAD6", i: "xcirc" },
       withdrawn: { l: "Withdrawn", fg: "#344054", bg: "#F0F2F6", bd: "#C3CAD6", i: "undo" },
@@ -1907,6 +2065,14 @@ export function ApplicationsManager() {
                   >
                     Review &amp; Sign
                   </button>
+                ) : item.st === "pay" ? (
+                  <button
+                    type="button"
+                    className="btn btn-red btn-sm"
+                    onClick={() => handleOpenDrawer(item, "offer")}
+                  >
+                    Pay Now
+                  </button>
                 ) : (
                   <button
                     type="button"
@@ -2220,6 +2386,8 @@ export function ApplicationsManager() {
                       </button>
                     ) : x.st === "sign" ? (
                       <span className="upd2">Agreement ready</span>
+                    ) : x.st === "pay" ? (
+                      <span className="upd2">Payment due</span>
                     ) : (
                       <span className="dash">—</span>
                     )}
@@ -2250,6 +2418,14 @@ export function ApplicationsManager() {
                         onClick={() => setSignModalApp(x)}
                       >
                         Review &amp; Sign
+                      </button>
+                    ) : x.st === "pay" ? (
+                      <button
+                        type="button"
+                        className="btn btn-red cta"
+                        onClick={() => handleOpenDrawer(x, "offer")}
+                      >
+                        Pay Now
                       </button>
                     ) : x.st === "info" ? (
                       <button
@@ -2337,7 +2513,7 @@ export function ApplicationsManager() {
                       {selectedApp.p} · {selectedApp.room} — {selectedApp.type}
                     </h2>
                     <div className="text-xs text-[#4a5878]">
-                      {selectedApp.city}, Telangana, India
+                      {selectedApp.city}
                     </div>
                   </div>
                 </div>
@@ -2479,19 +2655,19 @@ export function ApplicationsManager() {
                         <div className="kv2">
                           <div>
                             <span>Rent</span>
-                            <strong>{selectedApp.offer.rent}</strong>
+                            <strong>{displayOffer!.rent}</strong>
                           </div>
                           <div>
                             <span>Start</span>
-                            <strong>{selectedApp.offer.start}</strong>
+                            <strong>{displayOffer!.start}</strong>
                           </div>
                           <div>
                             <span>Term</span>
-                            <strong>{selectedApp.offer.term}</strong>
+                            <strong>{displayOffer!.term}</strong>
                           </div>
                           <div>
                             <span>Offer</span>
-                            <strong>{selectedApp.offer.id}</strong>
+                            <strong>{displayOffer!.id}</strong>
                           </div>
                         </div>
                       </div>
@@ -2511,6 +2687,17 @@ export function ApplicationsManager() {
                           </div>
                         </div>
                         <p className="text-xs text-[#5b6886] mt-1">{selectedApp.agr.note}</p>
+                        {selectedApp.rawApp.agreementId && (
+                          <a
+                            href={tenantAgreementPdfUrl(selectedApp.rawApp.agreementId)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-2 inline-flex items-center gap-1 text-xs font-bold text-[#0e2f73] hover:underline"
+                          >
+                            <SvgIcon name="file" size={14} strokeWidth={2.2} />
+                            Download agreement (PDF)
+                          </a>
+                        )}
                       </div>
                     )}
                   </>
@@ -2646,28 +2833,28 @@ export function ApplicationsManager() {
                       <>
                         <div className="dsec">
                           <h3>
-                            {selectedApp.st === "offer" ? "Current offer" : "Accepted offer"} · {selectedApp.offer.id}
+                            {selectedApp.st === "offer" ? "Current offer" : "Accepted offer"} · {displayOffer!.id}
                           </h3>
                           <div className="kv2">
                             <div>
                               <span>Proposed rent</span>
-                              <strong>{selectedApp.offer.rent}</strong>
+                              <strong>{displayOffer!.rent}</strong>
                             </div>
                             <div>
                               <span>Start date</span>
-                              <strong>{selectedApp.offer.start}</strong>
+                              <strong>{displayOffer!.start}</strong>
                             </div>
                             <div>
                               <span>Term</span>
-                              <strong>{selectedApp.offer.term}</strong>
+                              <strong>{displayOffer!.term}</strong>
                             </div>
                             <div>
                               <span>Deposit proposal</span>
-                              <strong>{selectedApp.offer.deposit}</strong>
+                              <strong>{displayOffer!.deposit}</strong>
                             </div>
                             <div>
                               <span>Status</span>
-                              <strong>{selectedApp.offer.exp}</strong>
+                              <strong>{displayOffer!.exp}</strong>
                             </div>
                             <div>
                               <span>Next stage</span>
@@ -2688,6 +2875,99 @@ export function ApplicationsManager() {
                         <p className="text-xs text-[#5b6886]">
                           The Zoiko Rooms Listing Fee is paid by the host and is separate from any rent or deposit.
                         </p>
+
+                        {/* Move-in payment once both parties have signed. Also SENT with both
+                            signatures: the checkout-expiry sweep resets an unpaid agreement to
+                            SENT after its deadline, but the backend still accepts the payment. */}
+                        {offerDetails?.agreement &&
+                          (RENTER_PAYABLE_AGREEMENT_STATUSES.includes(offerDetails.agreement.status) ||
+                            (offerDetails.agreement.status === "SENT" &&
+                              !!offerDetails.agreement.signedByRenterAt &&
+                              !!offerDetails.agreement.signedByProviderAt)) && (
+                            <div className="dsec">
+                              <h3>Payment due</h3>
+                              <p className="text-xs text-[#5b6886]">
+                                Both you and the host have signed. Pay the amounts below to confirm the agreement.
+                              </p>
+                              {paymentPreview === null ? (
+                                <p className="text-sm text-[#5b6886]">Loading payment details...</p>
+                              ) : paymentPreview.amountDueNow.length === 0 ? (
+                                <p className="text-sm text-[#5b6886]">Nothing due right now.</p>
+                              ) : (
+                                <div className="space-y-3">
+                                  {paymentPreview.amountDueNow.map((o) => {
+                                    const match = matchRentalPaymentObligation(
+                                      o,
+                                      paymentPreview.amountDueNow,
+                                      rentalPaymentObligations
+                                    );
+                                    if (match) {
+                                      return (
+                                        <div key={o.id} className="space-y-1.5">
+                                          <SingleObligationPaymentCard
+                                            obligation={match}
+                                            onChanged={() => {
+                                              if (offerDetails.agreement) loadAgreementPayments(offerDetails.agreement.id);
+                                              loadData();
+                                            }}
+                                          />
+                                          {match.obligationType === "DEPOSIT" && (
+                                            <p className="text-xs text-[#5b6886]">
+                                              Zoiko Rooms does not hold this deposit — it&apos;s held by your landlord or
+                                              agent, per applicable local rules.
+                                            </p>
+                                          )}
+                                        </div>
+                                      );
+                                    }
+                                    return (
+                                      <div key={o.id} className="flex flex-wrap items-center justify-between gap-2">
+                                        <span className="text-sm font-semibold text-[#0E2F73]">
+                                          {o.obligationType === "RENT"
+                                            ? "Rent"
+                                            : o.obligationType === "DEPOSIT"
+                                            ? "Deposit"
+                                            : o.obligationType}
+                                          {" — "}
+                                          {formatCurrency(o.amount, o.currency)}
+                                        </span>
+                                        {o.status === "PAID" ? (
+                                          <span className="text-xs font-bold text-[#05603A]">Paid</span>
+                                        ) : capabilities?.rent_collection_enabled ? (
+                                          <div className="flex items-center gap-2">
+                                            <select
+                                              className="h-9 rounded-lg border border-slate-300 px-2 text-xs"
+                                              value={selectedMethod[o.id] ?? ""}
+                                              onChange={(e) =>
+                                                setSelectedMethod((prev) => ({ ...prev, [o.id]: e.target.value }))
+                                              }
+                                              disabled={!obligationMethods[o.id]?.length}
+                                            >
+                                              {(obligationMethods[o.id] ?? []).map((m) => (
+                                                <option key={m} value={m}>
+                                                  {PAYMENT_METHOD_LABELS[m] ?? m}
+                                                </option>
+                                              ))}
+                                            </select>
+                                            <button
+                                              type="button"
+                                              className="btn btn-navy btn-sm"
+                                              disabled={!selectedMethod[o.id] || payingObligationId === o.id}
+                                              onClick={() => handlePayObligation(o.id)}
+                                            >
+                                              {payingObligationId === o.id ? "Paying..." : "Pay now"}
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <DirectPaymentNotice compact />
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          )}
                       </>
                     ) : (
                       <p className="text-sm text-[#5b6886]">
@@ -2720,7 +3000,7 @@ export function ApplicationsManager() {
                       <li>
                         <span className="tdot" />
                         <span>
-                          <strong>Offer issued · {selectedApp.offer.id}</strong>
+                          <strong>Offer issued · {displayOffer!.id}</strong>
                           <span className="text-xs text-[#5b6886]">Recent</span>
                         </span>
                       </li>
@@ -2763,10 +3043,12 @@ export function ApplicationsManager() {
                       className="btn btn-outline"
                       onClick={() => {
                         setCounterForm({
-                          monthlyRent: selectedApp.rent.replace(/[^\d]/g, ""),
-                          depositAmount: "30000",
-                          startDate: selectedApp.mi,
-                          termMonths: "6",
+                          monthlyRent: latestTerms
+                            ? String(latestTerms.monthlyRent)
+                            : selectedApp.rent.replace(/[^\d]/g, ""),
+                          depositAmount: latestTerms ? String(latestTerms.depositAmount) : "",
+                          startDate: latestTerms?.startDate ?? selectedApp.mi,
+                          termMonths: latestTerms ? String(latestTerms.termMonths) : "6",
                           message: "",
                         });
                         setCounterModalApp(selectedApp);
@@ -2791,6 +3073,24 @@ export function ApplicationsManager() {
                       onClick={() => setSignModalApp(selectedApp)}
                     >
                       Review &amp; Sign
+                    </button>
+                    <div className="grow" />
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => setActiveDrawerTab("messages")}
+                    >
+                      Message Host
+                    </button>
+                  </>
+                ) : selectedApp.st === "pay" ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-red"
+                      onClick={() => setActiveDrawerTab("offer")}
+                    >
+                      Pay Now
                     </button>
                     <div className="grow" />
                     <button
@@ -2871,19 +3171,23 @@ export function ApplicationsManager() {
               <div className="kv2">
                 <div>
                   <span>Rent</span>
-                  <strong>{acceptModalApp.offer?.rent || acceptModalApp.rent}</strong>
+                  <strong>{acceptOffer?.rent || acceptModalApp.rent}</strong>
                 </div>
                 <div>
                   <span>Start</span>
-                  <strong>{acceptModalApp.offer?.start || safeFormatDate(acceptModalApp.mi)}</strong>
+                  <strong>{acceptOffer?.start || safeFormatDate(acceptModalApp.mi)}</strong>
                 </div>
                 <div>
                   <span>Term</span>
-                  <strong>{acceptModalApp.offer?.term || acceptModalApp.dur}</strong>
+                  <strong>{acceptOffer?.term || acceptModalApp.dur}</strong>
+                </div>
+                <div>
+                  <span>Deposit</span>
+                  <strong>{acceptOffer?.deposit || "—"}</strong>
                 </div>
                 <div>
                   <span>Offer Version</span>
-                  <strong>{acceptModalApp.offer?.id || "v1"}</strong>
+                  <strong>{acceptOffer?.id || "v1"}</strong>
                 </div>
               </div>
 
@@ -3023,24 +3327,24 @@ export function ApplicationsManager() {
             <div className="dialog">
               <h2 id="sg-title">Review &amp; sign agreement</h2>
               <p className="text-xs text-[#5b6886]">
-                {signModalApp.agr?.id || "ZR-AGR-001"} · {signModalApp.p} · {signModalApp.room}
+                {signAgreementLabel || signModalApp.agr?.id || "Agreement"} · {signModalApp.p} · {signModalApp.room}
               </p>
               <div className="kv2">
                 <div>
                   <span>Rent</span>
-                  <strong>{signModalApp.offer?.rent || signModalApp.rent}</strong>
+                  <strong>{signOfferView?.rent || "—"}</strong>
                 </div>
                 <div>
                   <span>Start</span>
-                  <strong>{signModalApp.offer?.start || safeFormatDate(signModalApp.mi)}</strong>
+                  <strong>{signOfferView?.start || "—"}</strong>
                 </div>
                 <div>
                   <span>Term</span>
-                  <strong>{signModalApp.offer?.term || signModalApp.dur}</strong>
+                  <strong>{signOfferView?.term || "—"}</strong>
                 </div>
                 <div>
                   <span>Deposit</span>
-                  <strong>{signModalApp.offer?.deposit || "₹30,000"}</strong>
+                  <strong>{signOfferView?.deposit || "—"}</strong>
                 </div>
               </div>
 
@@ -3085,7 +3389,7 @@ export function ApplicationsManager() {
               <div className="dinfo">
                 <SvgIcon name="info" size={16} strokeWidth={2.2} />
                 <span>
-                  After you sign, the host signs. For Telangana, stamp duty and registration may still be required before the agreement is effective.
+                  After you sign, the host signs. Depending on where the property is, stamp duty or registration may still be required before the agreement is effective.
                 </span>
               </div>
 
@@ -3156,7 +3460,7 @@ export function ApplicationsManager() {
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="field">
-                  <label htmlFor="c-rent">Monthly rent you can pay (₹)</label>
+                  <label htmlFor="c-rent">Monthly rent you can pay{latestTerms ? ` (${latestTerms.currency})` : ""}</label>
                   <input
                     id="c-rent"
                     type="number"
@@ -3165,7 +3469,7 @@ export function ApplicationsManager() {
                   />
                 </div>
                 <div className="field">
-                  <label htmlFor="c-dep">Deposit you can pay (₹)</label>
+                  <label htmlFor="c-dep">Deposit you can pay{latestTerms ? ` (${latestTerms.currency})` : ""}</label>
                   <input
                     id="c-dep"
                     type="number"

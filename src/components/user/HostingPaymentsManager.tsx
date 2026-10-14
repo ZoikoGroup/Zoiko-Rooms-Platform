@@ -53,6 +53,7 @@ import {
 } from "@/lib/user-api";
 import { rentalPaymentStatusLabel, rentalPaymentStatusTone } from "@/lib/status";
 import { useUserSession } from "@/components/user/UserSessionContext";
+import { InstructionsManager } from "@/components/user/RecipientRentalPaymentsManager";
 
 /** Format short due date like "Nov 1", "Nov 15", "Oct 15" */
 function formatShortDueDate(dateStr?: string | null): string {
@@ -92,6 +93,7 @@ export function HostingPaymentsManager({
   const [loading, setLoading] = useState(true);
   const [obligations, setObligations] = useState<RentalPaymentObligation[]>([]);
   const [instructions, setInstructions] = useState<RentalPaymentInstruction[]>([]);
+  const [paymentDetailsOpen, setPaymentDetailsOpen] = useState(false);
   const [properties, setProperties] = useState<Property[]>([]);
 
   // Tab: "RENTAL_PAYMENTS" | "DEPOSITS" | "HISTORY"
@@ -555,6 +557,12 @@ export function HostingPaymentsManager({
 
         <div className="flex items-center gap-2 self-start sm:self-auto">
           <button
+            onClick={() => setPaymentDetailsOpen(true)}
+            className="inline-flex items-center gap-2 px-5 py-3 text-xs sm:text-sm font-bold text-white bg-[#0C2B4E] hover:bg-[#071c33] rounded-2xl shadow-sm transition cursor-pointer"
+          >
+            Payment details
+          </button>
+          <button
             onClick={handleExportCSV}
             className="inline-flex items-center gap-2 px-5 py-3 text-xs sm:text-sm font-bold text-[#0C2B4E] dark:text-slate-200 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:bg-slate-50 dark:hover:bg-slate-800/80 shadow-sm transition cursor-pointer"
           >
@@ -563,6 +571,26 @@ export function HostingPaymentsManager({
           </button>
         </div>
       </div>
+
+      {/* Tenants can't see how to pay until there's an ACTIVE payment instruction. */}
+      {!instructions.some((i) => i.status === "ACTIVE") && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl border border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-200">
+          <div className="text-xs sm:text-sm">
+            <strong className="block">Add your payment details</strong>
+            Your tenants can see what they owe but not where to pay it until you add bank, UPI or cash details.
+          </div>
+          <button
+            onClick={() => setPaymentDetailsOpen(true)}
+            className="shrink-0 px-4 py-2 rounded-xl bg-[#0C2B4E] hover:bg-[#071c33] text-white text-xs font-bold cursor-pointer"
+          >
+            Add payment details
+          </button>
+        </div>
+      )}
+
+      <Modal open={paymentDetailsOpen} onClose={() => setPaymentDetailsOpen(false)} title="Payment details">
+        <InstructionsManager instructions={instructions} onChanged={loadData} />
+      </Modal>
 
       {/* 2. 4 KPI Metric Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">

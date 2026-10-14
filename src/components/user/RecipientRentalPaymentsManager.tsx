@@ -792,7 +792,8 @@ function MarkReceivedModal({
   );
 }
 
-function InstructionsManager({ instructions, onChanged }: { instructions: RentalPaymentInstruction[]; onChanged: () => void }) {
+/** Add, verify and review the payment details tenants pay to -- also used on the host Payments page. */
+export function InstructionsManager({ instructions, onChanged }: { instructions: RentalPaymentInstruction[]; onChanged: () => void }) {
   const { toast, showToast } = useToast();
   const [formOpen, setFormOpen] = useState(false);
   const [method, setMethod] = useState<RentalPaymentMethodCategory>("BANK_TRANSFER");

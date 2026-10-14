@@ -739,6 +739,34 @@ def get_hosted_agreement(
     return leasing_crud.get_agreement_for_host_or_404(db, agreement_id, user)
 
 
+@router.get("/agreements/{agreement_id}/pdf")
+def download_hosted_agreement_pdf(
+    agreement_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The host's copy of the agreement PDF -- same document the renter gets
+    (user_rentals.py:download_own_agreement_pdf): the persisted executed
+    artifact once signed, otherwise a live draft render."""
+    from app.core.agreement_documents import read_agreement_document
+
+    agreement = leasing_crud.get_agreement_for_host_or_404(db, agreement_id, user)
+    log_audit_event(
+        db, None, "host_agreement.download", "agreement", str(agreement_id), get_correlation_id(request),
+        reason=f"host_user:{user.id}",
+    )
+    db.commit()
+
+    artifact = agreement.versions[-1].artifact if agreement.versions else None
+    if artifact is not None:
+        pdf_bytes = read_agreement_document(db, artifact.storage_ref)
+    else:
+        pdf_bytes = leasing_crud.generate_agreement_pdf(db, agreement)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="agreement-{agreement.id}.pdf"'},
+    )
+
+
 @router.get("/agreements/{agreement_id}/disclosures", response_model=list[DisclosureRequirementRead])
 def list_hosted_agreement_disclosures(
     agreement_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),

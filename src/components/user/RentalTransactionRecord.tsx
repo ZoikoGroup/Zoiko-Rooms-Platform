@@ -72,6 +72,20 @@ export function RentalTransactionRecord({ occupancyId, role }: { occupancyId: nu
     agreement: record.application?.offer?.agreement ?? null,
   };
 
+  // After a full sublet handover the rental's history still includes the
+  // previous tenant's payments -- tag them so the current tenant doesn't read
+  // them as their own (and sees why e.g. January is already paid).
+  const previousTenantObligationKeys = new Set(
+    record.rentalPaymentObligations
+      .filter((o) => o.tenantGuestId && o.tenantGuestId !== occupancy.guestId)
+      .map((o) => `${o.obligationType}|${o.dueDate}`)
+  );
+  const previousTenantTag = (paid: boolean) => (
+    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:bg-white/10 dark:text-slate-300">
+      {paid ? "Paid by previous tenant" : "Previous tenant"}
+    </span>
+  );
+
   return (
     <div className="space-y-4">
       <Card>
@@ -149,8 +163,10 @@ export function RentalTransactionRecord({ occupancyId, role }: { occupancyId: nu
           <div className="mt-2 space-y-1.5">
             {record.obligations.map((obligation) => (
               <div key={obligation.id} className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-                <span>
+                <span className="flex flex-wrap items-center gap-1.5">
                   {obligation.obligationType} — {formatCurrency(obligation.amount, obligation.currency)} due {formatDate(obligation.dueDate)}
+                  {previousTenantObligationKeys.has(`${obligation.obligationType}|${obligation.dueDate}`) &&
+                    previousTenantTag(obligation.status === "PAID")}
                 </span>
                 <Badge tone={obligationStatusTone[obligation.status as keyof typeof obligationStatusTone] ?? "neutral"}>
                   {obligationStatusLabel[obligation.status as keyof typeof obligationStatusLabel] ?? obligation.status}
@@ -191,9 +207,12 @@ export function RentalTransactionRecord({ occupancyId, role }: { occupancyId: nu
             {record.rentalPaymentObligations.map((obligation) => (
               <div key={obligation.id} className="rounded-xl border border-slate-100 p-3 dark:border-white/10">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  <span className="flex flex-wrap items-center gap-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200">
                     {obligation.displayLabel} — {formatCurrency(obligation.amount, obligation.currency)} due{" "}
                     {formatDate(obligation.dueDate)}
+                    {obligation.tenantGuestId &&
+                      obligation.tenantGuestId !== occupancy.guestId &&
+                      previousTenantTag(obligation.status === "CONFIRMED")}
                   </span>
                   <Badge tone={rentalPaymentStatusTone[obligation.status] ?? "neutral"}>
                     {rentalPaymentStatusLabel[obligation.status] ?? obligation.status}
