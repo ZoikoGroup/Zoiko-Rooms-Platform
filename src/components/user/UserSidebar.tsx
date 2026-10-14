@@ -1,7 +1,9 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { listHostedApplications } from "@/lib/user-api";
 import {
   BedDouble,
   Building2,
@@ -12,6 +14,7 @@ import {
   CreditCard,
   CreditCardIcon,
   DoorOpen,
+  HelpCircle,
   Home,
   LayoutDashboard,
   LogOut,
@@ -19,10 +22,12 @@ import {
   Menu,
   MessageCircle,
   MessagesSquare,
+  NotepadText,
   Receipt,
   Repeat,
   Scale,
   Search,
+  Settings,
   ShieldCheck,
   ShieldCheckIcon,
   UserCircle2,
@@ -55,19 +60,21 @@ const navGroups = [
       { href: "/account/host", label: "Properties & Rooms", icon: Home },
       { href: "/account/host/listings", label: "Listings", icon: Menu },
       { href: "/account/host/applications", label: "Applications", icon: MailOpen },
+      {href:"/account/host/rental-records",label: "Rental Records",icon:NotepadText},
       { href: "/account/host/payments", label: "Payments", icon: CreditCardIcon },
       { href: "/account/host/verification", label: "Verification", icon: ShieldCheckIcon },
       { href: "/account/host/disputes", label: "Disputes", icon: Scale },
        { href: "/account/host/sublet-requests", label: "Sublet Requests", icon: Repeat },
-     
     ],
   },
   {
     label: "ACCOUNT",
     items: [
+      { href: "/account/settings", label: "Settings", icon: Settings },
+      { href: "/account/support", label: "Help & Support", icon: HelpCircle },
       { href: "/account/identity", label: "Identity Verification", icon: ShieldCheck },
       // { href: "/account/payments", label: "Payment History", icon: CreditCard },
-      { href: "/account/profile", label: "Profile", icon: UserCircle2 },
+      //{ href: "/account/profile", label: "Profile", icon: UserCircle2 },
     ],
   },
 ];
@@ -89,6 +96,30 @@ export function UserSidebar({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const [badgeCounts, setBadgeCounts] = useState<{ applications?: number; rentalRecords?: number }>({});
+
+  useEffect(() => {
+    let active = true;
+    async function loadCounts() {
+      try {
+        const apps = await listHostedApplications();
+        if (!active) return;
+        const pendingCount = (apps || []).filter(
+          (a) => a.status === "SUBMITTED" || (!a.decisions || a.decisions.length === 0)
+        ).length;
+        setBadgeCounts((prev) => ({
+          ...prev,
+          applications: pendingCount > 0 ? pendingCount : undefined,
+        }));
+      } catch {
+        // silent fallback if network/auth not ready
+      }
+    }
+    loadCounts();
+    return () => {
+      active = false;
+    };
+  }, [pathname]);
 
   async function handleLogout() {
     await userLogout();
@@ -159,6 +190,13 @@ export function UserSidebar({
               {group.items.map((item) => {
                 const Icon = item.icon;
                 const active = pathname === item.href;
+                const badge =
+                  item.href === "/account/host/applications"
+                    ? badgeCounts.applications
+                    : item.href === "/account/host/rental-records"
+                    ? badgeCounts.rentalRecords
+                    : undefined;
+
                 return (
                   <Link
                     key={item.href}
@@ -180,6 +218,11 @@ export function UserSidebar({
                       )}
                     />
                     <span className={cn(collapsed && "lg:hidden")}>{item.label}</span>
+                    {badge !== undefined && badge > 0 && !collapsed && (
+                      <span className="ml-auto inline-flex items-center justify-center rounded-full bg-rose-600 px-2 py-0.5 text-xs font-bold text-white shadow-xs">
+                        {badge}
+                      </span>
+                    )}
                     {active && (
                       <span className="absolute -left-3 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-accent-600" />
                     )}
