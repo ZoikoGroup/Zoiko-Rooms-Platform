@@ -205,7 +205,7 @@ def _rent_obligations_for_case(case: TerminationCase) -> list[Obligation]:
 def calculate_refund_entitlement(db: Session, case: TerminationCase, admin: AdminUser) -> RefundEntitlement:
     """ZR-ENG-CLR-006 AC-10/AC-11/AC-24: computed independently from PSP/
     refund-execution status, itemized, and versioned -- a recalculation
-    always inserts a new row rather than overwriting the last one."""
+    always inserts a new row rather tha n overwriting the last one."""
     assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
     if case.status == "WITHDRAWN":
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot calculate a refund entitlement for a withdrawn case")

@@ -59,6 +59,7 @@ import {
 import { RegionSelect } from "@/components/user/RegionSelect";
 import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
+import { HostMoveInSteps } from "@/components/user/HostMoveInSteps";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Field, Toast, inputClass, useToast } from "@/components/user/ui";
 import { formatDate, resolveImageUrl } from "@/lib/utils";
@@ -320,6 +321,9 @@ export function HostingPropertiesManager() {
         } else if (roomStatus === "NOTICE_GIVEN" && currentOcc?.expectedEndDate) {
           nextMilestone = `Available from ${formatDate(currentOcc.expectedEndDate)}`;
           nextMilestoneTone = "positive";
+        } else if (currentOcc?.status === "PENDING_MOVE_IN") {
+          nextMilestone = "Move-in pending · hand over keys";
+          nextMilestoneTone = "urgent";
         } else if (currentOcc?.expectedEndDate) {
           nextMilestone = `Agreement ends ${formatDate(currentOcc.expectedEndDate)}`;
           nextMilestoneTone = "neutral";
@@ -331,6 +335,9 @@ export function HostingPropertiesManager() {
         if (appWithOffer) {
           actionLabel = "Review Offer";
           actionPrimary = true;
+        } else if (currentOcc?.status === "PENDING_MOVE_IN") {
+          // Opens the room drawer, where the move-in handover steps live.
+          actionLabel = "Complete Move-in";
         } else if (currentOcc) {
           actionLabel = "View Rental";
         } else if (listing && !isLive) {
@@ -368,6 +375,7 @@ export function HostingPropertiesManager() {
           actionPrimary,
           image,
           occupancyId: currentOcc?.id,
+          occupancyStatus: currentOcc?.status,
           listing,
           appWithOffer,
         };
@@ -1696,6 +1704,18 @@ export function HostingPropertiesManager() {
                     <ArrowRight className="size-4" />
                   </Link>
                 )}
+
+                {selectedRoomForDrawer.room.occupancyId &&
+                  selectedRoomForDrawer.room.occupancyStatus === "PENDING_MOVE_IN" && (
+                    <HostMoveInSteps
+                      occupancyId={selectedRoomForDrawer.room.occupancyId}
+                      showToast={showToast}
+                      onMovedIn={() => {
+                        setSelectedRoomForDrawer(null);
+                        load();
+                      }}
+                    />
+                  )}
 
                 {selectedRoomForDrawer.room.occupancyId && (
                   <button

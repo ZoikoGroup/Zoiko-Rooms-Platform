@@ -25,9 +25,10 @@ from app.crud import sublet as sublet_crud
 from app.crud import termination as termination_crud
 from app.crud.listing import assert_party_does_not_own_listing
 from app.crud.rental_transaction_record import build_rental_transaction_record
+from app.crud.activation_gate import handover_events_for
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
-from app.crud.eligibility import check_offer_eligibility
+from app.crud.eligibility import check_offer_eligibility, check_room_capacity
 from app.crud.guest import get_guest_for_user, get_or_create_guest_for_user
 from app.crud.identity_verification import get_verified_identity_for_party
 from app.crud import notification as notif_crud
@@ -131,6 +132,7 @@ def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyR
     listing = db.get(Listing, occupancy.listing_id)
     property_address, property_city, host_name = _property_and_host(db, listing)
     agreement = occupancy.offer.agreement if occupancy.offer else None
+    terms = occupancy.offer.terms[-1] if occupancy.offer and occupancy.offer.terms else None
     return UserOccupancyRead(
         id=occupancy.id,
         listing_id=occupancy.listing_id,
@@ -148,6 +150,11 @@ def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyR
         agreement_id=agreement.id if agreement else None,
         currency=listing.currency if listing else "USD",
         reassigned_via_sublet_request_id=occupancy_crud.get_reassigned_via_sublet_request_id(db, occupancy.id),
+        handover_event_types=sorted({event.event_type for event in handover_events_for(db, occupancy.id)}),
+        payment_recipient_reviewed_at=occupancy.payment_recipient_reviewed_at,
+        lease_start_date=terms.start_date if terms else None,
+        monthly_rent=float(terms.monthly_rent) if terms else None,
+        room_has_space_for_co_tenant=not check_room_capacity(db, occupancy.room),
     )
 
 
@@ -970,6 +977,33 @@ def get_own_latest_refund_entitlement(
     return refund_entitlement_crud.get_latest_refund_entitlement_or_404(db, case)
 
 
+@router.post("/occupancies/{occupancy_id}/payment-recipient/review", response_model=UserOccupancyRead)
+def review_payment_recipient(
+    occupancy_id: int,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Renter's move-in checklist: records that they reviewed the verified
+    payment recipient before paying. Idempotent -- the first review time is kept."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only review the payment recipient for your own rental")
+    if occupancy.status in ("ENDED", "CANCELLED"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This rental has already ended")
+    if occupancy.payment_recipient_reviewed_at is None:
+        occupancy.payment_recipient_reviewed_at = datetime.now(timezone.utc)
+        log_audit_event(
+            db, None, "occupancy.payment_recipient_reviewed", "occupancy", str(occupancy_id),
+            get_correlation_id(request), reason=f"user:{user.id}",
+        )
+        db.commit()
+    return _to_user_occupancy_read(db, occupancy)
+
+
 @router.post("/occupancies/{occupancy_id}/handover/receipt", response_model=HandoverEventRead)
 def submit_handover_receipt(
     occupancy_id: int,
@@ -985,6 +1019,11 @@ def submit_handover_receipt(
     guest = get_guest_for_user(db, user)
     if not guest or occupancy.guest_id != guest.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only record receipt for your own occupancy")
+    # Receipt confirms the host's POSSESSION_DELIVERED -- it can't come first.
+    if "POSSESSION_DELIVERED" not in {event.event_type for event in handover_events_for(db, occupancy.id)}:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Your host hasn't marked the keys and room as handed over yet",
+        )
     event = occupancy_crud.record_handover_event(
         db, occupancy, event_type="RENTER_RECEIPT", actor_kind="renter_user", actor_user_id=user.id,
         evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),

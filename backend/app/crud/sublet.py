@@ -105,6 +105,7 @@ def to_sublet_request_read(db: Session, sr: SubletRequest) -> SubletRequestRead:
         occupant_risk_tier=risk_tier,
         occupant_risk_reason=risk_reason,
         listing_name=listing.name if listing else "",
+        property_id=occupancy.room.property_id if occupancy and occupancy.room else None,
         listing_city=listing.city if listing else "",
         room_type=listing.room_type if listing else "",
         guests=listing.guests if listing else 0,
@@ -777,6 +778,50 @@ def evaluate_sublet_overlap(db: Session, sublet_request: SubletRequest) -> tuple
     )
 
 
+def _add_assignee_agreement_version(db: Session, sublet_request: SubletRequest) -> AgreementVersion | None:
+    """ASSIGNMENT_FULL: the agreement now names the incoming tenant. Adds a new
+    version of the same agreement -- every term copied unchanged from the
+    current version, only the renter details rebuilt for the assignee -- whose
+    PDF is rendered and frozen once the approval commits (see
+    approve_sublet_request). No new signing and no new payments: the open rent
+    has already moved to the assignee and the deposit stays with the tenancy.
+    The previous version stays on file as the original renter's record."""
+    import copy
+
+    from app.services.agreement_document.facts import build_document_facts
+
+    offer = sublet_request.current_occupancy.offer
+    agreement = offer.agreement
+    if agreement is None or not agreement.versions or not offer.terms:
+        return None
+    db.flush()
+    db.refresh(offer)  # offer.guest is now the assignee
+    guest = offer.guest
+    current = agreement.versions[-1]
+    snapshot = copy.deepcopy(current.snapshot)
+    previous_renter = snapshot.get("renter_name", "")
+
+    snapshot["renter_name"] = guest.name if guest else ""
+    snapshot["renter_email"] = guest.email if guest else ""
+    snapshot["renter_phone"] = guest.phone if guest else ""
+    if isinstance(snapshot.get("document"), dict):
+        snapshot["document"]["renter"] = build_document_facts(offer, offer.terms[-1])["renter"]
+    snapshot["assignment"] = {
+        "sublet_request_id": sublet_request.id,
+        "previous_renter_name": previous_renter,
+        "previous_version_no": current.version_no,
+        "assigned_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    version = AgreementVersion(
+        agreement_id=agreement.id, version_no=current.version_no + 1, status="WORKING", snapshot=snapshot,
+    )
+    db.add(version)
+    agreement.version = version.version_no
+    db.flush()
+    return version
+
+
 def approve_sublet_request(
     db: Session, sublet_request: SubletRequest, actor: UserAccount, notes: str = "",
     conditions: str = "", expires_at: datetime | None = None,
@@ -803,6 +848,7 @@ def approve_sublet_request(
     check (evaluate_sublet_overlap) comes back BLOCK -- the approver's
     recorded exception, exactly like user_accept_offer's own."""
     _assert_can_decide_sublet(db, sublet_request, actor)
+    assignee_version = None
     if expires_at is not None and expires_at <= datetime.now(timezone.utc):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Approval expiry must be in the future")
     if sublet_request.arrangement_type in REPLACING_ARRANGEMENT_TYPES:
@@ -919,6 +965,7 @@ def approve_sublet_request(
             # The released renter owes nothing more -- rent that's open and
             # untouched (nothing recorded on it yet) now belongs to the assignee.
             _reassign_open_rent_to(db, sublet_request.current_occupancy, proposed_guest.id)
+            assignee_version = _add_assignee_agreement_version(db, sublet_request)
         else:  # REPLACEMENT_OCCUPANT
             sublet_request.original_renter_liability = "LIMITED"
             sublet_request.new_occupant_liability = "SUBORDINATE"
@@ -1012,6 +1059,12 @@ def approve_sublet_request(
         )
 
     db.commit()
+    if assignee_version is not None:
+        # The assignee's version of the agreement, rendered and frozen like an
+        # executed agreement -- what both parties now download.
+        from app.crud.leasing import freeze_agreement_version
+
+        freeze_agreement_version(db, sublet_request.current_occupancy.offer.agreement)
     db.refresh(sublet_request)
     return sublet_request
 

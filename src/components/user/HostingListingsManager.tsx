@@ -36,6 +36,7 @@ import {
   XCircle,
   Minus,
   ArrowRight,
+  Receipt,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
@@ -65,6 +66,7 @@ import {
 import { ListARoomWizard, submitOutcomeMessage } from "@/components/user/ListARoomWizard";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Field, Toast, inputClass, useToast } from "@/components/user/ui";
+import { HostMoveInSteps } from "@/components/user/HostMoveInSteps";
 import {
   ListingAgreementDetailsFields,
   toAgreementDetailsForm,
@@ -358,12 +360,18 @@ export function HostingListingsManager() {
       let listingStatus: "LIVE" | "IN_PROGRESS" | "PAUSED" | "ACTION_REQUIRED" = "IN_PROGRESS";
       let listingStatusLabel = "In Progress";
       let listingStatusSubtext = "Review, fee or fixes";
-      let listingStatusTone: "live" | "paused" | "review" | "fee" | "changes" | "blocked" = "review";
+      let listingStatusTone: "live" | "paused" | "review" | "draft" | "fee" | "changes" | "blocked" = "review";
 
+      // Only verifications that have actually lapsed or failed block a listing.
+      // EXPIRING_SOON / MANUAL_REVIEW / IN_PROGRESS are still valid, and treating
+      // them as blocked used to hide "Pay Listing Fee" on approved listings.
       const isAuthorityExpired =
-        authVerif?.state === "EXPIRED" || authVerif?.state === "EXPIRING_SOON" || authVerif?.state === "ACTION_REQUIRED";
+        authVerif?.state === "EXPIRED" || authVerif?.state === "REVOKED" || authVerif?.state === "ACTION_REQUIRED";
       const isPropertyBlocked =
-        propVerif && propVerif.state !== "VERIFIED" && propVerif.state !== "NOT_STARTED";
+        propVerif?.state === "EXPIRED" ||
+        propVerif?.state === "REJECTED" ||
+        propVerif?.state === "INVALIDATED" ||
+        propVerif?.state === "ACTION_REQUIRED";
 
       if (l.state === "PUBLISHED") {
         listingStatus = "LIVE";
@@ -401,7 +409,7 @@ export function HostingListingsManager() {
         listingStatus = "IN_PROGRESS";
         listingStatusLabel = "Draft";
         listingStatusSubtext = "Ready to submit";
-        listingStatusTone = "review";
+        listingStatusTone = "draft";
       }
 
       // 2. Compute Room Status
@@ -464,7 +472,11 @@ export function HostingListingsManager() {
       let actionLabel = "View Listing";
       let actionStyle: "primary_red" | "primary_navy" | "outline" = "outline";
 
-      if (listingStatusTone === "blocked") {
+      if (currentOcc?.status === "PENDING_MOVE_IN") {
+        // Opens the drawer, where the move-in handover steps live.
+        actionLabel = "Complete Move-in";
+        actionStyle = "primary_red";
+      } else if (listingStatusTone === "blocked") {
         actionLabel = "Renew verification";
         actionStyle = "primary_red";
       } else if (listingStatusTone === "changes") {
@@ -475,6 +487,9 @@ export function HostingListingsManager() {
         actionStyle = "primary_navy";
       } else if (listingStatusTone === "paused") {
         actionLabel = "Resume Listing";
+        actionStyle = "primary_navy";
+      } else if (listingStatusTone === "draft") {
+        actionLabel = "Submit for Review";
         actionStyle = "primary_navy";
       } else if (listingStatusTone === "review") {
         actionLabel = "View Review";
@@ -517,6 +532,8 @@ export function HostingListingsManager() {
         actionStyle,
         propertyId: property?.id,
         roomId: l.roomId,
+        occupancyId: currentOcc?.id,
+        occupancyStatus: currentOcc?.status,
         propVerif,
         authVerif,
         blockReason:
@@ -830,13 +847,20 @@ export function HostingListingsManager() {
       setPayingFeeListingId(l.id);
     } else if (l.actionLabel === "Fix Listing") {
       setForm(toFormState(l.rawListing));
-    } else if (l.actionLabel === "Resume Listing") {
+    } else if (l.actionLabel === "Resume Listing" || l.actionLabel === "Submit for Review") {
+      // Submitting auto-approves when identity, property and authority are all
+      // verified -- the listing then moves to "Listing Fee Due".
       submitHostedListingForReview(l.id)
-        .then(() => {
-          showToast(`Listing ${l.title} submitted.`);
+        .then((updated) => {
+          showToast(
+            updated.state === "APPROVED"
+              ? `Listing ${l.title} approved — pay the Listing Fee to go live.`
+              : `Listing ${l.title} submitted.`
+          );
+          setSelectedListingForDrawer(null);
           load();
         })
-        .catch((err) => showToast(errorMessage(err, "Could not resume listing"), "error"));
+        .catch((err) => showToast(errorMessage(err, "Could not submit listing"), "error"));
     } else {
       // Opens Slide-out Drawer
       setSelectedListingForDrawer(l);
@@ -1090,6 +1114,12 @@ export function HostingListingsManager() {
           <div className="px-2.5 py-1 rounded-full bg-[#EEF3FF] text-[#1D3F8F] border border-[#AFC2EE] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 w-fit">
             <Clock className="size-3 text-[#1D3F8F]" />
             <span>Under Review</span>
+          </div>
+        )}
+        {l.listingStatusTone === "draft" && (
+          <div className="px-2.5 py-1 rounded-full bg-[#F0F2F6] text-[#344054] border border-[#C3CAD6] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 w-fit">
+            <PenLine className="size-3 text-[#344054]" />
+            <span>Draft</span>
           </div>
         )}
         {l.listingStatusTone === "paused" && (
@@ -1839,6 +1869,20 @@ export function HostingListingsManager() {
                             <span>View Applications</span>
                           </button>
 
+                          {l.rawListing.state === "APPROVED" && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setOpenMenuListingId(null);
+                                setPayingFeeListingId(l.id);
+                              }}
+                              className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2"
+                            >
+                              <Receipt className="size-3.5 text-slate-400" />
+                              <span>Pay Listing Fee</span>
+                            </button>
+                          )}
+
                           {l.listingStatus === "LIVE" && (
                             <Link
                               href={`/listings/${l.rawListing.slug || l.id}`}
@@ -1958,6 +2002,17 @@ export function HostingListingsManager() {
               {/* TAB 1: OVERVIEW */}
               {drawerTab === "overview" && (
                 <div className="space-y-5">
+                  {selectedListingForDrawer.occupancyId &&
+                    selectedListingForDrawer.occupancyStatus === "PENDING_MOVE_IN" && (
+                      <HostMoveInSteps
+                        occupancyId={selectedListingForDrawer.occupancyId}
+                        showToast={showToast}
+                        onMovedIn={() => {
+                          setSelectedListingForDrawer(null);
+                          load();
+                        }}
+                      />
+                    )}
                   {/* KV Grid */}
                   <div className="grid grid-cols-2 gap-2.5">
                     <div className="p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-1">
@@ -2338,6 +2393,17 @@ export function HostingListingsManager() {
               >
                 {selectedListingForDrawer.actionLabel}
               </button>
+
+              {selectedListingForDrawer.rawListing.state === "APPROVED" &&
+                selectedListingForDrawer.actionLabel !== "Pay Listing Fee" && (
+                  <button
+                    type="button"
+                    onClick={() => setPayingFeeListingId(selectedListingForDrawer.id)}
+                    className="h-10 px-5 rounded-full border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 text-[#0E2F73] dark:text-white text-xs font-bold font-heading transition cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Receipt className="size-3.5" /> Pay Listing Fee
+                  </button>
+                )}
 
               {selectedListingForDrawer.listingStatus === "LIVE" && (
                 <Link

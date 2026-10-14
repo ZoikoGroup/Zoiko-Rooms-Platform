@@ -204,18 +204,17 @@ export function HostingSubletRequestsManager({
       label: string;
       subtext: string;
     } => {
-      // Find property authority
+      // The host's current authority record for this request's property.
       const propAuth = authorityList.find(
-        (a) => a.propertyId === req.currentOccupancyId || a.propertyLabel === req.listingName
+        (a) => req.propertyId !== null && a.propertyId === req.propertyId && a.state !== "SUPERSEDED"
       );
 
-      // Check if authority needs renewal or action
+      // Only authority that has actually lapsed blocks a decision -- EXPIRING_SOON is still valid.
       if (
-        propAuth?.state === "EXPIRING_SOON" ||
         propAuth?.state === "EXPIRED" ||
+        propAuth?.state === "REVOKED" ||
         propAuth?.state === "ACTION_REQUIRED" ||
-        req.authorityEvidenceRef === "EXPIRED" ||
-        req.id === 1054 // Match the Figma scenario when authority requires renewal
+        req.authorityEvidenceRef === "EXPIRED"
       ) {
         return {
           type: "RENEWAL_REQUIRED",
@@ -228,8 +227,7 @@ export function HostingSubletRequestsManager({
       if (
         propAuth?.relationshipType === "AGENT" ||
         propAuth?.relationshipType === "PROPERTY_MANAGER" ||
-        req.authorityEvidenceRef === "OWNER_REQUIRED" ||
-        req.id === 1061 // Match Figma scenario for owner required
+        req.authorityEvidenceRef === "OWNER_REQUIRED"
       ) {
         return {
           type: "OWNER_REQUIRED",

@@ -46,6 +46,7 @@ const navGroups = [
       { href: "/account/rentals", label: "My Rentals", icon: DoorOpen },
       { href: "/account/rent-payments", label: "Rent & Deposit Payments", icon: Receipt },
       { href: "/account/sublets", label: "Sublet Requests", icon: Repeat },
+      { href: "/account/disputes", label: "Disputes", icon: Scale },
     ],
   },
   {

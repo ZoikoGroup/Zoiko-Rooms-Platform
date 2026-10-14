@@ -51,6 +51,7 @@ import {
   TerminationCase,
   TerminationCasePreview,
   UserOccupancy,
+  DisputeCaseRead,
 } from "@/lib/types";
 import {
   CO_TENANCY_ARRANGEMENT_TYPES,
@@ -65,6 +66,7 @@ import {
   addOwnConditionReportItem,
   cancelOwnBookingBeforeMoveIn,
   confirmHandoverReceipt,
+  reviewPaymentRecipient,
   confirmMoveOutReady,
   errorMessage,
   getObligationAvailableMethods,
@@ -87,9 +89,13 @@ import {
   submitSubletRequest,
   tenantAgreementPdfUrl,
   withdrawOwnTerminationCase,
+  renterDisputes,
 } from "@/lib/user-api";
+import { DisputeCasesSection } from "@/components/user/DisputeCasePanel";
 import { useToast } from "@/components/user/ui";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
+import { InstructionsModalView } from "@/components/user/RentalPaymentsManager";
+import { Modal } from "@/components/ui/Modal";
 
 type DrawerTab =
   | "movein"
@@ -100,6 +106,7 @@ type DrawerTab =
   | "sublet"
   | "notices"
   | "documents"
+  | "disputes"
   | "record";
 
 interface RentalCardItem {
@@ -135,8 +142,14 @@ interface RentalCardItem {
   subletText: string;
 }
 
+// An active rental is labelled "Ending soon" only in its final month.
+const ENDING_SOON_DAYS = 30;
+const PAID_OBLIGATION_STATUSES = new Set(["PAYER_RECORDED", "RECIPIENT_CONFIRMATION_PENDING", "CONFIRMED", "PARTIALLY_PAID"]);
+
 export function RentalsManager() {
   const router = useRouter();
+  // Captured once per mount so render stays pure (sublet nights-remaining check).
+  const [nowMs] = useState(() => Date.now());
   const { toast, showToast } = useToast();
 
   const [mounted, setMounted] = useState(false);
@@ -147,13 +160,14 @@ export function RentalsManager() {
   const [paymentPreviews, setPaymentPreviews] = useState<Record<number, PaymentPreview>>({});
   const [rentalPaymentObligations, setRentalPaymentObligations] = useState<Record<number, RentalPaymentObligation[]>>({});
   const [terminationCases, setTerminationCases] = useState<Record<number, TerminationCase>>({});
+  // Dispute cases the renter is a party to -- including ones the host opened
+  // (e.g. a payment the host says never arrived).
+  const [disputeCases, setDisputeCases] = useState<DisputeCaseRead[]>([]);
   const [publicListings, setPublicListings] = useState<PublicListing[]>([]);
   const [subletRequests, setSubletRequests] = useState<SubletRequest[]>([]);
 
   // User review state for payment recipient per occupancy (persisted in session)
-  const [reviewedRecipientIds, setReviewedRecipientIds] = useState<Set<number>>(new Set());
   const [receiptConfirmedIds, setReceiptConfirmedIds] = useState<Set<number>>(new Set());
-  const [markedPaidObligationIds, setMarkedPaidObligationIds] = useState<Set<number>>(new Set());
 
   // Filters & Tabs
   const [searchQuery, setSearchQuery] = useState("");
@@ -247,13 +261,16 @@ export function RentalsManager() {
 
   const loadRentalPaymentObligationsFor = useCallback((agreementId: number, occupancyId: number) => {
     Promise.all([
-      listMyRentalPaymentObligations(undefined, { agreementId }),
-      listMyRentalPaymentObligations(undefined, { occupancyId }),
+      listMyRentalPaymentObligations(undefined, { agreementId, limit: 100 }),
+      listMyRentalPaymentObligations(undefined, { occupancyId, limit: 100 }),
     ])
       .then(([agreementPage, occupancyPage]) => {
+        // The initial rent/deposit carry the agreement id, later rent the
+        // occupancy id; some carry both, so merge without duplicates.
+        const byId = new Map([...agreementPage.items, ...occupancyPage.items].map((o) => [o.id, o]));
         setRentalPaymentObligations((prev) => ({
           ...prev,
-          [agreementId]: [...agreementPage.items, ...occupancyPage.items],
+          [agreementId]: [...byId.values()],
         }));
       })
       .catch(() => {});
@@ -273,6 +290,7 @@ export function RentalsManager() {
       setAutopayMandates(mandatesData);
       setPublicListings(publicListingsData);
       setSubletRequests(subletRequestsData);
+      renterDisputes.listCases().then(setDisputeCases).catch(() => {});
 
       const active = occupanciesData.filter((o) => o.agreementId);
       await Promise.all(
@@ -305,6 +323,14 @@ export function RentalsManager() {
   }, [load]);
 
   // Transform occupancies into rich Figma-accurate rental cards
+  const isRecipientReviewed = useCallback(
+    (occ: UserOccupancy) =>
+      Boolean(occ.paymentRecipientReviewedAt) ||
+      (occ.agreementId !== null &&
+        (rentalPaymentObligations[occ.agreementId] ?? []).some((o) => PAID_OBLIGATION_STATUSES.has(o.status))),
+    [rentalPaymentObligations]
+  );
+
   const rentalItems = useMemo<RentalCardItem[]>(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -322,14 +348,15 @@ export function RentalsManager() {
       const roomType = listing?.roomType || "Private Room";
       const city = occ.propertyCity || listing?.city || "Hyderabad";
 
-      const fromStr = occ.moveInDate ? formatDate(occ.moveInDate) : "—";
+      const startDateIso = occ.moveInDate || occ.leaseStartDate;
+      const fromStr = startDateIso ? formatDate(startDateIso) : "—";
       const toStr = occ.expectedEndDate ? formatDate(occ.expectedEndDate) : "—";
-      const startIso = occ.moveInDate || occ.createdAt.split("T")[0] || "";
+      const startIso = startDateIso || occ.createdAt.split("T")[0] || "";
       const endIso = occ.expectedEndDate || occ.moveOutDate || occ.endedAt?.split("T")[0] || "";
 
       // Determine rent amount
       const rentObl = preview?.amountDueNow.find((o) => o.obligationType === "RENT");
-      const rentAmt = rentObl?.amount || (listing?.pricePerNight ? listing.pricePerNight * 30 : 0);
+      const rentAmt = occ.monthlyRent || rentObl?.amount || (listing?.pricePerNight ? listing.pricePerNight * 30 : 0);
       const currency = occ.currency || listing?.currency || "INR";
       const rentFormatted = rentAmt > 0 ? formatCurrency(rentAmt, currency) : "₹—";
 
@@ -338,18 +365,18 @@ export function RentalsManager() {
       const agrStatus = occ.agreementId ? (occ.status === "ACTIVE" ? "Executed / Effective" : "Executed") : "Pending";
 
       // Determine timeline & milestone
-      const startDate = occ.moveInDate ? new Date(occ.moveInDate) : null;
       const endDate = occ.expectedEndDate ? new Date(occ.expectedEndDate) : null;
       const isPastEnd = endDate ? endDate < today : false;
-      const isStartingFuture = startDate ? startDate > today : false;
       const daysUntilEnd = endDate ? Math.round((endDate.getTime() - today.getTime()) / 86400000) : null;
 
       let st: RentalCardItem["st"] = "active";
       if (occ.status === "ENDED") st = "ended";
       else if (occ.status === "CANCELLED") st = "cancelled";
-      else if (occ.status === "PENDING_MOVE_IN" || isStartingFuture) st = "upcoming";
+      // Upcoming means move-in not yet confirmed; once the host confirms, the
+      // backend status is ACTIVE regardless of how the date parses locally.
+      else if (occ.status === "PENDING_MOVE_IN") st = "upcoming";
       else if (occ.moveOutDate || terminationCases[occ.id]) st = "notice";
-      else if (daysUntilEnd !== null && daysUntilEnd <= 90 && daysUntilEnd >= 0) st = "ending";
+      else if (daysUntilEnd !== null && daysUntilEnd <= ENDING_SOON_DAYS && daysUntilEnd >= 0) st = "ending";
 
       let milestone = "Agreement in effect";
       if (st === "upcoming") milestone = occ.moveInDate ? `Move-in ${formatDate(occ.moveInDate)}` : "Pending move-in";
@@ -360,14 +387,15 @@ export function RentalsManager() {
       else if (st === "cancelled") milestone = "Cancelled before start";
 
       // Check if action required
-      const recipientReviewed = reviewedRecipientIds.has(occ.id);
-      const receiptConfirmed = receiptConfirmedIds.has(occ.id);
+      const recipientReviewed = isRecipientReviewed(occ);
+      const receiptConfirmed = receiptConfirmedIds.has(occ.id) || (occ.handoverEventTypes ?? []).includes("RENTER_RECEIPT");
+      const possessionDelivered = (occ.handoverEventTypes ?? []).includes("POSSESSION_DELIVERED");
       let action: string | null = null;
 
       if (occ.status === "PENDING_MOVE_IN") {
         if (!recipientReviewed) {
           action = `${propertyName} · ${roomLabel} has one move-in item outstanding: review the verified payment recipient before your first payment.`;
-        } else if (!receiptConfirmed) {
+        } else if (possessionDelivered && !receiptConfirmed) {
           action = `${propertyName} · ${roomLabel}: Confirm key and room receipt once delivered by host.`;
         }
       }
@@ -385,8 +413,12 @@ export function RentalsManager() {
       const payNext = dueObl
         ? `${formatCurrency(dueObl.amount, dueObl.currency)} due ${formatDate(dueObl.dueDate)}`
         : "No outstanding obligations";
-      const payStatus = markedPaidObligationIds.has(occ.id)
+      // Status from the real payment records, not local UI state.
+      const rentalObligations = occ.agreementId !== null ? rentalPaymentObligations[occ.agreementId] ?? [] : [];
+      const payStatus = rentalObligations.some((o) => ["PAYER_RECORDED", "RECIPIENT_CONFIRMATION_PENDING"].includes(o.status))
         ? "Marked paid by you · awaiting recipient confirmation"
+        : rentalObligations.some((o) => o.status === "OVERDUE")
+        ? "Overdue"
         : dueObl ? "Due soon" : "Up to date";
 
       // Deposit info
@@ -438,7 +470,7 @@ export function RentalsManager() {
         subletText,
       };
     });
-  }, [occupancies, publicListings, paymentPreviews, terminationCases, reviewedRecipientIds, receiptConfirmedIds, markedPaidObligationIds, subletRequests]);
+  }, [occupancies, publicListings, paymentPreviews, terminationCases, isRecipientReviewed, receiptConfirmedIds, rentalPaymentObligations, subletRequests]);
 
   // Segregate into Current and History
   const currentRentals = useMemo(
@@ -633,18 +665,16 @@ export function RentalsManager() {
   };
 
   // Action Submit Handlers
-  const handleConfirmRecipient = () => {
+  const handleConfirmRecipient = async () => {
     if (!modalOccupancy) return;
-    setReviewedRecipientIds((prev) => new Set(prev).add(modalOccupancy.id));
-    setActiveModal(null);
-    showToast("Payment recipient reviewed. Your rental stays Upcoming until move-in.");
-  };
-
-  const handleMarkPaymentMade = () => {
-    if (!modalOccupancy) return;
-    setMarkedPaidObligationIds((prev) => new Set(prev).add(modalOccupancy.id));
-    setActiveModal(null);
-    showToast("Payment marked as made. Only the verified recipient can confirm receipt.");
+    try {
+      const updated = await reviewPaymentRecipient(modalOccupancy.id);
+      setOccupancies((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+      setActiveModal(null);
+      showToast("Payment recipient reviewed. Your rental stays Upcoming until move-in.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not record the payment recipient review."), "error");
+    }
   };
 
   const handleConfirmHandoverReceipt = async (occupancyId: number) => {
@@ -1367,8 +1397,9 @@ export function RentalsManager() {
                 </span>
               </div>
 
-              {/* Tab Navigation in Drawer */}
-              <div className="flex border-b border-[#E1E7F1] px-4 overflow-x-auto gap-1">
+              {/* Tab Navigation in Drawer -- wraps so every tab stays visible (a
+                  sideways-scrolling strip hid Documents/Disputes/Record off-screen). */}
+              <div className="flex flex-wrap border-b border-[#E1E7F1] px-4 gap-x-1">
                 {(selectedItem.occupancy.status === "PENDING_MOVE_IN" || selectedItem.st === "upcoming") && (
                   <button
                     type="button"
@@ -1461,6 +1492,22 @@ export function RentalsManager() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => setDrawerTab("disputes")}
+                  className={`h-11 px-3.5 border-b-2 text-xs font-bold whitespace-nowrap transition-colors ${
+                    drawerTab === "disputes"
+                      ? "border-[#0E2F73] text-[#0E2F73]"
+                      : "border-transparent text-[#4A5878] hover:text-[#0E2F73]"
+                  }`}
+                >
+                  Disputes
+                  {disputeCases.filter((c) => c.occupancyId === selectedItem.occupancy.id).length > 0 && (
+                    <span className="ml-1.5 inline-flex min-w-4 h-4 px-1 items-center justify-center rounded-full bg-[#D80B0B] text-white text-[10px]">
+                      {disputeCases.filter((c) => c.occupancyId === selectedItem.occupancy.id).length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
                   onClick={() => setDrawerTab("record")}
                   className={`h-11 px-3.5 border-b-2 text-xs font-bold whitespace-nowrap transition-colors ${
                     drawerTab === "record"
@@ -1501,15 +1548,15 @@ export function RentalsManager() {
                       </li>
 
                       <li className={`p-3.5 flex items-center justify-between gap-3 ${
-                        reviewedRecipientIds.has(selectedItem.occupancy.id) ? "bg-white" : "bg-[#FFF7F7]"
+                        isRecipientReviewed(selectedItem.occupancy) ? "bg-white" : "bg-[#FFF7F7]"
                       }`}>
                         <div className="flex items-center gap-3">
                           <span className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                            reviewedRecipientIds.has(selectedItem.occupancy.id)
+                            isRecipientReviewed(selectedItem.occupancy)
                               ? "bg-[#E7F8EF] text-[#05603A]"
                               : "bg-[#FDECEC] text-[#B42318]"
                           }`}>
-                            {reviewedRecipientIds.has(selectedItem.occupancy.id) ? (
+                            {isRecipientReviewed(selectedItem.occupancy) ? (
                               <Check className="w-4 h-4" />
                             ) : (
                               <AlertTriangle className="w-4 h-4" />
@@ -1518,13 +1565,13 @@ export function RentalsManager() {
                           <div>
                             <div className="font-bold text-xs sm:text-sm text-[#0B1B3F]">First payment & recipient</div>
                             <div className="text-[11px] text-[#5B6886]">
-                              {reviewedRecipientIds.has(selectedItem.occupancy.id)
+                              {isRecipientReviewed(selectedItem.occupancy)
                                 ? `Recipient reviewed · ${selectedItem.recipient}`
                                 : "Review verified payment recipient before paying"}
                             </div>
                           </div>
                         </div>
-                        {reviewedRecipientIds.has(selectedItem.occupancy.id) ? (
+                        {isRecipientReviewed(selectedItem.occupancy) ? (
                           <span className="text-xs font-bold text-[#05603A]">Done</span>
                         ) : (
                           <button
@@ -1560,8 +1607,11 @@ export function RentalsManager() {
                             <div className="text-[11px] text-[#5B6886]">Collect on move-in day: {selectedItem.from}</div>
                           </div>
                         </div>
-                        {receiptConfirmedIds.has(selectedItem.occupancy.id) ? (
+                        {receiptConfirmedIds.has(selectedItem.occupancy.id) ||
+                        (selectedItem.occupancy.handoverEventTypes ?? []).includes("RENTER_RECEIPT") ? (
                           <span className="text-xs font-bold text-[#05603A]">Confirmed</span>
+                        ) : !(selectedItem.occupancy.handoverEventTypes ?? []).includes("POSSESSION_DELIVERED") ? (
+                          <span className="text-xs font-bold text-[#5B6886]">Waiting for host handover</span>
                         ) : (
                           <button
                             type="button"
@@ -1765,15 +1815,30 @@ export function RentalsManager() {
                     <div className="p-4 border border-[#E1E7F1] rounded-2xl space-y-2">
                       <strong className="text-sm text-[#0B1B3F] block">Sublet Status</strong>
                       <p className="text-xs text-[#4A5878]">{selectedItem.subletText}</p>
-                      {selectedItem.st === "active" && (
-                        <button
-                          type="button"
-                          onClick={() => openSubletWizard(selectedItem.occupancy)}
-                          className="mt-2 px-4 py-2 rounded-xl bg-[#0E2F73] hover:bg-[#0B2560] text-white text-xs font-bold transition-colors"
-                        >
-                          Request to Sublet
-                        </button>
-                      )}
+                      {(() => {
+                        // Mirrors crud/sublet.py:_assert_sublet_permitted so the button only
+                        // shows when the request can actually be accepted.
+                        const occ = selectedItem.occupancy;
+                        const daysLeft = occ.expectedEndDate
+                          ? Math.round((new Date(occ.expectedEndDate).getTime() - nowMs) / 86400000)
+                          : null;
+                        let blocked: string | null = null;
+                        if (occ.status !== "ACTIVE") blocked = "Subletting opens once your move-in is confirmed and the rental is active.";
+                        else if (occ.reassignedViaSubletRequestId) blocked = "This rental has already been reassigned through a sublet.";
+                        else if (selectedItem.hasSublet) blocked = "You already have a sublet request awaiting your host's decision.";
+                        else if (daysLeft === null || daysLeft < 30) blocked = "A sublet needs at least 30 nights left on the agreement.";
+                        return blocked ? (
+                          <p className="mt-1 text-xs text-[#5B6886]">{blocked}</p>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => openSubletWizard(occ)}
+                            className="mt-2 px-4 py-2 rounded-xl bg-[#0E2F73] hover:bg-[#0B2560] text-white text-xs font-bold transition-colors"
+                          >
+                            Request to Sublet
+                          </button>
+                        );
+                      })()}
                     </div>
                     <p className="text-xs text-[#5B6886]">
                       Your host or their authorized agent decides. Zoiko Rooms routes and records the request — it doesn’t grant consent.
@@ -1890,6 +1955,21 @@ export function RentalsManager() {
                   </div>
                 )}
 
+                {/* TAB: Disputes */}
+                {drawerTab === "disputes" && (
+                  <div className="space-y-4">
+                    <DisputeCasesSection
+                      client={renterDisputes}
+                      viewerRole="RENTER"
+                      cases={disputeCases.filter((c) => c.occupancyId === selectedItem.occupancy.id)}
+                      showToast={showToast}
+                      onChanged={load}
+                      occupancyId={selectedItem.occupancy.id}
+                      emptyMessage="No disputes on this rental."
+                    />
+                  </div>
+                )}
+
                 {/* TAB: Transaction Record */}
                 {drawerTab === "record" && (
                   <div className="space-y-4">
@@ -1983,77 +2063,26 @@ export function RentalsManager() {
           document.body
         )}
 
-      {/* Payment Instructions Modal */}
-      {mounted &&
-        activeModal === "instr" &&
-        modalItem &&
-        createPortal(
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
-            <div className="absolute inset-0 bg-[#081638]/45 backdrop-blur-[2px]" onClick={() => setActiveModal(null)} />
-            <div className="relative w-full max-w-lg bg-white rounded-[24px] p-6 shadow-2xl space-y-4 z-10">
-              <h2 className="text-xl font-extrabold text-[#0E2F73]">Payment instructions</h2>
-
-              <div className="p-4 rounded-2xl bg-[#E7F8EF] border border-[#8FD9B4] flex items-start gap-3">
-                <ShieldCheck className="w-6 h-6 text-[#05603A] flex-shrink-0" />
-                <div>
-                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#05603A] block">
-                    Verified Payee
-                  </span>
-                  <strong className="text-sm text-[#0B1B3F] block mt-0.5">{modalItem.recipient}</strong>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="p-3 border border-[#E1E7F1] rounded-xl flex flex-col gap-0.5">
-                  <span className="text-[10px] font-bold text-[#5B6886] uppercase">Amount</span>
-                  <strong className="text-[#0B1B3F]">{modalItem.rent}</strong>
-                </div>
-                <div className="p-3 border border-[#E1E7F1] rounded-xl flex flex-col gap-0.5">
-                  <span className="text-[10px] font-bold text-[#5B6886] uppercase">Due date</span>
-                  <strong className="text-[#0B1B3F]">{modalItem.from}</strong>
-                </div>
-                <div className="p-3 border border-[#E1E7F1] rounded-xl flex flex-col gap-0.5">
-                  <span className="text-[10px] font-bold text-[#5B6886] uppercase">Account name</span>
-                  <strong className="text-[#0B1B3F]">{modalItem.recipient}</strong>
-                </div>
-                <div className="p-3 border border-[#E1E7F1] rounded-xl flex flex-col gap-0.5">
-                  <span className="text-[10px] font-bold text-[#5B6886] uppercase">Account / UPI</span>
-                  <strong className="text-[#0B1B3F]">XXXX XXXX 4821 (HDFC Bank)</strong>
-                </div>
-                <div className="p-3 border border-[#E1E7F1] rounded-xl flex flex-col gap-0.5">
-                  <span className="text-[10px] font-bold text-[#5B6886] uppercase">IFSC code</span>
-                  <strong className="text-[#0B1B3F]">HDFC0001234</strong>
-                </div>
-                <div className="p-3 border border-[#E1E7F1] rounded-xl flex flex-col gap-0.5">
-                  <span className="text-[10px] font-bold text-[#5B6886] uppercase">Reference</span>
-                  <strong className="text-[#0E2F73] font-mono">{modalItem.id}</strong>
-                </div>
-              </div>
-
-              <p className="text-xs text-[#5B6886]">
-                This payment goes directly to {modalItem.recipient}. Zoiko Rooms does not hold rent or intermediate transactions.
-              </p>
-
-              <div className="flex justify-end gap-2.5 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setActiveModal(null)}
-                  className="px-4 py-2.5 rounded-xl border border-slate-300 text-xs font-bold text-[#0E2F73] hover:bg-slate-50"
-                >
-                  Close
-                </button>
-                <button
-                  type="button"
-                  onClick={handleMarkPaymentMade}
-                  className="px-4 py-2.5 rounded-xl bg-[#0E2F73] hover:bg-[#0B2560] text-xs font-bold text-white transition-colors"
-                >
-                  I’ve made this payment
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body
-        )}
+      {/* Payment Instructions -- the real, verified details for the next open payment */}
+      {activeModal === "instr" && modalItem && (() => {
+        const open = (modalItem.occupancy.agreementId !== null ? rentalPaymentObligations[modalItem.occupancy.agreementId] ?? [] : [])
+          .filter((o) => ["OVERDUE", "DUE", "UPCOMING", "PARTIALLY_PAID"].includes(o.status))
+          .sort((x, y) => x.dueDate.localeCompare(y.dueDate));
+        return open.length > 0 ? (
+          <InstructionsModalView
+            obligation={open[0]}
+            onClose={() => setActiveModal(null)}
+            onRecordPayment={() => {
+              setActiveModal(null);
+              router.push("/account/rent-payments");
+            }}
+          />
+        ) : (
+          <Modal open onClose={() => setActiveModal(null)} title="Payment instructions">
+            <p className="text-sm text-slate-600">Nothing is due on this rental right now.</p>
+          </Modal>
+        );
+      })()}
 
       {/* Early End / Move-out Modal */}
       {mounted &&
@@ -2142,9 +2171,19 @@ export function RentalsManager() {
                     >
                       <option value="ASSIGNMENT_FULL">Full Assignment (Swap renter)</option>
                       <option value="REPLACEMENT_OCCUPANT">Replacement Occupant</option>
-                      <option value="SUBLEASE_PARTIAL">Sublease Partial</option>
-                      <option value="ADD_CO_TENANT">Add Co-Tenant</option>
+                      <option value="SUBLEASE_PARTIAL" disabled={!modalOccupancy?.roomHasSpaceForCoTenant}>
+                        Sublease Partial{modalOccupancy?.roomHasSpaceForCoTenant ? "" : " (room is full)"}
+                      </option>
+                      <option value="ADD_CO_TENANT" disabled={!modalOccupancy?.roomHasSpaceForCoTenant}>
+                        Add Co-Tenant{modalOccupancy?.roomHasSpaceForCoTenant ? "" : " (room is full)"}
+                      </option>
                     </select>
+                    {!modalOccupancy?.roomHasSpaceForCoTenant && (
+                      <p className="mt-1 text-[11px] text-[#5B6886]">
+                        This room is already at its occupant limit, so only a full handover is possible. Your host can
+                        raise the room&apos;s occupant limit if it can be shared.
+                      </p>
+                    )}
                   </div>
                   <div>
                     <label className="font-bold text-[#3A4866] block mb-1">Reason for subletting</label>

@@ -485,6 +485,18 @@ class UserOccupancyRead(CamelModel):
     # enforces this server-side); the renter's own "Request to sublet" button
     # needs this to know not to offer an action that will just 409.
     reassigned_via_sublet_request_id: int | None = None
+    # Move-in handover steps recorded so far (HANDOVER_READY,
+    # POSSESSION_DELIVERED, RENTER_RECEIPT, ...) -- lets the renter's view show
+    # whether the host has delivered and whether receipt is already confirmed.
+    handover_event_types: list[str] = []
+    payment_recipient_reviewed_at: datetime | None = None
+    # Agreed terms (latest OfferTerms) -- move_in_date stays empty until move-in
+    # is confirmed, and nothing is "due now" once payments are complete.
+    lease_start_date: date | None = None
+    monthly_rent: float | None = None
+    # Whether the room has a free place for another tenancy -- the sublet
+    # arrangements that share the room (crud/sublet.py CO_TENANCY types) need one.
+    room_has_space_for_co_tenant: bool = False
 
 
 class SubletRequestCreate(CamelModel):
@@ -578,6 +590,9 @@ class SubletRequestRead(CamelModel):
     occupant_risk_reason: str = ""
 
     listing_name: str = ""
+    # The room's property -- lets the host UI match this request to their
+    # authority record for that property.
+    property_id: int | None = None
     listing_city: str = ""
     room_type: str = ""
     guests: int = 0

@@ -17,6 +17,7 @@ import {
 } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
+  hostAgreementPdfUrl,
   acceptHostedOfferCounter,
   addHostedOfferTerms,
   createHostedAgreement,
@@ -433,9 +434,19 @@ export function HostOfferAgreementPanel({
             <div className="space-y-4 border-t border-slate-100 pt-4 dark:border-white/10">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold uppercase tracking-wide text-slate-400">Agreement</span>
-                <Badge tone={agreementStatusTone[agreement.status] ?? "neutral"}>
-                  {agreementStatusLabel[agreement.status] ?? agreement.status}
-                </Badge>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={hostAgreementPdfUrl(agreement.id)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs font-bold text-primary-700 hover:underline dark:text-primary-300"
+                  >
+                    Download PDF
+                  </a>
+                  <Badge tone={agreementStatusTone[agreement.status] ?? "neutral"}>
+                    {agreementStatusLabel[agreement.status] ?? agreement.status}
+                  </Badge>
+                </div>
               </div>
 
               {agreement.status === "DRAFT" && (
