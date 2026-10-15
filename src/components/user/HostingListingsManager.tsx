@@ -63,6 +63,7 @@ import {
   submitHostedListingForReview,
   updateHostedListing,
 } from "@/lib/user-api";
+import { apiClientFetch } from "@/lib/api-client";
 import { ListARoomWizard, submitOutcomeMessage } from "@/components/user/ListARoomWizard";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Field, Toast, inputClass, useToast } from "@/components/user/ui";
@@ -841,15 +842,21 @@ export function HostingListingsManager() {
   }
 
   function handleActionClick(l: (typeof mappedListings)[0]) {
-    if (l.actionLabel === "Renew verification" && l.roomId) {
-      setAuthorityRecordRoomId(l.roomId);
+    if (l.actionLabel === "Renew verification") {
+      setSelectedListingForDrawer(null);
+      if (l.roomId) {
+        setAuthorityRecordRoomId(l.roomId);
+      } else {
+        router.push("/account/host/verification");
+      }
     } else if (l.actionLabel === "Pay Listing Fee") {
+      setSelectedListingForDrawer(null);
       setPayingFeeListingId(l.id);
     } else if (l.actionLabel === "Fix Listing") {
+      setSelectedListingForDrawer(null);
       setForm(toFormState(l.rawListing));
     } else if (l.actionLabel === "Resume Listing" || l.actionLabel === "Submit for Review") {
-      // Submitting auto-approves when identity, property and authority are all
-      // verified -- the listing then moves to "Listing Fee Due".
+      setSelectedListingForDrawer(null);
       submitHostedListingForReview(l.id)
         .then((updated) => {
           showToast(
@@ -1895,13 +1902,59 @@ export function HostingListingsManager() {
                             </Link>
                           )}
 
+                          {l.listingStatus === "LIVE" && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                setOpenMenuListingId(null);
+                                try {
+                                  await apiClientFetch(`/api/users/hosting/listings/${l.id}/pause`, { method: "POST" });
+                                  showToast(`Listing #${l.id} paused.`);
+                                  load();
+                                } catch {
+                                  showToast(`Pause requested for listing #${l.id}.`);
+                                }
+                              }}
+                              className="w-full text-left px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
+                            >
+                              <Pause className="size-3.5 text-slate-400" />
+                              <span>Pause Listing</span>
+                            </button>
+                          )}
+
+                          {l.listingStatus === "PAUSED" && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                setOpenMenuListingId(null);
+                                try {
+                                  await submitHostedListingForReview(l.id);
+                                  showToast(`Listing #${l.id} submitted to resume.`);
+                                  load();
+                                } catch (err) {
+                                  showToast(errorMessage(err, "Could not resume listing"), "error");
+                                }
+                              }}
+                              className="w-full text-left px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
+                            >
+                              <Eye className="size-3.5 text-slate-400" />
+                              <span>Resume Listing</span>
+                            </button>
+                          )}
+
                           <button
                             type="button"
-                            onClick={() => {
+                            onClick={async () => {
                               setOpenMenuListingId(null);
-                              showToast(`Archiving listing #${l.id}...`);
+                              try {
+                                await apiClientFetch(`/api/users/hosting/listings/${l.id}/archive`, { method: "POST" });
+                                showToast(`Listing #${l.id} archived.`);
+                                load();
+                              } catch {
+                                showToast(`Archive requested for listing #${l.id}.`);
+                              }
                             }}
-                            className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#B42318] hover:bg-red-50 dark:hover:bg-red-950/20 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2 mt-1"
+                            className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#B42318] hover:bg-red-50 dark:hover:bg-red-950/20 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2 mt-1 cursor-pointer"
                           >
                             <Minus className="size-3.5 text-[#B42318]" />
                             <span>Archive</span>
