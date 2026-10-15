@@ -175,6 +175,7 @@ export const depositStatusTone = {
   RELEASED: "success",
   FORFEITED: "danger",
   PARTIALLY_RELEASED: "warning",
+  FROZEN: "warning",
 } as const;
 
 export const depositStatusLabel = {
@@ -182,6 +183,7 @@ export const depositStatusLabel = {
   RELEASED: "Released",
   FORFEITED: "Forfeited",
   PARTIALLY_RELEASED: "Partially released",
+  FROZEN: "On hold (claim open)",
 } as const;
 
 export const payoutStatusTone = {
@@ -613,10 +615,12 @@ export const rentalPaymentStatusLabel = {
 
 export const rentalPaymentInstructionStatusTone = {
   PENDING_VERIFICATION: "warning",
+  COOLING_OFF: "warning",
   PENDING_REVIEW: "warning",
   ACTIVE: "success",
   SUPERSEDED: "neutral",
   REJECTED: "danger",
+  CANCELLED: "neutral",
 } as const;
 
 // -- Section 10 gap: ZR-ENG-CLR-010 general-purpose Dispute Resolution

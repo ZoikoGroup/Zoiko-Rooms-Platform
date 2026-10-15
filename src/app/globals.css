@@ -384,3 +384,18 @@ body {
 .typing-dot-3 {
   animation: chat-typing-bounce 1.2s ease-in-out 0.3s infinite;
 }
+
+
+/* Settings > Preferences (lib/display-preferences.ts sets these on <html>). */
+html[data-density="compact"] {
+  font-size: 87.5%;
+}
+
+html[data-motion="reduce"] *,
+html[data-motion="reduce"] *::before,
+html[data-motion="reduce"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}

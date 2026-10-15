@@ -3025,7 +3025,7 @@ export function SubletRequestsList() {
                     )}
                   </fieldset>
                   <p className="muted small">
-                    Rentals that can't be sublet are shown greyed out with the reason.
+                    Rentals that can&apos;t be sublet are shown greyed out with the reason.
                   </p>
                 </div>
               )}

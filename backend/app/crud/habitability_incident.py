@@ -7,7 +7,7 @@ only when no other open H2/H3 incident remains for the same room."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -17,18 +17,23 @@ from app.crud import notification as notif_crud
 from app.crud.events import emit_event
 from app.crud.party import assert_provider_access, party_id_for_room
 from app.models.admin_user import AdminUser
-from app.models.finance import Obligation
 from app.models.guest import Guest
-from app.models.leasing import Agreement
 from app.models.habitability_incident import (
     HABITABILITY_SEVERITIES,
+    OPEN_HABITABILITY_STATUSES,
     ROOM_FREEZING_SEVERITIES,
     HabitabilityIncident,
 )
+from app.models.user_account import UserAccount
+
+# How long the host has to fix it, by severity (H3 = most serious).
+_FIX_DAYS = {"H3": 2, "H2": 7, "H1": 14, "H0": 30}
+# Share of the next unpaid rent credited to the renter when a serious
+# problem isn't fixed in time.
+_OVERDUE_CREDIT_SHARE = {"H3": 0.5, "H2": 0.25}
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
-from app.schemas.finance import RefundDecide, RefundRequestCreate
-from app.schemas.habitability import HabitabilityCreditApply, HabitabilityIncidentCreate, HabitabilityIncidentResolve
+from app.schemas.habitability import HabitabilityIncidentCreate
 
 
 def report_habitability_incident(
@@ -57,6 +62,7 @@ def report_habitability_incident(
         reported_by_admin_id=admin.id if admin else None,
         severity=data.severity,
         description=data.description,
+        fix_due_at=datetime.now(timezone.utc) + timedelta(days=_FIX_DAYS[data.severity]),
     )
     db.add(incident)
 
@@ -97,111 +103,176 @@ def report_habitability_incident(
     return incident
 
 
-def resolve_habitability_incident(
-    db: Session, incident: HabitabilityIncident, admin: AdminUser, data: HabitabilityIncidentResolve,
-) -> HabitabilityIncident:
-    assert_provider_access(db, admin, party_id_for_room(incident.room))
-    if incident.status != "OPEN":
-        raise HTTPException(status.HTTP_409_CONFLICT, "This incident has already been resolved")
-
+def _close(db: Session, incident: HabitabilityIncident, *, basis: str, notes: str = "") -> None:
+    """Resolved: reopens the room for new bookings when no other serious
+    incident on it is still open."""
     incident.status = "RESOLVED"
     incident.resolved_at = datetime.now(timezone.utc)
-    incident.resolved_by_admin_id = admin.id
-    incident.resolution_notes = data.resolution_notes
-
+    incident.resolution_basis = basis
+    if notes:
+        incident.resolution_notes = notes
     if incident.severity in ROOM_FREEZING_SEVERITIES:
         other_open_severe = db.scalar(
             select(HabitabilityIncident).where(
                 HabitabilityIncident.room_id == incident.room_id,
-                HabitabilityIncident.status == "OPEN",
+                HabitabilityIncident.status.in_(OPEN_HABITABILITY_STATUSES),
                 HabitabilityIncident.severity.in_(ROOM_FREEZING_SEVERITIES),
                 HabitabilityIncident.id != incident.id,
             )
         )
         if other_open_severe is None:
             incident.room.status = "active"
-            # ZR-ENG-CLR-006 Section 20.2: booking.inventory_reopened -- the
-            # room becoming bookable again is exactly this event, fired only
-            # from this authorized resolution path (Section 20.3: "Inventory
-            # reopening must occur only from an authorized termination/
-            # occupancy event").
             emit_event(
                 db, "booking.inventory_reopened", "room", str(incident.room_id),
                 {"habitabilityIncidentId": incident.id},
             )
 
-    db.commit()
-    db.refresh(incident)
-    return incident
+
+def _assert_host(db: Session, incident: HabitabilityIncident, user: UserAccount) -> None:
+    if not user.party_id or party_id_for_room(incident.room) != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This room isn't on your property")
 
 
-def apply_habitability_credit(
-    db: Session, incident: HabitabilityIncident, admin: AdminUser, data: HabitabilityCreditApply,
-) -> HabitabilityIncident:
-    """ZR-ENG-CLR-006 Section 9.1 H1 row: 'Compliance review; possible rent
-    adjustment/credit.' Executed as a real Section 5 RefundRequest against a
-    specific already-paid RENT obligation on this incident's own occupancy
-    -- reusing the exact tested pattern crud/refund_entitlement.py:
-    execute_refund_entitlement already uses, since 'credit' means the same
-    thing here: money actually given back, not a bookkeeping note. One-shot
-    per incident (a second call is rejected, not accumulated) -- see the
-    model's own field docstring for why this is deliberately H1-only."""
-    from app.crud import finance as finance_crud  # local import: finance.py imports this module at module level
+def _assert_renter(incident: HabitabilityIncident, guest: Guest) -> None:
+    if incident.occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This report isn't about your tenancy")
 
-    assert_provider_access(db, admin, party_id_for_room(incident.room))
-    if incident.severity != "H1":
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A habitability credit can only be applied to an H1 incident")
-    if incident.credited_amount > 0:
-        raise HTTPException(status.HTTP_409_CONFLICT, "A credit has already been applied to this incident")
-    if data.amount <= 0:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The credit amount must be positive")
-    if not data.reason.strip():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A reason is required to apply a habitability credit")
 
-    obligation = db.get(Obligation, data.obligation_id)
-    # RENT obligations reach an occupancy via either occupancy_id (generated
-    # while ACTIVE) or the agreement's own obligations (the initial one, set
-    # at signing) -- same duality crud/refund_entitlement.py:
-    # _rent_obligations_for_case already resolves for this exact reason.
-    agreement = db.scalar(select(Agreement).where(Agreement.offer_id == incident.occupancy.offer_id))
-    valid_obligation_ids = {o.id for o in incident.occupancy.obligations}
-    if agreement:
-        valid_obligation_ids |= {o.id for o in agreement.obligations}
-    if obligation is None or obligation.id not in valid_obligation_ids or obligation.obligation_type != "RENT":
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The obligation must be a RENT obligation on this incident's own occupancy")
-    paid_allocation = next((a for a in obligation.allocations if a.amount_allocated > 0), None)
-    if paid_allocation is None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "This obligation has no paid amount to credit against")
-
-    refund = finance_crud.request_refund(
-        db,
-        RefundRequestCreate(
-            payment_id=paid_allocation.payment_id, obligation_id=obligation.id, amount=data.amount,
-            reason=f"ZR-ENG-CLR-006 Section 9.1 H1 credit for habitability incident #{incident.id}: {data.reason}",
-            idempotency_key=f"habitability-credit-{incident.id}",
-        ),
-        admin,
-    )
-    if refund.status == "REQUESTED":
-        refund = finance_crud.decide_refund(db, refund, admin, RefundDecide(approve=True))
-        finance_crud.reverse_platform_fee_for_refund(db, obligation, refund)
-
-    incident.credited_amount = data.amount
-    incident.credited_refund_request_id = refund.id
-    incident.credit_reason = data.reason
-    incident.credited_by_admin_id = admin.id
-    incident.credited_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(incident)
-
+def _tell_renter(db: Session, incident: HabitabilityIncident, *, title: str, message: str, event: str) -> None:
     notif_crud.notify_user_by_guest(
-        db, incident.occupancy.guest,
-        title="A rent credit was applied to your tenancy",
-        message=f"A credit of {refund.payment.currency} {data.amount:.2f} was applied following your habitability report.",
-        notification_type="habitability_incident.credited",
-        related_entity_type="habitability_incident", related_entity_id=str(incident.id),
+        db, incident.occupancy.guest, title=title, message=message,
+        notification_type=f"habitability_incident.{event}", related_entity_type="habitability_incident",
+        related_entity_id=f"{incident.id}:{event}:{incident.fix_rejected_count}",
     )
+
+
+def _tell_host(db: Session, incident: HabitabilityIncident, *, title: str, message: str, event: str) -> None:
+    notif_crud.notify_user_by_party(
+        db, party_id_for_room(incident.room), title=title, message=message,
+        notification_type=f"habitability_incident.{event}", related_entity_type="habitability_incident",
+        related_entity_id=f"{incident.id}:{event}:{incident.fix_rejected_count}",
+    )
+
+
+def acknowledge(db: Session, incident: HabitabilityIncident, user: UserAccount) -> HabitabilityIncident:
+    _assert_host(db, incident, user)
+    if incident.status != "OPEN":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This report has already been acknowledged")
+    incident.status = "ACKNOWLEDGED"
+    incident.acknowledged_at = datetime.now(timezone.utc)
+    _tell_renter(
+        db, incident, event="acknowledged", title="Your host is on it",
+        message=f"Your host acknowledged the issue you reported. It's due to be fixed by {incident.fix_due_at.date().isoformat()}.",
+    )
+    db.commit()
+    db.refresh(incident)
     return incident
+
+
+def report_fixed(db: Session, incident: HabitabilityIncident, user: UserAccount, notes: str) -> HabitabilityIncident:
+    _assert_host(db, incident, user)
+    if incident.status not in ("OPEN", "ACKNOWLEDGED"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This report isn't waiting for a fix")
+    incident.status = "FIX_REPORTED"
+    incident.acknowledged_at = incident.acknowledged_at or datetime.now(timezone.utc)
+    incident.fix_reported_at = datetime.now(timezone.utc)
+    incident.resolution_notes = notes.strip()[:2000]
+    _tell_renter(
+        db, incident, event="fix_reported", title="Your host says it's fixed",
+        message="Confirm the fix, or tell your host it isn't fixed. If you don't answer within a few days it's treated as fixed.",
+    )
+    db.commit()
+    db.refresh(incident)
+    return incident
+
+
+def confirm_fixed(db: Session, incident: HabitabilityIncident, guest: Guest) -> HabitabilityIncident:
+    _assert_renter(incident, guest)
+    if incident.status != "FIX_REPORTED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Your host hasn't reported a fix yet")
+    _close(db, incident, basis="RENTER_CONFIRMED")
+    db.commit()
+    db.refresh(incident)
+    return incident
+
+
+def reject_fix(db: Session, incident: HabitabilityIncident, guest: Guest, note: str) -> HabitabilityIncident:
+    _assert_renter(incident, guest)
+    if incident.status != "FIX_REPORTED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Your host hasn't reported a fix yet")
+    incident.status = "ACKNOWLEDGED"
+    incident.fix_reported_at = None
+    incident.fix_rejected_count = (incident.fix_rejected_count or 0) + 1
+    _tell_host(
+        db, incident, event="fix_rejected", title="The renter says it isn't fixed",
+        message=(note.strip()[:300] or "The issue is still there.") + f" Still due by {incident.fix_due_at.date().isoformat()}.",
+    )
+    db.commit()
+    db.refresh(incident)
+    return incident
+
+
+def _confirm_days(incident: HabitabilityIncident) -> int:
+    from app.services.policy import get_policy
+
+    listing = incident.occupancy.listing
+    return int(get_policy(listing.market_release if listing else None, "habitability.renter_confirm_days"))
+
+
+def _apply_overdue_credit(db: Session, incident: HabitabilityIncident) -> bool:
+    """A serious problem past its fix date: take a share of the next unpaid
+    rent off, once per incident. Rent is paid to the host directly, so the
+    credit is a reduction of what the renter owes, not a payout."""
+    from app.models.rental_payment import RentalPaymentObligation
+
+    share = _OVERDUE_CREDIT_SHARE.get(incident.severity)
+    if not share or float(incident.credited_amount or 0) > 0:
+        return False
+    nxt = db.scalar(
+        select(RentalPaymentObligation).where(
+            RentalPaymentObligation.occupancy_id == incident.occupancy_id,
+            RentalPaymentObligation.obligation_type == "RENT",
+            RentalPaymentObligation.status.in_(("UPCOMING", "DUE")),
+        ).order_by(RentalPaymentObligation.due_date)
+    )
+    if nxt is None:
+        return False
+    credit = round(float(nxt.amount) * share, 2)
+    nxt.amount = round(float(nxt.amount) - credit, 2)
+    incident.credited_amount = credit
+    incident.credit_reason = f"{incident.severity} issue not fixed by {incident.fix_due_at.date().isoformat()}"
+    incident.credited_at = datetime.now(timezone.utc)
+    _tell_renter(
+        db, incident, event="credited", title="Rent reduced: issue not fixed in time",
+        message=(
+            f"{nxt.currency} {credit:.2f} was taken off your rent due {nxt.due_date.isoformat()}. "
+            "If the room is unlivable you can also end your tenancy (reason: property uninhabitable)."
+        ),
+    )
+    _tell_host(
+        db, incident, event="credited_for_host", title="Rent reduced: issue not fixed in time",
+        message=f"{nxt.currency} {credit:.2f} was taken off the rent due {nxt.due_date.isoformat()}.",
+    )
+    return True
+
+
+def apply_habitability_deadlines(db: Session) -> int:
+    """Scheduler job: a reported fix the renter didn't answer is confirmed;
+    a serious problem past its fix date gets the rent credit."""
+    now = datetime.now(timezone.utc)
+    changed = 0
+    for incident in db.scalars(select(HabitabilityIncident).where(HabitabilityIncident.status.in_(OPEN_HABITABILITY_STATUSES))):
+        if incident.status == "FIX_REPORTED" and incident.fix_reported_at is not None:
+            reported = incident.fix_reported_at if incident.fix_reported_at.tzinfo else incident.fix_reported_at.replace(tzinfo=timezone.utc)
+            if now - reported >= timedelta(days=_confirm_days(incident)):
+                _close(db, incident, basis="DEEMED_CONFIRMED")
+                changed += 1
+        elif incident.fix_due_at is not None:
+            due = incident.fix_due_at if incident.fix_due_at.tzinfo else incident.fix_due_at.replace(tzinfo=timezone.utc)
+            if due < now and _apply_overdue_credit(db, incident):
+                changed += 1
+    db.commit()
+    return changed
 
 
 def get_habitability_incident_or_404(db: Session, incident_id: int) -> HabitabilityIncident:
@@ -238,7 +309,7 @@ def has_open_severe_incident_for_room(db: Session, room_id: int) -> bool:
     return db.scalar(
         select(HabitabilityIncident.id).where(
             HabitabilityIncident.room_id == room_id,
-            HabitabilityIncident.status == "OPEN",
+            HabitabilityIncident.status.in_(OPEN_HABITABILITY_STATUSES),
             HabitabilityIncident.severity.in_(ROOM_FREEZING_SEVERITIES),
         ).limit(1)
     ) is not None

@@ -259,8 +259,22 @@ class TestApartmentAndUnits:
         _flow(client, host).happy_path("APARTMENT", "8B", evidence=_pdf("Property tax record", "Flat 8B", "2-599 Madupally, Madhira 507116"))
         other = _host(db_session, "plv-host-3@test.com")
         b = Flow(client, other[0], other[1]).happy_path("APARTMENT", "8B", evidence=_pdf("Property tax record", "Flat 8B", "2-599 Madupally Madhira 507116 copy"))
-        assert b["state"] == "ACTION_REQUIRED" and b["possibleDuplicate"] and "POSSIBLE_DUPLICATE" in b["reasonCodes"]
+        assert b["state"] == "ACTION_REQUIRED" and b["possibleDuplicate"] and "PROPERTY_ALREADY_REGISTERED" in b["reasonCodes"]
+        assert "already registered" in svc.describe(["PROPERTY_ALREADY_REGISTERED"])["message"]
 
+    def test_re_adding_your_own_property_says_so(self, client, db_session, host, provider, uploads):
+        from app.models.property import Property
+        from app.models.property_location import PropertyLocationVerification
+
+        user, prop, _room = host
+        a = _flow(client, host).happy_path("APARTMENT", "8B", evidence=_pdf("Property tax record", "Flat 8B", "2-599 Madupally, Madhira 507116"))
+        mine = Property(owner_party_id=prop.owner_party_id, address="2-599 Madupally", city="Madhira", jurisdiction_code="IN", status="active")
+        db_session.add(mine)
+        db_session.commit()
+        v = db_session.get(PropertyLocationVerification, a["id"])
+        v.duplicate_of_property_id = mine.id
+        assert svc._duplicate_code(db_session, v) == "PROPERTY_ALREADY_YOURS"
+        assert "already added" in svc.describe(["PROPERTY_ALREADY_YOURS"])["message"]
 
 class TestMapControl:
     def test_a_10m_adjustment_is_accepted_and_recorded(self, client, db_session, host, provider, uploads):

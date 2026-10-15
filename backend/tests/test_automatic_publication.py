@@ -120,10 +120,12 @@ class TestAutomaticPublication:
         assert r.status_code == 200, r.text
         assert r.json()["state"] == "SUSPENDED"
 
-    def test_market_can_opt_back_into_admin_review(self, client, db_session: Session):
+    def test_a_market_override_cannot_turn_admin_review_back_on(self, client, db_session: Session):
+        """publication.requires_approval is platform-fixed: a release still
+        carrying an old True override publishes automatically anyway."""
         listing_id, cookies = _create_listing(client, db_session, "auto-review@test.com",
                                               overrides={"publication.requires_approval": True})
 
         r = _submit(client, listing_id, cookies)
         assert r.status_code == 200, r.text
-        assert r.json()["state"] == "REVIEW"
+        assert r.json()["state"] == "PUBLISHED"

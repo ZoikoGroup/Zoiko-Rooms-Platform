@@ -112,6 +112,8 @@ export function HostingSubletRequestsManager({
 }: HostingSubletRequestsManagerProps) {
   const { user, identityVerified } = useUserSession();
   const { toast, showToast } = useToast();
+  // Captured once so render stays pure (used for the approval-expiry date picker's min).
+  const [now] = useState(() => Date.now());
 
   const [loading, setLoading] = useState(true);
   const [requests, setRequests] = useState<SubletRequest[]>([]);
@@ -715,7 +717,7 @@ export function HostingSubletRequestsManager({
             <RoundedFilterDropdown
               label="Status"
               value={statusFilter}
-              onChange={(v) => setStatusFilter(v as any)}
+              onChange={(v) => setStatusFilter(v as StatusFilterType)}
               options={statusFilterOptions}
               size="sm"
               className="flex-1 sm:w-36"
@@ -737,7 +739,7 @@ export function HostingSubletRequestsManager({
             <RoundedFilterDropdown
               label="Decision Authority"
               value={authorityFilter}
-              onChange={(v) => setAuthorityFilter(v as any)}
+              onChange={(v) => setAuthorityFilter(v as AuthorityFilterType)}
               options={authorityFilterOptions}
               size="sm"
               className="flex-1 sm:w-36"
@@ -748,7 +750,7 @@ export function HostingSubletRequestsManager({
             <RoundedFilterDropdown
               label="Sort"
               value={sortOption}
-              onChange={(v) => setSortOption(v as any)}
+              onChange={(v) => setSortOption(v as SortOptionType)}
               options={sortFilterOptions}
               align="right"
               size="sm"
@@ -1442,7 +1444,7 @@ export function HostingSubletRequestsManager({
                   </label>
                   <input
                     type="date"
-                    min={new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10)}
+                    min={new Date(now + 24 * 60 * 60 * 1000).toISOString().slice(0, 10)}
                     value={approveExpiresAt}
                     onChange={(e) => setApproveExpiresAt(e.target.value)}
                     className="w-full rounded-xl bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-xs outline-none ring-1 ring-slate-200 dark:ring-slate-700 focus:ring-2 focus:ring-indigo-400"

@@ -30,6 +30,8 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
   const [records, setRecords] = useState<PropertyVerification[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [verifyingId, setVerifyingId] = useState<number | null>(null);
+  // Captured once so render stays pure when checking verification expiry.
+  const [now] = useState(() => Date.now());
   const verifyingSince = useRef(0);
 
   function load(quiet = false) {
@@ -63,7 +65,6 @@ export function PropertyVerificationManager({ roomId }: { roomId: number }) {
   if (loading) return <Loader label="Loading property verification status" />;
 
   const current = [...records].sort((a, b) => b.id - a.id)[0] ?? null;
-  const now = Date.now();
   const currentIsLiveVerified =
     current?.status === "verified" && (!current.expiresAt || new Date(current.expiresAt).getTime() > now);
   const currentIsVerifying = current?.status === "pending" && current.verifierNotes === AUTO_VERIFY_PENDING_NOTE;

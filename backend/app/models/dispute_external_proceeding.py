@@ -45,7 +45,8 @@ class DisputeExternalProceeding(Base):
     decision_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     outcome_evidence_id: Mapped[int | None] = mapped_column(ForeignKey("dispute_evidence_items.id", ondelete="SET NULL"), nullable=True)
     outcome_summary: Mapped[str] = mapped_column(String(2000), default="")
-    filed_by_admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id"), nullable=False)
+    # Null when the renter or host recorded taking it to the outside body.
+    filed_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     decided_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # QA-Q21: "Claim filed after external deadline; system does not

@@ -55,12 +55,12 @@ JURISDICTION_COUNTRY = {"England": "GB", "GB-ENG": "GB", "GB-WLS": "GB", "GB-SCT
 
 REASONS: dict[str, tuple[str, str]] = {
     # code: (user-facing message, CTA)
-    "NEARBY_PROPERTY_CONFLICT": ("Another property is registered at almost the same spot. We need to review the property information. You can leave this page; we'll update the status here.", "Go to dashboard"),
-    "DUPLICATE_REVIEW": ("This property looks like one already on Zoiko Rooms. We need to review it. You can leave this page; we'll update the status here.", "Go to dashboard"),
-    "EVIDENCE_REVIEW": ("We need to review your property evidence. You can leave this page; we'll update the status here.", "Go to dashboard"),
-    "PREVIOUSLY_REJECTED": ("We need to review this property information. You can leave this page; we'll update the status here.", "Go to dashboard"),
+    "NEARBY_PROPERTY_CONFLICT": ("Another property is registered at almost the same spot. Add your flat or unit number and a document that shows it, or move the marker onto your property.", "Add unit"),
+    "PROPERTY_ALREADY_REGISTERED": ("This property is already registered on Zoiko Rooms. If yours is a different flat or unit at this address, add its unit number.", "Add unit"),
+    "PROPERTY_ALREADY_YOURS": ("You've already added this property. Use your existing property instead of adding it again.", "Go to properties"),
+    "EVIDENCE_REVIEW": ("One of your documents looks edited or couldn't be scanned. Remove it and upload the original.", "Replace document"),
+    "PREVIOUSLY_REJECTED": ("This address was turned down before. Add a second official document (for example a property tax bill and a registry record) to confirm it.", "Add evidence"),
     "POSTAL_CODE_INVALID": ("The postal code doesn't look right for this country. Check the address.", "Review address"),
-    "SAME_PROPERTY_DECLARED": ("You said this is the same property as an existing listing, so it can't be verified again as a new property.", "Contact support"),
     "ADDRESS_NOT_FOUND": ("We couldn't find this address automatically. Enter it manually and we'll verify it another way.", "Enter manually"),
     "ADDRESS_PARTIAL": ("We could only partly confirm this address. We'll check the property information.", "View status"),
     "GEOCODE_AMBIGUOUS": ("We found more than one possible location. Choose the correct property.", "Choose address"),
@@ -75,8 +75,7 @@ REASONS: dict[str, tuple[str, str]] = {
     "EVIDENCE_TYPE_UNCLEAR": ("This document doesn't look like the type you chose. Choose the right type or upload a property tax bill, registry or title record.", "Replace document"),
     "EVIDENCE_UNREADABLE": ("We couldn't read your document. Upload the PDF from the official website or a clear photo of the full document.", "Upload document"),
     "SUPPLEMENTARY_EVIDENCE_ONLY": ("A utility bill alone can't confirm the property. Add a property tax bill, registry record, title deed or building record.", "Add evidence"),
-    "EVIDENCE_REUSED": ("We need to review your property evidence. You can leave this page; we'll update the status here.", "Go to dashboard"),
-    "POSSIBLE_DUPLICATE": ("This property looks like one already on Zoiko Rooms. Answer the duplicate question on the property details step.", "Answer question"),
+    "EVIDENCE_REUSED": ("This document has already been used for another property. Remove it and upload a document for this property.", "Replace document"),
     "PROVIDER_UNAVAILABLE": ("Location search is temporarily unavailable. Your progress is saved. Try again or enter the address manually.", "Try again"),
     "SECOND_APPROVAL_REQUIRED": ("We need to review this property information. You can leave this page; we'll update the status here.", "Go to dashboard"),
     "ADDRESS_CHANGED": ("The property address changed, so the property needs to be verified again.", "Reverify property"),
@@ -689,37 +688,26 @@ def set_unit(db: Session, user: UserAccount, v: PropertyLocationVerification, *,
     v.canonical_address = {**(v.canonical_address or {}), "subpremise": v.unit}
     v.address_fingerprint = fingerprint(v.canonical_address, v.unit)
     v.duplicate_of_property_id = _find_duplicate(db, v)
-    v.reason_codes = [c for c in (v.reason_codes or []) if c not in ("POSSIBLE_DUPLICATE", "UNIT_MISSING")] + (
-        ["POSSIBLE_DUPLICATE"] if v.duplicate_of_property_id else [])
+    v.reason_codes = [c for c in (v.reason_codes or []) if c not in DUPLICATE_CODES + ("UNIT_MISSING",)] + (
+        [_duplicate_code(db, v)] if v.duplicate_of_property_id else [])
     _touch(v)
     db.commit()
     db.refresh(v)
     return v
 
 
-DUPLICATE_ANSWERS = ("NOT_SAME_PROPERTY", "SAME_PROPERTY")
+# The same address (street, postcode and unit) as a property already on Zoiko
+# Rooms: the host is told straight away -- no question, no review. A
+# different flat at the same address has a different unit, so it never
+# matches.
+DUPLICATE_CODES = ("PROPERTY_ALREADY_REGISTERED", "PROPERTY_ALREADY_YOURS")
 
 
-def answer_duplicate(db: Session, user: UserAccount, v: PropertyLocationVerification, *, answer: str, note: str = "",
-                     expected_version: int | None = None, correlation_id: str = "") -> PropertyLocationVerification:
-    """Screen 4: the host answers the possible-duplicate match. Either way a
-    reviewer still checks it (Section 14) -- the answer is context, never an
-    override."""
-    _check_version(v, expected_version)
-    _editable(v)
-    if not v.duplicate_of_property_id:
-        raise HTTPException(status.HTTP_409_CONFLICT, "No possible duplicate was found for this property")
-    answer = (answer or "").upper()
-    if answer not in DUPLICATE_ANSWERS:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"answer must be one of {DUPLICATE_ANSWERS}")
-    if answer == "NOT_SAME_PROPERTY" and not note.strip():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Tell us how this property differs (e.g. a different flat number)")
-    v.duplicate_host_answer, v.duplicate_host_note = answer, note.strip()[:500]
-    _event(db, "DUPLICATE_ANSWERED", v, actor=user, correlation_id=correlation_id, extra={"answer": answer})
-    _touch(v)
-    db.commit()
-    db.refresh(v)
-    return v
+def _duplicate_code(db: Session, v: PropertyLocationVerification) -> str:
+    existing = db.get(Property, v.duplicate_of_property_id)
+    if existing is not None and v.party_id is not None and existing.owner_party_id == v.party_id:
+        return "PROPERTY_ALREADY_YOURS"
+    return "PROPERTY_ALREADY_REGISTERED"
 
 
 POSTAL_PATTERNS = {
@@ -893,10 +881,12 @@ def decide(v: PropertyLocationVerification, pack: PropertyRegulatoryPack) -> tup
     from the PDF's own text (services/property_document_analysis.py). The
     result of reading the document is always automatic -- VERIFIED, or
     ACTION_REQUIRED with one clear thing for the host to fix -- never a wait for a reviewer.
-    Fraud / duplicate signals are different (Sections 14, 20): reused
-    evidence, a possible duplicate the host says is a different property, a
-    conflicting property at the same spot, an edited document or a property
-    rejected before go to MANUAL_REVIEW:
+    Fraud / duplicate signals (Sections 14, 20) are host actions too, each
+    with a rule for passing: an already-registered address is never verified
+    again; a reused or edited document must be replaced; a conflicting
+    property at the same spot needs a unit confirmed by a document; an
+    address turned down before needs two official documents. Nothing waits
+    for a reviewer:
 
     - a clear, recent primary document (tax / registry / title / building
       record) of the chosen type that shows the confirmed address and postal
@@ -906,7 +896,6 @@ def decide(v: PropertyLocationVerification, pack: PropertyRegulatoryPack) -> tup
     - anything that can't be confirmed asks the host for the specific fix.
     """
     action: list[str] = []
-    review: list[str] = []
     evidence = list(v.evidence)
     primary = [e for e in evidence if e.evidence_type not in SUPPLEMENTARY_EVIDENCE_TYPES]
     good = [e for e in primary if e.quality != "POOR" and e.readable]
@@ -936,22 +925,24 @@ def decide(v: PropertyLocationVerification, pack: PropertyRegulatoryPack) -> tup
     if v.unit and typed and not any(e.unit_matched for e in typed):
         action.append("UNIT_NOT_CONFIRMED")
 
-    # -- fraud / duplicate signals: a reviewer resolves them (Sections 14, 20)
+    # -- fraud / duplicate signals: each is something the host can fix, with a
+    # clear rule for passing -- never a wait for a reviewer. A flagged file
+    # blocks verification for as long as it stays attached.
     if any(e.reused_elsewhere for e in evidence):
-        review.append("EVIDENCE_REUSED")
+        action.append("EVIDENCE_REUSED")
     if any(e.tamper_signal or e.scan_status == "ERROR" for e in evidence):
-        review.append("EVIDENCE_REVIEW")
+        action.append("EVIDENCE_REVIEW")
     if v.duplicate_of_property_id:
-        if v.duplicate_host_answer == "SAME_PROPERTY":
-            action.append("SAME_PROPERTY_DECLARED")
-        elif v.duplicate_host_answer == "NOT_SAME_PROPERTY":
-            review.append("DUPLICATE_REVIEW")  # the host's answer is checked, not trusted
-        else:
-            action.append("POSSIBLE_DUPLICATE")
+        # Already registered (or already the host's own): never verified again.
+        action.append(next((c for c in (v.reason_codes or []) if c in DUPLICATE_CODES), "PROPERTY_ALREADY_REGISTERED"))
+    # Another property at almost the same spot: a unit number confirmed by a
+    # document tells them apart.
     if "NEARBY_PROPERTY_CONFLICT" in (v.reason_codes or []):
-        review.append("NEARBY_PROPERTY_CONFLICT")
-    if "PREVIOUSLY_REJECTED" in (v.reason_codes or []):
-        review.append("PREVIOUSLY_REJECTED")
+        if not (v.unit and any(e.unit_matched for e in typed)):
+            action.append("NEARBY_PROPERTY_CONFLICT")
+    # Turned down before: two good, matching official documents confirm it.
+    if "PREVIOUSLY_REJECTED" in (v.reason_codes or []) and len(typed) < 2:
+        action.append("PREVIOUSLY_REJECTED")
     if "ADDRESS_COMPONENTS_CONFLICT" in (v.reason_codes or []):
         action.append("ADDRESS_COMPONENTS_CONFLICT")
     # A marker dragged far from (or onto another address than) where the map
@@ -961,9 +952,7 @@ def decide(v: PropertyLocationVerification, pack: PropertyRegulatoryPack) -> tup
         action.append("PIN_MOVED_TOO_FAR")
 
     if action:
-        return "ACTION_REQUIRED", "INSUFFICIENT", list(dict.fromkeys(action + review))
-    if review:
-        return "MANUAL_REVIEW", "INSUFFICIENT", list(dict.fromkeys(review))
+        return "ACTION_REQUIRED", "INSUFFICIENT", list(dict.fromkeys(action))
     return "VERIFIED", "EVIDENCE_CONFIRMED", []
 
 
@@ -1037,11 +1026,6 @@ def submit(db: Session, user: UserAccount, v: PropertyLocationVerification, *, a
     _write_canonical_to_property(db, v, user=user, correlation_id=correlation_id)
     if state == "VERIFIED":
         _verify(db, v, pack, actor=user, correlation_id=correlation_id)
-    elif state == "MANUAL_REVIEW":
-        v.state = "MANUAL_REVIEW"
-        _event(db, "PROPERTY_MANUAL_REVIEW_STARTED", v, actor=user, reason_codes=codes, previous_state=previous,
-               new_state=v.state, correlation_id=correlation_id)
-        _notify_reviewers(db, v)
     else:
         v.state = "ACTION_REQUIRED"
         v.decided_at = now
@@ -1051,6 +1035,30 @@ def submit(db: Session, user: UserAccount, v: PropertyLocationVerification, *, a
     db.commit()
     db.refresh(v)
     return v
+
+
+def redecide_legacy_reviews(db: Session) -> int:
+    """Scheduler job: cases left in the retired MANUAL_REVIEW queue are
+    decided by the current rules -- verified, or back to the host with the
+    specific fix. Returns how many moved."""
+    moved = 0
+    for v in list(db.scalars(select(PropertyLocationVerification).where(PropertyLocationVerification.state == "MANUAL_REVIEW"))):
+        pack = get_pack(db, v.country_code)
+        state, existence, codes = decide(v, pack)
+        v.existence_status = existence
+        v.reason_codes = codes
+        if state == "VERIFIED":
+            _verify(db, v, pack, actor=None, correlation_id="")
+        else:
+            previous = v.state
+            v.state = "ACTION_REQUIRED"
+            v.decided_at = _now()
+            _event(db, "PROPERTY_ACTION_REQUIRED", v, actor=None, reason_codes=codes, previous_state=previous,
+                   new_state=v.state, correlation_id="")
+        _touch(v)
+        moved += 1
+    db.commit()
+    return moved
 
 
 def _verify(db: Session, v: PropertyLocationVerification, pack: PropertyRegulatoryPack, *,
@@ -1090,18 +1098,6 @@ def _recheck_waiting_authority(db: Session, property_id: int, correlation_id: st
             recheck_pending(db, property_id=property_id, correlation_id=correlation_id)
     except Exception:
         logger.exception("authority re-check after property verification failed")
-
-
-def _notify_reviewers(db: Session, v: PropertyLocationVerification) -> None:
-    from app.crud import notification as notif_crud
-
-    notif_crud.notify_all_super_admins(
-        db, title="Property verification needs review",
-        message=f"Property verification #{v.id} (property #{v.property_id}) needs a reviewer: "
-                f"{', '.join(v.reason_codes or []) or 'manual review'}.",
-        notification_type="property_verification.review",
-        related_entity_type=RESOURCE, related_entity_id=str(v.id),
-    )
 
 
 def _write_canonical_to_property(db: Session, v: PropertyLocationVerification, *, user: UserAccount,
@@ -1175,7 +1171,7 @@ def invalidate_property(db: Session, property_id: int, *, reason: str = "ADDRESS
 
 # -- Trust & Safety review (Section 16) -------------------------------------------
 
-FOUR_EYES_CODES = ("EVIDENCE_REUSED", "EVIDENCE_REVIEW", "DUPLICATE_REVIEW", "NEARBY_PROPERTY_CONFLICT",
+FOUR_EYES_CODES = ("EVIDENCE_REUSED", "EVIDENCE_REVIEW", "NEARBY_PROPERTY_CONFLICT",
                    "PREVIOUSLY_REJECTED")
 
 

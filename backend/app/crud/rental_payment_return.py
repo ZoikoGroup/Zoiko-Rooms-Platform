@@ -20,9 +20,7 @@ from app.models.occupancy import Occupancy
 from app.models.party import Party
 from app.models.rental_payment import RentalPaymentObligation
 from app.models.rental_payment_return import RENTAL_PAYMENT_RETURN_KINDS, RentalPaymentReturn
-
-# Money is sent back by the same direct methods rent is paid with.
-RETURN_METHODS = ("BANK_TRANSFER", "UPI", "CASH", "OTHER")
+from app.services import payment_method_catalog as method_catalog
 # Which occupancy state each kind belongs to.
 _KIND_REQUIRES_OCCUPANCY_STATUS = {"DEPOSIT_RETURN": "ENDED", "CANCELLATION_RETURN": "CANCELLED"}
 # A return that still counts against what can be sent back -- a DISPUTED one
@@ -32,6 +30,12 @@ _COUNTING_STATUSES = ("RECORDED", "CONFIRMED")
 
 def _round2(value) -> float:
     return round(float(value or 0), 2)
+
+
+def occupancy_country(occupancy: Occupancy) -> str:
+    """The ISO country a return's payment methods resolve from."""
+    prop = occupancy.room.property if occupancy.room else None
+    return method_catalog.country_for(prop.country_code, prop.jurisdiction_code) if prop else ""
 
 
 def _booking_obligations(db: Session, occupancy: Occupancy) -> list[RentalPaymentObligation]:
@@ -101,10 +105,37 @@ def get_return_or_404(db: Session, return_id: int) -> RentalPaymentReturn:
     return record
 
 
+def _assert_not_possible_duplicate_return(
+    db: Session, occupancy: Occupancy, *, kind: str, amount: float, returned_date: date,
+    method: method_catalog.MethodSelection, currency: str,
+) -> None:
+    """Same duplicate warning as crud/rental_payment.py's for payments."""
+    from app.crud.rental_payment import POSSIBLE_DUPLICATE_CODE, is_possible_duplicate
+
+    existing = db.scalars(select(RentalPaymentReturn).where(
+        RentalPaymentReturn.occupancy_id == occupancy.id, RentalPaymentReturn.kind == kind,
+        RentalPaymentReturn.status.in_(_COUNTING_STATUSES),
+    )).all()
+    for other in existing:
+        if is_possible_duplicate(
+            amount=amount, paid_on=returned_date, method=method, other_amount=float(other.amount),
+            other_date=other.returned_date, other_reference=other.external_reference,
+            other_category=other.payment_method_category, other_subtype=other.payment_method_subtype,
+        ):
+            raise HTTPException(status.HTTP_409_CONFLICT, {
+                "code": POSSIBLE_DUPLICATE_CODE,
+                "message": (
+                    f"A return of {currency} {amount:.2f} on {returned_date.isoformat()} is already recorded. "
+                    "If this is a separate payment, confirm and record it again."
+                ),
+            })
+
+
 def record_return(
     db: Session, party: Party, occupancy: Occupancy, *, kind: str, amount: float, deductions_amount: float = 0,
     deductions_reason: str = "", payment_method_category: str, external_reference: str = "",
     returned_date: date, note: str = "", correlation_id: str = "",
+    payment_method_subtype: str = "", payment_method_description: str = "", confirm_not_duplicate: bool = False,
 ) -> RentalPaymentReturn:
     """The host records money they sent back to the renter directly. For a
     deposit, amount + deductions can't exceed the deposit they received (less
@@ -119,8 +150,10 @@ def record_return(
             "A deposit is returned once the tenancy has ended" if kind == "DEPOSIT_RETURN"
             else "This booking hasn't been cancelled",
         )
-    if payment_method_category not in RETURN_METHODS:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"paymentMethodCategory must be one of {RETURN_METHODS}")
+    method = method_catalog.resolve_selection(
+        category=payment_method_category, subtype=payment_method_subtype, description=payment_method_description,
+        reference=external_reference, country=occupancy_country(occupancy), context="return_record",
+    )
 
     summary = booking_money_summary(db, occupancy)
     allowed = (
@@ -146,11 +179,17 @@ def record_return(
             + ("of the deposit you received)" if kind == "DEPOSIT_RETURN" else "the renter paid on this booking)"),
         )
 
+    if not confirm_not_duplicate and amount > 0:
+        _assert_not_possible_duplicate_return(db, occupancy, kind=kind, amount=amount, returned_date=returned_date,
+                                              method=method, currency=summary["currency"])
+
     record = RentalPaymentReturn(
         occupancy_id=occupancy.id, kind=kind, status="RECORDED", tenant_guest_id=occupancy.guest_id,
         recipient_party_id=party.id, amount=amount, currency=summary["currency"],
         deductions_amount=deductions_amount, deductions_reason=deductions_reason.strip(),
-        payment_method_category=payment_method_category, external_reference=external_reference.strip(),
+        payment_method_category=method.category, payment_method_subtype=method.subtype,
+        payment_method_description=method.description, payment_method_label=method.label,
+        payment_method_config_version=method.config_version, external_reference=method.reference,
         returned_date=returned_date, note=note.strip(),
         obligation_id=summary["deposit_obligation_id"] if kind == "DEPOSIT_RETURN" else summary["paid_obligation_id"],
     )
@@ -284,5 +323,6 @@ def list_return_candidates_for_recipient(db: Session, party_id: int) -> list[dic
             "occupancy_status": occupancy.status, "currency": summary["currency"], "paid": paid,
             "settled": summary["deposit_settled"] if kind == "DEPOSIT_RETURN" else summary["cancellation_settled"],
             "remaining": max(_limit_for(kind, summary), 0.0), "ended_on": occupancy.move_out_date,
+            "country_code": occupancy_country(occupancy),
         })
     return candidates

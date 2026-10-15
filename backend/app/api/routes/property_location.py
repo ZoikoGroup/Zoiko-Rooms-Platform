@@ -306,21 +306,6 @@ def post_confirm_location(verification_id: int, payload: ConfirmLocationIn, requ
         device=device))
 
 
-class DuplicateAnswerIn(CamelModel):
-    answer: str
-    note: str = ""
-
-
-@router.post("/{verification_id}/duplicate-answer")
-def post_duplicate_answer(verification_id: int, payload: DuplicateAnswerIn, request: Request,
-                          if_match: str | None = Header(default=None, alias="If-Match"),
-                          user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
-    v = svc.get_owned_verification(db, user, verification_id)
-    return session_read(svc.answer_duplicate(db, user, v, answer=payload.answer, note=payload.note,
-                                             expected_version=_version(if_match),
-                                             correlation_id=get_correlation_id(request)))
-
-
 @router.put("/{verification_id}/unit")
 def put_unit(verification_id: int, payload: UnitIn, request: Request,
              if_match: str | None = Header(default=None, alias="If-Match"),

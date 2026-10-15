@@ -43,3 +43,8 @@ class HabitabilityIncidentRead(CamelModel):
     credited_refund_request_id: int | None
     credit_reason: str
     credited_at: datetime | None
+    acknowledged_at: datetime | None = None
+    fix_due_at: datetime | None = None
+    fix_reported_at: datetime | None = None
+    fix_rejected_count: int = 0
+    resolution_basis: str = ""

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useId, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, Download, FileWarning, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -16,7 +16,8 @@ import {
   ListingFeeRefund,
   RentalPaymentDiscrepancyReason,
   RentalPaymentInstruction,
-  RentalPaymentMethodCategory,
+  PaymentMethodCategory,
+  RentalPaymentInstructionMethod,
   RentalPaymentObligation,
   RentalPaymentObligationType,
   RentalPaymentRecord,
@@ -28,8 +29,31 @@ import {
   rentalPaymentStatusLabel,
   rentalPaymentStatusTone,
 } from "@/lib/status";
-import { formatDate, formatDateTime, formatMoney } from "@/lib/utils";
+import { cn, formatDate, formatDateTime, formatMoney } from "@/lib/utils";
 import {
+  DuplicateWarning,
+  EMPTY_PAYMENT_METHOD,
+  EvidenceUpload,
+  ExternalPaymentNotice,
+  FieldError,
+  FieldLabel,
+  LockedCurrency,
+  OverpaymentWarning,
+  PaymentMethodErrors,
+  PaymentMethodFields,
+  PaymentMethodGuidance,
+  PaymentMethodValue,
+  SubmitAcks,
+  currencySymbol,
+  handleSubmitWarning,
+  paymentMethodDisplay,
+  resolveFieldRules,
+  usePaymentMethodCatalog,
+  validatePaymentMethod,
+} from "@/components/user/payment-methods/PaymentMethodFields";
+import { OptionCombobox } from "@/components/user/payment-methods/OptionCombobox";
+import {
+  cancelRentalPaymentInstruction,
   confirmRentalPaymentInstruction,
   confirmRentalPaymentReceipt,
   downloadListingFeeCreditNote,
@@ -40,6 +64,8 @@ import {
   listMyRentalPaymentInstructions,
   listRecipientRentalPaymentObligations,
   recordRentalPaymentReceiptAsRecipient,
+  applyRentalPaymentExcess,
+  returnRentalPaymentExcess,
   updateOwnOpenRentalPaymentDispute,
   uploadRentalPaymentEvidenceAsRecipient,
   reportRentalPaymentDiscrepancyAsRecipient,
@@ -47,16 +73,18 @@ import {
   submitRentalPaymentInstruction,
 } from "@/lib/user-api";
 
-// Rent is paid straight to the host: bank transfer, UPI or cash.
-const METHOD_OPTIONS: { value: RentalPaymentMethodCategory; label: string }[] = [
-  { value: "BANK_TRANSFER", label: "Bank transfer" },
-  { value: "UPI", label: "UPI" },
+// Where the payee asks to be paid (payment instructions). Recorded payments
+// use the global method catalog instead (payment-methods/PaymentMethodFields).
+// Canonical categories (ZR-PAY-METHODS-GLOBAL-001); for the instant rail,
+// wallet and mobile-money options the specific rail/provider is chosen too.
+const METHOD_OPTIONS: { value: RentalPaymentInstructionMethod; label: string }[] = [
+  { value: "BANK_TRANSFER", label: "Bank Transfer" },
+  { value: "INSTANT_BANK_PAYMENT", label: "Instant Bank Payment / Pay by Bank" },
+  { value: "DIGITAL_WALLET_P2P", label: "Digital Wallet / P2P Payment App" },
+  { value: "MOBILE_MONEY", label: "Mobile Money" },
   { value: "CASH", label: "Cash" },
 ];
-
-const METHOD_LABELS: Record<string, string> = {
-  BANK_TRANSFER: "Bank transfer", UPI: "UPI", CASH: "Cash", CARD: "Card", OTHER: "Other",
-};
+const METHODS_WITH_RAIL = new Set<string>(["INSTANT_BANK_PAYMENT", "DIGITAL_WALLET_P2P", "MOBILE_MONEY"]);
 
 // Owed in full or in part, with nothing already waiting on the host to review.
 const MARK_RECEIVED_STATUSES = new Set(["UPCOMING", "DUE", "OVERDUE", "REVERSED", "PARTIALLY_PAID"]);
@@ -102,6 +130,7 @@ export function RecipientRentalPaymentsManager() {
   const [tab, setTab] = useState<Tab>("overview");
   const [typeFilter, setTypeFilter] = useState<RentalPaymentObligationType | "ALL">("ALL");
   const [reviewing, setReviewing] = useState<{ record: RentalPaymentRecord; obligation: RentalPaymentObligation } | null>(null);
+  const [decidingExcess, setDecidingExcess] = useState<{ record: RentalPaymentRecord; obligation: RentalPaymentObligation } | null>(null);
 
   function load() {
     Promise.all([
@@ -143,6 +172,15 @@ export function RecipientRentalPaymentsManager() {
     [obligations]
   );
   const awaitingConfirmationCount = obligations.filter((o) => o.status === "RECIPIENT_CONFIRMATION_PENDING").length;
+  // ZR-PAY-METHODS-GLOBAL-001 Section 10: money received above what was
+  // owed, waiting for the host to apply it elsewhere or send it back.
+  const excessToDecide = useMemo(
+    () =>
+      obligations.flatMap((o) =>
+        o.records.filter((r) => r.excessStatus === "REVIEW_REQUIRED").map((r) => ({ record: r, obligation: o }))
+      ),
+    [obligations]
+  );
   const upcomingCount = obligations.filter((o) => o.status === "UPCOMING" || o.status === "DUE").length;
 
   const allRecords = useMemo(
@@ -211,6 +249,26 @@ export function RecipientRentalPaymentsManager() {
         </div>
       )}
 
+      {(tab === "overview" || tab === "amounts-due") && excessToDecide.length > 0 && (
+        <Card className="ring-amber-200 dark:ring-amber-500/30">
+          <SectionHeading
+            title="Overpayments to decide"
+            subtitle="You received more than was owed. Nothing is applied automatically -- apply the extra to another payment from the same renter, or record sending it back."
+          />
+          <ul className="mt-3 space-y-2">
+            {excessToDecide.map(({ record, obligation }) => (
+              <li key={record.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                <span>
+                  <span className="font-semibold capitalize">{obligation.displayLabel}</span> payment #{record.id} ·{" "}
+                  {formatMoney(record.excessRemaining, record.declaredCurrency)} extra to decide
+                </span>
+                <Button size="sm" onClick={() => setDecidingExcess({ record, obligation })}>Decide</Button>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
       {tab === "amounts-due" && (
         <div className="space-y-4">
           <SectionHeading title="Amounts due" subtitle="Rent and deposit obligations owed to you across your properties." />
@@ -243,7 +301,7 @@ export function RecipientRentalPaymentsManager() {
                     )}
                     {MARK_RECEIVED_STATUSES.has(o.status) && o.payerAllocations.length === 0 && (
                       <Button size="sm" onClick={() => setMarkingReceived(o)}>
-                        Mark as received
+                        Record Payment
                       </Button>
                     )}
                   </div>
@@ -304,6 +362,9 @@ export function RecipientRentalPaymentsManager() {
                           <Badge tone={rentalPaymentStatusTone[record.status] ?? "neutral"}>
                             {rentalPaymentStatusLabel[record.status] ?? record.status}
                           </Badge>
+                          {record.excessStatus === "REVIEW_REQUIRED" && (
+                            <Badge tone="warning" className="ml-1.5">Overpayment -- review required</Badge>
+                          )}
                         </td>
                         <td className="px-5 py-3 text-right">
                           <button onClick={() => setReviewing({ record, obligation })} className="text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300">
@@ -335,12 +396,24 @@ export function RecipientRentalPaymentsManager() {
         </div>
       )}
 
+      <ExcessDecisionModal
+        entry={decidingExcess}
+        obligations={obligations}
+        onClose={() => setDecidingExcess(null)}
+        onDone={(message) => {
+          setDecidingExcess(null);
+          showToast(message);
+          load();
+        }}
+      />
+
       <MarkReceivedModal
         obligation={markingReceived}
         onClose={() => setMarkingReceived(null)}
-        onRecorded={(updated) => {
+        onRecorded={(updated, warning) => {
           setMarkingReceived(null);
-          showToast(
+          if (warning) showToast(warning, "error");
+          else showToast(
             updated.status === "CONFIRMED"
               ? "Marked as received. The renter has been notified."
               : `Part payment recorded -- ${formatMoney(updated.outstandingAmount, updated.currency)} is still due.`,
@@ -578,7 +651,13 @@ function ReviewModal({
           <Row label="Tenant reference" value={record.declaredByGuestId} />
           <Row label="Amount declared" value={formatMoney(record.declaredAmount, record.declaredCurrency)} />
           <Row label="Tenant marked paid" value={formatDateTime(record.createdAt)} />
-          <Row label="Payment method" value={record.paymentMethodCategory.replace(/_/g, " ").toLowerCase()} />
+          <Row label="Payment method" value={paymentMethodDisplay(record)} />
+          {record.excessAmount > 0 && (
+            <Row
+              label="Paid above what was owed"
+              value={`${formatMoney(record.excessAmount, record.declaredCurrency)} -- after you confirm, you decide whether it goes towards another payment or is sent back`}
+            />
+          )}
           {record.externalReference && <Row label="Transaction reference" value={record.externalReference} />}
           <RentalPaymentTimeline recordId={record.id} />
           <div>
@@ -700,6 +779,197 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** ZR-PAY-METHODS-GLOBAL-001 Section 10: the host decides what happens to
+ *  money received above what was owed -- applied to another open payment
+ *  from the same renter, or sent back to them. Never automatic. */
+function ExcessDecisionModal({
+  entry,
+  obligations,
+  onClose,
+  onDone,
+}: {
+  entry: { record: RentalPaymentRecord; obligation: RentalPaymentObligation } | null;
+  obligations: RentalPaymentObligation[];
+  onClose: () => void;
+  onDone: (message: string) => void;
+}) {
+  const ids = useId();
+  const [action, setAction] = useState<"apply" | "return">("apply");
+  const [targetId, setTargetId] = useState("");
+  const [amount, setAmount] = useState("");
+  const [returnedDate, setReturnedDate] = useState("");
+  const [method, setMethod] = useState<PaymentMethodValue>(EMPTY_PAYMENT_METHOD);
+  const [methodErrors, setMethodErrors] = useState<PaymentMethodErrors>({});
+  const [note, setNote] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const record = entry?.record;
+  const { catalog, error: catalogError } = usePaymentMethodCatalog(
+    entry?.obligation.countryCode, "return_record", Boolean(entry) && action === "return"
+  );
+
+  const targets = useMemo(
+    () =>
+      entry
+        ? obligations.filter(
+            (o) =>
+              o.id !== entry.obligation.id &&
+              o.tenantGuestId === entry.obligation.tenantGuestId &&
+              o.currency === entry.record.declaredCurrency &&
+              MARK_RECEIVED_STATUSES.has(o.status) &&
+              o.payerAllocations.length === 0 &&
+              o.outstandingAmount > 0
+          )
+        : [],
+    [entry, obligations]
+  );
+
+  useEffect(() => {
+    if (!entry) return;
+    setAction(targets.length > 0 ? "apply" : "return");
+    setTargetId(targets[0] ? String(targets[0].id) : "");
+    setAmount(String(entry.record.excessRemaining));
+    setReturnedDate(new Date().toISOString().slice(0, 10));
+    setMethod(EMPTY_PAYMENT_METHOD);
+    setMethodErrors({});
+    setNote("");
+    setError("");
+  }, [entry]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!record) return;
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value <= 0 || value > record.excessRemaining) {
+      setError(`Enter an amount up to ${formatMoney(record.excessRemaining, record.declaredCurrency)}.`);
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+    try {
+      if (action === "apply") {
+        const target = targets.find((t) => String(t.id) === targetId);
+        if (!target) {
+          setError("Choose the payment to apply the extra to.");
+          return;
+        }
+        if (value > target.outstandingAmount) {
+          setError(`Only ${formatMoney(target.outstandingAmount, target.currency)} is owed on that payment.`);
+          return;
+        }
+        await applyRentalPaymentExcess(record.id, { targetObligationId: target.id, amount: value, note });
+        onDone(`Applied ${formatMoney(value, record.declaredCurrency)} to the ${target.displayLabel} due ${formatDate(target.dueDate)}.`);
+      } else {
+        const errors = validatePaymentMethod(catalog, method);
+        setMethodErrors(errors);
+        if (Object.keys(errors).length > 0) {
+          setError("Please fix the highlighted fields.");
+          return;
+        }
+        await returnRentalPaymentExcess(record.id, {
+          amount: value,
+          returnedDate,
+          paymentMethodCategory: method.category as PaymentMethodCategory,
+          paymentMethodSubtype: method.subtype,
+          paymentMethodDescription: method.description,
+          externalReference: method.reference,
+          note,
+        });
+        onDone(`Recorded sending back ${formatMoney(value, record.declaredCurrency)}. The renter has been notified.`);
+      }
+    } catch (err) {
+      setError(errorMessage(err, "Could not save this decision."));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal open={Boolean(entry)} onClose={onClose} size="lg" title="Decide what happens to the overpayment">
+      {entry && record && (
+        <form onSubmit={handleSubmit} noValidate className="space-y-4 text-sm">
+          <p className="text-slate-600 dark:text-slate-300">
+            Payment #{record.id} for the <span className="font-semibold">{entry.obligation.displayLabel}</span> was{" "}
+            {formatMoney(record.excessAmount, record.declaredCurrency)} more than was owed.{" "}
+            {formatMoney(record.excessRemaining, record.declaredCurrency)} is still to be decided.
+          </p>
+          {record.excessAllocations.length > 0 && (
+            <ul className="list-disc space-y-0.5 pl-5 text-xs text-slate-500 dark:text-slate-400">
+              {record.excessAllocations.map((a) => (
+                <li key={a.id}>
+                  {formatMoney(a.amount, a.currency)}{" "}
+                  {a.action === "APPLY_TO_OBLIGATION"
+                    ? `applied to payment #${a.targetObligationId}`
+                    : `sent back${a.paymentMethodLabel ? ` (${a.paymentMethodLabel})` : ""}`}{" "}
+                  on {formatDate(a.createdAt)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {error && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">{error}</p>}
+
+          <fieldset className="space-y-2">
+            <legend className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">What should happen?</legend>
+            <label className="flex items-start gap-2">
+              <input type="radio" name={`${ids}-action`} checked={action === "apply"} disabled={targets.length === 0} onChange={() => setAction("apply")} className="mt-1" />
+              <span>
+                Apply it to another payment from this renter
+                {targets.length === 0 && <span className="block text-xs text-slate-400">Nothing else is owed by this renter right now.</span>}
+              </span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input type="radio" name={`${ids}-action`} checked={action === "return"} onChange={() => setAction("return")} className="mt-1" />
+              <span>I sent it back to the renter</span>
+            </label>
+          </fieldset>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <FieldLabel htmlFor={`${ids}-amount`} text={`Amount (${record.declaredCurrency})`} required />
+              <input id={`${ids}-amount`} type="number" min="0.01" step="0.01" max={record.excessRemaining} value={amount} onChange={(e) => setAmount(e.target.value)} className={inputClass} />
+            </div>
+            {action === "apply" ? (
+              <div>
+                <FieldLabel htmlFor={`${ids}-target`} text="Apply to" required />
+                <select id={`${ids}-target`} value={targetId} onChange={(e) => setTargetId(e.target.value)} className={inputClass}>
+                  {targets.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.displayLabel} due {formatDate(t.dueDate)} -- {formatMoney(t.outstandingAmount, t.currency)} owed
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div>
+                <FieldLabel htmlFor={`${ids}-date`} text="Date sent back" required />
+                <input id={`${ids}-date`} type="date" value={returnedDate} max={new Date().toISOString().slice(0, 10)} onChange={(e) => setReturnedDate(e.target.value)} className={inputClass} />
+              </div>
+            )}
+          </div>
+
+          {action === "return" && (
+            <PaymentMethodFields catalog={catalog} catalogError={catalogError} value={method} onChange={setMethod} errors={methodErrors} categoryLabel="Sent by" />
+          )}
+
+          <div>
+            <FieldLabel htmlFor={`${ids}-note`} text="Note to the renter" optional />
+            <textarea id={`${ids}-note`} value={note} maxLength={500} rows={2} onChange={(e) => setNote(e.target.value)} className={cn(inputClass, "resize-none")} />
+          </div>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Zoiko Rooms did not process or hold this payment. This records your decision; the original payment is kept unchanged.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button type="submit" loading={submitting}>Save decision</Button>
+          </div>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
+/** ZR-PAY-METHODS-GLOBAL-001 host flow ("Record External Payment"): money
+ *  the renter paid the host directly, recorded by the host as recipient. */
 function MarkReceivedModal({
   obligation,
   onClose,
@@ -707,86 +977,183 @@ function MarkReceivedModal({
 }: {
   obligation: RentalPaymentObligation | null;
   onClose: () => void;
-  onRecorded: (updated: RentalPaymentObligation) => void;
+  onRecorded: (updated: RentalPaymentObligation, warning?: string) => void;
 }) {
+  const ids = useId();
   const [amount, setAmount] = useState("");
   const [receivedDate, setReceivedDate] = useState("");
-  const [method, setMethod] = useState<RentalPaymentMethodCategory>("BANK_TRANSFER");
-  const [reference, setReference] = useState("");
+  const [method, setMethod] = useState<PaymentMethodValue>(EMPTY_PAYMENT_METHOD);
+  const [note, setNote] = useState("");
+  const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<PaymentMethodErrors & { amount?: string; date?: string }>({});
+  const [duplicate, setDuplicate] = useState("");
+  const [overpayment, setOverpayment] = useState("");
+  const [acks, setAcks] = useState<SubmitAcks>({});
+  const context = obligation?.obligationType === "DEPOSIT" ? "deposit_record" : "rent_record";
+  const { catalog, error: catalogError } = usePaymentMethodCatalog(obligation?.countryCode, context, Boolean(obligation));
+  const { rules } = resolveFieldRules(catalog, method);
 
   useEffect(() => {
     if (!obligation) return;
     setAmount(String(obligation.outstandingAmount));
     setReceivedDate(new Date().toISOString().slice(0, 10));
-    setMethod("BANK_TRANSFER");
-    setReference("");
+    setMethod(EMPTY_PAYMENT_METHOD);
+    setNote("");
+    setFile(null);
     setError("");
+    setFieldErrors({});
+    setDuplicate("");
+    setOverpayment("");
+    setAcks({});
   }, [obligation]);
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
+  async function submit(next: SubmitAcks = {}) {
     if (!obligation) return;
+    const flags = { ...acks, ...next };
+    setAcks(flags);
+    const errors: PaymentMethodErrors & { amount?: string; date?: string } = validatePaymentMethod(catalog, method);
     const value = Number(amount);
-    if (!Number.isFinite(value) || value <= 0) {
-      setError("Enter the amount you received.");
-      return;
-    }
-    if (value > obligation.outstandingAmount) {
-      setError(`That's more than what's still owed (${formatMoney(obligation.outstandingAmount, obligation.currency)}).`);
+    if (!Number.isFinite(value) || value <= 0) errors.amount = "Enter the amount you received.";
+    if (!receivedDate) errors.date = "Enter the date you received it.";
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      setError("Please fix the highlighted fields.");
       return;
     }
     setSubmitting(true);
     setError("");
+    setDuplicate("");
+    setOverpayment("");
     try {
       const updated = await recordRentalPaymentReceiptAsRecipient(obligation.id, {
-        amount: value, receivedDate, paymentMethodCategory: method, externalReference: reference,
+        amount: value,
+        receivedDate,
+        paymentMethodCategory: method.category as PaymentMethodCategory,
+        paymentMethodSubtype: method.subtype,
+        paymentMethodDescription: method.description,
+        externalReference: method.reference,
+        note,
+        ...flags,
       });
-      onRecorded(updated);
+      const newRecord = updated.records[updated.records.length - 1];
+      let warning: string | undefined;
+      if (file && newRecord) {
+        try {
+          await uploadRentalPaymentEvidenceAsRecipient(newRecord.id, file);
+        } catch (err) {
+          warning = `Payment recorded, but the evidence didn't upload: ${errorMessage(err, "please try again.")}`;
+        }
+      }
+      onRecorded(updated, warning);
     } catch (err) {
-      setError(errorMessage(err, "Could not record this payment."));
+      if (!handleSubmitWarning(err, setDuplicate, setOverpayment)) setError(errorMessage(err, "Could not record this payment."));
     } finally {
       setSubmitting(false);
     }
   }
 
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    void submit();
+  }
+
+  const errorList = Object.values(fieldErrors).filter(Boolean);
+
   return (
-    <Modal open={Boolean(obligation)} onClose={onClose} title="Mark as received">
+    <Modal open={Boolean(obligation)} onClose={onClose} size="2xl" title={`Record External Payment · ${obligation?.displayLabel ?? ""}`}>
       {obligation && (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <p className="text-sm text-slate-600 dark:text-slate-300">
-            Record the <span className="font-semibold capitalize">{obligation.displayLabel}</span> the renter paid you
-            directly. Still owed: {formatMoney(obligation.outstandingAmount, obligation.currency)}.
-          </p>
-          {error && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">{error}</p>}
-          <Field label={`Amount received (${obligation.currency}) *`} hint="Less than what's owed records a part payment.">
-            <input
-              required type="number" min="0.01" step="0.01" max={obligation.outstandingAmount}
-              value={amount} onChange={(e) => setAmount(e.target.value)} className={inputClass}
-            />
-          </Field>
-          <Field label="Date received *">
-            <input required type="date" value={receivedDate} onChange={(e) => setReceivedDate(e.target.value)} className={inputClass} />
-          </Field>
-          <Field label="Paid by *">
-            <select value={method} onChange={(e) => setMethod(e.target.value as RentalPaymentMethodCategory)} className={inputClass}>
-              {METHOD_OPTIONS.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Reference" hint="Optional -- e.g. the bank or UPI transaction reference.">
-            <input value={reference} onChange={(e) => setReference(e.target.value)} className={inputClass} />
-          </Field>
-          <p className="text-xs text-slate-400">
-            Zoiko only records this -- the money was paid to you directly and never passed through Zoiko.
-          </p>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
-            <Button type="submit" loading={submitting}>Mark as received</Button>
-          </div>
-        </form>
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+          <form onSubmit={handleSubmit} noValidate className="space-y-5">
+            <p className="text-sm text-slate-600 dark:text-slate-300">
+              Record the <span className="font-semibold">{obligation.displayLabel}</span> the renter paid you directly. Still owed:{" "}
+              {formatMoney(obligation.outstandingAmount, obligation.currency)}.
+            </p>
+            {(error || errorList.length > 0) && (
+              <div role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">
+                <p className="font-semibold">{error || "Please fix the highlighted fields."}</p>
+                {errorList.length > 0 && (
+                  <ul className="mt-1 list-disc pl-5 text-xs">
+                    {errorList.map((m) => (
+                      <li key={m}>{m}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+            {duplicate && <DuplicateWarning message={duplicate} submitting={submitting} onConfirm={() => void submit({ confirmNotDuplicate: true })} />}
+            {overpayment && <OverpaymentWarning message={overpayment} submitting={submitting} onConfirm={() => void submit({ acknowledgeOverpayment: true })} />}
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <FieldLabel htmlFor={`${ids}-amount`} text="Amount received" required />
+                <div className={cn("flex items-center rounded-xl bg-slate-50 ring-1 dark:bg-slate-800", fieldErrors.amount ? "ring-rose-400" : "ring-slate-200 dark:ring-slate-700")}>
+                  <span className="pl-4 pr-1 text-slate-500" aria-hidden="true">{currencySymbol(obligation.currency)}</span>
+                  <input
+                    id={`${ids}-amount`}
+                    type="number"
+                    inputMode="decimal"
+                    min="0.01"
+                    step="0.01"
+                    required
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    aria-invalid={Boolean(fieldErrors.amount) || undefined}
+                    aria-describedby={`${ids}-amount-help${fieldErrors.amount ? ` ${ids}-amount-err` : ""}`}
+                    className="w-full rounded-xl bg-transparent px-3 py-2.5 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-primary-400 dark:text-slate-100"
+                  />
+                </div>
+                <p id={`${ids}-amount-help`} className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  Less than what&apos;s owed records a part payment. Anything above it is held for you to apply or send back.
+                </p>
+                <FieldError id={`${ids}-amount-err`} message={fieldErrors.amount} />
+              </div>
+              <LockedCurrency currency={obligation.currency} />
+              <div>
+                <FieldLabel htmlFor={`${ids}-date`} text="Date received" required />
+                <input
+                  id={`${ids}-date`}
+                  required
+                  type="date"
+                  value={receivedDate}
+                  max={new Date().toISOString().slice(0, 10)}
+                  onChange={(e) => setReceivedDate(e.target.value)}
+                  aria-invalid={Boolean(fieldErrors.date) || undefined}
+                  className={cn(inputClass, fieldErrors.date && "ring-rose-400")}
+                />
+                <FieldError id={`${ids}-date-err`} message={fieldErrors.date} />
+              </div>
+            </div>
+
+            <PaymentMethodFields catalog={catalog} catalogError={catalogError} value={method} onChange={setMethod} errors={fieldErrors} />
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <EvidenceUpload file={file} onChange={setFile} helper={rules?.evidenceHelper || undefined} />
+              <div>
+                <FieldLabel htmlFor={`${ids}-note`} text="Notes" optional />
+                <textarea
+                  id={`${ids}-note`}
+                  value={note}
+                  maxLength={500}
+                  rows={4}
+                  onChange={(e) => setNote(e.target.value)}
+                  aria-describedby={`${ids}-note-count`}
+                  className={cn(inputClass, "resize-none")}
+                />
+                <p id={`${ids}-note-count`} className="mt-1 text-right text-xs text-slate-400">{note.length}/500</p>
+              </div>
+            </div>
+
+            <ExternalPaymentNotice role="host" />
+
+            <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
+              <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+              <Button type="submit" loading={submitting}>Record Payment</Button>
+            </div>
+          </form>
+          <PaymentMethodGuidance catalog={catalog} className="self-start" />
+        </div>
       )}
     </Modal>
   );
@@ -796,7 +1163,8 @@ function MarkReceivedModal({
 export function InstructionsManager({ instructions, onChanged }: { instructions: RentalPaymentInstruction[]; onChanged: () => void }) {
   const { toast, showToast } = useToast();
   const [formOpen, setFormOpen] = useState(false);
-  const [method, setMethod] = useState<RentalPaymentMethodCategory>("BANK_TRANSFER");
+  const [method, setMethod] = useState<RentalPaymentInstructionMethod>("BANK_TRANSFER");
+  const [methodSubtype, setMethodSubtype] = useState("");
   const [recipientName, setRecipientName] = useState("");
   const [countryCode, setCountryCode] = useState("GB");
   const [bankDetails, setBankDetails] = useState<Record<string, string>>({});
@@ -806,8 +1174,13 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
-  const bankFieldSchema = resolveBankFieldSchema(countryCode, method);
-  const isBankTransfer = method === "BANK_TRANSFER";
+  const bankFieldSchema = resolveBankFieldSchema(countryCode, method, methodSubtype);
+  const needsCountry = method !== "CASH";
+  const needsRail = METHODS_WITH_RAIL.has(method);
+  const railLabelId = useId();
+  const { catalog: railCatalog } = usePaymentMethodCatalog(countryCode === "OTHER" ? "" : countryCode, "rent_record", formOpen && needsRail);
+  const railCategory = railCatalog?.categories.find((c) => c.code === method);
+  const railOptions = (railCategory?.subtypes ?? []).map((s) => ({ value: s.code, label: s.label, hint: s.region || undefined }));
 
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const [code, setCode] = useState("");
@@ -820,11 +1193,16 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
       setError("Confirm that these instructions belong to the authorized recipient before saving.");
       return;
     }
+    if (needsRail && !methodSubtype) {
+      setError(`Choose the ${railCategory?.subtypeLabel.toLowerCase() ?? "payment network"}.`);
+      return;
+    }
     setSubmitting(true);
     setError("");
     try {
       const created = await submitRentalPaymentInstruction({
-        method, recipientName, countryCode, bankDetails, authorizedRecipientConfirmed, referenceFormat, additionalInstructions,
+        method, methodSubtype: needsRail ? methodSubtype : "", recipientName, countryCode, bankDetails,
+        authorizedRecipientConfirmed, referenceFormat, additionalInstructions,
       });
       setFormOpen(false);
       setRecipientName("");
@@ -851,8 +1229,12 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
       const confirmed = await confirmRentalPaymentInstruction(confirmingId, code);
       setConfirmingId(null);
       setCode("");
-      if (confirmed.status === "PENDING_REVIEW") {
-        showToast("Code confirmed. This change was flagged for review and needs admin approval before it becomes active.");
+      if (confirmed.status === "COOLING_OFF") {
+        showToast(
+          `Code confirmed. For your security this change takes effect on ${
+            confirmed.activatesAt ? new Date(confirmed.activatesAt).toLocaleString() : "in 72 hours"
+          } — your current details stay active until then.`,
+        );
       } else {
         showToast("Payment instructions are now active. Affected tenants have been notified.");
       }
@@ -897,19 +1279,41 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
                   <Badge tone={rentalPaymentInstructionStatusTone[i.status] ?? "neutral"}>{i.status.replace(/_/g, " ")}</Badge>
                 </div>
                 <p className="mt-0.5 text-xs text-slate-400">
-                  {[METHOD_LABELS[i.method] ?? i.method, i.countryCode, i.accountIdentifierMasked].filter(Boolean).join(" · ")}
+                  {[i.methodLabel || i.method, i.countryCode, i.accountIdentifierMasked].filter(Boolean).join(" · ")}
                 </p>
-                {i.status === "PENDING_REVIEW" && (
+                {(i.status === "COOLING_OFF" || i.status === "PENDING_REVIEW") && (
                   <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-                    Flagged for admin review{i.highRiskReason ? ` (${i.highRiskReason})` : ""} -- the previous instructions remain active until this is approved.
+                    Takes effect {i.activatesAt ? `on ${new Date(i.activatesAt).toLocaleString()}` : "after a short security wait"}
+                    {i.highRiskReason ? ` (${i.highRiskReason})` : ""}. Your current details stay active until then. If you
+                    didn&apos;t make this change, cancel it and change your password.
                   </p>
+                )}
+                {i.status === "CANCELLED" && (
+                  <p className="mt-1 text-xs text-slate-500">You cancelled this change.</p>
                 )}
                 {i.status === "REJECTED" && (
                   <p className="mt-1 text-xs text-rose-600 dark:text-rose-400">
-                    This change was rejected on review{i.reviewReason ? `: ${i.reviewReason}` : "."}
+                    This change didn&apos;t take effect{i.reviewReason ? `: ${i.reviewReason}` : "."}
                   </p>
                 )}
               </div>
+              {i.status === "COOLING_OFF" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={async () => {
+                    try {
+                      await cancelRentalPaymentInstruction(i.id);
+                      showToast("Change cancelled. Your current payment details stay active.");
+                      onChanged();
+                    } catch (err) {
+                      showToast(errorMessage(err, "Could not cancel this change."), "error");
+                    }
+                  }}
+                >
+                  Cancel change
+                </Button>
+              )}
               {i.status === "PENDING_VERIFICATION" && (
                 <div className="flex items-center gap-2">
                   <Button size="sm" variant="ghost" onClick={() => handleResend(i.id)}>Resend code</Button>
@@ -928,7 +1332,8 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
             <select
               value={method}
               onChange={(e) => {
-                setMethod(e.target.value as RentalPaymentMethodCategory);
+                setMethod(e.target.value as RentalPaymentInstructionMethod);
+                setMethodSubtype("");
                 setBankDetails({});
               }}
               className={inputClass}
@@ -941,12 +1346,13 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
           <Field label="Recipient name *">
             <input required value={recipientName} onChange={(e) => setRecipientName(e.target.value)} className={inputClass} />
           </Field>
-          {isBankTransfer && (
+          {needsCountry && (
             <Field label="Country / region *">
               <select
                 value={countryCode}
                 onChange={(e) => {
                   setCountryCode(e.target.value);
+                  setMethodSubtype("");
                   setBankDetails({});
                 }}
                 className={inputClass}
@@ -956,6 +1362,28 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
                 ))}
               </select>
             </Field>
+          )}
+          {needsRail && (
+            <div>
+              <FieldLabel id={railLabelId} text={railCategory?.subtypeLabel ?? "Payment network"} required />
+              {railOptions.length > 0 ? (
+                <OptionCombobox
+                  labelId={railLabelId}
+                  options={railOptions}
+                  value={methodSubtype}
+                  onChange={(code) => {
+                    setMethodSubtype(code);
+                    setBankDetails({});
+                  }}
+                  placeholder="Select..."
+                  required
+                />
+              ) : (
+                <p className="text-xs text-slate-500">
+                  {railCatalog ? "None is configured for this country -- choose another method." : "Loading..."}
+                </p>
+              )}
+            </div>
           )}
           {bankFieldSchema.fields.map((field) => (
             <Field key={field.key} label={`${field.label} *`} hint={field.hint}>

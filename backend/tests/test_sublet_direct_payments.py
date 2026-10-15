@@ -171,7 +171,7 @@ class TestPaymentGate:
         with pytest.raises(HTTPException) as exc:
             rp_crud.mark_paid(db_session, guest, rent, amount=301, currency=rent.currency, declared_date=date.today(),
                               payment_method_category="CASH")
-        assert "more than" in exc.value.detail
+        assert exc.value.detail["code"] == "OVERPAYMENT"
         rp_crud.mark_paid(db_session, guest, rent, amount=300, currency=rent.currency, declared_date=date.today(),
                           payment_method_category="CASH")
         with pytest.raises(HTTPException):  # already awaiting confirmation for the full amount

@@ -10,7 +10,7 @@ pathway (crud/termination.py) as its own, separate action."""
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String
+from sqlalchemy import Integer, DateTime, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -21,7 +21,11 @@ HABITABILITY_SEVERITIES = ("H0", "H1", "H2", "H3")
 # severities the spec requires to "freeze new booking" -- see
 # crud/habitability_incident.py:report_habitability_incident.
 ROOM_FREEZING_SEVERITIES = ("H2", "H3")
-HABITABILITY_INCIDENT_STATUSES = ("OPEN", "RESOLVED")
+# OPEN -> ACKNOWLEDGED (host) -> FIX_REPORTED (host) -> RESOLVED (renter
+# confirms, or is deemed to after the confirm window). The renter rejecting a
+# reported fix sends it back to ACKNOWLEDGED. No admin step.
+HABITABILITY_INCIDENT_STATUSES = ("OPEN", "ACKNOWLEDGED", "FIX_REPORTED", "RESOLVED")
+OPEN_HABITABILITY_STATUSES = ("OPEN", "ACKNOWLEDGED", "FIX_REPORTED")
 
 
 class HabitabilityIncident(Base):
@@ -39,6 +43,13 @@ class HabitabilityIncident(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     resolution_notes: Mapped[str] = mapped_column(String(2000), default="")
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the fix is due, by severity (crud/habitability_incident.py:_FIX_DAYS).
+    fix_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fix_reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fix_rejected_count: Mapped[int] = mapped_column(Integer, default=0)
+    # RENTER_CONFIRMED | DEEMED_CONFIRMED (no reply in the confirm window).
+    resolution_basis: Mapped[str] = mapped_column(String(30), default="")
     # ZR-ENG-CLR-006 Section 9.1 H1 row: "Compliance review; possible rent
     # adjustment/credit" -- "possible" means discretionary, not a computed
     # abatement percentage this build doesn't have. An admin applies a

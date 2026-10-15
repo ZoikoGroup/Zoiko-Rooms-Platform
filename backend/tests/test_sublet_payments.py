@@ -79,7 +79,7 @@ class TestSubleasePaysTheOriginalRenter:
             assert rp_crud.recipient_holds_payment_receipt_authority(db_session, obligation, payee.id)
             rp_crud.record_receipt_as_recipient(
                 db_session, payee, obligation, amount=None, received_date=date.today(),
-                payment_method_category="UPI",
+                payment_method_category="BANK_TRANSFER",
             )
         db_session.refresh(agreement)
         assert agreement.status == "SIGNED"
@@ -112,7 +112,7 @@ class TestSubleasePaysTheOriginalRenter:
         for obligation in _obligations(db_session, agreement.id).values():
             rp_crud.record_receipt_as_recipient(
                 db_session, db_session.get(Party, obligation.recipient_party_id), obligation, amount=None,
-                received_date=date.today(), payment_method_category="UPI",
+                received_date=date.today(), payment_method_category="BANK_TRANSFER",
             )
         sub_occupancy = db_session.scalar(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id))
         assert rp_crud.resolve_rent_recipient_for_occupancy(db_session, sub_occupancy) == original_renter.id

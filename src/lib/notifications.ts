@@ -76,7 +76,8 @@ export function resolveNotificationHref(
   if (
     notificationType === "application.received" ||
     notificationType === "application.decided" ||
-    notificationType === "offer.countered_for_host"
+    notificationType === "offer.countered_for_host" ||
+    notificationType === "rental_message.received_for_host"
   ) {
     return "/account/host/applications";
   }
@@ -108,6 +109,8 @@ export function resolveNotificationHref(
     return "/account/host/sublet-requests";
   }
   if (notificationType.startsWith("application.")) return "/account/applications";
+  if (notificationType === "rental_message.received") return "/account/applications";
+  if (notificationType.startsWith("support_ticket.")) return "/account/support";
   if (notificationType.startsWith("offer.")) return "/account/applications";
   if (notificationType.startsWith("agreement.")) return "/account/applications";
   if (notificationType.startsWith("identity_verification.")) return "/account/identity";

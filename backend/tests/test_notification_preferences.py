@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.crud import user_settings
+
 from app.crud import notification as notification_crud
 from app.models.notification import Notification
 from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
@@ -68,6 +70,7 @@ class TestCategoryOptOut:
 class TestQuietHours:
     def test_normal_priority_suppressed_inside_the_window(self, client, db_session: Session):
         renter = _make_user(db_session, email="notif-pref-quiet1@test.com")
+        user_settings.update_preferences(db_session, renter, {"timeZone": "UTC"})  # quiet hours are in the user's zone
         now = datetime.now(timezone.utc)
         now_minute = now.hour * 60 + now.minute
         # A 24h-wide window guaranteed to contain "now" regardless of when this
@@ -92,6 +95,7 @@ class TestQuietHours:
 
     def test_high_priority_bypasses_quiet_hours(self, client, db_session: Session):
         renter = _make_user(db_session, email="notif-pref-quiet2@test.com")
+        user_settings.update_preferences(db_session, renter, {"timeZone": "UTC"})  # quiet hours are in the user's zone
         now = datetime.now(timezone.utc)
         now_minute = now.hour * 60 + now.minute
         start = (now_minute - 60) % 1440
@@ -115,6 +119,7 @@ class TestQuietHours:
 
     def test_disabled_quiet_hours_never_suppress(self, client, db_session: Session):
         renter = _make_user(db_session, email="notif-pref-quiet3@test.com")
+        user_settings.update_preferences(db_session, renter, {"timeZone": "UTC"})  # quiet hours are in the user's zone
         client.put(
             "/api/users/notifications/preferences",
             json={"optedOutCategories": [], "quietHoursEnabled": False, "quietHoursStartMinute": 0, "quietHoursEndMinute": 1439},

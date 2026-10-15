@@ -8,6 +8,8 @@ import { UserProfile } from "@/lib/types";
 import { getCurrentUser } from "@/lib/user-auth";
 import { claimTabIdentity, watchForForeignSessionChange } from "@/lib/session-guard";
 import { UserSessionProvider } from "@/components/user/UserSessionContext";
+import { applyUserPreferences } from "@/lib/display-preferences";
+import { getUserPreferences } from "@/lib/user-api";
 
 /**
  * Client-side gate for the /account area. Mirrors AdminGuard, but resolves the
@@ -18,6 +20,18 @@ export function UserGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [user, setUser] = useState<UserProfile | null>(null);
   const [sessionChangedElsewhere, setSessionChangedElsewhere] = useState(false);
+  // Bumped when the saved display preferences differ from this browser's
+  // cached copy (e.g. first sign-in here), so dates re-render in their format.
+  const [displayVersion, setDisplayVersion] = useState(0);
+
+  useEffect(() => {
+    if (!user) return;
+    getUserPreferences()
+      .then((prefs) => {
+        if (applyUserPreferences(prefs)) setDisplayVersion((v) => v + 1);
+      })
+      .catch(() => undefined);
+  }, [user]);
 
   useEffect(() => {
     getCurrentUser().then((profile) => {
@@ -60,5 +74,9 @@ export function UserGuard({ children }: { children: React.ReactNode }) {
     return <SessionChangedNotice />;
   }
 
-  return <UserSessionProvider user={user}>{children}</UserSessionProvider>;
+  return (
+    <UserSessionProvider user={user}>
+      <div key={displayVersion} className="contents">{children}</div>
+    </UserSessionProvider>
+  );
 }

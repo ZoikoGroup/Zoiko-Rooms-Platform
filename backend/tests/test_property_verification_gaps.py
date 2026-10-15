@@ -88,27 +88,19 @@ class TestDuplicateAnswerAndSignals:
         assert flow.location().status_code == 200
         return flow
 
-    def test_host_answers_a_possible_duplicate(self, client, db_session, host, provider, uploads):
+    def test_a_duplicate_is_told_to_the_host_with_no_question(self, client, db_session, host, provider, uploads):
+        """An exact address match is a host action (PROPERTY_ALREADY_REGISTERED)
+        whatever the host says -- there is no duplicate question any more."""
         flow = self._to_unit(client, host)
         flow.unit()
         v = db_session.get(PropertyLocationVerification, flow.body["id"])
         v.duplicate_of_property_id = 999
         db_session.commit()
-        flow.body["version"] = v.version
-        r = flow._send("POST", f"/{v.id}/duplicate-answer", json={"answer": "NOT_SAME_PROPERTY"})
-        assert r.status_code == 400  # a "different property" answer needs a note
-        r = flow._send("POST", f"/{v.id}/duplicate-answer", json={"answer": "SAME_PROPERTY"})
-        assert r.status_code == 200, r.text
-        assert r.json()["duplicateHostAnswer"] == "SAME_PROPERTY"
-        db_session.refresh(v)
         state, _existence, codes = svc.decide(v, svc.get_pack(db_session, "IN"))
-        assert state == "ACTION_REQUIRED" and "SAME_PROPERTY_DECLARED" in codes
-
-    def test_no_duplicate_means_no_answer(self, client, db_session, host, provider, uploads):
-        flow = self._to_unit(client, host)
-        flow.unit()
-        r = flow._send("POST", f"/{flow.body['id']}/duplicate-answer", json={"answer": "SAME_PROPERTY"})
-        assert r.status_code == 409
+        assert state == "ACTION_REQUIRED" and "PROPERTY_ALREADY_REGISTERED" in codes
+        flow.body["version"] = v.version
+        r = flow._send("POST", f"/{v.id}/duplicate-answer", json={"answer": "SAME_PROPERTY"})
+        assert r.status_code in (404, 405)
 
     def test_pin_adjustment_records_device_metadata(self, client, db_session, host, provider, uploads):
         user, prop, _room = host
@@ -129,7 +121,7 @@ class TestDuplicateAnswerAndSignals:
         state, _e, codes = svc.decide(v, svc.get_pack(db_session, "IN"))
         assert state == "ACTION_REQUIRED" and "POSTAL_CODE_INVALID" in codes
 
-    def test_another_owners_property_at_the_same_spot_goes_to_review(self, client, db_session, host, provider, uploads):
+    def test_another_owners_property_at_the_same_spot_needs_a_confirmed_unit(self, client, db_session, host, provider, uploads):
         other_user, other_prop, _r = _host(db_session, "gaps-other@test.com")
         db_session.add(PropertyLocationVerification(
             property_id=other_prop.id, party_id=other_user.party_id, country_code="IN", pack_version=1, state="VERIFIED",
@@ -137,7 +129,7 @@ class TestDuplicateAnswerAndSignals:
         db_session.commit()
         user, prop, _room = host
         body = Flow(client, user, prop).happy_path()
-        assert body["state"] == "MANUAL_REVIEW"  # a reviewer resolves conflicting properties (Section 14)
+        assert body["state"] == "ACTION_REQUIRED"  # the host tells them apart -- no reviewer
         assert "NEARBY_PROPERTY_CONFLICT" in body["reasonCodes"]
 
 

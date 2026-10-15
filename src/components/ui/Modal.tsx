@@ -10,6 +10,8 @@ const MAX_WIDTH_CLASS = {
   md: "max-w-lg",
   lg: "max-w-2xl",
   xl: "max-w-4xl",
+  /** Form + side panel layouts (e.g. recording a payment with guidance). */
+  "2xl": "max-w-6xl",
 } as const;
 
 export function Modal({

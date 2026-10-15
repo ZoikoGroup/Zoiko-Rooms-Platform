@@ -3,6 +3,8 @@
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { applyUserPreferences } from "@/lib/display-preferences";
+import { getUserPreferences } from "@/lib/user-api";
 import { BedDouble, Building2, Eye, EyeOff, Lock, Mail, ShieldCheck, Sparkles } from "lucide-react";
 import { Logo } from "@/components/ui/Logo";
 import { Button } from "@/components/ui/Button";
@@ -45,7 +47,19 @@ export default function UserLoginPage() {
     setSubmitting(true);
     try {
       await userLogin(email.trim(), password);
-      router.push(safeNextPath(new URLSearchParams(window.location.search).get("next")));
+      const next = new URLSearchParams(window.location.search).get("next");
+      let destination = safeNextPath(next);
+      if (!next) {
+        // Settings > Account: "Open this workspace after sign-in".
+        try {
+          const prefs = await getUserPreferences();
+          applyUserPreferences(prefs);
+          if (prefs.defaultWorkspace === "host") destination = "/account/host";
+        } catch {
+          /* fall back to the dashboard */
+        }
+      }
+      router.push(destination);
       router.refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong. Please try again.");

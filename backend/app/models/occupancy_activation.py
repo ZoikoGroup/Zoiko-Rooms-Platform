@@ -18,7 +18,11 @@ HANDOVER_EVENT_TYPES = (
     # why these three are reachable on an ACTIVE occupancy, unlike the
     # PENDING_MOVE_IN-only trio above.
     "MOVE_OUT_NOTICE_GIVEN", "MOVE_OUT_READY", "HOST_MOVE_OUT_CONFIRMED",
+    # Both sides agreeing to move in although a dispute on this occupancy is
+    # still open (crud/activation_gate.py) -- no admin review.
+    "HOST_PROCEED_DESPITE_DISPUTE", "RENTER_PROCEED_DESPITE_DISPUTE",
 )
+PROCEED_DESPITE_DISPUTE_EVENTS = ("HOST_PROCEED_DESPITE_DISPUTE", "RENTER_PROCEED_DESPITE_DISPUTE")
 HANDOVER_ACTOR_KINDS = ("provider_admin", "renter_user")
 ACTIVATION_OUTCOMES = ("ACTIVATE", "WAITING_FOR_GATE", "MANUAL_REVIEW", "BLOCKED")
 

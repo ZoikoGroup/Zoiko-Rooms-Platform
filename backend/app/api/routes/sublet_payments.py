@@ -27,6 +27,7 @@ from app.db.session import get_db
 from app.models.user_account import UserAccount
 from app.schemas.common import CamelModel
 from app.services import sublet_payments as svc
+from app.services.payment_method_catalog import method_label
 
 router = APIRouter(prefix="/api/users", tags=["sublet-payments"], dependencies=[Depends(get_current_user)])
 
@@ -134,8 +135,10 @@ def get_receipt(record_id: int, user: UserAccount = Depends(get_current_user), d
         ("Period", f"{o.period_start:%d %b %Y} - {o.period_end:%d %b %Y}" if o.period_start and o.period_end else "--"),
         ("Amount", f"{float(record.confirmed_amount or record.declared_amount):.2f} {record.declared_currency}"),
         ("Paid on", f"{record.declared_date:%d %b %Y}"),
-        ("Method", record.payment_method_category.replace("_", " ").title()),
-        ("Payer reference / UTR", record.external_reference or "--"),
+        ("Method", record.payment_method_label or method_label(record.payment_method_category,
+                                                                record.payment_method_subtype)),
+        ("Payment reference / transaction ID", record.external_reference or "--"),
+        ("Paid outside Zoiko Rooms", "Zoiko Rooms did not process or hold this payment."),
         ("Payee", svc._party_name(db, o.recipient_party_id)),
         ("Confirmed by payee", f"{record.confirmed_at:%d %b %Y %H:%M}" if record.confirmed_at else "--"),
         ("Zoiko Rooms platform fee", f"0.00 {o.currency}"),

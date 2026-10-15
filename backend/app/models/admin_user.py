@@ -55,6 +55,8 @@ class AdminUser(Base):
     dispute_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # See PAYMENT_STAFF_ROLES above -- null means "not payment support staff".
     payment_staff_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # A password reset stamps this; admin tokens issued before it stop working.
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     approval_status: Mapped[str] = mapped_column(String(20), default="approved")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

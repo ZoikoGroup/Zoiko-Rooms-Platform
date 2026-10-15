@@ -202,11 +202,12 @@ def _rent_obligations_for_case(case: TerminationCase) -> list[Obligation]:
     return sorted(combined, key=lambda o: o.due_date)
 
 
-def calculate_refund_entitlement(db: Session, case: TerminationCase, admin: AdminUser) -> RefundEntitlement:
+def calculate_refund_entitlement(db: Session, case: TerminationCase, admin: AdminUser | None) -> RefundEntitlement:
     """ZR-ENG-CLR-006 AC-10/AC-11/AC-24: computed independently from PSP/
     refund-execution status, itemized, and versioned -- a recalculation
     always inserts a new row rather tha n overwriting the last one."""
-    assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
+    if admin is not None:  # None = the system settling an ended tenancy
+        assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
     if case.status == "WITHDRAWN":
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot calculate a refund entitlement for a withdrawn case")
     if case.effective_termination_date is None:
@@ -286,7 +287,7 @@ def calculate_refund_entitlement(db: Session, case: TerminationCase, admin: Admi
         currency=case.occupancy.listing.currency,
         gross_refundable=gross_refundable,
         net_refund=net_refund,
-        calculated_by_admin_id=admin.id,
+        calculated_by_admin_id=admin.id if admin is not None else None,
     )
     entitlement.line_items = line_items
     db.add(entitlement)
@@ -300,7 +301,7 @@ def calculate_refund_entitlement(db: Session, case: TerminationCase, admin: Admi
     return entitlement
 
 
-def approve_refund_entitlement(db: Session, entitlement: RefundEntitlement, admin: AdminUser) -> RefundEntitlement:
+def approve_refund_entitlement(db: Session, entitlement: RefundEntitlement, admin: AdminUser | None) -> RefundEntitlement:
     """ZR-ENG-CLR-006 Section 16.1/20.1 POST /refund-entitlements/{id}/approve
     -- see models/refund_entitlement.py:REFUND_ENTITLEMENT_STATUSES's own
     docstring for why this build requires an explicit approval on every
@@ -308,12 +309,13 @@ def approve_refund_entitlement(db: Session, entitlement: RefundEntitlement, admi
     threshold/fraud-signal scoring exists yet to tell a low-risk entitlement
     apart from one Section 16.2 would require manual review for."""
     case = entitlement.termination_case
-    assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
+    if admin is not None:  # None = the system settling an ended tenancy
+        assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
     if entitlement.status != "CALCULATED":
         raise HTTPException(status.HTTP_409_CONFLICT, f"This entitlement is not awaiting approval (status: {entitlement.status})")
 
     entitlement.status = "APPROVED"
-    entitlement.approved_by_admin_id = admin.id
+    entitlement.approved_by_admin_id = admin.id if admin is not None else None
     entitlement.approved_at = datetime.now(timezone.utc)
     emit_event(
         db, "refund.approved", "refund_entitlement", str(entitlement.id),
@@ -324,7 +326,7 @@ def approve_refund_entitlement(db: Session, entitlement: RefundEntitlement, admi
     return entitlement
 
 
-def execute_refund_entitlement(db: Session, entitlement: RefundEntitlement, admin: AdminUser) -> RefundEntitlement:
+def execute_refund_entitlement(db: Session, entitlement: RefundEntitlement, admin: AdminUser | None) -> RefundEntitlement:
     """ZR-ENG-CLR-006 Section 15: 'Zoiko orchestrates the refund through the
     ledger/PSP' -- creates a real Section 5 RefundRequest for each
     REFUNDABLE_UNEARNED_RENT line, against the same payment/obligation the
@@ -339,7 +341,8 @@ def execute_refund_entitlement(db: Session, entitlement: RefundEntitlement, admi
     first -- entitlement.approve is the only thing that moves CALCULATED to
     APPROVED (Section 16.1's own state model)."""
     case = entitlement.termination_case
-    assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
+    if admin is not None:  # None = the system settling an ended tenancy
+        assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
     if entitlement.status == "EXECUTED":
         raise HTTPException(status.HTTP_409_CONFLICT, "This entitlement has already been executed")
     if entitlement.status != "APPROVED":
@@ -399,7 +402,7 @@ def execute_refund_entitlement(db: Session, entitlement: RefundEntitlement, admi
         line.refund_request_id = refund.id
 
     entitlement.status = "EXECUTED"
-    entitlement.executed_by_admin_id = admin.id
+    entitlement.executed_by_admin_id = admin.id if admin is not None else None
     entitlement.executed_at = datetime.now(timezone.utc)
     # ZR-ENG-CLR-006 Section 20.2 also names refund.failed/refund.settled as
     # separate events -- this build's refund_entitlement.executed below is

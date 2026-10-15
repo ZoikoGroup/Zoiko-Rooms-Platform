@@ -130,13 +130,22 @@ def evaluate_activation_gate(db: Session, occupancy: Occupancy) -> GateEvaluatio
             checks[event_type.lower()] = "PASSED"
 
     open_dispute = db.scalar(
-        select(DisputeCase.id).where(DisputeCase.occupancy_id == occupancy.id, DisputeCase.status == "OPEN").limit(1)
+        # "Open" = any status short of RESOLVED/CLOSED (dispute_state_machine.py);
+        # there is no literal "OPEN" case status.
+        select(DisputeCase.id).where(
+            DisputeCase.occupancy_id == occupancy.id, DisputeCase.status.not_in(("RESOLVED", "CLOSED")),
+        ).limit(1)
     )
     if open_dispute:
-        # Categories have no activation semantics in the current policy. Fail closed
-        # into review instead of inventing category-specific blocking behavior.
-        review.append("OPEN_OCCUPANCY_DISPUTE_REQUIRES_REVIEW")
-        checks["occupancy_dispute"] = "MANUAL_REVIEW"
+        # No admin review: move-in waits until the dispute closes, or goes
+        # ahead now if both host and renter say so.
+        from app.models.occupancy_activation import PROCEED_DESPITE_DISPUTE_EVENTS
+
+        if all(e in event_types for e in PROCEED_DESPITE_DISPUTE_EVENTS):
+            checks["occupancy_dispute"] = "PASSED"
+        else:
+            waiting.append("OPEN_OCCUPANCY_DISPUTE")
+            checks["occupancy_dispute"] = "WAITING"
     else:
         checks["occupancy_dispute"] = "PASSED"
 

@@ -1,5 +1,17 @@
 import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
+  RentalConversation,
+  RentalMessage,
+  SupportTicket,
+  SupportTicketInput,
+  HostRentalRecord,
+  HostRefund,
+  HabitabilityIncident,
+  HabitabilitySeverity,
+  UserPreferences,
+  AccountClosureCheck,
+  UserProfile,
+  AgreementAmendment,
   Agreement,
   Application,
   ListingAgreementDetails,
@@ -50,13 +62,16 @@ import {
   RentalPaymentDiscrepancyReason,
   RentalPaymentDispute,
   RentalPaymentInstruction,
-  RentalPaymentMethodCategory,
+  PaymentMethodCatalog,
+  PaymentMethodCategory,
+  PaymentMethodContext,
+  RentalPaymentExcessAllocation,
+  RentalPaymentInstructionMethod,
   RentalPaymentObligation,
   RentalPaymentObligationsPage,
   RentalPaymentReturn,
   RentalPaymentReturnCandidate,
   RentalPaymentReturnKind,
-  RentalPaymentReturnMethod,
   RentalPaymentTimelinePage,
   RentalTransactionRecord,
   RentalTransactionTimelineEntry,
@@ -70,6 +85,8 @@ import {
   TerminationCasePreview,
   UserApplication,
   UserOccupancy,
+  DepositClaim,
+  DepositRecord,
 } from "@/lib/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -337,6 +354,44 @@ export function declineOwnMutualSurrender(caseId: number): Promise<TerminationCa
 export function getOwnRefundEntitlement(caseId: number): Promise<RefundEntitlement> {
   return apiClientFetch<RefundEntitlement>(`/api/users/rentals/termination-cases/${caseId}/refund-entitlement`);
 }
+
+export type TerminationResponseInput = { response: "ACCEPT" | "COUNTER" | "CONTEST"; proposedDate?: string; note?: string };
+export type TerminationExternalDecisionInput = {
+  outcome: "ENDS_ON_DATE" | "TENANCY_CONTINUES";
+  orderRef: string;
+  effectiveDate?: string;
+  liabilityAmount?: number;
+};
+
+function terminationClient(base: string) {
+  return {
+    /** Accept, counter (with another date) or contest a proposed end date. */
+    respond: (caseId: number, input: TerminationResponseInput) =>
+      apiClientFetch<TerminationCase>(`${base}/termination-cases/${caseId}/respond`, { method: "POST", body: JSON.stringify(input) }),
+    /** Record a court/tribunal order that settles a contested case. */
+    recordExternalDecision: (caseId: number, input: TerminationExternalDecisionInput) =>
+      apiClientFetch<TerminationCase>(`${base}/termination-cases/${caseId}/external-decision`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    /** Proof of off-portal delivery, by whoever gave the notice. */
+    attachNoticeProof: (caseId: number, proofRef: string, servedAt: string) =>
+      apiClientFetch<TerminationCase>(`${base}/termination-cases/${caseId}/notice-proof`, {
+        method: "POST",
+        body: JSON.stringify({ proofRef, servedAt }),
+      }),
+    /** The receiving side confirms they got the notice. */
+    acknowledge: (caseId: number) =>
+      apiClientFetch<TerminationCase>(`${base}/termination-cases/${caseId}/acknowledge`, { method: "POST" }),
+  };
+}
+
+export const renterTermination = terminationClient("/api/users/rentals");
+export const hostTermination = {
+  ...terminationClient("/api/users/hosting"),
+  withdraw: (caseId: number) =>
+    apiClientFetch<TerminationCase>(`/api/users/hosting/termination-cases/${caseId}/withdraw`, { method: "POST" }),
+};
 
 export function submitSubletRequest(
   occupancyId: number,
@@ -710,6 +765,21 @@ export function submitHostedListingForReview(listingId: string): Promise<HostedL
   });
 }
 
+/** PUBLISHED -> PAUSED: stops new applications; existing rentals are untouched. */
+export function pauseHostedListing(listingId: string): Promise<HostedListing> {
+  return apiClientFetch<HostedListing>(`/api/users/hosting/listings/${listingId}/pause`, { method: "POST" });
+}
+
+/** PAUSED -> PUBLISHED, re-checking the publication gates. */
+export function resumeHostedListing(listingId: string): Promise<HostedListing> {
+  return apiClientFetch<HostedListing>(`/api/users/hosting/listings/${listingId}/resume`, { method: "POST" });
+}
+
+/** Refused (409) while the room has an accepted offer or a live agreement. */
+export function archiveHostedListing(listingId: string): Promise<HostedListing> {
+  return apiClientFetch<HostedListing>(`/api/users/hosting/listings/${listingId}/archive`, { method: "POST" });
+}
+
 // --- Applications to review (ZR-ENG-CLR-011 Section 10) --------------------
 
 /** Applications submitted to any of the host's own party-owned listings. */
@@ -765,6 +835,38 @@ export function declineHostedSubletRequest(subletRequestId: number, notes = "", 
   return apiClientFetch<SubletRequest>(`/api/users/hosting/sublet-requests/${subletRequestId}/decline`, {
     method: "POST",
     body: JSON.stringify({ notes, declineReasonCode }),
+  });
+}
+
+// --- Host <-> renter messages (one thread per application) -----------------
+
+export function listRenterConversations(): Promise<RentalConversation[]> {
+  return apiClientFetch<RentalConversation[]>("/api/users/rentals/conversations");
+}
+
+/** Opening a thread also marks the host's messages in it as read. */
+export function listRenterApplicationMessages(applicationId: number): Promise<RentalMessage[]> {
+  return apiClientFetch<RentalMessage[]>(`/api/users/rentals/applications/${applicationId}/messages`);
+}
+
+export function sendRenterApplicationMessage(applicationId: number, body: string): Promise<RentalMessage> {
+  return apiClientFetch<RentalMessage>(`/api/users/rentals/applications/${applicationId}/messages`, {
+    method: "POST", body: JSON.stringify({ body }),
+  });
+}
+
+export function listHostConversations(): Promise<RentalConversation[]> {
+  return apiClientFetch<RentalConversation[]>("/api/users/hosting/conversations");
+}
+
+/** Opening a thread also marks the renter's messages in it as read. */
+export function listHostApplicationMessages(applicationId: number): Promise<RentalMessage[]> {
+  return apiClientFetch<RentalMessage[]>(`/api/users/hosting/applications/${applicationId}/messages`);
+}
+
+export function sendHostApplicationMessage(applicationId: number, body: string): Promise<RentalMessage> {
+  return apiClientFetch<RentalMessage>(`/api/users/hosting/applications/${applicationId}/messages`, {
+    method: "POST", body: JSON.stringify({ body }),
   });
 }
 
@@ -964,14 +1066,60 @@ export function getMyRentalPaymentObligation(obligationId: number): Promise<Rent
   return apiClientFetch<RentalPaymentObligation>(`/api/users/rental-payments/obligations/${obligationId}`);
 }
 
+/** ZR-PAY-METHODS-GLOBAL-001 Section 10.1: the payment-method dropdowns for
+ *  one country/context, resolved server-side. */
+/** Section 10 overpayment allocation (recipient): apply the extra to
+ *  another open payment from the same renter... */
+export function applyRentalPaymentExcess(
+  recordId: number,
+  payload: { targetObligationId: number; amount?: number; note?: string }
+): Promise<RentalPaymentExcessAllocation> {
+  return apiClientFetch<RentalPaymentExcessAllocation>(
+    `/api/users/rental-payments/recipient/records/${recordId}/excess/apply`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
+}
+
+/** ...or record sending it back to the renter directly. */
+export function returnRentalPaymentExcess(
+  recordId: number,
+  payload: PaymentMethodPayload & { amount?: number; returnedDate: string; note?: string }
+): Promise<RentalPaymentExcessAllocation> {
+  return apiClientFetch<RentalPaymentExcessAllocation>(
+    `/api/users/rental-payments/recipient/records/${recordId}/excess/return`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
+}
+
+export function getPaymentMethodCatalog(country: string, context: PaymentMethodContext): Promise<PaymentMethodCatalog> {
+  const params = new URLSearchParams({ country, context });
+  return apiClientFetch<PaymentMethodCatalog>(`/api/users/payment-methods?${params}`);
+}
+
+/** What every payment-recording form sends about the method used: canonical
+ *  codes only, never display strings (criterion 26). */
+export interface PaymentMethodPayload {
+  paymentMethodCategory: PaymentMethodCategory;
+  paymentMethodSubtype?: string;
+  paymentMethodDescription?: string;
+  externalReference?: string;
+  /** Resend as true once the person confirms a possible-duplicate warning. */
+  confirmNotDuplicate?: boolean;
+}
+
+/** Recording more than is owed needs an explicit acknowledgement; the
+ *  excess is then held for the recipient to apply or return. */
+export interface OverpaymentAck {
+  acknowledgeOverpayment?: boolean;
+}
+
 export function markRentalPaymentPaid(
   obligationId: number,
-  payload: {
+  payload: PaymentMethodPayload & OverpaymentAck & {
     amount: number;
     currency: string;
     declaredDate: string;
-    paymentMethodCategory: RentalPaymentMethodCategory;
-    externalReference?: string;
+    note?: string;
   }
 ): Promise<RentalPaymentObligation> {
   return apiClientFetch<RentalPaymentObligation>(`/api/users/rental-payments/obligations/${obligationId}/mark-paid`, {
@@ -1004,7 +1152,11 @@ export function reportRentalPaymentDiscrepancyAsTenant(
  *  field name -- it's used directly server-side in getattr/setattr. */
 export function correctOwnRentalPaymentRecord(
   recordId: number,
-  payload: { fieldName: "external_reference" | "payment_method_category"; newValue: string; reason?: string }
+  payload: {
+    fieldName: "external_reference" | "payment_method_category" | "payment_method_subtype";
+    newValue: string;
+    reason?: string;
+  }
 ): Promise<RentalPaymentCorrection> {
   return apiClientFetch<RentalPaymentCorrection>(`/api/users/rental-payments/records/${recordId}/self-correct`, {
     method: "POST",
@@ -1075,11 +1227,9 @@ export function confirmRentalPaymentReceipt(recordId: number, amount?: number, n
  *  everything still outstanding. */
 export function recordRentalPaymentReceiptAsRecipient(
   obligationId: number,
-  payload: {
+  payload: PaymentMethodPayload & OverpaymentAck & {
     amount?: number;
     receivedDate: string;
-    paymentMethodCategory: RentalPaymentMethodCategory;
-    externalReference?: string;
     note?: string;
   }
 ): Promise<RentalPaymentObligation> {
@@ -1116,14 +1266,12 @@ export function listRecipientRentalPaymentReturnCandidates(): Promise<RentalPaym
 
 export function recordRentalPaymentReturn(
   occupancyId: number,
-  payload: {
+  payload: PaymentMethodPayload & {
     kind: RentalPaymentReturnKind;
     amount: number;
     deductionsAmount?: number;
     deductionsReason?: string;
-    paymentMethodCategory: RentalPaymentReturnMethod;
     returnedDate: string;
-    externalReference?: string;
     note?: string;
   }
 ): Promise<RentalPaymentReturn> {
@@ -1167,7 +1315,9 @@ export function listMyRentalPaymentInstructions(): Promise<RentalPaymentInstruct
 }
 
 export function submitRentalPaymentInstruction(payload: {
-  method: RentalPaymentMethodCategory;
+  method: RentalPaymentInstructionMethod;
+  /** The rail/provider (e.g. "UPI") for instant, wallet and mobile-money methods. */
+  methodSubtype?: string;
   recipientName: string;
   countryCode: string;
   bankDetails: Record<string, string>;
@@ -1183,6 +1333,13 @@ export function submitRentalPaymentInstruction(payload: {
 
 export function resendRentalPaymentInstructionCode(instructionId: number): Promise<void> {
   return apiClientFetch<void>(`/api/users/rental-payments/recipient/instructions/${instructionId}/resend-code`, {
+    method: "POST",
+  });
+}
+
+/** Stop a scheduled (cooling-off) payment-details change. */
+export function cancelRentalPaymentInstruction(instructionId: number): Promise<RentalPaymentInstruction> {
+  return apiClientFetch<RentalPaymentInstruction>(`/api/users/rental-payments/recipient/instructions/${instructionId}/cancel`, {
     method: "POST",
   });
 }
@@ -1313,6 +1470,34 @@ function makeDisputeClient(basePath: string) {
     requestClaimReview(caseId: number, claimId: number, reason: string): Promise<DisputeClaimRead> {
       return apiClientFetch<DisputeClaimRead>(`${basePath}/${caseId}/claims/${claimId}/request-review`, { method: "POST", body: JSON.stringify({ reason }) });
     },
+    /** The other side accepts or contests a host<->renter claim (silence past the deadline = accepted). */
+    respondToClaim(caseId: number, claimId: number, response: "ACCEPT" | "CONTEST", note = ""): Promise<DisputeClaimRead> {
+      return apiClientFetch<DisputeClaimRead>(`${basePath}/${caseId}/claims/${claimId}/respond`, {
+        method: "POST",
+        body: JSON.stringify({ response, note }),
+      });
+    },
+    /** Either party records that claims were taken to the outside body (tribunal, deposit scheme...). */
+    fileExternalProceeding(
+      caseId: number,
+      payload: { claimIds: number[]; authorityType: string; authorityName: string; externalReference: string },
+    ): Promise<DisputeExternalProceedingRead> {
+      return apiClientFetch<DisputeExternalProceedingRead>(`${basePath}/${caseId}/external-proceedings`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    /** Either party records the outside body's decision; it's applied to the claims automatically. */
+    recordExternalDecision(
+      caseId: number,
+      proceedingId: number,
+      payload: { outcome: string; decisionDate: string; finalityState: "FINAL" | "UNDER_REVIEW"; reasonCode?: string },
+    ): Promise<DisputeExternalProceedingRead> {
+      return apiClientFetch<DisputeExternalProceedingRead>(`${basePath}/${caseId}/external-proceedings/${proceedingId}/decision`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
     /** A payment-record problem, resolved between tenant and host (no Zoiko Rooms decision). */
     resolvePaymentClaim(caseId: number, claimId: number, action: PaymentDisputePartyAction, notes: string): Promise<DisputeCaseRead> {
       return apiClientFetch<DisputeCaseRead>(`${basePath}/${caseId}/claims/${claimId}/payment-resolution`, {
@@ -1326,3 +1511,364 @@ function makeDisputeClient(basePath: string) {
 export const renterDisputes = makeDisputeClient("/api/users/rentals/disputes");
 export const hostDisputes = makeDisputeClient("/api/users/hosting/disputes");
 
+
+// --- Help & Support tickets --------------------------------------------------
+
+export function listSupportTickets(): Promise<SupportTicket[]> {
+  return apiClientFetch<SupportTicket[]>("/api/users/support/tickets");
+}
+
+export function createSupportTicket(input: SupportTicketInput): Promise<SupportTicket> {
+  const form = new FormData();
+  form.append("category", input.category);
+  form.append("issue", input.issue);
+  form.append("description", input.description);
+  if (input.linkedType && input.linkedId != null) {
+    form.append("linkedType", input.linkedType);
+    form.append("linkedId", String(input.linkedId));
+  }
+  form.append("linkedLabel", input.linkedLabel ?? "");
+  form.append("timeSensitive", String(input.timeSensitive));
+  form.append("replyChannel", input.replyChannel);
+  input.files.forEach((f) => form.append("files", f));
+  return apiClientFetch<SupportTicket>("/api/users/support/tickets", { method: "POST", body: form });
+}
+
+/** A reply to an ACTION_REQUIRED ticket puts it back IN_REVIEW. */
+export function replyToSupportTicket(ref: string, body: string, files: File[] = []): Promise<SupportTicket> {
+  const form = new FormData();
+  form.append("body", body);
+  files.forEach((f) => form.append("files", f));
+  return apiClientFetch<SupportTicket>(`/api/users/support/tickets/${encodeURIComponent(ref)}/messages`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+/** Only a RESOLVED ticket can be reopened; CLOSED is final. */
+/** The user says the case is solved (e.g. by the automatic first reply). */
+export function markSupportTicketSolved(ref: string): Promise<SupportTicket> {
+  return apiClientFetch<SupportTicket>(`/api/users/support/tickets/${encodeURIComponent(ref)}/solved`, { method: "POST" });
+}
+
+export function reopenSupportTicket(ref: string, reason = ""): Promise<SupportTicket> {
+  return apiClientFetch<SupportTicket>(`/api/users/support/tickets/${encodeURIComponent(ref)}/reopen`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export function supportAttachmentUrl(ref: string, attachmentId: number): string {
+  return `${API_URL}/api/users/support/tickets/${encodeURIComponent(ref)}/attachments/${attachmentId}`;
+}
+
+// --- Host Rental Records and tenancy decisions --------------------------------
+
+export function listHostRentalRecords(): Promise<HostRentalRecord[]> {
+  return apiClientFetch<HostRentalRecord[]>("/api/users/hosting/rental-records");
+}
+
+/** The host's own confirmation that the room was handed back. */
+export function confirmHostMoveOut(occupancyId: number, notes = ""): Promise<unknown> {
+  return apiClientFetch(`/api/users/hosting/occupancies/${occupancyId}/move-out/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+}
+
+export function listHostChangeRequests(): Promise<BookingChangeRequest[]> {
+  return apiClientFetch<BookingChangeRequest[]>("/api/users/hosting/change-requests");
+}
+
+/** Approving a term/rent change creates a new agreement version both sides re-sign. */
+export function approveHostChangeRequest(bcrId: number, decisionNote = ""): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/hosting/change-requests/${bcrId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ decisionNote }),
+  });
+}
+
+export function declineHostChangeRequest(bcrId: number, decisionNote = ""): Promise<BookingChangeRequest> {
+  return apiClientFetch<BookingChangeRequest>(`/api/users/hosting/change-requests/${bcrId}/decline`, {
+    method: "POST",
+    body: JSON.stringify({ decisionNote }),
+  });
+}
+
+/** Host-proposed extension and/or rent change on a signed agreement. */
+export function proposeHostAmendment(
+  agreementId: number,
+  input: { monthlyRent?: number; additionalTermMonths?: number; reason?: string },
+): Promise<AgreementAmendment> {
+  return apiClientFetch<AgreementAmendment>(`/api/users/hosting/agreements/${agreementId}/amendments`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function startHostTermination(
+  occupancyId: number,
+  input: { causeCode: string; notes?: string; proposedEffectiveDate?: string },
+): Promise<TerminationCase> {
+  return apiClientFetch<TerminationCase>(`/api/users/hosting/occupancies/${occupancyId}/termination-cases`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function acceptHostSurrender(caseId: number): Promise<TerminationCase> {
+  return apiClientFetch<TerminationCase>(`/api/users/hosting/termination-cases/${caseId}/accept-surrender`, {
+    method: "POST",
+  });
+}
+
+export function declineHostSurrender(caseId: number): Promise<TerminationCase> {
+  return apiClientFetch<TerminationCase>(`/api/users/hosting/termination-cases/${caseId}/decline-surrender`, {
+    method: "POST",
+  });
+}
+
+// --- Account settings ----------------------------------------------------------
+
+export function getUserPreferences(): Promise<UserPreferences> {
+  return apiClientFetch<UserPreferences>("/api/users/preferences");
+}
+
+export function updateUserPreferences(changes: Partial<UserPreferences>): Promise<UserPreferences> {
+  return apiClientFetch<UserPreferences>("/api/users/preferences", { method: "PUT", body: JSON.stringify(changes) });
+}
+
+export function uploadProfilePhoto(file: File): Promise<UserProfile> {
+  const form = new FormData();
+  form.append("file", file);
+  return apiClientFetch<UserProfile>("/api/users/profile/avatar", { method: "POST", body: form });
+}
+
+export function removeProfilePhoto(): Promise<UserProfile> {
+  return apiClientFetch<UserProfile>("/api/users/profile/avatar", { method: "DELETE" });
+}
+
+/** `version` (the user's avatarUpdatedAt) busts the browser cache after a change. */
+export function profilePhotoUrl(version?: string | null): string {
+  return `${API_URL}/api/users/profile/avatar${version ? `?v=${encodeURIComponent(version)}` : ""}`;
+}
+
+export function getPendingEmailChange(): Promise<{ pendingEmail: string | null }> {
+  return apiClientFetch<{ pendingEmail: string | null }>("/api/users/email-change");
+}
+
+/** Emails a confirmation link to the new address; nothing changes until it's opened. */
+export function requestEmailChange(newEmail: string, currentPassword: string): Promise<{ pendingEmail: string }> {
+  return apiClientFetch<{ pendingEmail: string }>("/api/users/email-change", {
+    method: "POST",
+    body: JSON.stringify({ newEmail, currentPassword }),
+  });
+}
+
+export function confirmEmailChange(token: string): Promise<UserProfile> {
+  return apiClientFetch<UserProfile>("/api/users/email-change/confirm", { method: "POST", body: JSON.stringify({ token }) });
+}
+
+export function signOutOtherSessions(): Promise<{ ok: boolean }> {
+  return apiClientFetch<{ ok: boolean }>("/api/users/sessions/revoke-others", { method: "POST" });
+}
+
+export function dataExportUrl(): string {
+  return `${API_URL}/api/users/data-export`;
+}
+
+export function getAccountClosureCheck(): Promise<AccountClosureCheck> {
+  return apiClientFetch<AccountClosureCheck>("/api/users/account/closure-check");
+}
+
+export function closeAccount(password: string, reason: string): Promise<{ ok: boolean }> {
+  return apiClientFetch<{ ok: boolean }>("/api/users/account/close", {
+    method: "POST",
+    body: JSON.stringify({ password, reason }),
+  });
+}
+
+/** Both sides agreeing to move in although a dispute on the occupancy is open. */
+export function hostProceedDespiteDispute(occupancyId: number): Promise<unknown> {
+  return apiClientFetch(`/api/users/hosting/occupancies/${occupancyId}/proceed-despite-dispute`, { method: "POST" });
+}
+
+export function renterProceedDespiteDispute(occupancyId: number): Promise<unknown> {
+  return apiClientFetch(`/api/users/rentals/occupancies/${occupancyId}/proceed-despite-dispute`, { method: "POST" });
+}
+
+// --- Refunds after a tenancy ends ----------------------------------------------
+
+export function listHostOwedRefunds(): Promise<HostRefund[]> {
+  return apiClientFetch<HostRefund[]>("/api/users/hosting/refunds");
+}
+
+export function markHostRefundPaid(refundId: number, reference: string): Promise<HostRefund> {
+  return apiClientFetch<HostRefund>(`/api/users/hosting/refunds/${refundId}/mark-paid`, {
+    method: "POST",
+    body: JSON.stringify({ reference }),
+  });
+}
+
+export function listMyRefunds(): Promise<HostRefund[]> {
+  return apiClientFetch<HostRefund[]>("/api/users/rentals/refunds");
+}
+
+export function confirmRefundReceived(refundId: number): Promise<HostRefund> {
+  return apiClientFetch<HostRefund>(`/api/users/rentals/refunds/${refundId}/confirm`, { method: "POST" });
+}
+
+export function reportRefundNotReceived(refundId: number, note: string): Promise<HostRefund> {
+  return apiClientFetch<HostRefund>(`/api/users/rentals/refunds/${refundId}/not-received`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
+// --- Habitability issues ----------------------------------------------------------
+
+export function reportHabitabilityIssue(occupancyId: number, severity: HabitabilitySeverity, description: string): Promise<HabitabilityIncident> {
+  return apiClientFetch<HabitabilityIncident>(`/api/users/rentals/occupancies/${occupancyId}/habitability-incidents`, {
+    method: "POST",
+    body: JSON.stringify({ severity, description }),
+  });
+}
+
+export function listMyHabitabilityIssues(occupancyId: number): Promise<HabitabilityIncident[]> {
+  return apiClientFetch<HabitabilityIncident[]>(`/api/users/rentals/occupancies/${occupancyId}/habitability-incidents`);
+}
+
+export function confirmHabitabilityFixed(incidentId: number): Promise<HabitabilityIncident> {
+  return apiClientFetch<HabitabilityIncident>(`/api/users/rentals/habitability-incidents/${incidentId}/confirm-fixed`, { method: "POST" });
+}
+
+export function rejectHabitabilityFix(incidentId: number, note: string): Promise<HabitabilityIncident> {
+  return apiClientFetch<HabitabilityIncident>(`/api/users/rentals/habitability-incidents/${incidentId}/reject-fix`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
+export function listHostHabitabilityIssues(): Promise<HabitabilityIncident[]> {
+  return apiClientFetch<HabitabilityIncident[]>("/api/users/hosting/habitability-incidents");
+}
+
+export function acknowledgeHabitabilityIssue(incidentId: number): Promise<HabitabilityIncident> {
+  return apiClientFetch<HabitabilityIncident>(`/api/users/hosting/habitability-incidents/${incidentId}/acknowledge`, { method: "POST" });
+}
+
+export function reportHabitabilityFixed(incidentId: number, notes: string): Promise<HabitabilityIncident> {
+  return apiClientFetch<HabitabilityIncident>(`/api/users/hosting/habitability-incidents/${incidentId}/fixed`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+}
+
+// --- Deposits and deposit claims (host <-> renter, no admin) -----------------
+
+export const DEPOSIT_CLAIM_CATEGORIES: { value: string; label: string }[] = [
+  { value: "UNPAID_RENT", label: "Unpaid rent" },
+  { value: "DAMAGE_BEYOND_NORMAL_WEAR", label: "Damage beyond normal wear" },
+  { value: "MISSING_ITEMS_OR_KEYS", label: "Missing items or keys" },
+  { value: "CLEANING_REMEDIATION", label: "Cleaning" },
+  { value: "UTILITIES_OR_OTHER_OCCUPANCY_CHARGES", label: "Utilities or other charges" },
+];
+
+export function listHostDeposits(): Promise<DepositRecord[]> {
+  return apiClientFetch<DepositRecord[]>("/api/users/hosting/deposits");
+}
+
+export function listHostDepositClaims(depositId: number): Promise<DepositClaim[]> {
+  return apiClientFetch<DepositClaim[]>(`/api/users/hosting/deposits/${depositId}/claims`);
+}
+
+export function submitHostDepositClaim(
+  depositId: number,
+  items: { categoryCode: string; amountRequested: number; description: string }[],
+): Promise<DepositClaim> {
+  return apiClientFetch<DepositClaim>(`/api/users/hosting/deposits/${depositId}/claims`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
+export function attachHostDepositClaimEvidence(itemId: number, file: File): Promise<DepositClaim> {
+  const form = new FormData();
+  form.set("file", file);
+  return apiClientFetch<DepositClaim>(`/api/users/hosting/deposit-claim-items/${itemId}/evidence`, { method: "POST", body: form });
+}
+
+/** The host lowers (0 = drops) a disputed item. */
+export function reviseHostDepositClaimItem(itemId: number, amount: number): Promise<DepositClaim> {
+  return apiClientFetch<DepositClaim>(`/api/users/hosting/deposit-claim-items/${itemId}/revise`, {
+    method: "POST",
+    body: JSON.stringify({ amount }),
+  });
+}
+
+/** The host gives up further claims and settles the deposit now. */
+export function settleHostDeposit(depositId: number): Promise<DepositRecord> {
+  return apiClientFetch<DepositRecord>(`/api/users/hosting/deposits/${depositId}/settle`, { method: "POST" });
+}
+
+export function listMyDeposits(): Promise<DepositRecord[]> {
+  return apiClientFetch<DepositRecord[]>("/api/users/rentals/deposits");
+}
+
+export function listMyDepositClaims(): Promise<DepositClaim[]> {
+  return apiClientFetch<DepositClaim[]>("/api/users/rentals/deposit-claims");
+}
+
+export function respondToDepositClaimItem(
+  itemId: number,
+  response: "ACCEPT" | "PARTIAL_ACCEPT" | "DISPUTE",
+  acceptedAmount?: number,
+): Promise<unknown> {
+  return apiClientFetch(`/api/users/rentals/deposit-claim-items/${itemId}/respond`, {
+    method: "POST",
+    body: JSON.stringify({ response, acceptedAmount: acceptedAmount ?? null }),
+  });
+}
+
+/** Either side records the deposit scheme's decision on the disputed items. */
+export function recordDepositSchemeDecision(
+  side: "host" | "renter",
+  claimId: number,
+  payload: { itemFinalAmounts: { itemId: number; finalAmount: number }[]; schemeReference: string; notes?: string },
+): Promise<DepositClaim> {
+  const base = side === "host" ? "/api/users/hosting" : "/api/users/rentals";
+  return apiClientFetch<DepositClaim>(`${base}/deposit-claims/${claimId}/scheme-decision`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function depositEvidenceUrl(side: "host" | "renter", itemId: number): string {
+  const base = side === "host" ? "/api/users/hosting" : "/api/users/rentals";
+  return `${API_URL}${base}/deposit-claim-items/${itemId}/evidence`;
+}
+
+
+// --- Help centre articles (from the knowledge base) --------------------------
+
+export interface HelpCentreArticle {
+  id: string;
+  category: string;
+  type: string;
+  title: string;
+  summary: string;
+  body: string;
+  report: boolean;
+  updatedAt: string;
+}
+
+export function listHelpArticles(): Promise<HelpCentreArticle[]> {
+  return apiClientFetch<HelpCentreArticle[]>("/api/users/help/articles");
+}
+
+export function sendHelpArticleFeedback(articleId: string, helpful: boolean): Promise<{ ok: boolean }> {
+  return apiClientFetch<{ ok: boolean }>(`/api/users/help/articles/${encodeURIComponent(articleId)}/feedback`, {
+    method: "POST",
+    body: JSON.stringify({ helpful }),
+  });
+}

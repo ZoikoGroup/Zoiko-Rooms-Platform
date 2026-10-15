@@ -1,4 +1,5 @@
 import { clsx, type ClassValue } from "clsx";
+import { getDisplayPreferences } from "@/lib/display-preferences";
 
 export function cn(...inputs: ClassValue[]) {
   return clsx(inputs);
@@ -43,11 +44,21 @@ export function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat(locale, { style: "currency", currency }).format(amount);
 }
 
+/** A bare "YYYY-MM-DD" is a calendar date, not an instant -- it's shown as-is,
+ *  never shifted into another time zone (which could move it a day). */
+function isDateOnly(date: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(date);
+}
+
+/** Dates and times follow the user's Settings > Preferences (region's date
+ *  order, time zone, 12/24-hour clock) -- see lib/display-preferences.ts. */
 export function formatDate(date: string) {
-  return new Date(date).toLocaleDateString("en-IN", {
+  const prefs = getDisplayPreferences();
+  return new Date(date).toLocaleDateString(prefs.locale, {
     day: "numeric",
     month: "short",
     year: "numeric",
+    timeZone: isDateOnly(date) ? "UTC" : prefs.timeZone,
   });
 }
 
@@ -55,12 +66,15 @@ export function formatDate(date: string) {
  *  used wherever a payment declaration/confirmation timestamp, not just a
  *  due date, needs to be shown. */
 export function formatDateTime(date: string) {
-  return new Date(date).toLocaleString("en-IN", {
+  const prefs = getDisplayPreferences();
+  return new Date(date).toLocaleString(prefs.locale, {
     day: "numeric",
     month: "short",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    hour12: prefs.timeFormat === "12h",
+    timeZone: prefs.timeZone,
   });
 }
 

@@ -3,13 +3,10 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { listHostedApplications } from "@/lib/user-api";
+import { listHostRentalRecords, listHostedApplications } from "@/lib/user-api";
 import {
-  BedDouble,
-  Building2,
   ChevronLeft,
   ChevronRight,
-  ClipboardCheck,
   ClipboardList,
   CreditCard,
   CreditCardIcon,
@@ -30,7 +27,6 @@ import {
   Settings,
   ShieldCheck,
   ShieldCheckIcon,
-  UserCircle2,
   X,
 } from "lucide-react";
 import { Logo } from "@/components/ui/Logo";
@@ -101,19 +97,18 @@ export function UserSidebar({
   useEffect(() => {
     let active = true;
     async function loadCounts() {
-      try {
-        const apps = await listHostedApplications();
-        if (!active) return;
-        const pendingCount = (apps || []).filter(
-          (a) => a.status === "SUBMITTED" || (!a.decisions || a.decisions.length === 0)
-        ).length;
-        setBadgeCounts((prev) => ({
-          ...prev,
-          applications: pendingCount > 0 ? pendingCount : undefined,
-        }));
-      } catch {
-        // silent fallback if network/auth not ready
-      }
+      // Both endpoints return [] for a user with no hosted properties.
+      const [apps, records] = await Promise.allSettled([listHostedApplications(), listHostRentalRecords()]);
+      if (!active) return;
+      const pending = apps.status === "fulfilled" ? apps.value.filter((a) => a.status === "SUBMITTED").length : 0;
+      const waitingOnHost =
+        records.status === "fulfilled"
+          ? records.value.filter((r) => r.nextAction !== "NONE" && r.nextAction !== "AWAITING_RENTER_SIGNATURE").length
+          : 0;
+      setBadgeCounts({
+        applications: pending > 0 ? pending : undefined,
+        rentalRecords: waitingOnHost > 0 ? waitingOnHost : undefined,
+      });
     }
     loadCounts();
     return () => {

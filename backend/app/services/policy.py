@@ -30,8 +30,8 @@ _DEFAULTS: dict[str, Any] = {
     # property and authority verification (and meets the listing rules) is
     # approved by the system at submit and goes live -- straight away, or as
     # soon as the Listing Fee is paid. Super admins are notified and can
-    # suspend / quarantine a live listing at any time. A market release may
-    # override this to True to send every listing to admin review instead.
+    # suspend / quarantine a live listing at any time. Platform-fixed (see
+    # _PLATFORM_FIXED_KEYS): a market can no longer turn admin review back on.
     "publication.requires_approval": lambda: False,
     # Same status: readable/settable, not yet consulted -- no call site in
     # this codebase currently branches public-visibility behavior on a
@@ -46,6 +46,41 @@ _DEFAULTS: dict[str, Any] = {
     # admin has explicitly approved it for. Off everywhere by default;
     # renters otherwise pay using the recipient's payment instructions.
     "payment.external_handoff_approved": lambda: False,
+    # Party decisions instead of admin review (crud/termination_responses.py,
+    # crud/occupancy_lifecycle.py): how long the other side has to answer a
+    # termination proposal before silence counts as acceptance; the shortest
+    # notice a contested ground may propose; how long a host has to confirm a
+    # renter's move-out before it's confirmed for them.
+    "termination.response_days": lambda: 14,
+    "termination.contested_min_notice_days": lambda: 28,
+    "tenancy.move_out_confirm_days": lambda: 7,
+    # Rent paid to the host for days after a tenancy ended (crud/
+    # tenancy_settlement.py): how long the host has to pay it back, and how
+    # long the renter has to confirm before receipt is assumed.
+    "refund.host_payment_days": lambda: 14,
+    "refund.renter_confirm_days": lambda: 7,
+    # A host's reported fix for a habitability issue the renter doesn't
+    # answer is treated as confirmed after this many days.
+    "habitability.renter_confirm_days": lambda: 5,
+    # A high-risk change to a host's payment details (new destination, just
+    # after a password reset...) waits this long before taking effect, so a
+    # host whose account was taken over can cancel it -- instead of an admin
+    # reviewing it.
+    "payment.instruction_cooling_off_hours": lambda: 72,
+    # A contested host<->renter dispute claim: days to agree a settlement
+    # before it goes to the outside body (crud/dispute_party_flow.py).
+    "dispute.negotiation_days": lambda: 21,
+    # Deposit claims (crud/deposit_party_flow.py): days after a tenancy ends
+    # for the host to claim against the deposit -- after that, whatever isn't
+    # claimed goes back to the renter on its own -- and days the renter has
+    # to answer a claim before it's accepted.
+    "deposit.claim_days": lambda: 14,
+    "deposit.renter_response_days": lambda: 14,
+    # Support tickets (services/support_assistant.py): a ticket waiting on the
+    # user closes after this many quiet days; a resolved one closes (no more
+    # reopening) after this many.
+    "support.action_required_close_days": lambda: 14,
+    "support.resolved_close_days": lambda: 7,
 }
 
 POLICY_KEYS = tuple(_DEFAULTS)
@@ -61,9 +96,17 @@ _RETIRED_KEYS = frozenset({
 })
 
 
+# Keys a market release can't override: decisions the platform keeps automatic
+# everywhere (no manual admin review step). An override already saved on a
+# release is ignored, and set_policy_overrides drops new ones.
+_PLATFORM_FIXED_KEYS = frozenset({"publication.requires_approval"})
+
+
 def get_policy(market_release: MarketRelease | None, key: str) -> Any:
     if key not in _DEFAULTS:
         raise KeyError(f"Unknown policy key: {key}")
+    if key in _PLATFORM_FIXED_KEYS:
+        return _DEFAULTS[key]()
     if market_release is not None and market_release.policy_overrides and key in market_release.policy_overrides:
         return market_release.policy_overrides[key]
     return _DEFAULTS[key]()
@@ -74,7 +117,7 @@ def set_policy_overrides(market_release: MarketRelease, overrides: dict[str, Any
     dict (schema-validated to only ever contain known keys), same shape as
     every other 'set state' crud function in this codebase rather than a
     partial per-key PATCH."""
-    overrides = {k: v for k, v in overrides.items() if k not in _RETIRED_KEYS}
+    overrides = {k: v for k, v in overrides.items() if k not in _RETIRED_KEYS and k not in _PLATFORM_FIXED_KEYS}
     unknown = set(overrides) - set(_DEFAULTS)
     if unknown:
         raise ValueError(f"Unknown policy key(s): {', '.join(sorted(unknown))}")

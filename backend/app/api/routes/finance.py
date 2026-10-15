@@ -24,7 +24,6 @@ from app.models.party import Party
 from app.schemas.finance import (
     DepositClaimCreate,
     DepositClaimRead,
-    DepositClaimResolve,
     DepositRecordRead,
     DepositRelease,
     DisputeCreate,
@@ -343,22 +342,6 @@ def get_deposit_claim_item_evidence(item_id: int, admin: AdminUser = Depends(get
         content=data, media_type=item.evidence_content_type or "application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{item.evidence_original_name or "evidence"}"'},
     )
-
-
-@router.post("/deposit-claims/{claim_id}/resolve", response_model=DepositClaimRead)
-def post_resolve_deposit_claim(
-    claim_id: int,
-    payload: DepositClaimResolve,
-    request: Request,
-    admin: AdminUser = Depends(get_current_admin),
-    db: Session = Depends(get_db),
-):
-    claim = crud.get_deposit_claim_or_404(db, claim_id)
-    updated = crud.resolve_deposit_claim(db, claim, admin, payload)
-    log_audit_event(db, admin, "deposit_claim.resolve", "deposit_claim", str(claim_id), get_correlation_id(request), reason=payload.notes)
-    emit_event(db, "deposit_claim.resolved", "deposit_claim", str(claim_id), {})
-    db.commit()
-    return crud.to_deposit_claim_read(updated)
 
 
 @router.post("/payouts/run", response_model=PayoutRecordRead, dependencies=[Depends(require_capability("host_payouts_enabled"))])

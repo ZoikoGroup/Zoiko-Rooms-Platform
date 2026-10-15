@@ -1,17 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertOctagon, BadgeCheck, CheckCircle2, Landmark, ReceiptText, RotateCcw, ShieldAlert } from "lucide-react";
+import { AlertOctagon, BadgeCheck, CheckCircle2, Landmark, ReceiptText, RotateCcw } from "lucide-react";
 import {
   AdminRole,
   DisputeCase,
-  Obligation,
   PaymentCapabilities,
   PayoutRecord,
   ReconciliationRun,
   RefundRequest,
-  RentalPaymentInstruction,
-  SimulatedPayment,
 } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -35,26 +32,17 @@ import {
 import { formatCurrency, formatDate } from "@/lib/utils";
 
 const emptyPayoutForm = { partyId: "", periodKey: "" };
-const emptyRefundForm = { paymentId: "", obligationId: "", amount: "", reason: "" };
-const emptyDisputeForm = { paymentId: "", category: "OTHER", description: "" };
 export function FinanceOpsManager() {
-  const [payments, setPayments] = useState<SimulatedPayment[]>([]);
-  const [obligations, setObligations] = useState<Obligation[]>([]);
   const [payouts, setPayouts] = useState<PayoutRecord[]>([]);
   const [refunds, setRefunds] = useState<RefundRequest[]>([]);
   const [disputes, setDisputes] = useState<DisputeCase[]>([]);
   const [runs, setRuns] = useState<ReconciliationRun[]>([]);
-  const [pendingInstructions, setPendingInstructions] = useState<RentalPaymentInstruction[]>([]);
   const [capabilities, setCapabilities] = useState<PaymentCapabilities | null>(null);
   const [toast, setToast] = useState("");
   const [role, setRole] = useState<AdminRole | null>(null);
 
   const [payoutModalOpen, setPayoutModalOpen] = useState(false);
   const [payoutForm, setPayoutForm] = useState(emptyPayoutForm);
-  const [refundModalOpen, setRefundModalOpen] = useState(false);
-  const [refundForm, setRefundForm] = useState(emptyRefundForm);
-  const [disputeModalOpen, setDisputeModalOpen] = useState(false);
-  const [disputeForm, setDisputeForm] = useState(emptyDisputeForm);
 
   // Stable identity -- ListingFeePriceBookManager reloads when it changes.
   const showToast = useCallback((message: string) => {
@@ -68,15 +56,11 @@ export function FinanceOpsManager() {
       setRole(admin?.role ?? null);
       setCapabilities(await apiClientFetch<PaymentCapabilities>("/api/finance/capabilities"));
 
-      const [paymentsData, obligationsData, payoutsData, refundsData, disputesData] = await Promise.all([
-        apiClientFetch<SimulatedPayment[]>("/api/finance/payments"),
-        apiClientFetch<Obligation[]>("/api/finance/obligations"),
+      const [payoutsData, refundsData, disputesData] = await Promise.all([
         apiClientFetch<PayoutRecord[]>("/api/finance/payouts"),
         apiClientFetch<RefundRequest[]>("/api/finance/refunds"),
         apiClientFetch<DisputeCase[]>("/api/finance/disputes"),
       ]);
-      setPayments(paymentsData);
-      setObligations(obligationsData);
       setPayouts(payoutsData);
       setRefunds(refundsData);
       setDisputes(disputesData);
@@ -85,9 +69,6 @@ export function FinanceOpsManager() {
       // separately so a 403 here never blocks the rest of the page for a provider.
       if (admin?.role === "super_admin") {
         setRuns(await apiClientFetch<ReconciliationRun[]>("/api/finance/reconciliation"));
-        setPendingInstructions(
-          await apiClientFetch<RentalPaymentInstruction[]>("/api/finance/rental-payments/instructions/pending-review"),
-        );
       }
     } catch {
       showToast("Failed to load finance operations data");
@@ -111,83 +92,6 @@ export function FinanceOpsManager() {
       loadAll();
     } catch {
       showToast("Failed to run payout — it may already exist for this provider and period");
-    }
-  }
-
-  async function submitRefund(e: React.FormEvent) {
-    e.preventDefault();
-    try {
-      await apiClientFetch("/api/finance/refunds", {
-        method: "POST",
-        body: JSON.stringify({
-          paymentId: Number(refundForm.paymentId),
-          obligationId: Number(refundForm.obligationId),
-          amount: Number(refundForm.amount),
-          reason: refundForm.reason,
-        }),
-      });
-      showToast("Refund requested");
-      setRefundModalOpen(false);
-      setRefundForm(emptyRefundForm);
-      loadAll();
-    } catch {
-      showToast("Failed to request refund");
-    }
-  }
-
-  async function decideRefund(id: number, approve: boolean) {
-    try {
-      await apiClientFetch(`/api/finance/refunds/${id}/decide`, { method: "POST", body: JSON.stringify({ approve }) });
-      showToast(approve ? "Refund completed" : "Refund rejected");
-      loadAll();
-    } catch {
-      showToast("Failed to decide refund");
-    }
-  }
-
-  async function submitDispute(e: React.FormEvent) {
-    e.preventDefault();
-    try {
-      await apiClientFetch("/api/finance/disputes", {
-        method: "POST",
-        body: JSON.stringify({
-          paymentId: disputeForm.paymentId ? Number(disputeForm.paymentId) : undefined,
-          category: disputeForm.category,
-          description: disputeForm.description,
-        }),
-      });
-      showToast("Dispute opened");
-      setDisputeModalOpen(false);
-      setDisputeForm(emptyDisputeForm);
-      loadAll();
-    } catch {
-      showToast("Failed to open dispute");
-    }
-  }
-
-  async function resolveDispute(id: number, resolved: boolean) {
-    try {
-      await apiClientFetch(`/api/finance/disputes/${id}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({ status: resolved ? "RESOLVED" : "REJECTED", resolutionNotes: "" }),
-      });
-      showToast(resolved ? "Dispute resolved" : "Dispute rejected");
-      loadAll();
-    } catch {
-      showToast("Failed to update dispute");
-    }
-  }
-
-  async function reviewInstruction(id: number, approve: boolean) {
-    try {
-      await apiClientFetch(`/api/finance/rental-payments/instructions/${id}/${approve ? "approve" : "reject"}`, {
-        method: "POST",
-        body: JSON.stringify({ reason: "" }),
-      });
-      showToast(approve ? "Payment instruction approved and activated" : "Payment instruction rejected");
-      loadAll();
-    } catch {
-      showToast("Failed to review this payment instruction");
     }
   }
 
@@ -243,12 +147,11 @@ export function FinanceOpsManager() {
             <RotateCcw className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
             <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Refunds</h2>
           </div>
-          {capabilities?.rent_collection_enabled && (
-            <Button size="sm" variant="accent" onClick={() => setRefundModalOpen(true)}>
-              Request Refund
-            </Button>
-          )}
         </div>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          Read-only. Refunds are calculated and paid by the rules when a tenancy ends, or settled between renter and
+          host — Zoiko Rooms staff don&apos;t approve them.
+        </p>
         {capabilities && !capabilities.rent_collection_enabled && (
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
             Rental refunds happen directly between renter and recipient. Listing Fee refunds are handled from the Listing
@@ -266,16 +169,6 @@ export function FinanceOpsManager() {
               </div>
               <div className="flex items-center gap-2">
                 <Badge tone={refundStatusTone[refund.status]}>{refundStatusLabel[refund.status] ?? refund.status}</Badge>
-                {refund.status === "REQUESTED" && capabilities?.rent_collection_enabled && (
-                  <>
-                    <Button size="sm" variant="primary" onClick={() => decideRefund(refund.id, true)}>
-                      Approve
-                    </Button>
-                    <Button size="sm" variant="outline" onClick={() => decideRefund(refund.id, false)}>
-                      Reject
-                    </Button>
-                  </>
-                )}
               </div>
             </div>
           ))}
@@ -289,10 +182,10 @@ export function FinanceOpsManager() {
             <AlertOctagon className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
             <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Disputes</h2>
           </div>
-          <Button size="sm" variant="accent" onClick={() => setDisputeModalOpen(true)}>
-            Open Dispute
-          </Button>
         </div>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          Read-only. Disputes are settled between renter and host, or by the outside body that handles them.
+        </p>
         <div className="mt-4 space-y-2">
           {disputes.map((dispute) => (
             <div key={dispute.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
@@ -302,16 +195,6 @@ export function FinanceOpsManager() {
               </div>
               <div className="flex items-center gap-2">
                 <Badge tone={disputeStatusTone[dispute.status]}>{disputeStatusLabel[dispute.status] ?? dispute.status}</Badge>
-                {dispute.status === "OPEN" && (
-                  <>
-                    <Button size="sm" variant="primary" onClick={() => resolveDispute(dispute.id, true)}>
-                      Resolve
-                    </Button>
-                    <Button size="sm" variant="outline" onClick={() => resolveDispute(dispute.id, false)}>
-                      Reject
-                    </Button>
-                  </>
-                )}
               </div>
             </div>
           ))}
@@ -319,39 +202,6 @@ export function FinanceOpsManager() {
         </div>
       </section>
 
-      {role === "super_admin" && (
-        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
-          <div className="flex items-center gap-2">
-            <ShieldAlert className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
-            <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Payment instructions awaiting review</h2>
-          </div>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            ZR-PAY-002 Section 9.1: a landlord/agent&apos;s payment-instruction change flagged high-risk (e.g. right after a
-            password reset) still needs a restricted admin&apos;s approval before it can supersede the current instruction.
-          </p>
-          <div className="mt-4 space-y-2">
-            {pendingInstructions.map((i) => (
-              <div key={i.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
-                <div>
-                  <p className="text-sm font-semibold text-primary-900 dark:text-white">
-                    {i.recipientName} · {i.method.replace(/_/g, " ").toLowerCase()} · {i.accountIdentifierMasked}
-                  </p>
-                  <p className="text-xs text-amber-600 dark:text-amber-400">{i.highRiskReason || "Flagged high-risk"}</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button size="sm" variant="primary" onClick={() => reviewInstruction(i.id, true)}>
-                    Approve
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => reviewInstruction(i.id, false)}>
-                    Reject
-                  </Button>
-                </div>
-              </div>
-            ))}
-            {pendingInstructions.length === 0 && <p className="text-sm text-slate-400">Nothing awaiting review right now.</p>}
-          </div>
-        </section>
-      )}
 
       <RentalPaymentDisputesManager showToast={showToast} />
 
@@ -433,113 +283,6 @@ export function FinanceOpsManager() {
         </form>
       </Modal>
 
-      <Modal open={refundModalOpen} onClose={() => setRefundModalOpen(false)} title="Request Refund">
-        <form onSubmit={submitRefund} className="space-y-3.5">
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Payment</label>
-            <select
-              value={refundForm.paymentId}
-              onChange={(e) => setRefundForm((f) => ({ ...f, paymentId: e.target.value }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-              required
-            >
-              <option value="">Select a payment…</option>
-              {payments.map((p) => (
-                <option key={p.id} value={p.id}>
-                  #{p.id} · {formatCurrency(p.amount, p.currency)} · {p.status}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Obligation</label>
-            <select
-              value={refundForm.obligationId}
-              onChange={(e) => setRefundForm((f) => ({ ...f, obligationId: e.target.value }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-              required
-            >
-              <option value="">Select an obligation…</option>
-              {obligations.map((o) => (
-                <option key={o.id} value={o.id}>
-                  #{o.id} · {o.obligationType} · {formatCurrency(o.amount, o.currency)}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Amount{(() => {
-                const selectedPayment = payments.find((p) => String(p.id) === refundForm.paymentId);
-                return selectedPayment ? ` (${selectedPayment.currency})` : "";
-              })()}
-            </label>
-            <input
-              type="number"
-              min={0}
-              value={refundForm.amount}
-              onChange={(e) => setRefundForm((f) => ({ ...f, amount: e.target.value }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-              required
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Reason</label>
-            <input
-              value={refundForm.reason}
-              onChange={(e) => setRefundForm((f) => ({ ...f, reason: e.target.value }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
-          </div>
-          <Button type="submit" variant="primary" fullWidth>
-            Request Refund
-          </Button>
-        </form>
-      </Modal>
-
-      <Modal open={disputeModalOpen} onClose={() => setDisputeModalOpen(false)} title="Open Dispute">
-        <form onSubmit={submitDispute} className="space-y-3.5">
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Payment (optional)</label>
-            <select
-              value={disputeForm.paymentId}
-              onChange={(e) => setDisputeForm((f) => ({ ...f, paymentId: e.target.value }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            >
-              <option value="">None</option>
-              {payments.map((p) => (
-                <option key={p.id} value={p.id}>
-                  #{p.id} · {formatCurrency(p.amount, p.currency)}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Category</label>
-            <select
-              value={disputeForm.category}
-              onChange={(e) => setDisputeForm((f) => ({ ...f, category: e.target.value }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            >
-              <option value="CHARGEBACK">Chargeback</option>
-              <option value="COMPENSATION">Compensation</option>
-              <option value="OTHER">Other</option>
-            </select>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Description</label>
-            <textarea
-              value={disputeForm.description}
-              onChange={(e) => setDisputeForm((f) => ({ ...f, description: e.target.value }))}
-              rows={3}
-              className="w-full resize-none rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
-          </div>
-          <Button type="submit" variant="primary" fullWidth>
-            Open Dispute
-          </Button>
-        </form>
-      </Modal>
 
       {toast && (
         <div

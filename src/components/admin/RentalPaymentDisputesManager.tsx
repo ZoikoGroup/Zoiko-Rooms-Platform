@@ -7,6 +7,7 @@ import { ApiError, apiClientFetch } from "@/lib/api-client";
 import { RentalPaymentDisputeAdmin } from "@/lib/types";
 import { rentalPaymentStatusLabel, rentalPaymentStatusTone } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { maskReference, paymentMethodDisplay } from "@/components/user/payment-methods/PaymentMethodFields";
 
 const REASON_LABELS: Record<string, string> = {
   NOT_ARRIVED: "Payment has not arrived",
@@ -14,10 +15,6 @@ const REASON_LABELS: Record<string, string> = {
   REFERENCE_MISMATCH: "Reference cannot be matched",
   RETURNED_OR_REVERSED: "Payment was returned or reversed",
   OTHER: "Other",
-};
-
-const METHOD_LABELS: Record<string, string> = {
-  BANK_TRANSFER: "Bank transfer", UPI: "UPI", CASH: "Cash", CARD: "Card", OTHER: "Other",
 };
 
 /** Rent is paid to the host directly, and a problem with a payment is sorted
@@ -71,8 +68,8 @@ export function RentalPaymentDisputesManager({ showToast }: { showToast: (messag
               {d.details ? ` -- "${d.details}"` : ""}
             </p>
             <p className="mt-0.5 text-xs text-slate-400">
-              {METHOD_LABELS[d.paymentMethodCategory] ?? d.paymentMethodCategory} on {formatDate(d.declaredDate)}
-              {d.externalReference ? ` · ref ${d.externalReference}` : ""} · obligation #{d.obligationId}
+              {paymentMethodDisplay(d)} on {formatDate(d.declaredDate)}
+              {d.externalReference ? ` · ref ${maskReference(d.externalReference)}` : ""} · obligation #{d.obligationId}
             </p>
           </div>
         ))}

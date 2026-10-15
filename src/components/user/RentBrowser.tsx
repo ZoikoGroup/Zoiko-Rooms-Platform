@@ -83,9 +83,11 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
       : [];
   const photos = resolvedPhotos.length > 0 ? resolvedPhotos : DEFAULT_ROOM_PHOTOS;
 
+  // Owner-facing fields only exist on HostedListing; PublicListing lacks them.
+  const hosted = item as Partial<HostedListing>;
   const monthlyRent =
-    (item as any).defaultMonthlyRent != null && Number((item as any).defaultMonthlyRent) > 0
-      ? Math.round(Number((item as any).defaultMonthlyRent))
+    hosted.defaultMonthlyRent != null && Number(hosted.defaultMonthlyRent) > 0
+      ? Math.round(Number(hosted.defaultMonthlyRent))
       : Math.round((item.pricePerNight || 0) * 30);
 
   const currency = item.currency || "INR";
@@ -114,11 +116,11 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
     (t) => t.toLowerCase().includes("step-free") || t.toLowerCase().includes("lift")
   );
 
-  const isAvailable = (item as any).available !== false;
-  const isOffer = (item as any).state === "REVIEW" || (item as any).state === "APPROVED";
+  const isAvailable = hosted.available !== false;
+  const isOffer = hosted.state === "REVIEW" || hosted.state === "APPROVED";
 
-  const houseRules = (item as any).agreementDetails?.houseRules
-    ? Object.values((item as any).agreementDetails.houseRules as Record<string, string>).filter(Boolean)
+  const houseRules = hosted.agreementDetails?.houseRules
+    ? Object.values(hosted.agreementDetails.houseRules as unknown as Record<string, string>).filter(Boolean)
     : ["Quiet hours after 10 PM", "No indoor smoking", "Keep common areas clean"];
 
   return {
@@ -147,7 +149,7 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
       item.description ||
       "Verified private room with secure access, high standards, and documented rental tenancy terms.",
     houseRules,
-    ownerName: (item as any).contactName || "Verified Host",
+    ownerName: hosted.contactName || "Verified Host",
   };
 }
 
@@ -643,7 +645,7 @@ export function RentBrowser() {
               <span>Sort</span>
               <select
                 value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as any)}
+                onChange={(e) => setSortBy(e.target.value as "best" | "plow" | "phigh" | "soon")}
                 className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
               >
                 <option value="best">Best Match</option>
@@ -1225,7 +1227,7 @@ export function RentBrowser() {
                     <button
                       key={tab.id}
                       type="button"
-                      onClick={() => setDrawerTab(tab.id as any)}
+                      onClick={() => setDrawerTab(tab.id as "overview" | "amenities" | "availability" | "rules" | "about")}
                       className={`pb-2.5 px-3 border-b-2 transition-colors ${
                         drawerTab === tab.id
                           ? "border-[#0E2F73] text-[#0E2F73] dark:border-blue-400 dark:text-blue-400"

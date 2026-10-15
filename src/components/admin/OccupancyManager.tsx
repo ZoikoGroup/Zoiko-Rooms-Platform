@@ -39,7 +39,6 @@ export function OccupancyManager() {
   const [terminationEntitlements, setTerminationEntitlements] = useState<Record<number, RefundEntitlement>>({});
   const [terminationLoading, setTerminationLoading] = useState(false);
   const [terminationBusy, setTerminationBusy] = useState<number | null>(null);
-  const [decisionNote, setDecisionNote] = useState("");
 
   function showToast(message: string) {
     setToast(message);
@@ -123,7 +122,6 @@ export function OccupancyManager() {
 
   async function openTermination(occupancy: Occupancy) {
     setTerminationFor(occupancy);
-    setDecisionNote("");
     setTerminationLoading(true);
     try {
       const cases = await apiClientFetch<TerminationCase[]>(`/api/occupancy/${occupancy.id}/termination-cases`);
@@ -150,22 +148,6 @@ export function OccupancyManager() {
   async function refreshTerminationCases() {
     if (!terminationFor) return;
     await openTermination(terminationFor);
-  }
-
-  async function decideCase(caseId: number, approve: boolean) {
-    setTerminationBusy(caseId);
-    try {
-      await apiClientFetch(`/api/occupancy/termination-cases/${caseId}/decision`, {
-        method: "POST",
-        body: JSON.stringify({ approve, reason: decisionNote.trim() || (approve ? "Approved" : "Rejected") }),
-      });
-      showToast(approve ? "Case approved" : "Case rejected");
-      await refreshTerminationCases();
-    } catch {
-      showToast("Failed to decide this case");
-    } finally {
-      setTerminationBusy(null);
-    }
   }
 
   async function calculateRefund(caseId: number) {
@@ -346,32 +328,12 @@ export function OccupancyManager() {
                     </p>
                   )}
 
-                  {termCase.status === "PENDING_REVIEW" && (
-                    <div className="space-y-2 border-t border-slate-200 pt-2 dark:border-slate-700">
-                      <textarea
-                        value={decisionNote}
-                        onChange={(e) => setDecisionNote(e.target.value)}
-                        placeholder="Decision reason"
-                        rows={2}
-                        className="w-full rounded-xl bg-white px-3 py-2 text-xs outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700"
-                      />
-                      <div className="flex gap-2">
-                        <Button
-                          size="sm" variant="primary" className="flex-1"
-                          loading={terminationBusy === termCase.id}
-                          onClick={() => decideCase(termCase.id, true)}
-                        >
-                          Approve
-                        </Button>
-                        <Button
-                          size="sm" variant="outline" className="flex-1"
-                          loading={terminationBusy === termCase.id}
-                          onClick={() => decideCase(termCase.id, false)}
-                        >
-                          Reject
-                        </Button>
-                      </div>
-                    </div>
+                  {(termCase.status === "AWAITING_RESPONSE" || termCase.status === "CONTESTED") && (
+                    <p className="border-t border-slate-200 pt-2 text-xs text-slate-500 dark:border-slate-700">
+                      {termCase.status === "CONTESTED"
+                        ? "Contested between the parties — settled when either records a court/tribunal order."
+                        : `Waiting on ${(termCase.pendingResponders ?? []).length} part${(termCase.pendingResponders ?? []).length === 1 ? "y" : "ies"} to answer. Decided by the host and renter(s), not here.`}
+                    </p>
                   )}
 
                   {(termCase.status === "EFFECTIVE_DATE_SET" || termCase.status === "TERMINATED") && !entitlement && (

@@ -119,6 +119,17 @@ def deliver(to_email: str, message: Message) -> bool:
         logger.exception("mailer: failed to render %s for %s", spec.template_id, to_email)
         return False
 
+    # The recipient's own notification preferences apply to email too.
+    from app.services.email import recipient as recipient_prefs
+
+    reason = recipient_prefs.suppression_reason(
+        recipient_prefs.lookup(to_email), tier=spec.tier, stream_key=spec.stream.key,
+        related_entity_type=message.related_entity_type,
+    )
+    if reason:
+        logger.info("mailer: %s to %s not sent -- %s", spec.template_id, to_email, reason)
+        return True
+
     record_id, should_send = message_log.claim(
         template_id=spec.template_id, template_version=spec.version, variant=message.variant, tier=spec.tier,
         stream=spec.stream.key, recipient_email=to_email,
@@ -218,6 +229,24 @@ def send_password_reset_email(to_email: str, reset_link: str, expires_minutes: i
             "If you did not request this, you can ignore the email. Your password and account remain unchanged.",
         ],
         cta_url=reset_link,
+    ))
+
+
+def send_email_change_confirmation_email(to_email: str, confirm_link: str, expires_minutes: int, full_name: str = "") -> None:
+    """ZR-EML-ID-005: sent to the NEW address -- proving the user controls it
+    is what lets the change take effect."""
+    deliver(to_email, Message(
+        spec=registry.get("ZR-EML-ID-005"), variant="confirm-new",
+        heading="Confirm your new email address", first_name=fmt.first_name(full_name),
+        intro=[
+            "You asked to change the email address you use to sign in to Zoiko Rooms to this one.",
+            f"Use the secure button below to confirm. The link expires in {expires_minutes} minutes and can be used only once.",
+        ],
+        outro=[
+            "Until you confirm, your sign-in email stays the same.",
+            "If you did not request this, you can ignore the email.",
+        ],
+        cta_url=confirm_link,
     ))
 
 
@@ -794,3 +823,34 @@ def send_payout_paid_email(
         outro=["Open the payout record for the ledger breakdown, partner status and any required action."],
         cta_url=_url("/account/host/listings"),
     ))
+
+
+# --- Recipient display settings ----------------------------------------------
+# Every send_*(to_email, ...) builder runs with the recipient's time zone,
+# clock and region applied to the dates it formats (services/email/formatting.py).
+
+
+def _with_recipient_display(builder):
+    import functools
+
+    @functools.wraps(builder)
+    def wrapper(to_email, *args, **kwargs):
+        from app.services.email import recipient as recipient_prefs
+
+        with fmt.for_recipient(recipient_prefs.lookup(to_email) if isinstance(to_email, str) else None):
+            return builder(to_email, *args, **kwargs)
+
+    return wrapper
+
+
+def _wrap_builders() -> None:
+    import inspect
+
+    for name, obj in list(globals().items()):
+        if name.startswith("send_") and inspect.isfunction(obj) and obj.__module__ == __name__:
+            params = list(inspect.signature(obj).parameters)
+            if params and params[0] == "to_email":
+                globals()[name] = _with_recipient_display(obj)
+
+
+_wrap_builders()

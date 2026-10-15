@@ -20,7 +20,9 @@ from app.crud import notification as notif_crud
 from app.crud.events import emit_event
 from app.crud.market_policy import jurisdiction_code_for_occupancy, resolve_market_policy, to_termination_policy_snapshot
 from app.crud.occupancy import has_co_tenants
-from app.crud.party import assert_provider_access, party_id_for_listing
+from app.crud.party import assert_provider_access, assert_provider_access_any, party_id_for_listing
+from app.crud.provider_actor import ProviderActor, admin_id, event_actor, user_id
+from app.models.user_account import UserAccount
 from app.models.market_policy import MarketPolicyPack
 from app.models.admin_user import AdminUser
 from app.models.guest import Guest
@@ -43,21 +45,19 @@ from app.models.termination_case import (
     TerminationDecision,
 )
 from app.schemas.termination import (
-    AdjudicatedEffectiveDateSet,
     MitigationRecordCreate,
     TerminationCaseCreate,
-    TerminationCaseDecision,
     TerminationCasePreviewRead,
     TerminationCasePreviewRequest,
     TerminationCaseRead,
-    TerminationCaseTribunalLiability,
-    TerminationNoticeServiceRecord,
+    TerminationCaseResponseRead,
 )
 
 
 def _record_decision(
     db: Session, case: TerminationCase, *, basis: str, authority: str,
     effective_termination_at: date | None, approved_by_admin_id: int | None = None,
+    approved_by_user_id: int | None = None,
     external_order_ref: str = "", reason: str = "",
 ) -> TerminationDecision:
     """ZR-ENG-CLR-006 Section 19's own termination_decision entity -- an
@@ -67,6 +67,7 @@ def _record_decision(
     decision = TerminationDecision(
         termination_case_id=case.id, effective_termination_at=effective_termination_at,
         decision_basis=basis, authority=authority, approved_by_admin_id=approved_by_admin_id,
+        approved_by_user_id=approved_by_user_id,
         external_order_ref=external_order_ref, reason=reason,
     )
     db.add(decision)
@@ -74,7 +75,13 @@ def _record_decision(
     return decision
 
 
-_OPEN_CASE_STATUSES = ("OPENED", "SURRENDER_PROPOSED", "PENDING_REVIEW", "EFFECTIVE_DATE_SET")
+_OPEN_CASE_STATUSES = ("OPENED", "SURRENDER_PROPOSED", "PENDING_REVIEW", "EFFECTIVE_DATE_SET", "AWAITING_RESPONSE", "CONTESTED")
+
+
+def _min_notice_days(occupancy: Occupancy) -> int:
+    from app.services.policy import get_policy
+
+    return int(get_policy(occupancy.listing.market_release if occupancy.listing else None, "termination.contested_min_notice_days"))
 
 
 def _align_to_rent_cycle(raw_date: date) -> date:
@@ -118,6 +125,7 @@ def _require_proposed_effective_date(data: TerminationCaseCreate) -> date:
 
 def _resolve_case_opening(
     data: TerminationCaseCreate, policy: MarketPolicyPack, *, auto_cause_codes: tuple[str, ...], joint_tenancy: bool = False,
+    min_notice_days: int = 28,
 ) -> tuple[str, date | None, date | None]:
     """Returns (status, earliest_effective_date, effective_termination_date)
     for a newly-opened case. Four pathways, per models/termination_case.py's
@@ -135,18 +143,39 @@ def _resolve_case_opening(
     tenancy other co-tenants never consented to. No jurisdiction-general
     rule exists here for whether one joint tenant's own notice ends the
     whole tenancy, only their own interest, or neither."""
-    if joint_tenancy:
-        return "PENDING_REVIEW", None, None
     if data.cause_code in MUTUAL_CAUSE_CODES:
         proposed_date = _require_proposed_effective_date(data)
-        return "SURRENDER_PROPOSED", proposed_date, None
-    if data.cause_code in EVIDENCE_GATED_CAUSE_CODES and data.evidence_refs:
-        today = date.today()
-        return "EFFECTIVE_DATE_SET", today, today
-    if data.cause_code in auto_cause_codes:
-        effective_date = _resolve_earliest_effective_date(data.cause_code, policy)
-        return "EFFECTIVE_DATE_SET", effective_date, effective_date
-    return "PENDING_REVIEW", None, None
+        # With co-tenants every tenant must agree too, not just one of them.
+        return ("AWAITING_RESPONSE" if joint_tenancy else "SURRENDER_PROPOSED"), proposed_date, None
+    evidence_now = data.cause_code in EVIDENCE_GATED_CAUSE_CODES and bool(data.evidence_refs)
+    if not joint_tenancy:
+        if evidence_now:
+            today = date.today()
+            return "EFFECTIVE_DATE_SET", today, today
+        if data.cause_code in auto_cause_codes:
+            effective_date = _resolve_earliest_effective_date(data.cause_code, policy)
+            return "EFFECTIVE_DATE_SET", effective_date, effective_date
+    # Everything else is decided by the parties (crud/termination_responses.py):
+    # a proposed date the other side(s) accept, counter or contest. A date
+    # the rules could compute is the default proposal; a contested ground
+    # must name its own, at least the minimum notice away.
+    if evidence_now:
+        default = date.today()
+    elif data.cause_code in auto_cause_codes:
+        default = _resolve_earliest_effective_date(data.cause_code, policy)
+    else:
+        default = None
+    if default is not None and data.proposed_effective_date is None:
+        return "AWAITING_RESPONSE", default, None
+    if data.proposed_effective_date is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Propose the date the tenancy should end")
+    if data.proposed_effective_date < date.today():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The proposed end date cannot be in the past")
+    if default is None and data.proposed_effective_date < date.today() + timedelta(days=min_notice_days):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"For this reason the end date must be at least {min_notice_days} days away",
+        )
+    return "AWAITING_RESPONSE", data.proposed_effective_date, None
 
 
 def _assert_no_open_case(db: Session, occupancy_id: int) -> None:
@@ -170,7 +199,9 @@ def _notify_case_opened(db: Session, case: TerminationCase, occupancy: Occupancy
     listing = db.get(Listing, occupancy.listing_id)
     if not listing:
         return
-    if case.status == "PENDING_REVIEW":
+    if case.status == "AWAITING_RESPONSE":
+        date_phrase = f"proposed for {case.earliest_effective_date.isoformat()} -- respond by {case.response_due_at.date().isoformat()}"
+    elif case.status == "PENDING_REVIEW":
         date_phrase = "under review -- no effective date has been set yet"
     elif case.status == "SURRENDER_PROPOSED":
         date_phrase = f"proposed for {case.earliest_effective_date.isoformat()}"
@@ -217,6 +248,7 @@ def open_termination_case(db: Session, occupancy: Occupancy, guest: Guest, data:
     policy = resolve_market_policy(db, jurisdiction_code_for_occupancy(occupancy))
     case_status, effective_date, final_date = _resolve_case_opening(
         data, policy, auto_cause_codes=UNILATERAL_CAUSE_CODES, joint_tenancy=has_co_tenants(db, occupancy.id),
+        min_notice_days=_min_notice_days(occupancy),
     )
     agreement = _get_agreement_or_409(db, occupancy)
 
@@ -232,7 +264,8 @@ def open_termination_case(db: Session, occupancy: Occupancy, guest: Guest, data:
         # PORTAL service is instantaneous -- there's no separate delivery
         # step this build waits on (see models/termination_case.py's own
         # notice_served_at field docstring).
-        notice_served_at=now if data.notice_method == "PORTAL" else None,
+        # The portal copy is delivered at submission whatever the method.
+        notice_served_at=now,
         notice_method=data.notice_method,
         evidence_refs=data.evidence_refs,
         policy_snapshot=to_termination_policy_snapshot(policy),
@@ -255,6 +288,10 @@ def open_termination_case(db: Session, occupancy: Occupancy, guest: Guest, data:
     if case_status == "EFFECTIVE_DATE_SET":
         basis = "AUTO_RESOLVED_EVIDENCE_GATED" if data.cause_code in EVIDENCE_GATED_CAUSE_CODES else "AUTO_RESOLVED_UNILATERAL"
         _record_decision(db, case, basis=basis, authority="system", effective_termination_at=final_date)
+    if case_status == "AWAITING_RESPONSE":
+        from app.crud.termination_responses import start_response_round
+
+        start_response_round(db, case, proposer=guest.id)
     db.commit()
     db.refresh(case)
 
@@ -305,10 +342,9 @@ def preview_termination_case(db: Session, occupancy: Occupancy, guest: Guest, da
     # with no date yet in mind should still describe the pathway (host
     # consent required, no computable estimate) rather than 400.
     if joint_tenancy:
-        # AC-25: same fail-closed rule _resolve_case_opening applies for a
-        # real submission -- see that function's own docstring.
-        resolved_status = "PENDING_REVIEW"
-        earliest_effective_date = None
+        # AC-25: every tenant (and the host) answers the proposal.
+        resolved_status = "AWAITING_RESPONSE"
+        earliest_effective_date = data.proposed_effective_date
     elif data.cause_code in MUTUAL_CAUSE_CODES:
         resolved_status = "SURRENDER_PROPOSED"
         earliest_effective_date = data.proposed_effective_date
@@ -319,13 +355,14 @@ def preview_termination_case(db: Session, occupancy: Occupancy, guest: Guest, da
         resolved_status = "EFFECTIVE_DATE_SET"
         earliest_effective_date = _resolve_earliest_effective_date(data.cause_code, policy)
     else:
-        resolved_status = "PENDING_REVIEW"
-        earliest_effective_date = None
+        resolved_status = "AWAITING_RESPONSE"
+        earliest_effective_date = data.proposed_effective_date
 
     result = TerminationCasePreviewRead(
         cause_code=data.cause_code,
         resolved_status=resolved_status,
-        requires_host_consent=not joint_tenancy and data.cause_code in MUTUAL_CAUSE_CODES,
+        # The host answers any proposal (and, with co-tenants, so does everyone else).
+        requires_host_consent=resolved_status in ("SURRENDER_PROPOSED", "AWAITING_RESPONSE"),
         requires_evidence_to_resolve_now=(
             not joint_tenancy and data.cause_code in EVIDENCE_GATED_CAUSE_CODES and not data.evidence_refs
         ),
@@ -375,14 +412,14 @@ def preview_termination_case(db: Session, occupancy: Occupancy, guest: Guest, da
     return result
 
 
-def open_host_termination_case(db: Session, occupancy: Occupancy, admin: AdminUser, data: TerminationCaseCreate) -> TerminationCase:
+def open_host_termination_case(db: Session, occupancy: Occupancy, admin: ProviderActor, data: TerminationCaseCreate) -> TerminationCase:
     """ZR-ENG-CLR-006 Section 8: 'Start termination / possession process,'
     not 'Cancel renter.' HOST_UNILATERAL_CAUSE_CODES/MUTUAL_CAUSE_CODES
     resolve automatically; every other Host pathway in Section 8.1's table
     (RENTER_BREACH_ALLEGED, OWNER_MOVE_IN/SALE/OTHER_GROUND, SAFETY_
     EMERGENCY) still opens a case, just PENDING_REVIEW -- see
     models/termination_case.py's own docstring for why."""
-    assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(occupancy.listing))
     if occupancy.status != "ACTIVE":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only an active occupancy can have a termination started")
 
@@ -397,6 +434,7 @@ def open_host_termination_case(db: Session, occupancy: Occupancy, admin: AdminUs
     policy = resolve_market_policy(db, jurisdiction_code_for_occupancy(occupancy))
     case_status, effective_date, final_date = _resolve_case_opening(
         data, policy, auto_cause_codes=HOST_UNILATERAL_CAUSE_CODES, joint_tenancy=has_co_tenants(db, occupancy.id),
+        min_notice_days=_min_notice_days(occupancy),
     )
     agreement = _get_agreement_or_409(db, occupancy)
 
@@ -404,12 +442,14 @@ def open_host_termination_case(db: Session, occupancy: Occupancy, admin: AdminUs
     case = TerminationCase(
         occupancy_id=occupancy.id,
         agreement_id=agreement.id,
-        initiator_admin_id=admin.id,
+        initiator_admin_id=admin_id(admin),
+        initiator_host_user_id=user_id(admin),
         cause_code=data.cause_code,
         status=case_status,
         notes=data.notes,
         notice_created_at=now,
-        notice_served_at=now if data.notice_method == "PORTAL" else None,
+        # The portal copy is delivered at submission whatever the method.
+        notice_served_at=now,
         notice_method=data.notice_method,
         evidence_refs=data.evidence_refs,
         policy_snapshot=to_termination_policy_snapshot(policy),
@@ -420,15 +460,19 @@ def open_host_termination_case(db: Session, occupancy: Occupancy, admin: AdminUs
     db.flush()
     emit_event(
         db, "termination.case_opened", "termination_case", str(case.id), {"occupancyId": occupancy.id, "causeCode": case.cause_code},
-        actor_kind="admin", actor_id=str(admin.id), new_state=case.status,
+        actor_kind=event_actor(admin)[0], actor_id=event_actor(admin)[1], new_state=case.status,
     )
     emit_event(
         db, "termination.policy_resolved", "termination_case", str(case.id), {"policyPackId": policy.id, "policyPackVersion": policy.version},
-        actor_kind="admin", actor_id=str(admin.id),
+        actor_kind=event_actor(admin)[0], actor_id=event_actor(admin)[1],
     )
     if case_status == "EFFECTIVE_DATE_SET":
         basis = "AUTO_RESOLVED_EVIDENCE_GATED" if data.cause_code in EVIDENCE_GATED_CAUSE_CODES else "AUTO_RESOLVED_UNILATERAL"
         _record_decision(db, case, basis=basis, authority="system", effective_termination_at=final_date)
+    if case_status == "AWAITING_RESPONSE":
+        from app.crud.termination_responses import start_response_round
+
+        start_response_round(db, case, proposer="HOST")
     db.commit()
     db.refresh(case)
 
@@ -460,82 +504,13 @@ def withdraw_termination_case(db: Session, case: TerminationCase, guest: Guest) 
     return case
 
 
-def _notify_case_decided(db: Session, case: TerminationCase, *, approved: bool) -> None:
-    """Both parties were waiting on a PENDING_REVIEW outcome regardless of
-    who initiated -- unlike a mutual-surrender proposal, this isn't a
-    two-party negotiation where only the proposer needs telling."""
-    listing = db.get(Listing, case.occupancy.listing_id)
-    if not listing:
-        return
-    verb = "approved" if approved else "rejected"
-    notif_crud.notify_user_by_guest(
-        db, case.occupancy.guest,
-        title=f"Your termination case was {verb}",
-        message=f'Your termination request for "{listing.name}" was {verb} after review.',
-        notification_type="termination_case.decided",
-        related_entity_type="termination_case", related_entity_id=str(case.id),
-    )
-    if listing.party_id:
-        notif_crud.notify_user_by_party(
-            db, listing.party_id,
-            title=f"A termination case was {verb}",
-            message=f'A termination case for "{listing.name}" was {verb} after review.',
-            notification_type="termination_case.decided",
-            related_entity_type="termination_case", related_entity_id=str(case.id),
-        )
+def _host_initiated(case: TerminationCase) -> bool:
+    return case.initiator_admin_id is not None or case.initiator_host_user_id is not None
 
 
-def decide_termination_case(db: Session, case: TerminationCase, admin: AdminUser, data: TerminationCaseDecision) -> TerminationCase:
-    """ZR-ENG-CLR-006 Section 20.1 POST /termination-cases/{id}/decision --
-    the only way a PENDING_REVIEW case moves forward (AC-35). Super-Admin-
-    only, the same override tier AC-05's active-occupancy guard and
-    write_off_host_recovery already reserve for a comparably consequential,
-    evidence-dependent decision (AC-29: role authorization + mandatory
-    reason). Approving sets the date the Super Admin determined lawful --
-    this build computes nothing for these causes itself, see
-    models/termination_case.py:RENTER_ONLY_CAUSE_CODES/HOST_ONLY_CAUSE_CODES;
-    rejecting means the alleged pathway was determined not to apply."""
-    if admin.role != "super_admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a Super Admin can decide a termination case pending review")
-    if case.status != "PENDING_REVIEW":
-        raise HTTPException(status.HTTP_409_CONFLICT, f"This case is not pending review (status: {case.status})")
-    if not data.reason.strip():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A reason is required to decide a termination case")
-
-    previous_status = case.status
-    if data.approve:
-        if data.effective_termination_date is None:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "An effective termination date is required to approve this case")
-        case.status = "EFFECTIVE_DATE_SET"
-        case.earliest_effective_date = data.effective_termination_date
-        case.effective_termination_date = data.effective_termination_date
-        emit_event(
-            db, "termination.effective_date_set", "termination_case", str(case.id),
-            {"occupancyId": case.occupancy_id, "effectiveDate": data.effective_termination_date.isoformat()},
-            actor_kind="admin", actor_id=str(admin.id), previous_state=previous_status, new_state=case.status,
-        )
-        _record_decision(
-            db, case, basis="PENDING_REVIEW_APPROVED", authority="super_admin",
-            effective_termination_at=data.effective_termination_date, approved_by_admin_id=admin.id, reason=data.reason,
-        )
-    else:
-        case.status = "REJECTED_PATHWAY"
-        emit_event(
-            db, "termination.pathway_rejected", "termination_case", str(case.id), {"occupancyId": case.occupancy_id},
-            actor_kind="admin", actor_id=str(admin.id), previous_state=previous_status, new_state=case.status,
-        )
-        _record_decision(
-            db, case, basis="PENDING_REVIEW_REJECTED", authority="super_admin",
-            effective_termination_at=None, approved_by_admin_id=admin.id, reason=data.reason,
-        )
-
-    db.commit()
-    db.refresh(case)
-    _notify_case_decided(db, case, approved=data.approve)
-    return case
-
-
-def _assert_is_responding_party(case: TerminationCase, *, guest: Guest | None, admin: AdminUser | None) -> None:
+def _assert_is_responding_party(
+    case: TerminationCase, *, guest: Guest | None, admin: AdminUser | None, host_user: UserAccount | None = None,
+) -> None:
     """The other party from whoever proposed -- a proposer 'accepting' their
     own offer isn't a real negotiation, so it's rejected the same as an
     unrelated stranger would be."""
@@ -544,8 +519,8 @@ def _assert_is_responding_party(case: TerminationCase, *, guest: Guest | None, a
             raise HTTPException(status.HTTP_403_FORBIDDEN, "This termination case does not belong to you")
         if case.initiator_guest_id is not None:
             raise HTTPException(status.HTTP_409_CONFLICT, "You proposed this surrender -- the Host must respond to it")
-    elif admin is not None:
-        if case.initiator_admin_id is not None:
+    elif admin is not None or host_user is not None:
+        if _host_initiated(case):
             raise HTTPException(status.HTTP_409_CONFLICT, "You proposed this surrender -- the renter must respond to it")
     else:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "A responding party is required")
@@ -577,6 +552,7 @@ def _notify_surrender_response(db: Session, case: TerminationCase, *, accepted: 
 
 def accept_mutual_surrender(
     db: Session, case: TerminationCase, *, guest: Guest | None = None, admin: AdminUser | None = None,
+    host_user: UserAccount | None = None,
 ) -> TerminationCase:
     """ZR-ENG-CLR-006 Section 7.1 Step 9/Section 8.1 MUTUAL_SURRENDER_PROPOSAL:
     the other party's affirmative acceptance is what actually makes the
@@ -584,7 +560,9 @@ def accept_mutual_surrender(
     for why there's no auto-accept path."""
     if admin is not None:
         assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
-    _assert_is_responding_party(case, guest=guest, admin=admin)
+    if host_user is not None:
+        assert_provider_access_any(db, host_user, party_id_for_listing(case.occupancy.listing))
+    _assert_is_responding_party(case, guest=guest, admin=admin, host_user=host_user)
     if case.status != "SURRENDER_PROPOSED":
         raise HTTPException(status.HTTP_409_CONFLICT, f"This case is not awaiting a surrender response (status: {case.status})")
 
@@ -592,15 +570,18 @@ def accept_mutual_surrender(
     case.status = "EFFECTIVE_DATE_SET"
     effective_date = case.earliest_effective_date
     case.effective_termination_date = effective_date
-    actor_kind, actor_id = ("admin", str(admin.id)) if admin is not None else ("guest", str(guest.id))
+    host = admin if admin is not None else host_user
+    actor_kind, actor_id = event_actor(host) if host is not None else ("guest", str(guest.id))
     emit_event(
         db, "termination.mutual_surrender_accepted", "termination_case", str(case.id),
         {"occupancyId": case.occupancy_id, "effectiveDate": effective_date.isoformat()},
         actor_kind=actor_kind, actor_id=actor_id, previous_state=previous_status, new_state=case.status,
     )
     _record_decision(
-        db, case, basis="MUTUAL_SURRENDER_ACCEPTED", authority="host_admin" if admin is not None else "renter",
+        db, case, basis="MUTUAL_SURRENDER_ACCEPTED",
+        authority="host_admin" if admin is not None else "host" if host_user is not None else "renter",
         effective_termination_at=effective_date, approved_by_admin_id=admin.id if admin is not None else None,
+        approved_by_user_id=host_user.id if host_user is not None else None,
     )
     db.commit()
     db.refresh(case)
@@ -610,19 +591,23 @@ def accept_mutual_surrender(
 
 def decline_mutual_surrender(
     db: Session, case: TerminationCase, *, guest: Guest | None = None, admin: AdminUser | None = None,
+    host_user: UserAccount | None = None,
 ) -> TerminationCase:
     """QT-07: 'Mutual surrender offer expires/rejected; original tenancy
     remains active.' The occupancy is never touched here -- only the case's
     own status changes, freeing the occupancy to have a new case opened."""
     if admin is not None:
         assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
-    _assert_is_responding_party(case, guest=guest, admin=admin)
+    if host_user is not None:
+        assert_provider_access_any(db, host_user, party_id_for_listing(case.occupancy.listing))
+    _assert_is_responding_party(case, guest=guest, admin=admin, host_user=host_user)
     if case.status != "SURRENDER_PROPOSED":
         raise HTTPException(status.HTTP_409_CONFLICT, f"This case is not awaiting a surrender response (status: {case.status})")
 
     previous_status = case.status
     case.status = "SURRENDER_DECLINED"
-    actor_kind, actor_id = ("admin", str(admin.id)) if admin is not None else ("guest", str(guest.id))
+    host = admin if admin is not None else host_user
+    actor_kind, actor_id = event_actor(host) if host is not None else ("guest", str(guest.id))
     emit_event(
         db, "termination.mutual_surrender_declined", "termination_case", str(case.id), {"occupancyId": case.occupancy_id},
         actor_kind=actor_kind, actor_id=actor_id, previous_state=previous_status, new_state=case.status,
@@ -673,6 +658,7 @@ def to_termination_case_read(case: TerminationCase, *, redact_notes: bool) -> Te
     return TerminationCaseRead(
         id=case.id, occupancy_id=case.occupancy_id, agreement_id=case.agreement_id,
         initiator_guest_id=case.initiator_guest_id, initiator_admin_id=case.initiator_admin_id,
+        initiator_host_user_id=case.initiator_host_user_id,
         cause_code=case.cause_code, status=case.status, notes=notes, notice_created_at=case.notice_created_at,
         notice_served_at=case.notice_served_at, notice_method=case.notice_method, evidence_refs=case.evidence_refs,
         policy_snapshot=case.policy_snapshot, earliest_effective_date=case.earliest_effective_date,
@@ -682,102 +668,89 @@ def to_termination_case_read(case: TerminationCase, *, redact_notes: bool) -> Te
         adjudicated_effective_date_reason=case.adjudicated_effective_date_reason,
         notice_service_proof_ref=case.notice_service_proof_ref,
         notice_service_recorded_by_admin_id=case.notice_service_recorded_by_admin_id,
+        notice_service_recorded_by_user_id=case.notice_service_recorded_by_user_id,
+        notice_acknowledged_at=case.notice_acknowledged_at,
+        proposer=case.proposer,
+        response_round=case.response_round or 1,
+        response_due_at=case.response_due_at,
+        deemed_on_silence=case.deemed_on_silence if case.deemed_on_silence is not None else True,
+        pending_responders=case.pending_responders,
+        responses=[
+            TerminationCaseResponseRead(
+                response_round=r.response_round, responder=r.responder, response=r.response,
+                proposed_date=r.proposed_date, note=r.note, created_at=r.created_at,
+            )
+            for r in case.responses
+        ],
+        external_outcome=case.external_outcome or "",
+        external_order_ref=case.external_order_ref or "",
         created_at=case.created_at,
     )
 
 
-def record_notice_service(db: Session, case: TerminationCase, admin: AdminUser, data: TerminationNoticeServiceRecord) -> TerminationCase:
-    """Section 11 gap: records real-world delivery proof for a non-PORTAL
-    notice_method -- see models/termination_case.py's own field docstring.
-    PORTAL cases already have notice_served_at set at submission time and
-    have nothing to record here; a case can only have its service recorded
-    once (immutable, like notice_created_at)."""
-    assert_provider_access(db, admin, party_id_for_listing(case.occupancy.listing))
-    if case.notice_method == "PORTAL":
-        raise HTTPException(status.HTTP_409_CONFLICT, "PORTAL notice is served at submission time -- there is nothing to record")
-    if case.notice_served_at is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Notice service has already been recorded for this case")
-    if not data.proof_ref.strip():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A proof reference is required to record notice service")
+def _assert_initiating_side(case: TerminationCase, *, guest: Guest | None, host_user: UserAccount | None) -> None:
+    if guest is not None:
+        if case.initiator_guest_id != guest.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person who gave this notice can attach proof of delivery")
+    elif host_user is None or not _host_initiated(case):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person who gave this notice can attach proof of delivery")
 
-    case.notice_served_at = data.served_at
-    case.notice_service_proof_ref = data.proof_ref
-    case.notice_service_recorded_by_admin_id = admin.id
+
+def attach_notice_proof(
+    db: Session, case: TerminationCase, *, proof_ref: str, served_at: datetime,
+    guest: Guest | None = None, host_user: UserAccount | None = None,
+) -> TerminationCase:
+    """Proof of delivery by the notice's own off-portal method (post, hand
+    delivery, prescribed form...), attached by whoever served it. The portal
+    copy already made the notice served at submission; this is supporting
+    evidence, recorded once."""
+    if host_user is not None:
+        assert_provider_access_any(db, host_user, party_id_for_listing(case.occupancy.listing))
+    _assert_initiating_side(case, guest=guest, host_user=host_user)
+    if case.notice_method == "PORTAL":
+        raise HTTPException(status.HTTP_409_CONFLICT, "A portal notice needs no separate proof of delivery")
+    if case.notice_service_proof_ref:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Proof of delivery has already been attached")
+    if not proof_ref.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Describe or reference the proof of delivery")
+
+    case.notice_service_proof_ref = proof_ref.strip()[:500]
+    case.notice_served_at = min(case.notice_served_at or served_at, served_at)
+    case.notice_service_recorded_by_user_id = host_user.id if host_user is not None else (
+        case.occupancy.guest.user_account_id if case.occupancy.guest else None
+    )
+    actor_kind, actor_id = ("host_user", str(host_user.id)) if host_user is not None else ("guest", str(guest.id))
     emit_event(
-        db, "termination.notice_service_recorded", "termination_case", str(case.id),
-        {"occupancyId": case.occupancy_id, "noticeMethod": case.notice_method},
-        actor_kind="admin", actor_id=str(admin.id),
+        db, "termination.notice_proof_attached", "termination_case", str(case.id),
+        {"occupancyId": case.occupancy_id, "noticeMethod": case.notice_method}, actor_kind=actor_kind, actor_id=actor_id,
     )
     db.commit()
     db.refresh(case)
     return case
 
 
-def set_tribunal_liability(db: Session, case: TerminationCase, admin: AdminUser, data: TerminationCaseTribunalLiability) -> TerminationCase:
-    """ZR-ENG-CLR-006 Section 11.1 TRIBUNAL_OR_COURT_DETERMINED/Section 20.1
-    -- see models/termination_case.py's own field docstring for why this is
-    a Super Admin's own entry, never a computed formula. Recalculating the
-    refund entitlement after this call (AC-24: a new version, not an
-    overwrite) is what actually applies it to the case's own NOTICE_
-    LIABILITY line."""
-    if admin.role != "super_admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a Super Admin can set a tribunal/court-determined liability")
-    if data.amount < 0:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The liability amount cannot be negative")
-    if not data.reason.strip():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A reason is required to set a tribunal/court-determined liability")
-
-    case.tribunal_liability_amount = data.amount
-    case.tribunal_liability_reason = data.reason
-    emit_event(
-        db, "termination.tribunal_liability_set", "termination_case", str(case.id),
-        {"occupancyId": case.occupancy_id, "amount": data.amount},
-        actor_kind="admin", actor_id=str(admin.id),
-    )
-    db.commit()
-    db.refresh(case)
+def acknowledge_notice(
+    db: Session, case: TerminationCase, *, guest: Guest | None = None, host_user: UserAccount | None = None,
+) -> TerminationCase:
+    """The receiving side confirms they got the notice: the renter for a
+    host-initiated case, the host for a renter-initiated one."""
+    if guest is not None:
+        if case.occupancy.guest_id != guest.id or case.initiator_guest_id is not None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person this notice was given to can acknowledge it")
+    elif host_user is not None:
+        assert_provider_access_any(db, host_user, party_id_for_listing(case.occupancy.listing))
+        if case.initiator_guest_id is None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person this notice was given to can acknowledge it")
+    else:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "An acknowledging party is required")
+    if case.notice_acknowledged_at is None:
+        case.notice_acknowledged_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(case)
     return case
 
 
 _TERMINAL_CASE_STATUSES = ("TERMINATED", "WITHDRAWN", "REJECTED_PATHWAY")
-
-
-def set_adjudicated_effective_date(
-    db: Session, case: TerminationCase, admin: AdminUser, data: AdjudicatedEffectiveDateSet,
-) -> TerminationCase:
-    """ZR-ENG-CLR-006 Section 10 adjudicated_effective_date/Section 20.1 --
-    see models/termination_case.py's own field docstring for why this is a
-    Super Admin's own entry, never computed. Takes precedence over whatever
-    date this build already resolved (notice-days, a mutual-surrender
-    proposal, or a prior PENDING_REVIEW decision) -- the whole point of
-    Section 10's own precedence() function. Not available once the case has
-    already reached a terminal state; the underlying occupancy is unaffected
-    (as with every other date-setting action here -- ending it is a separate
-    step, crud/occupancy.py:end_occupancy)."""
-    if admin.role != "super_admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a Super Admin can set an adjudicated effective date")
-    if case.status in _TERMINAL_CASE_STATUSES:
-        raise HTTPException(status.HTTP_409_CONFLICT, f"This case is already {case.status.lower()} and cannot be adjudicated")
-    if not data.reason.strip():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A reason is required to set an adjudicated effective date")
-
-    previous_status = case.status
-    case.adjudicated_effective_date = data.effective_date
-    case.adjudicated_effective_date_reason = data.reason
-    case.effective_termination_date = data.effective_date
-    case.status = "EFFECTIVE_DATE_SET"
-    emit_event(
-        db, "termination.effective_date_set", "termination_case", str(case.id),
-        {"occupancyId": case.occupancy_id, "effectiveDate": data.effective_date.isoformat(), "basis": "adjudicated"},
-        actor_kind="admin", actor_id=str(admin.id), previous_state=previous_status, new_state=case.status,
-    )
-    _record_decision(
-        db, case, basis="ADJUDICATED", authority="super_admin",
-        effective_termination_at=data.effective_date, approved_by_admin_id=admin.id, reason=data.reason,
-    )
-    db.commit()
-    db.refresh(case)
-    return case
 
 
 def record_mitigation(db: Session, case: TerminationCase, admin: AdminUser, data: MitigationRecordCreate) -> MitigationRecord:

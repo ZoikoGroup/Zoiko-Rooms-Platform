@@ -27,6 +27,7 @@ from app.crud import sublet as sublet_crud
 from app.crud import sublet_documents as sublet_documents_crud
 from app.crud.property import get_property, get_room, list_rooms_for_property
 from app.crud.rental_transaction_record import build_rental_transaction_record
+from app.crud.host_rental_records import list_host_rental_records
 from app.db.session import get_db
 from app.services import jurisdictions as jurisdiction_service
 from app.models.occupancy import Occupancy
@@ -56,6 +57,7 @@ from app.schemas.marketplace import (
 from app.schemas.listing import ListingCreate, ListingRead, ListingUpdate
 from app.schemas.occupancy import OccupancyRead
 from app.schemas.rental_transaction_record import RentalTransactionRecordRead
+from app.schemas.host_rental_record import HostRentalRecordRead
 from app.schemas.verification import PropertyVerificationRead
 from app.schemas.payment_connection import PaymentConnectionRead
 
@@ -173,6 +175,55 @@ def post_possession_delivered_as_host(
     return event
 
 
+@router.post("/occupancies/{occupancy_id}/proceed-despite-dispute", response_model=HandoverEventRead)
+def post_proceed_despite_dispute_as_host(
+    occupancy_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The host agreeing to move-in going ahead although a dispute on this
+    occupancy is open. Move-in proceeds once the renter agrees too."""
+    occupancy = _get_own_occupancy_or_403(db, occupancy_id, user)
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="HOST_PROCEED_DESPITE_DISPUTE", actor_kind="provider_user", actor_user_id=user.id,
+        correlation_id=get_correlation_id(request),
+    )
+    db.commit()
+    return event
+
+
+@router.post("/occupancies/{occupancy_id}/move-out/confirm", response_model=HandoverEventRead)
+def post_confirm_move_out_as_host(
+    occupancy_id: int, payload: HandoverEventCreate, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The host's own verification step in the move-out handshake --
+    confirming the room was handed back. Self-service counterpart of
+    api/routes/occupancy.py:post_confirm_move_out, same as the move-in
+    handover routes above."""
+    occupancy = _get_own_occupancy_or_403(db, occupancy_id, user)
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="HOST_MOVE_OUT_CONFIRMED", actor_kind="provider_user", actor_user_id=user.id,
+        evidence_ref=payload.evidence_ref, notes=payload.notes, correlation_id=get_correlation_id(request),
+    )
+    log_audit_event(
+        db, None, "occupancy.host_move_out_confirmed", "occupancy", str(occupancy_id), get_correlation_id(request),
+        reason=f"host_user:{user.id}",
+    )
+    emit_event(db, "occupancy.host_move_out_confirmed", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
+    db.commit()
+    # Ends the tenancy now if its end date has already arrived.
+    from app.crud.occupancy_lifecycle import try_end_occupancy
+
+    try_end_occupancy(db, occupancy)
+    return event
+
+
+@router.get("/rental-records", response_model=list[HostRentalRecordRead])
+def list_rental_records(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Every rental on the host's properties, accepted offer onwards
+    (crud/host_rental_records.py)."""
+    return list_host_rental_records(db, user)
+
+
 def _agreement_for_occupancy_or_404(db: Session, occupancy: Occupancy):
     from app.models.leasing import Agreement
 
@@ -236,8 +287,8 @@ def post_confirm_move_in_as_host(
         db.commit()
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            {"message": "Activation gate did not permit move-in", "outcome": evaluation.outcome,
-             "reasonCodes": evaluation.reason_codes, "decisionId": decision.id},
+            {"message": "Move-in can't be confirmed yet", "outcome": evaluation.outcome,
+             "reasonCodes": evaluation.reason_codes, "reasons": evaluation.reason_codes, "decisionId": decision.id},
         )
 
     occupancy = occupancy_crud.confirm_move_in(db, agreement, user)
@@ -555,6 +606,54 @@ def submit_user_listing_for_review(
     emit_event(db, "listing.submitted", "listing", listing_id, {"room_id": updated.room_id, "partyId": user.party_id})
     db.commit()
     return updated
+
+
+def _host_listing_transition(db: Session, request: Request, user: UserAccount, listing_id: str, action: str, transition):
+    """Shared shape for the host's own pause/resume/archive: ownership check,
+    the crud transition, then an audit row and domain event. These are the
+    host's decisions about their own listing -- no admin step."""
+    listing = _get_user_listing_or_404(db, listing_id, user)
+    before_state = listing.state
+    correlation_id = get_correlation_id(request)
+    updated = transition(db, listing)
+    log_audit_event(
+        db, None, f"user_listing.{action}", "listing", listing_id, correlation_id,
+        before_state=before_state, after_state=updated.state, reason=f"user:{user.id}",
+    )
+    emit_event(
+        db, f"listing.{action}d", "listing", listing_id,
+        {"room_id": updated.room_id, "partyId": user.party_id},
+        correlation_id=correlation_id, idempotency_key=f"listing.{action}:{listing_id}:{correlation_id}",
+    )
+    db.commit()
+    return updated
+
+
+@router.post("/listings/{listing_id}/pause", response_model=ListingRead)
+def pause_user_listing(
+    listing_id: str, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """PUBLISHED -> PAUSED. Stops new applications; existing offers,
+    agreements and tenancies are untouched (crud.pause_listing)."""
+    return _host_listing_transition(db, request, user, listing_id, "pause", listing_crud.pause_listing)
+
+
+@router.post("/listings/{listing_id}/resume", response_model=ListingRead)
+def resume_user_listing(
+    listing_id: str, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """PAUSED -> PUBLISHED, re-checking the publication gates (authority may
+    have lapsed while paused)."""
+    return _host_listing_transition(db, request, user, listing_id, "resume", listing_crud.resume_listing)
+
+
+@router.post("/listings/{listing_id}/archive", response_model=ListingRead)
+def archive_user_listing(
+    listing_id: str, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Retire a listing. Refused (409) while its room has an accepted offer or
+    a live agreement (crud.host_archive_listing)."""
+    return _host_listing_transition(db, request, user, listing_id, "archive", listing_crud.host_archive_listing)
 
 
 # --- Applications (ZR-ENG-CLR-011 Section 10: Host "Applications to review") ----

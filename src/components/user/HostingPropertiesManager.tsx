@@ -137,8 +137,8 @@ export function HostingPropertiesManager() {
 
   // Room Inspection Drawer (Sidebar) state
   const [selectedRoomForDrawer, setSelectedRoomForDrawer] = useState<{
-    room: any;
-    property: any;
+    room: (typeof filteredProperties)[number]["rooms"][number];
+    property: (typeof filteredProperties)[number];
   } | null>(null);
 
   // Three-dots menus open state
@@ -655,7 +655,7 @@ export function HostingPropertiesManager() {
   }
 
   // Room status explanation string matching HTML
-  function getRoomExplanation(room: any) {
+  function getRoomExplanation(room: (typeof mappedProperties)[number]["rooms"][number]) {
     if (room.roomStatus === "AVAILABLE") {
       return room.listingStatus === "LIVE"
         ? "Vacant and publicly marketed. Applications are open."

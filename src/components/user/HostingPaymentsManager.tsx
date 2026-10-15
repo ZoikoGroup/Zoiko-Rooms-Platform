@@ -39,6 +39,7 @@ import {
   RentalPaymentRecord,
   RentalPaymentInstruction,
   Property,
+  RentalPaymentDiscrepancyReason,
 } from "@/lib/types";
 import { formatCurrency, formatDate, formatMoney } from "@/lib/utils";
 import {
@@ -54,6 +55,7 @@ import {
 import { rentalPaymentStatusLabel, rentalPaymentStatusTone } from "@/lib/status";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { InstructionsManager } from "@/components/user/RecipientRentalPaymentsManager";
+import { paymentMethodDisplay } from "@/components/user/payment-methods/PaymentMethodFields";
 
 /** Format short due date like "Nov 1", "Nov 15", "Oct 15" */
 function formatShortDueDate(dateStr?: string | null): string {
@@ -79,14 +81,7 @@ function isDueSoon(dateStr?: string | null): boolean {
   }
 }
 
-export interface HostingPaymentsManagerProps {
-  /** When true (e.g. on standalone preview route when database is empty), shows sample preview rows */
-  allowPreviewFallback?: boolean;
-}
-
-export function HostingPaymentsManager({
-  allowPreviewFallback = false,
-}: HostingPaymentsManagerProps) {
+export function HostingPaymentsManager() {
   const { user } = useUserSession();
   const { toast, showToast } = useToast();
 
@@ -103,9 +98,6 @@ export function HostingPaymentsManager({
   const [searchQuery, setSearchQuery] = useState("");
   const [rentalFilter, setRentalFilter] = useState<string>("ALL");
   const [sortOption, setSortOption] = useState<"NEXT_DUE_FIRST" | "AMOUNT_HIGH" | "AMOUNT_LOW" | "NEWEST">("NEXT_DUE_FIRST");
-
-  // Sample data fallback state (for standalone preview when DB is empty)
-  const [sampleMode, setSampleMode] = useState(false);
 
   // Modal states
   const [viewingInstructions, setViewingInstructions] = useState<RentalPaymentObligation | null>(null);
@@ -142,168 +134,24 @@ export function HostingPaymentsManager({
       setObligations(combined);
       setInstructions(instr);
       setProperties(props);
-
-      // In preview mode, if live DB has 0 records, enable sample fallback for visual validation
-      if (allowPreviewFallback && combined.length === 0) {
-        setSampleMode(true);
-      }
     } catch (err) {
       console.warn("Could not load payment obligations:", err);
       showToast(errorMessage(err, "Could not load payments."), "error");
     } finally {
       setLoading(false);
     }
-  }, [allowPreviewFallback, showToast]);
+  }, [showToast]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
-  // Sample mock items matching the Figma screenshot media_1791791525900_5b780e88.png
-  // ONLY used when sampleMode === true on the preview route
-  const sampleObligations: RentalPaymentObligation[] = useMemo(() => {
-    if (!sampleMode) return [];
-    return [
-      {
-        id: 10491,
-        obligationType: "RENT",
-        agreementId: 10491,
-        occupancyId: 10491,
-        tenantGuestId: "guest_10491",
-        recipientPartyId: 1,
-        amount: 26000,
-        outstandingAmount: 26000,
-        currency: "INR",
-        dueDate: "2026-11-01",
-        status: "DUE",
-        displayLabel: "First rent",
-        waivedReason: "",
-        waivedAt: null,
-        createdAt: "2026-10-01T00:00:00Z",
-        payeeType: "LANDLORD_AGENT",
-        payeeBasis: "Riverside Homes LLP",
-        payeeAuthorityRef: "AUTH-10491",
-        periodStart: "2026-11-01",
-        periodEnd: "2026-11-30",
-        arrangementId: null,
-        arrangementVersion: null,
-        agreementVersionNo: 1,
-        paymentReference: "ZR-R-10491",
-        platformFeeAmount: 0,
-        version: 1,
-        payerAllocations: [],
-        records: [],
-      },
-      {
-        id: 10482,
-        obligationType: "RENT",
-        agreementId: 10482,
-        occupancyId: 10482,
-        tenantGuestId: "guest_10482",
-        recipientPartyId: 2,
-        amount: 24000,
-        outstandingAmount: 24000,
-        currency: "INR",
-        dueDate: "2026-11-15",
-        status: "UPCOMING",
-        displayLabel: "Nov 2026 rent",
-        waivedReason: "",
-        waivedAt: null,
-        createdAt: "2026-10-01T00:00:00Z",
-        payeeType: "LANDLORD_AGENT",
-        payeeBasis: "Banjara Hills Property Ltd",
-        payeeAuthorityRef: "AUTH-10482",
-        periodStart: "2026-11-15",
-        periodEnd: "2026-12-14",
-        arrangementId: null,
-        arrangementVersion: null,
-        agreementVersionNo: 1,
-        paymentReference: "ZR-R-10482",
-        platformFeeAmount: 0,
-        version: 1,
-        payerAllocations: [],
-        records: [],
-      },
-      {
-        id: 10483,
-        obligationType: "RENT",
-        agreementId: 10482,
-        occupancyId: 10482,
-        tenantGuestId: "guest_10482",
-        recipientPartyId: 2,
-        amount: 24000,
-        outstandingAmount: 0,
-        currency: "INR",
-        dueDate: "2026-10-15",
-        status: "RECIPIENT_CONFIRMATION_PENDING",
-        displayLabel: "Oct 2026 rent",
-        waivedReason: "",
-        waivedAt: null,
-        createdAt: "2026-09-15T00:00:00Z",
-        payeeType: "LANDLORD_AGENT",
-        payeeBasis: "Banjara Hills Property Ltd",
-        payeeAuthorityRef: "AUTH-10482",
-        periodStart: "2026-10-15",
-        periodEnd: "2026-11-14",
-        arrangementId: null,
-        arrangementVersion: null,
-        agreementVersionNo: 1,
-        paymentReference: "ZR-R-10482",
-        platformFeeAmount: 0,
-        version: 1,
-        payerAllocations: [],
-        records: [
-          {
-            id: 991,
-            obligationId: 10483,
-            status: "RECIPIENT_CONFIRMATION_PENDING",
-            provenance: "TENANT_DECLARATION",
-            declaredAmount: 24000,
-            declaredCurrency: "INR",
-            declaredDate: "2026-10-15",
-            paymentMethodCategory: "BANK_TRANSFER",
-            externalReference: "HDFC-TXN-882194",
-            declaredByGuestId: "guest_10482",
-            confirmedByPartyId: null,
-            confirmedAmount: null,
-            providerReference: "",
-            confirmedAt: null,
-            createdAt: "2026-10-15T14:30:00Z",
-            disputes: [],
-            corrections: [],
-          },
-        ],
-      },
-    ];
-  }, [sampleMode]);
 
-  // Effective obligations list
-  const activeObligations = sampleMode ? sampleObligations : obligations;
+  const activeObligations = obligations;
 
   // Derive Property name / Rental details for an obligation
   const getObligationPropertyInfo = useCallback(
     (o: RentalPaymentObligation) => {
-      if (sampleMode) {
-        if (o.id === 10491) {
-          return {
-            propertyName: "Riverside House · Room #7",
-            rentalCode: "Rental #ZR-R-10491",
-            tenantName: "Alex Morgan",
-            tenantVerified: true,
-            recipientName: "Riverside Homes LLP",
-            recipientVerified: true,
-          };
-        }
-        return {
-          propertyName: "Banjara Hills · Room #8",
-          rentalCode: "Rental #ZR-R-10482",
-          tenantName: "Priya Sharma",
-          tenantVerified: true,
-          recipientName: "Banjara Hills Property Ltd",
-          recipientVerified: true,
-        };
-      }
-
       // Live DB matching
       const prop = properties.find((p) => p.id === o.occupancyId || p.id === o.agreementId);
       const propName = prop
@@ -324,7 +172,7 @@ export function HostingPaymentsManager({
         recipientVerified: true,
       };
     },
-    [sampleMode, properties]
+    [properties]
   );
 
   // Filter tabs
@@ -516,7 +364,7 @@ export function HostingPaymentsManager({
     if (!disputeModalRecord || !disputeReason) return;
     try {
       await reportRentalPaymentDiscrepancyAsRecipient(disputeModalRecord.id, {
-        reasonCode: disputeReason as any,
+        reasonCode: disputeReason as RentalPaymentDiscrepancyReason,
         details: disputeNotes.trim(),
       });
       showToast("Payment discrepancy reported.", "success");
@@ -786,7 +634,7 @@ export function HostingPaymentsManager({
           <RoundedFilterDropdown
             label="Sort"
             value={sortOption}
-            onChange={(v) => setSortOption(v as any)}
+            onChange={(v) => setSortOption(v as typeof sortOption)}
             options={sortOptions}
             size="sm"
             align="right"
@@ -1189,7 +1037,7 @@ export function HostingPaymentsManager({
               <div className="flex justify-between">
                 <span className="text-slate-400 font-semibold">Method:</span>
                 <span className="font-bold text-slate-800 dark:text-slate-200">
-                  {viewingRecord.record.paymentMethodCategory}
+                  {paymentMethodDisplay(viewingRecord.record)}
                 </span>
               </div>
               {viewingRecord.record.externalReference && (

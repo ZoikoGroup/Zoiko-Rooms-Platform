@@ -10,8 +10,6 @@ import {
   Pencil,
   Plus,
   Send,
-  ThumbsDown,
-  ThumbsUp,
   XCircle,
 } from "lucide-react";
 import {
@@ -64,8 +62,6 @@ export function LeasingManager() {
   const [applicationModalOpen, setApplicationModalOpen] = useState(false);
   const [editingApplicationId, setEditingApplicationId] = useState<number | null>(null);
   const [applicationForm, setApplicationForm] = useState(emptyApplicationForm);
-  const [rejectingId, setRejectingId] = useState<number | null>(null);
-  const [rejectReason, setRejectReason] = useState("");
   const [overlapOfferId, setOverlapOfferId] = useState<number | null>(null);
   const [overlapMessage, setOverlapMessage] = useState("");
   const [overlapReasonInput, setOverlapReasonInput] = useState("");
@@ -195,44 +191,6 @@ export function LeasingManager() {
       loadApplications();
     } catch {
       showToast("Failed to withdraw application");
-    }
-  }
-
-  function updateApplication(updated: Application) {
-    setApplications((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
-  }
-
-  async function approve(application: Application) {
-    try {
-      const updated = await apiClientFetch<Application>(`/api/leasing/applications/${application.id}/decide`, {
-        method: "POST",
-        body: JSON.stringify({ decision: "APPROVED" }),
-      });
-      updateApplication(updated);
-      showToast("Application approved");
-    } catch {
-      showToast("Failed to record decision");
-    }
-  }
-
-  function openRejectModal(applicationId: number) {
-    setRejectReason("");
-    setRejectingId(applicationId);
-  }
-
-  async function submitReject(e: React.FormEvent) {
-    e.preventDefault();
-    if (rejectingId === null) return;
-    try {
-      const updated = await apiClientFetch<Application>(`/api/leasing/applications/${rejectingId}/decide`, {
-        method: "POST",
-        body: JSON.stringify({ decision: "REJECTED", note: rejectReason.trim() }),
-      });
-      updateApplication(updated);
-      setRejectingId(null);
-      showToast("Application rejected");
-    } catch {
-      showToast("Failed to record decision");
     }
   }
 
@@ -581,18 +539,9 @@ export function LeasingManager() {
 
             {isPending && (
               <div className="mt-3 flex flex-wrap gap-2">
-                {role === "super_admin" ? (
-                  <>
-                    <Button size="sm" variant="primary" onClick={() => approve(application)}>
-                      <ThumbsUp className="h-3.5 w-3.5" /> Approve
-                    </Button>
-                    <Button size="sm" variant="outline" onClick={() => openRejectModal(application.id)}>
-                      <ThumbsDown className="h-3.5 w-3.5" /> Reject
-                    </Button>
-                  </>
-                ) : (
-                  <p className="text-xs text-slate-400 dark:text-slate-400">Awaiting super admin review</p>
-                )}
+                <p className="w-full text-xs text-slate-400 dark:text-slate-400">
+                  Waiting for the host to accept or decline — Zoiko Rooms staff don&apos;t decide applications.
+                </p>
                 <Button size="sm" variant="outline" onClick={() => openEditModal(application)}>
                   <Pencil className="h-3.5 w-3.5" /> Edit
                 </Button>
@@ -913,25 +862,6 @@ export function LeasingManager() {
         </form>
       </Modal>
 
-      <Modal open={rejectingId !== null} onClose={() => setRejectingId(null)} title="Reject Application">
-        <form onSubmit={submitReject} className="space-y-3.5">
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Reason (optional)
-            </label>
-            <textarea
-              value={rejectReason}
-              onChange={(e) => setRejectReason(e.target.value)}
-              rows={3}
-              placeholder="Let the renter know why, e.g. income requirements not met"
-              className="w-full resize-none rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
-          </div>
-          <Button type="submit" variant="primary" fullWidth>
-            Confirm Rejection
-          </Button>
-        </form>
-      </Modal>
 
       <Modal
         open={overlapOfferId !== null}

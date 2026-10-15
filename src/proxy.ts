@@ -9,6 +9,7 @@ const PUBLIC_ACCOUNT_PATHS = [
   "/account/register",
   "/account/forgot-password",
   "/account/reset-password",
+  "/account/confirm-email",
   // ZR-AUTHORITY-002: owners / landlords confirm without an account.
   "/account/authority-confirmation",
 ];

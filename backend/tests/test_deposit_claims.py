@@ -232,40 +232,164 @@ class TestDisputeWorkflow:
         r = client.post(f"/api/finance/deposits/{deposit_id}/forfeit", cookies=admin_cookies)
         assert r.status_code == 409, r.text
 
-    def test_admin_resolving_the_dispute_unfreezes_the_record(self, client, db_session: Session):
-        _user, deposit_id, _guest_id = _fund_a_deposit(client, db_session, email="resolver@test.com", deposit_amount=5000.0)
+    def test_admin_resolve_route_is_gone(self, client, db_session: Session):
         super_admin = _make_admin(db_session, email="dispute-admin2@test.com", role="super_admin")
-        admin_cookies = auth_admin_cookie(super_admin)
-        user_cookies = auth_user_cookie(_user)
+        r = client.post("/api/finance/deposit-claims/1/resolve", json={"itemFinalAmounts": [], "notes": ""}, cookies=auth_admin_cookie(super_admin))
+        assert r.status_code in (404, 405)
 
+
+def _host_user_for(db_session: Session, deposit_id: int, email: str):
+    from app.crud.finance import _deposit_record_party_id
+
+    host = _make_user(db_session, email=email)
+    host.party_id = _deposit_record_party_id(db_session.get(DepositRecord, deposit_id))
+    db_session.commit()
+    return host
+
+
+def _end_tenancy(db_session: Session, deposit_id: int, *, days_ago: int) -> None:
+    from datetime import datetime, timezone
+
+    from app.models.occupancy import Occupancy
+
+    record = db_session.get(DepositRecord, deposit_id)
+    offer = record.obligation.agreement.offer
+    listing = offer.listing
+    occupancy = db_session.scalar(select(Occupancy).where(Occupancy.offer_id == offer.id))
+    if occupancy is None:
+        occupancy = Occupancy(offer_id=offer.id, listing_id=listing.id, room_id=listing.room_id, guest_id=offer.guest_id)
+        db_session.add(occupancy)
+    occupancy.status = "ENDED"
+    occupancy.ended_at = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    db_session.commit()
+
+
+def _claim(client, deposit_id: int, host, items: list[tuple[str, float]]):
+    r = client.post(
+        f"/api/users/hosting/deposits/{deposit_id}/claims",
+        json={"items": [{"categoryCode": c, "amountRequested": a, "description": "x"} for c, a in items]},
+        cookies=auth_user_cookie(host),
+    )
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+class TestDepositPartyFlow:
+    def test_host_claims_renter_disputes_host_lowers_and_claim_is_resolved(self, client, db_session: Session):
+        renter, deposit_id, _ = _fund_a_deposit(client, db_session, email="pf-lower@test.com", deposit_amount=5000.0)
+        host = _host_user_for(db_session, deposit_id, "pf-lower-host@test.com")
+        claim = _claim(client, deposit_id, host, [("MISSING_ITEMS_OR_KEYS", 1000.0)])
+        assert claim["submittedByUserId"] == host.id and claim["responseDueAt"]
+        item_id = claim["items"][0]["id"]
+
+        r = client.post(f"/api/users/rentals/deposit-claim-items/{item_id}/respond", json={"response": "DISPUTE"}, cookies=auth_user_cookie(renter))
+        assert r.status_code == 200, r.text
+        r = client.get(f"/api/users/hosting/deposits/{deposit_id}/claims", cookies=auth_user_cookie(host))
+        assert r.json()[0]["status"] == "DISPUTED" and r.json()[0]["negotiationEndsAt"]
+
+        r = client.post(f"/api/users/hosting/deposit-claim-items/{item_id}/revise", json={"amount": 1200.0}, cookies=auth_user_cookie(host))
+        assert r.status_code == 400  # can't raise
+        r = client.post(f"/api/users/hosting/deposit-claim-items/{item_id}/revise", json={"amount": 400.0}, cookies=auth_user_cookie(host))
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "RESOLVED" and r.json()["items"][0]["finalAmount"] == 400.0
+
+        r = client.post(f"/api/users/hosting/deposits/{deposit_id}/settle", cookies=auth_user_cookie(host))
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "RELEASED" and r.json()["releasedAmount"] == 4600.0
+
+    def test_unanswered_claim_is_accepted_and_deposit_settles_after_the_window(self, client, db_session: Session):
+        from datetime import datetime, timezone
+
+        from app.crud.deposit_party_flow import apply_deposit_deadlines
+        from app.models.finance import DepositClaim
+
+        _renter, deposit_id, _ = _fund_a_deposit(client, db_session, email="pf-deemed@test.com", deposit_amount=3000.0)
+        host = _host_user_for(db_session, deposit_id, "pf-deemed-host@test.com")
+        claim = _claim(client, deposit_id, host, [("CLEANING_REMEDIATION", 500.0)])
+        row = db_session.get(DepositClaim, claim["id"])
+        row.response_due_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db_session.commit()
+
+        apply_deposit_deadlines(db_session)
+        db_session.refresh(row)
+        assert row.status == "AGREED" and row.items[0].tenant_response == "DEEMED_ACCEPTED"
+        assert db_session.get(DepositRecord, deposit_id).status not in ("RELEASED", "FORFEITED"), "tenancy still running"
+
+        _end_tenancy(db_session, deposit_id, days_ago=30)
+        apply_deposit_deadlines(db_session)
+        record = db_session.get(DepositRecord, deposit_id)
+        db_session.refresh(record)
+        assert record.status == "RELEASED" and float(record.released_amount) == 2500.0
+
+        # The window has closed -- no more claims.
         r = client.post(
-            f"/api/finance/deposits/{deposit_id}/claims",
-            json={"items": [{"categoryCode": "MISSING_ITEMS_OR_KEYS", "amountRequested": 1000.0, "description": "Missing key fob"}]},
-            cookies=admin_cookies,
+            f"/api/users/hosting/deposits/{deposit_id}/claims",
+            json={"items": [{"categoryCode": "UNPAID_RENT", "amountRequested": 10.0, "description": "x"}]},
+            cookies=auth_user_cookie(host),
         )
-        claim_id = r.json()["id"]
-        item_id = r.json()["items"][0]["id"]
+        assert r.status_code == 409
 
-        client.post(f"/api/users/rentals/deposit-claim-items/{item_id}/respond", json={"response": "DISPUTE"}, cookies=user_cookies)
+    def test_no_claim_means_full_release_after_the_window(self, client, db_session: Session):
+        from app.crud.deposit_party_flow import apply_deposit_deadlines
 
-        # Only super_admin/plain-admin-with-role can resolve; a non-DISPUTED claim can't be resolved.
-        r = client.post(f"/api/finance/deposit-claims/{claim_id}/resolve", json={"itemFinalAmounts": [{"itemId": item_id, "finalAmount": 400.0}], "notes": "Key fob replacement cost only"}, cookies=admin_cookies)
+        _renter, deposit_id, _ = _fund_a_deposit(client, db_session, email="pf-noclaim@test.com", deposit_amount=2000.0)
+        _end_tenancy(db_session, deposit_id, days_ago=5)
+        apply_deposit_deadlines(db_session)
+        assert db_session.get(DepositRecord, deposit_id).status == "HELD", "window still open"
+        _end_tenancy(db_session, deposit_id, days_ago=15)
+        apply_deposit_deadlines(db_session)
+        record = db_session.get(DepositRecord, deposit_id)
+        db_session.refresh(record)
+        assert record.status == "RELEASED" and float(record.released_amount) == 2000.0
+
+    def test_stalled_dispute_is_referred_and_either_party_records_the_scheme_decision(self, client, db_session: Session):
+        from datetime import datetime, timezone
+
+        from app.crud.deposit_party_flow import apply_deposit_deadlines
+        from app.models.finance import DepositClaim
+
+        renter, deposit_id, _ = _fund_a_deposit(client, db_session, email="pf-scheme@test.com", deposit_amount=4000.0)
+        host = _host_user_for(db_session, deposit_id, "pf-scheme-host@test.com")
+        claim = _claim(client, deposit_id, host, [("DAMAGE_BEYOND_NORMAL_WEAR", 1500.0), ("UNPAID_RENT", 200.0)])
+        first, second = (i["id"] for i in claim["items"])
+        client.post(f"/api/users/rentals/deposit-claim-items/{first}/respond", json={"response": "DISPUTE"}, cookies=auth_user_cookie(renter))
+        client.post(f"/api/users/rentals/deposit-claim-items/{second}/respond", json={"response": "ACCEPT"}, cookies=auth_user_cookie(renter))
+
+        row = db_session.get(DepositClaim, claim["id"])
+        row.negotiation_ends_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db_session.commit()
+        apply_deposit_deadlines(db_session)
+        db_session.refresh(row)
+        assert row.status == "REFERRED" and row.referred_at is not None
+
+        # Every disputed item needs an amount.
+        r = client.post(
+            f"/api/users/rentals/deposit-claims/{claim['id']}/scheme-decision",
+            json={"itemFinalAmounts": [], "schemeReference": "TDS-1"}, cookies=auth_user_cookie(renter),
+        )
+        assert r.status_code == 400
+        r = client.post(
+            f"/api/users/rentals/deposit-claims/{claim['id']}/scheme-decision",
+            json={"itemFinalAmounts": [{"itemId": first, "finalAmount": 600.0}], "schemeReference": "TDS-1"},
+            cookies=auth_user_cookie(renter),
+        )
         assert r.status_code == 200, r.text
-        assert r.json()["status"] == "RESOLVED"
-        assert r.json()["items"][0]["finalAmount"] == 400.0
+        assert r.json()["status"] == "RESOLVED" and r.json()["schemeReference"] == "TDS-1"
 
-        r = client.get("/api/finance/deposits", cookies=admin_cookies)
-        record = next(d for d in r.json() if d["id"] == deposit_id)
-        assert record["status"] != "FROZEN"
-
-        # Remaining 4600 (5000 - 400 resolved) is now releasable.
-        r = client.post(f"/api/finance/deposits/{deposit_id}/release", json={"amount": 4600.0}, cookies=admin_cookies)
+        r = client.post(f"/api/users/hosting/deposits/{deposit_id}/settle", cookies=auth_user_cookie(host))
         assert r.status_code == 200, r.text
-        assert r.json()["status"] == "RELEASED"
+        assert r.json()["releasedAmount"] == 3200.0  # 4000 - 600 - 200
 
-        # Resolving twice is rejected -- there's nothing left to resolve.
-        r = client.post(f"/api/finance/deposit-claims/{claim_id}/resolve", json={"itemFinalAmounts": [], "notes": ""}, cookies=admin_cookies)
-        assert r.status_code == 409, r.text
+    def test_another_host_cannot_touch_the_deposit(self, client, db_session: Session):
+        _renter, deposit_id, _ = _fund_a_deposit(client, db_session, email="pf-other@test.com", deposit_amount=1000.0)
+        stranger = _make_user(db_session, email="pf-other-host@test.com")
+        db_session.commit()
+        r = client.post(
+            f"/api/users/hosting/deposits/{deposit_id}/claims",
+            json={"items": [{"categoryCode": "UNPAID_RENT", "amountRequested": 10.0, "description": "x"}]},
+            cookies=auth_user_cookie(stranger),
+        )
+        assert r.status_code == 404
 
 
 class TestClaimValidation:

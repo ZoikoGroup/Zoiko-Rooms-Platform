@@ -37,7 +37,12 @@ class RentalPaymentReturn(Base):
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     deductions_amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     deductions_reason: Mapped[str] = mapped_column(String(2000), default="")
-    payment_method_category: Mapped[str] = mapped_column(String(20), nullable=False)
+    payment_method_category: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Same rail/provider, description and label snapshot as RentalPaymentRecord.
+    payment_method_subtype: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    payment_method_description: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    payment_method_label: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    payment_method_config_version: Mapped[str] = mapped_column(String(20), default="", server_default="")
     external_reference: Mapped[str] = mapped_column(String(255), default="")
     returned_date: Mapped[date] = mapped_column(Date, nullable=False)
     note: Mapped[str] = mapped_column(String(2000), default="")

@@ -6,7 +6,19 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
-import { RentalPaymentReturn, RentalPaymentReturnCandidate, RentalPaymentReturnMethod } from "@/lib/types";
+import { PaymentMethodCategory, RentalPaymentReturn, RentalPaymentReturnCandidate } from "@/lib/types";
+import {
+  DuplicateWarning,
+  EMPTY_PAYMENT_METHOD,
+  ExternalPaymentNotice,
+  PaymentMethodErrors,
+  PaymentMethodFields,
+  PaymentMethodValue,
+  handleSubmitWarning,
+  paymentMethodDisplay,
+  usePaymentMethodCatalog,
+  validatePaymentMethod,
+} from "@/components/user/payment-methods/PaymentMethodFields";
 import { formatDate, formatMoney } from "@/lib/utils";
 import {
   confirmRentalPaymentReturn,
@@ -27,15 +39,6 @@ const KIND_LABELS: Record<string, string> = {
   CANCELLATION_RETURN: "Cancelled booking",
 };
 
-const METHOD_OPTIONS: { value: RentalPaymentReturnMethod; label: string }[] = [
-  { value: "BANK_TRANSFER", label: "Bank transfer" },
-  { value: "UPI", label: "UPI" },
-  { value: "CASH", label: "Cash" },
-  { value: "OTHER", label: "Other" },
-];
-
-const METHOD_LABELS: Record<string, string> = Object.fromEntries(METHOD_OPTIONS.map((m) => [m.value, m.label]));
-
 const STATUS: Record<string, { label: string; tone: "warning" | "success" | "danger" }> = {
   RECORDED: { label: "Awaiting renter", tone: "warning" },
   CONFIRMED: { label: "Received", tone: "success" },
@@ -53,7 +56,7 @@ function ReturnSummary({ item }: { item: RentalPaymentReturn }) {
         <Badge tone={status.tone}>{status.label}</Badge>
       </div>
       <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-        {METHOD_LABELS[item.paymentMethodCategory] ?? item.paymentMethodCategory} on {formatDate(item.returnedDate)}
+        {paymentMethodDisplay(item)} on {formatDate(item.returnedDate)}
         {item.externalReference ? ` · ref ${item.externalReference}` : ""}
       </p>
       {item.deductionsAmount > 0 && (
@@ -164,28 +167,41 @@ function RecordReturnModal({
   const [amount, setAmount] = useState("");
   const [deductions, setDeductions] = useState("0");
   const [deductionsReason, setDeductionsReason] = useState("");
-  const [method, setMethod] = useState<RentalPaymentReturnMethod>("BANK_TRANSFER");
+  const [method, setMethod] = useState<PaymentMethodValue>(EMPTY_PAYMENT_METHOD);
   const [returnedDate, setReturnedDate] = useState("");
-  const [reference, setReference] = useState("");
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [methodErrors, setMethodErrors] = useState<PaymentMethodErrors>({});
+  const [duplicate, setDuplicate] = useState("");
+  const { catalog, error: catalogError } = usePaymentMethodCatalog(candidate?.countryCode, "return_record", Boolean(candidate));
 
   useEffect(() => {
     if (!candidate) return;
     setAmount(String(candidate.remaining));
     setDeductions("0");
     setDeductionsReason("");
-    setMethod("BANK_TRANSFER");
+    setMethod(EMPTY_PAYMENT_METHOD);
     setReturnedDate(new Date().toISOString().slice(0, 10));
-    setReference("");
     setNote("");
     setError("");
+    setMethodErrors({});
+    setDuplicate("");
   }, [candidate]);
 
-  async function handleSubmit(e: FormEvent) {
+  function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    void submit();
+  }
+
+  async function submit(confirmNotDuplicate = false) {
     if (!candidate) return;
+    const errors = validatePaymentMethod(catalog, method);
+    setMethodErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      setError("Please fix the highlighted fields.");
+      return;
+    }
     const sent = Number(amount);
     const kept = Number(deductions || 0);
     if (!Number.isFinite(sent) || !Number.isFinite(kept) || sent < 0 || kept < 0 || sent + kept <= 0) {
@@ -202,21 +218,24 @@ function RecordReturnModal({
     }
     setSubmitting(true);
     setError("");
+    setDuplicate("");
     try {
       await recordRentalPaymentReturn(candidate.occupancyId, {
         kind: candidate.kind, amount: sent, deductionsAmount: kept, deductionsReason: deductionsReason.trim(),
-        paymentMethodCategory: method, returnedDate, externalReference: reference, note,
+        paymentMethodCategory: method.category as PaymentMethodCategory, paymentMethodSubtype: method.subtype,
+        paymentMethodDescription: method.description, externalReference: method.reference,
+        returnedDate, note, confirmNotDuplicate,
       });
       onRecorded();
     } catch (err) {
-      setError(errorMessage(err, "Could not record this."));
+      if (!handleSubmitWarning(err, setDuplicate, setError)) setError(errorMessage(err, "Could not record this."));
     } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <Modal open={Boolean(candidate)} onClose={onClose} title="Record money sent back">
+    <Modal open={Boolean(candidate)} onClose={onClose} size="lg" title="Record money sent back">
       {candidate && (
         <form onSubmit={handleSubmit} className="space-y-4">
           <p className="text-sm text-slate-600 dark:text-slate-300">
@@ -224,6 +243,7 @@ function RecordReturnModal({
             settle: {formatMoney(candidate.remaining, candidate.currency)}.
           </p>
           {error && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">{error}</p>}
+          {duplicate && <DuplicateWarning message={duplicate} submitting={submitting} onConfirm={() => void submit(true)} />}
           <Field label={`Amount sent back (${candidate.currency}) *`}>
             <input required type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} className={inputClass} />
           </Field>
@@ -238,22 +258,21 @@ function RecordReturnModal({
               <textarea value={deductionsReason} onChange={(e) => setDeductionsReason(e.target.value)} rows={2} className={inputClass} />
             </Field>
           )}
-          <Field label="Sent by *">
-            <select value={method} onChange={(e) => setMethod(e.target.value as RentalPaymentReturnMethod)} className={inputClass}>
-              {METHOD_OPTIONS.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
-          </Field>
           <Field label="Date sent *">
             <input required type="date" value={returnedDate} onChange={(e) => setReturnedDate(e.target.value)} className={inputClass} />
           </Field>
-          <Field label="Reference" hint="Optional -- e.g. the bank or UPI transaction reference.">
-            <input value={reference} onChange={(e) => setReference(e.target.value)} className={inputClass} />
-          </Field>
+          <PaymentMethodFields
+            catalog={catalog}
+            catalogError={catalogError}
+            value={method}
+            onChange={setMethod}
+            errors={methodErrors}
+            categoryLabel="Sent by"
+          />
           <Field label="Note to the renter" hint="Optional">
             <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} className={inputClass} />
           </Field>
+          <ExternalPaymentNotice role="return" />
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
             <Button type="submit" loading={submitting}>Record</Button>

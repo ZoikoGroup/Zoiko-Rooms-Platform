@@ -76,6 +76,7 @@ class TerminationCaseRead(CamelModel):
     agreement_id: int
     initiator_guest_id: str | None
     initiator_admin_id: int | None
+    initiator_host_user_id: int | None = None
     cause_code: str
     status: str
     notes: str
@@ -103,6 +104,16 @@ class TerminationCaseRead(CamelModel):
     adjudicated_effective_date_reason: str
     notice_service_proof_ref: str
     notice_service_recorded_by_admin_id: int | None
+    notice_service_recorded_by_user_id: int | None = None
+    notice_acknowledged_at: datetime | None = None
+    proposer: str | None = None
+    response_round: int = 1
+    response_due_at: datetime | None = None
+    deemed_on_silence: bool = True
+    pending_responders: list[str] = []
+    responses: list["TerminationCaseResponseRead"] = []
+    external_outcome: str = ""
+    external_order_ref: str = ""
     created_at: datetime
 
 
@@ -230,3 +241,30 @@ class RefundEntitlementRead(CamelModel):
     executed_by_admin_id: int | None
     executed_at: datetime | None
     line_items: list[RefundEntitlementLineItemRead] = []
+
+
+class TerminationCaseResponseRead(CamelModel):
+    response_round: int
+    responder: str  # "HOST" or a tenant's guest id
+    response: str
+    proposed_date: date | None = None
+    note: str = ""
+    created_at: datetime
+
+
+TerminationCaseRead.model_rebuild()
+
+
+class TerminationResponseCreate(CamelModel):
+    response: str  # ACCEPT | COUNTER | CONTEST
+    proposed_date: date | None = None
+    note: str = ""
+
+
+class TerminationExternalDecisionCreate(CamelModel):
+    outcome: str  # ENDS_ON_DATE | TENANCY_CONTINUES
+    order_ref: str
+    effective_date: date | None = None
+    # An amount the order makes the renter liable for (feeds the refund
+    # calculation's NOTICE_LIABILITY line).
+    liability_amount: float | None = None

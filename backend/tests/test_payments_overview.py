@@ -24,7 +24,7 @@ class TestRentRecords:
         recipient = db_session.get(Party, obligations["RENT"].recipient_party_id)
         rp_crud.record_receipt_as_recipient(
             db_session, recipient, obligations["DEPOSIT"], amount=None, received_date=date.today(),
-            payment_method_category="UPI",
+            payment_method_category="BANK_TRANSFER",
         )
         cookies = _admin(db_session, "rent")
 

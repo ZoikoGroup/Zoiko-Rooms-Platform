@@ -118,8 +118,9 @@ class TestSubmitWithStructuredBankDetails:
             country_code="IN", bank_details={"upi_id": "host.name@okhdfcbank"},
             authorized_recipient_confirmed=True,
         )
-        assert instruction.method == "UPI"
-        assert instruction.country_code == ""
+        # The legacy "UPI" method is stored as the canonical category + rail.
+        assert (instruction.method, instruction.method_subtype) == ("INSTANT_BANK_PAYMENT", "UPI")
+        assert instruction.country_code == "IN"
         assert instruction.account_identifier_last4 == "bank"
         assert decrypt_json(instruction.encrypted_bank_details) == {"upi_id": "host.name@okhdfcbank"}
 

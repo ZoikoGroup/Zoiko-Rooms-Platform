@@ -294,19 +294,34 @@ class DepositInstrument(Base):
 class DepositClaim(Base):
     """A Host-submitted itemized deduction claim against a held deposit
     (ZR-ENG-CLR-002 Section 9-10). The Host is the claimant, never the automatic
-    adjudicator -- the renter must accept or dispute each line item before any
-    disputed amount can be released or forfeited."""
+    adjudicator -- the renter accepts or disputes each line item (silence past
+    response_due_at counts as acceptance). A disputed item is settled by the
+    host lowering it, or by the deposit scheme's decision recorded by either
+    party -- no admin decides it (crud/deposit_party_flow.py).
+
+    Statuses: RENTER_RESPONSE_PENDING -> AGREED, or DISPUTED -> (negotiation
+    window over) REFERRED -> RESOLVED."""
 
     __tablename__ = "deposit_claims"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     deposit_record_id: Mapped[int] = mapped_column(ForeignKey("deposit_records.id", ondelete="CASCADE"), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(30), default="RENTER_RESPONSE_PENDING")
-    submitted_by_admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id"), nullable=False)
+    # Provider staff (admin portal) or the host themselves submit a claim.
+    submitted_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    submitted_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # Unanswered items past this are accepted.
+    response_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     renter_responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # DISPUTED: the parties' window to agree before it goes to the deposit scheme.
+    negotiation_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    referred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Legacy: admin-resolved claims from before the party flow.
     resolved_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    resolved_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scheme_reference: Mapped[str] = mapped_column(String(200), default="")
     resolution_notes: Mapped[str] = mapped_column(String(2000), default="")
 
     deposit_record: Mapped["DepositRecord"] = relationship(back_populates="claims")
@@ -483,7 +498,8 @@ class RefundRequest(Base):
     reason: Mapped[str] = mapped_column(String(2000), default="")
     idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="REQUESTED")
-    requested_by_admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id"), nullable=False)
+    # Null when the system raised it (an ended tenancy settling automatically).
+    requested_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     decided_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

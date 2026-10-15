@@ -73,6 +73,7 @@ from app.schemas.dispute_evidence import (
     DisputeEvidenceVerify,
     DisputeLegalHoldRead,
 )
+from app.schemas.common import CamelModel
 from app.schemas.dispute_external_proceeding import (
     DisputeExternalProceedingCreate,
     DisputeExternalProceedingDecide,
@@ -721,6 +722,73 @@ def post_request_review_as_host(
     log_audit_event(db, None, "dispute_claim.request_review", "dispute_resolution_claim", str(claim_id), get_correlation_id(request), reason=f"party:{party_id}")
     db.commit()
     return updated
+
+
+# -- Host <-> renter claims settled without an admin (crud/dispute_party_flow.py)
+
+
+class DisputeClaimRespond(CamelModel):
+    response: str  # ACCEPT | CONTEST
+    note: str = ""
+
+
+def _party_flow_routes(router, *, role: str):
+    def _case_for(db: Session, user: UserAccount, case_id: int):
+        case = crud.get_case_or_404(db, case_id)
+        if role == "RENTER":
+            guest = get_or_create_guest_for_user(db, user)
+            crud.assert_guest_can_access_case(case, guest)
+        else:
+            crud.assert_party_can_access_case(case, _host_party_id(user))
+        return case
+
+    @router.post("/{case_id}/claims/{claim_id}/respond", response_model=DisputeClaimRead)
+    def respond_to_claim(
+        case_id: int, claim_id: int, payload: DisputeClaimRespond,
+        user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+    ):
+        """The other side accepts or contests a claim."""
+        from app.crud import dispute_party_flow
+
+        case = _case_for(db, user, case_id)
+        claim = crud.get_claim_or_404(db, claim_id)
+        return dispute_party_flow.respond_to_claim(db, case, claim, role=role, response=payload.response, note=payload.note)
+
+    @router.post("/{case_id}/external-proceedings", response_model=DisputeExternalProceedingRead, status_code=status.HTTP_201_CREATED)
+    def file_external(
+        case_id: int, payload: DisputeExternalProceedingCreate,
+        user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+    ):
+        """Record that claims were taken to the outside body."""
+        from app.crud import dispute_party_flow
+
+        case = _case_for(db, user, case_id)
+        proceeding = dispute_party_flow.file_external_by_party(
+            db, case, claim_ids=payload.claim_ids, authority_type=payload.authority_type,
+            authority_name=payload.authority_name, external_reference=payload.external_reference,
+        )
+        return _to_proceeding_read(db, proceeding)
+
+    @router.post("/{case_id}/external-proceedings/{proceeding_id}/decision", response_model=DisputeExternalProceedingRead)
+    def record_external_decision(
+        case_id: int, proceeding_id: int, payload: DisputeExternalProceedingDecide,
+        user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+    ):
+        """Record the outside body's decision; it's applied automatically."""
+        from app.crud import dispute_party_flow
+
+        case = _case_for(db, user, case_id)
+        proceeding = proceeding_crud.get_proceeding_or_404(db, proceeding_id)
+        updated = dispute_party_flow.record_external_by_party(
+            db, case, proceeding, outcome=payload.outcome, decision_date=payload.decision_date,
+            finality_state=payload.finality_state, reason_code=payload.reason_code,
+            outcome_evidence_id=payload.outcome_evidence_id,
+        )
+        return _to_proceeding_read(db, updated)
+
+
+_party_flow_routes(renter_router, role="RENTER")
+_party_flow_routes(host_router, role="HOST")
 
 
 # -- Admin dispute-operations console (Section 12) -------------------------

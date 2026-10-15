@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
+from pydantic import Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -40,7 +41,16 @@ from app.models.listing_approval import CURRENT_POLICY_VERSION
 from app.models.occupancy import Occupancy
 from app.services.booking_expiry import expire_offer_if_overdue
 from app.models.user_account import UserAccount
-from app.schemas.finance import DepositClaimItemRead, DepositClaimItemRespond, DepositClaimRead, PaymentPreviewRead
+from app.schemas.common import CamelModel
+from app.schemas.host_refund import HostRefundNotReceived, HostRefundRead
+from app.schemas.finance import (
+    DepositClaimItemRead,
+    DepositClaimItemRespond,
+    DepositClaimRead,
+    DepositRecordRead,
+    DepositSchemeDecisionCreate,
+    PaymentPreviewRead,
+)
 from app.schemas.habitability import HabitabilityIncidentCreate, HabitabilityIncidentRead
 from app.schemas.host_entry_visit import HostEntryVisitRead
 from app.schemas.leasing import (
@@ -73,6 +83,9 @@ from app.schemas.rental_transaction_record import RentalTransactionRecordRead
 from app.schemas.review import ReviewCreate, ReviewRead
 from app.schemas.sublet_document import SubletDocumentRead
 from app.schemas.termination import (
+    TerminationNoticeServiceRecord,
+    TerminationExternalDecisionCreate,
+    TerminationResponseCreate,
     RefundEntitlementRead,
     TerminationCaseCreate,
     TerminationCasePreviewRead,
@@ -138,6 +151,7 @@ def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyR
         listing_id=occupancy.listing_id,
         listing_name=listing.name if listing else "",
         room_id=occupancy.room_id,
+        guest_id=occupancy.guest_id,
         property_address=property_address,
         property_city=property_city,
         host_name=host_name,
@@ -155,6 +169,7 @@ def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyR
         lease_start_date=terms.start_date if terms else None,
         monthly_rent=float(terms.monthly_rent) if terms else None,
         room_has_space_for_co_tenant=not check_room_capacity(db, occupancy.room),
+        application_id=occupancy.offer.application_id if occupancy.offer else None,
     )
 
 
@@ -950,6 +965,67 @@ def accept_own_mutual_surrender(case_id: int, user: UserAccount = Depends(get_cu
     return termination_crud.accept_mutual_surrender(db, case, guest=guest)
 
 
+@router.post("/termination-cases/{case_id}/notice-proof", response_model=TerminationCaseRead)
+def attach_own_notice_proof(
+    case_id: int, payload: TerminationNoticeServiceRecord,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Proof of off-portal delivery for a notice the renter gave."""
+    case = termination_crud.get_termination_case_or_404(db, case_id)
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This termination case does not belong to you")
+    return termination_crud.attach_notice_proof(db, case, proof_ref=payload.proof_ref, served_at=payload.served_at, guest=guest)
+
+
+@router.post("/termination-cases/{case_id}/acknowledge", response_model=TerminationCaseRead)
+def acknowledge_host_notice(case_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The renter confirming they received the host's notice."""
+    case = termination_crud.get_termination_case_or_404(db, case_id)
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This termination case does not belong to you")
+    return termination_crud.acknowledge_notice(db, case, guest=guest)
+
+
+def _own_guest_or_403(db: Session, user: UserAccount):
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This termination case does not belong to you")
+    return guest
+
+
+@router.post("/termination-cases/{case_id}/respond", response_model=TerminationCaseRead)
+def respond_to_termination(
+    case_id: int, payload: TerminationResponseCreate, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Accept, counter (with another date) or contest a proposed end date."""
+    from app.crud import termination_responses
+
+    case = termination_crud.get_termination_case_or_404(db, case_id)
+    updated = termination_responses.respond(
+        db, case, response=payload.response, guest=_own_guest_or_403(db, user),
+        proposed_date=payload.proposed_date, note=payload.note,
+    )
+    return termination_crud.to_termination_case_read(updated, redact_notes=False)
+
+
+@router.post("/termination-cases/{case_id}/external-decision", response_model=TerminationCaseRead)
+def record_external_termination_decision(
+    case_id: int, payload: TerminationExternalDecisionCreate, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Record a court/tribunal order that settles a contested case."""
+    from app.crud import termination_responses
+
+    case = termination_crud.get_termination_case_or_404(db, case_id)
+    updated = termination_responses.record_external_decision(
+        db, case, outcome=payload.outcome, order_ref=payload.order_ref, effective_date=payload.effective_date,
+        liability_amount=payload.liability_amount,
+        guest=_own_guest_or_403(db, user),
+    )
+    return termination_crud.to_termination_case_read(updated, redact_notes=False)
+
+
 @router.post("/termination-cases/{case_id}/decline-surrender", response_model=TerminationCaseRead)
 def decline_own_mutual_surrender(case_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     case = termination_crud.get_termination_case_or_404(db, case_id)
@@ -1072,6 +1148,26 @@ def submit_move_out_notice(
     return event
 
 
+@router.post("/occupancies/{occupancy_id}/proceed-despite-dispute", response_model=HandoverEventRead)
+def proceed_despite_dispute(
+    occupancy_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """The renter agreeing to move in although a dispute on this occupancy is
+    open. Move-in proceeds once the host agrees too."""
+    occupancy = db.get(Occupancy, occupancy_id)
+    if not occupancy:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Occupancy not found")
+    guest = get_guest_for_user(db, user)
+    if not guest or occupancy.guest_id != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This occupancy does not belong to you")
+    event = occupancy_crud.record_handover_event(
+        db, occupancy, event_type="RENTER_PROCEED_DESPITE_DISPUTE", actor_kind="renter_user", actor_user_id=user.id,
+        correlation_id=get_correlation_id(request),
+    )
+    db.commit()
+    return event
+
+
 @router.post("/occupancies/{occupancy_id}/move-out/ready", response_model=HandoverEventRead)
 def submit_move_out_ready(
     occupancy_id: int,
@@ -1098,6 +1194,8 @@ def submit_move_out_ready(
     )
     emit_event(db, "occupancy.move_out_ready", "occupancy", str(occupancy_id), {"handoverEventId": event.id})
     db.commit()
+    # The host confirms (or is deemed to after the confirm window); the
+    # scheduler ends the tenancy then -- crud/occupancy_lifecycle.py.
     return event
 
 
@@ -1407,6 +1505,49 @@ def respond_to_deposit_claim_item(
     return finance_crud.to_deposit_claim_item_read(updated)
 
 
+@router.get("/deposits", response_model=list[DepositRecordRead])
+def list_my_deposits(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The renter's deposits and where each stands (held, being claimed,
+    settled)."""
+    from sqlalchemy import select as _select
+
+    from app.models.finance import DepositRecord
+
+    guest = get_guest_for_user(db, user)
+    if not guest:
+        return []
+    records = db.scalars(_select(DepositRecord).order_by(DepositRecord.id.desc())).all()
+    return [finance_crud.to_deposit_record_read(r) for r in records if finance_crud.deposit_record_guest_id(r) == guest.id]
+
+
+@router.post("/deposit-claims/{claim_id}/scheme-decision", response_model=DepositClaimRead)
+def record_my_deposit_scheme_decision(
+    claim_id: int,
+    payload: DepositSchemeDecisionCreate,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The renter records the deposit protection scheme's decision on the
+    disputed items of a claim against their deposit."""
+    from app.crud import deposit_party_flow
+
+    claim = finance_crud.get_deposit_claim_or_404(db, claim_id)
+    guest = get_guest_for_user(db, user)
+    if not guest or finance_crud.deposit_record_guest_id(claim.deposit_record) != guest.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This deposit claim does not belong to you")
+    updated = deposit_party_flow.record_scheme_decision(
+        db, claim, role="RENTER", user=user, item_final_amounts=payload.item_final_amounts,
+        scheme_reference=payload.scheme_reference, notes=payload.notes,
+    )
+    log_audit_event(
+        db, None, "user_deposit_claim.scheme_decision", "deposit_claim", str(claim_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    db.commit()
+    return finance_crud.to_deposit_claim_read(updated)
+
+
 @router.get("/deposit-claim-items/{item_id}/evidence")
 def get_my_deposit_claim_item_evidence(item_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     """Lets a renter view the evidence behind a claim item before deciding
@@ -1444,3 +1585,55 @@ def submit_review(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only review a listing you have rented")
     review = review_crud.create_review(db, guest.id, payload)
     return review_crud.to_review_read(review)
+
+
+# --- Refunds a former host owes the renter (crud/tenancy_settlement.py) ---------
+
+
+@router.get("/refunds", response_model=list[HostRefundRead])
+def list_refunds_owed_to_me(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.crud import tenancy_settlement
+
+    return tenancy_settlement.list_for_renter(db, user)
+
+
+@router.post("/refunds/{refund_id}/confirm", response_model=HostRefundRead)
+def confirm_refund_received(refund_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.crud import tenancy_settlement
+
+    return tenancy_settlement.confirm_received(db, tenancy_settlement.host_refund_for_renter(db, refund_id, user))
+
+
+@router.post("/refunds/{refund_id}/not-received", response_model=HostRefundRead)
+def report_refund_not_received(
+    refund_id: int, payload: HostRefundNotReceived, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    from app.crud import tenancy_settlement
+
+    refund = tenancy_settlement.host_refund_for_renter(db, refund_id, user)
+    return tenancy_settlement.report_not_received(db, refund, payload.note)
+
+
+# --- Confirming a habitability fix (crud/habitability_incident.py) --------------
+
+
+class _FixRejection(CamelModel):
+    note: str = Field(default="", max_length=1000)
+
+
+@router.post("/habitability-incidents/{incident_id}/confirm-fixed", response_model=HabitabilityIncidentRead)
+def confirm_habitability_fixed(incident_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.crud import habitability_incident as crud
+
+    guest = _own_guest_or_403(db, user)
+    return crud.confirm_fixed(db, crud.get_habitability_incident_or_404(db, incident_id), guest)
+
+
+@router.post("/habitability-incidents/{incident_id}/reject-fix", response_model=HabitabilityIncidentRead)
+def reject_habitability_fix(
+    incident_id: int, payload: _FixRejection, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    from app.crud import habitability_incident as crud
+
+    guest = _own_guest_or_403(db, user)
+    return crud.reject_fix(db, crud.get_habitability_incident_or_404(db, incident_id), guest, payload.note)
