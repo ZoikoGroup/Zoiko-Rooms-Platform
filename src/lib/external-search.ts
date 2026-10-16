@@ -51,6 +51,8 @@ export interface ExternalCard {
   locationRegion: string | null;
   locationCountry: string | null;
   rentMonthly: number | null;
+  /** True when rentMonthly is the lowest advertised rent ("starting at"). */
+  rentIsFrom: boolean;
   currency: string | null;
   deposit: number | null;
   availabilityText: string | null;
@@ -153,6 +155,7 @@ function toExternalCard(raw: Json): ExternalCard {
     locationRegion: (raw.location_region as string | null) ?? null,
     locationCountry: (raw.location_country as string | null) ?? null,
     rentMonthly: (raw.rent_monthly as number | null) ?? null,
+    rentIsFrom: raw.rent_is_from === true,
     currency: (raw.currency as string | null) ?? null,
     deposit: (raw.deposit as number | null) ?? null,
     availabilityText: (raw.availability_text as string | null) ?? null,

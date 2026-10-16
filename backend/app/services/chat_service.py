@@ -396,6 +396,15 @@ def _parse_date(value: object) -> "date | None":
         return None
 
 
+def _external_price_text(card) -> str:
+    """Ready-made price wording for an external card, so the model never has
+    to decide between "about" and "from"."""
+    if not card.rent_monthly or not card.currency:
+        return "price not listed"
+    prefix = "advertised from about" if card.rent_is_from else "advertised price, about"
+    return f"{prefix} {card.currency} {card.rent_monthly:,} per month"
+
+
 def _user_tool_search_rooms(db: Session, user: UserAccount, args: dict) -> list[dict]:
     # Section 5.1: search the user's area, never everywhere. A country or
     # region alone ("rooms in UK") is not a search area.
@@ -425,7 +434,7 @@ def _user_tool_search_rooms(db: Session, user: UserAccount, args: dict) -> list[
     # Persisted so the model can request contact by opportunity_id; the
     # returned cards exclude the source identity (SRCH-05).
     for card in persist_external_cards(db, disc.external_matches[:50], user.id, res.external_private[:50]):
-        rows.append({"type": "external_masked", **card.model_dump(mode="json")})
+        rows.append({"type": "external_masked", "price_text": _external_price_text(card), **card.model_dump(mode="json")})
     for gn in disc.guardrail_notes:
         rows.append({"guardrail_note": gn})
     return rows
@@ -948,15 +957,21 @@ External search rules:
 approved outside sources only if nothing matches. Always pass both `city` and `country`. Infer the country when \
 the city makes it clear (Manchester -> United Kingdom, Austin -> United States); if the city is ambiguous \
 (e.g. Cambridge, Portland), ask which country before searching.
+- Search straight away with whatever the user gave; don't ask for budget, dates or filters before the first \
+search. Offer to narrow the results afterwards.
+- Zoiko Rooms is for rooms to live in only. If the user asks for a studio flat, a shop, an office or other \
+commercial or work space, say Zoiko Rooms doesn't cover that and offer to search for rooms in the same city instead.
+- Read `external_search_status` when there are no Zoiko Rooms results: COMPLETE means the web was searched; \
+NO_ELIGIBLE_RESULTS means the web was searched but nothing suitable was found (say so and suggest a nearby city); \
+NOT_ACTIVATED means outside search isn't available for that area yet (say so plainly, don't imply a web search ran).
 - If Zoiko Rooms results are returned, present them. Do NOT disclose external sources. Report each listing's \
 `verificationStatus` as given; never call an INTERNAL_UNVERIFIED listing verified.
 - If no Zoiko Rooms results exist, safe external discovery cards may be returned. They are NOT Zoiko Rooms \
 listings and have NOT been verified by Zoiko Rooms.
 - Use the `disclosure_text` returned by `search_rooms` verbatim.
 - For external cards never say "available" — say "appears listed" / "discovered".
-- Present external cards as a short numbered list ("Option 1", "Option 2", ...): area, room type and \
-`rent_monthly` with the currency when the card has them (say "advertised price, about X per month"), \
-otherwise "price not listed". Keep `opportunity_id` for tool calls only; don't show it as a column.
+- Present external cards as a short numbered list ("Option 1", "Option 2", ...): area, room type when the card \
+has one, and the card's `price_text` exactly as given (it already says "from" when the price is a starting price). Keep `opportunity_id` for tool calls only; don't show it as a column.
 - Show each Zoiko Rooms listing's price with its own `currency` field; never convert or guess a currency.
 - Never expose source URLs, phone numbers, emails, handles, or exact addresses for external leads.
 - External leads are handled through Zoiko Rooms until the provider accepts the introduction; the user must use \

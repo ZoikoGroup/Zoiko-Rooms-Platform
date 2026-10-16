@@ -11,6 +11,7 @@ const CARD: ExternalCard = {
   locationRegion: null,
   locationCountry: "GB",
   rentMonthly: null,
+  rentIsFrom: false,
   currency: null,
   deposit: null,
   availabilityText: "appears listed",
@@ -61,6 +62,11 @@ describe("ExternalDiscoveryCard", () => {
   it("labels any price as the advertised price", () => {
     render(<ExternalDiscoveryCard card={{ ...CARD, rentMonthly: 850 }} onRequestContact={vi.fn()} />);
     expect(screen.getByText(/Advertised price: £850 per month/)).toBeInTheDocument();
+  });
+
+  it("labels a 'starting at' price as advertised from", () => {
+    render(<ExternalDiscoveryCard card={{ ...CARD, rentMonthly: 850, rentIsFrom: true }} onRequestContact={vi.fn()} />);
+    expect(screen.getByText(/Advertised from £850 per month/)).toBeInTheDocument();
   });
 
   it("must NOT offer website/booking/phone/email actions", () => {
