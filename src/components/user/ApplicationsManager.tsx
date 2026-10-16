@@ -32,12 +32,13 @@ import {
   listMyRentalPaymentObligations,
   payOwnObligation,
   listRenterApplicationMessages,
+  listRenterConversations,
   sendRenterApplicationMessage,
 } from "@/lib/user-api";
 import { matchRentalPaymentObligation } from "@/lib/rentalPaymentMatch";
 import { SingleObligationPaymentCard } from "@/components/user/RentalPaymentsManager";
 import { DirectPaymentNotice, usePaymentCapabilities } from "@/components/user/DirectPaymentNotice";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate, formatDateTime } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 
 function safeFormatDate(date?: string | null): string {
@@ -244,6 +245,8 @@ export function ApplicationsManager() {
 
   // Messages Thread State
   const [chatMessages, setChatMessages] = useState<Record<string, Array<{ from: "host" | "user"; text: string; time: string }>>>({});
+  // Unread host messages per application, from the server.
+  const [unreadByApp, setUnreadByApp] = useState<Record<number, number>>({});
   const [messageInput, setMessageInput] = useState("");
 
   // Modals
@@ -338,11 +341,13 @@ export function ApplicationsManager() {
   // Load real applications and listings
   const loadData = useCallback(async () => {
     try {
-      const [appsData, listingsData, changeReqs] = await Promise.all([
+      const [appsData, listingsData, changeReqs, conversations] = await Promise.all([
         listRentalApplications().catch(() => []),
         listPublicListings({ limit: 100 }).then((res) => res.items).catch(() => []),
         listMyChangeRequests().catch(() => []),
+        listRenterConversations().catch(() => []),
       ]);
+      setUnreadByApp(Object.fromEntries(conversations.map((c) => [c.applicationId, c.unreadCount])));
       setApplications(appsData);
       setPublicListings(listingsData);
       setChangeRequests(changeReqs);
@@ -362,11 +367,11 @@ export function ApplicationsManager() {
     return applications.map((raw) => {
       const listing = publicListings.find((l) => l.id === raw.listingId);
       const propertyName = listing?.name || raw.listingName || `Listing #${raw.listingId}`;
-      const roomType = listing?.roomType || "En-suite";
+      const roomType = listing?.roomType || "Room";
       const city = listing?.city || "";
       const roomLabel = listing?.roomId ? `Room #${listing.roomId}` : "Room";
       const appliedDate = safeFormatDate(raw.submittedAt);
-      const moveInDate = raw.desiredMoveIn ? raw.desiredMoveIn.split("T")[0] : "2026-10-15";
+      const moveInDate = raw.desiredMoveIn ? raw.desiredMoveIn.split("T")[0] : "";
       const rentAmount = listing ? formatCurrency(listing.pricePerNight * 30, listing.currency) : "—";
 
       // Status resolution
@@ -437,14 +442,8 @@ export function ApplicationsManager() {
         } else {
           // Standard review stages
           stage = "application";
-          if (raw.id % 3 === 0) {
-            st = "info";
-            actionText = `The host requested information for ${roomLabel} at ${propertyName} — due soon.`;
-          } else if (raw.id % 2 === 0) {
-            st = "review";
-          } else {
-            st = "submitted";
-          }
+          // Waiting on the host. A request for information arrives as a chat message.
+          st = "submitted";
         }
       }
 
@@ -459,14 +458,15 @@ export function ApplicationsManager() {
         ltitle: listing?.name || propertyName,
         applied: appliedDate,
         mi: moveInDate,
-        dur: "6 months",
+        // The term is only fixed by an offer; until then show the listing's minimum stay.
+        dur: listing?.minStayNights ? `Min. stay ${Math.max(1, Math.round(listing.minStayNights / 30))} months` : "Flexible",
         rent: rentAmount,
         st,
         stage,
-        unread: raw.id % 4 === 0 ? 2 : raw.id % 3 === 0 ? 1 : 0,
+        unread: unreadByApp[raw.id] ?? 0,
         actionText,
         outText,
-        updatedNotice: raw.id % 5 === 0 ? "Listing updated since you applied. Your application keeps the terms you applied for." : null,
+        updatedNotice: null,
         rawApp: raw,
         offer: raw.offerId
           ? {
@@ -822,7 +822,7 @@ export function ApplicationsManager() {
   const toChatMessage = (m: RentalMessage) => ({
     from: m.senderRole === "HOST" ? ("host" as const) : ("user" as const),
     text: m.body,
-    time: formatDate(m.createdAt),
+    time: formatDateTime(m.createdAt),
   });
 
   // Load the real thread (and mark the host's messages read) whenever the
@@ -830,9 +830,18 @@ export function ApplicationsManager() {
   useEffect(() => {
     if (activeDrawerTab !== "messages" || !selectedApp) return;
     const key = selectedApp.id;
-    listRenterApplicationMessages(selectedApp.rawApp.id)
-      .then((items) => setChatMessages((prev) => ({ ...prev, [key]: items.map(toChatMessage) })))
-      .catch(() => setChatMessages((prev) => ({ ...prev, [key]: prev[key] ?? [] })));
+    const applicationId = selectedApp.rawApp.id;
+    const refresh = () =>
+      listRenterApplicationMessages(applicationId)
+        .then((items) => {
+          setChatMessages((prev) => ({ ...prev, [key]: items.map(toChatMessage) }));
+          setUnreadByApp((prev) => ({ ...prev, [applicationId]: 0 }));  // opening marks them read
+        })
+        .catch(() => setChatMessages((prev) => ({ ...prev, [key]: prev[key] ?? [] })));
+    refresh();
+    // New replies show up without reloading the page.
+    const timer = window.setInterval(refresh, 15000);
+    return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDrawerTab, selectedApp?.id]);
 

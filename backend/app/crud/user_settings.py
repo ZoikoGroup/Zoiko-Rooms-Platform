@@ -33,34 +33,33 @@ from app.models.user_settings import EmailChangeRequest, UserPreference
 # key -> allowed values (None = validated separately below). Defaults are
 # what a user who has never saved sees.
 PREFERENCE_FIELDS: dict[str, tuple | None] = {
-    "language": ("en-US", "en-GB", "hi-IN", "te-IN"),
+    # English only: the app has no other translations.
+    "language": ("en-US", "en-GB"),
     "region": ("GB", "US", "IN"),
-    "currencyDisplay": ("LISTING", "GBP", "USD", "INR"),
     "timeZone": None,
     "timeFormat": ("12h", "24h"),
     "density": ("comfortable", "compact"),
     "motion": ("system", "reduce"),
     "defaultWorkspace": ("renter", "host"),
     "personalizedRecommendations": (True, False),
-    "optionalAnalytics": (True, False),
 }
 PREFERENCE_DEFAULTS: dict = {
     "language": "en-GB",
     "region": "GB",
-    "currencyDisplay": "LISTING",
     "timeZone": "Europe/London",
     "timeFormat": "24h",
     "density": "comfortable",
     "motion": "system",
     "defaultWorkspace": "renter",
     "personalizedRecommendations": True,
-    "optionalAnalytics": False,
 }
 
 
 def get_preferences(db: Session, user: UserAccount) -> dict:
     row = db.get(UserPreference, user.id)
-    stored = {k: v for k, v in (row.data if row else {}).items() if k in PREFERENCE_FIELDS}
+    # A value no longer offered (e.g. a removed language) falls back to the default.
+    stored = {k: v for k, v in (row.data if row else {}).items()
+              if k in PREFERENCE_FIELDS and (PREFERENCE_FIELDS[k] is None or v in PREFERENCE_FIELDS[k])}
     return {**PREFERENCE_DEFAULTS, **stored}
 
 

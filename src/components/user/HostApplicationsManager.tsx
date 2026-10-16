@@ -33,9 +33,10 @@ import {
 import { ApiError } from "@/lib/api-client";
 import {
   RentalMessage, Application, HostedListing, Property, Offer } from "@/lib/types";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate, formatDateTime } from "@/lib/utils";
 import {
   listHostApplicationMessages,
+  listHostConversations,
   sendHostApplicationMessage,
   decideHostedApplication,
   errorMessage,
@@ -99,7 +100,8 @@ const CLOSED_STATUSES: ApplicationStatusKey[] = [
 function buildApplicationRecord(
   app: Application,
   listingMap: Map<string, HostedListing>,
-  propertyMap: Map<number, Property>
+  propertyMap: Map<number, Property>,
+  unreadCount = 0,
 ): ApplicationRecord {
   const listing = listingMap.get(app.listingId);
   const property =
@@ -126,18 +128,18 @@ function buildApplicationRecord(
   const propertyName = property?.address.split(",")[0] || listing?.city || "Property";
   const propertyPlace = property
     ? `${property.address}, ${property.city}`
-    : listing?.location || "India";
+    : listing?.location || listing?.city || "";
 
   const curr = listing?.currency || "INR";
   const rentText = listing?.defaultMonthlyRent
     ? formatCurrency(listing.defaultMonthlyRent, curr)
     : listing?.pricePerNight
     ? formatCurrency(listing.pricePerNight * 30, curr)
-    : formatCurrency(24000, curr);
+    : "Rent not set";
 
   const termText = listing?.defaultTermMonths
     ? `Minimum ${listing.defaultTermMonths} months`
-    : "Minimum 6 months";
+    : "Term not set";
 
   const roomStatus = status === "selected" ? "offer" : "available";
 
@@ -183,13 +185,14 @@ function buildApplicationRecord(
     propertyPlace,
     status,
     desiredMoveIn: app.desiredMoveIn,
-    durationText: "6 months",
-    occupantsText: "1 adult",
+    durationText: listing?.defaultTermMonths ? `${listing.defaultTermMonths} months` : "Term not set",
+    occupantsText: "",
     timeAgoText: formatDate(app.submittedAt),
     submittedDateText: formatDate(app.submittedAt),
-    unreadCount: 0,
+    unreadCount,
     messages: app.message ? [app.message] : [],
     history,
+    // Applying needs a verified identity (enforced by the backend), so every applicant has one.
     idVerified: true,
     attention,
     cta,
@@ -239,6 +242,8 @@ export function HostApplicationsManager() {
   const [replaceReasonError, setReplaceReasonError] = useState(false);
   const [declineReason, setDeclineReason] = useState("");
   const [reqInfoItem, setReqInfoItem] = useState("Rental reference");
+  // Unread renter messages per application, from the server.
+  const [unreadByApp, setUnreadByApp] = useState<Record<number, number>>({});
 
   // Offer Agreement Panel Modal
   const [offerAgreementTarget, setOfferAgreementTarget] = useState<ApplicationRecord | null>(null);
@@ -260,6 +265,8 @@ export function HostApplicationsManager() {
         listHostedProperties().catch(() => [] as Property[]),
         listHostedListings().catch(() => [] as HostedListing[]),
       ]);
+      const conversations = await listHostConversations().catch(() => []);
+      setUnreadByApp(Object.fromEntries(conversations.map((c) => [c.applicationId, c.unreadCount])));
 
       setRawApplications(apps);
       setRawProperties(props);
@@ -291,9 +298,9 @@ export function HostApplicationsManager() {
   // Dynamic Application Records
   const appRecords: ApplicationRecord[] = useMemo(() => {
     return rawApplications.map((app) =>
-      buildApplicationRecord(app, listingMap, propertyMap)
+      buildApplicationRecord(app, listingMap, propertyMap, unreadByApp[app.id] ?? 0)
     );
-  }, [rawApplications, listingMap, propertyMap]);
+  }, [rawApplications, listingMap, propertyMap, unreadByApp]);
 
   // Deep link (?applicationId=) from Rental Records' "Message renter":
   // open that application's thread once the data has loaded.
@@ -654,20 +661,39 @@ export function HostApplicationsManager() {
     });
   };
 
-  const handleConfirmReqInfo = () => {
+  const handleConfirmReqInfo = async () => {
     if (!pendingModal) return;
-    showToast(
-      `Request for ${reqInfoItem} recorded. Renter has been notified.`,
-      "success"
-    );
-    setPendingModal(null);
+    const app = pendingModal.app;
+    try {
+      const sent = await sendHostApplicationMessage(
+        app.id,
+        `Could you please share your ${reqInfoItem.replace(" (where configured)", "").toLowerCase()}? ` +
+          "Reply here in the chat when you have it.",
+      );
+      if (drawerTarget?.id === app.id) setThread((prev) => [...prev, sent]);
+      showToast(`Request for ${reqInfoItem} sent to ${app.guestName} in the chat.`, "success");
+      setPendingModal(null);
+    } catch (err) {
+      showToast(errorMessage(err, "Could not send the request."), "error");
+    }
   };
 
   // Load the thread (and mark the renter's messages read) when the Messages tab opens.
   useEffect(() => {
     if (drawerTab !== "messages" || !drawerTarget) return;
+    const applicationId = drawerTarget.id;
     setThread([]);
-    listHostApplicationMessages(drawerTarget.id).then(setThread).catch(() => setThread([]));
+    const refresh = () =>
+      listHostApplicationMessages(applicationId)
+        .then((items) => {
+          setThread(items);
+          setUnreadByApp((prev) => ({ ...prev, [applicationId]: 0 }));  // opening marks them read
+        })
+        .catch(() => undefined);
+    refresh();
+    // New replies show up without reloading the page.
+    const timer = window.setInterval(refresh, 15000);
+    return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawerTab, drawerTarget?.id]);
 
@@ -1271,9 +1297,11 @@ export function HostApplicationsManager() {
                         <span className="text-xs font-bold text-[#0C2B4E] dark:text-white block truncate">
                           {app.desiredMoveIn ? formatDate(app.desiredMoveIn) : "Flexible"} · {app.durationText}
                         </span>
-                        <span className="text-xs text-slate-500 dark:text-slate-400 block">
-                          {app.occupantsText}
-                        </span>
+                        {app.occupantsText && (
+                          <span className="text-xs text-slate-500 dark:text-slate-400 block">
+                            {app.occupantsText}
+                          </span>
+                        )}
                       </div>
 
                       {/* 4. Application State */}
@@ -1337,18 +1365,18 @@ export function HostApplicationsManager() {
 
                       {/* 5. Messages */}
                       <div>
-                        {app.messages.length > 0 ? (
-                          <button
-                            type="button"
-                            onClick={() => openDrawer(app, "messages")}
-                            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#EEF3FF] hover:bg-[#DFE8FB] text-[#1D3F8F] text-xs font-extrabold transition cursor-pointer"
-                          >
-                            <MessageSquare className="size-3.5" />
-                            <span>{app.messages.length} msg</span>
-                          </button>
-                        ) : (
-                          <span className="text-slate-400 text-sm font-semibold pl-2">—</span>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => openDrawer(app, "messages")}
+                          className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold transition cursor-pointer ${
+                            app.unreadCount > 0
+                              ? "bg-[#D80B0B] text-white hover:bg-[#B80909]"
+                              : "bg-[#EEF3FF] hover:bg-[#DFE8FB] text-[#1D3F8F]"
+                          }`}
+                        >
+                          <MessageSquare className="size-3.5" />
+                          <span>{app.unreadCount > 0 ? `${app.unreadCount} new` : "Chat"}</span>
+                        </button>
                       </div>
 
                       {/* 6. Next Action */}
@@ -1733,7 +1761,7 @@ export function HostApplicationsManager() {
                       [
                         // The renter's note from their application, then the live thread.
                         ...drawerTarget.messages.map((m) => ({ isHost: false, text: m, time: drawerTarget.submittedDateText })),
-                        ...thread.map((m) => ({ isHost: m.senderRole === "HOST", text: m.body, time: formatDate(m.createdAt) })),
+                        ...thread.map((m) => ({ isHost: m.senderRole === "HOST", text: m.body, time: formatDateTime(m.createdAt) })),
                       ].map(({ isHost, text, time }, idx) => {
                         return (
                           <div

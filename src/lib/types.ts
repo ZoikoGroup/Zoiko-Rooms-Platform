@@ -2551,16 +2551,14 @@ export interface HostRentalRecord {
 // --- Account settings (/api/users/preferences etc.) ---
 
 export interface UserPreferences {
-  language: "en-US" | "en-GB" | "hi-IN" | "te-IN";
+  language: "en-US" | "en-GB";
   region: "GB" | "US" | "IN";
-  currencyDisplay: "LISTING" | "GBP" | "USD" | "INR";
   timeZone: string;
   timeFormat: "12h" | "24h";
   density: "comfortable" | "compact";
   motion: "system" | "reduce";
   defaultWorkspace: "renter" | "host";
   personalizedRecommendations: boolean;
-  optionalAnalytics: boolean;
 }
 
 export interface AccountClosureCheck {

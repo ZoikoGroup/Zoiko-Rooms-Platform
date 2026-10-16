@@ -128,6 +128,8 @@ def evidence_read(e: AuthorityEvidence) -> dict:
             "contentType": e.content_type, "fileSize": e.file_size, "processingStatus": e.processing_status,
             # Which listed document OCR / the text layer recognised (None = not read yet).
             "detectedDocument": e.detected_document or None,
+            # A document that never proves ownership (utility bill, tax bill, insurance policy).
+            "notOwnershipProof": e.non_proof_document or None,
             "recognised": e.type_matched if e.source_type == "UPLOAD" else True,
             "available": bool(e.stored_filename), "createdAt": e.created_at}
 
@@ -150,6 +152,7 @@ def verification_read(db: Session, v: AuthorityVerification) -> dict:
         "revokedAt": v.revoked_at, "revocationReasonCode": v.revocation_reason_code,
         "reasonCodes": list(v.reason_codes or []), "reason": svc.describe(v.reason_codes or []),
         "requirements": svc.requirements(db, v),
+        "declaration": svc.declaration_view(v),
         "matchResults": svc.host_match_results(db, v),
         "evidence": [evidence_read(e) for e in v.evidence if e.processing_status != "REPLACED"],
         "confirmations": [confirmation_read(c) for c in v.confirmations],

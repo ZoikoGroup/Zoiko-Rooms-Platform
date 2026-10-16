@@ -169,24 +169,47 @@ class TestDecideHostedApplication:
         )
         assert r.status_code == 403, r.text
 
-    def test_cannot_decide_an_already_decided_application(self, client, db_session: Session):
+    def _decide(self, client, host, application_id, decision):
+        return client.post(f"/api/users/hosting/applications/{application_id}/decide",
+                           json={"decision": decision}, cookies=auth_user_cookie(host))
+
+    def test_shortlisted_applicant_can_still_be_declined(self, client, db_session: Session):
+        """Shortlisting records an approval; the host can still decline until an offer is made."""
         host, listing_id = _make_host_and_listing(db_session, email="apps-host-j@test.com")
         renter = _make_verified_renter(db_session, email="apps-renter-j@test.com")
         application_id = _submit_application(client, listing_id, renter)
+        assert self._decide(client, host, application_id, "APPROVED").status_code == 200
 
-        first = client.post(
-            f"/api/users/hosting/applications/{application_id}/decide",
-            json={"decision": "APPROVED"},
-            cookies=auth_user_cookie(host),
-        )
-        assert first.status_code == 200, first.text
+        r = self._decide(client, host, application_id, "REJECTED")
+        assert r.status_code == 200, r.text
+        decisions = db_session.query(ApplicationDecision).filter(ApplicationDecision.application_id == application_id).all()
+        assert [d.decision for d in decisions] == ["APPROVED", "REJECTED"]
+        # Declined stays declined.
+        assert self._decide(client, host, application_id, "APPROVED").status_code == 409
 
-        second = client.post(
-            f"/api/users/hosting/applications/{application_id}/decide",
-            json={"decision": "REJECTED"},
-            cookies=auth_user_cookie(host),
-        )
-        assert second.status_code == 409, second.text
+    def test_selecting_a_shortlisted_applicant_reuses_the_approval(self, client, db_session: Session):
+        host, listing_id = _make_host_and_listing(db_session, email="apps-host-j2@test.com")
+        renter = _make_verified_renter(db_session, email="apps-renter-j2@test.com")
+        application_id = _submit_application(client, listing_id, renter)
+        assert self._decide(client, host, application_id, "APPROVED").status_code == 200
+        r = self._decide(client, host, application_id, "APPROVED")
+        assert r.status_code == 200, r.text
+        assert db_session.query(ApplicationDecision).filter(ApplicationDecision.application_id == application_id).count() == 1
+
+    def test_an_applicant_with_a_live_offer_cannot_be_redecided(self, client, db_session: Session):
+        from app.models.leasing import Application, Offer
+
+        host, listing_id = _make_host_and_listing(db_session, email="apps-host-j3@test.com")
+        renter = _make_verified_renter(db_session, email="apps-renter-j3@test.com")
+        application_id = _submit_application(client, listing_id, renter)
+        assert self._decide(client, host, application_id, "APPROVED").status_code == 200
+        app_row = db_session.get(Application, application_id)
+        db_session.add(Offer(application_id=application_id, listing_id=app_row.listing_id, guest_id=app_row.guest_id,
+                             status="SENT"))
+        db_session.commit()
+        r = self._decide(client, host, application_id, "REJECTED")
+        assert r.status_code == 409
+        assert "Withdraw the offer" in r.json()["detail"]
 
     def test_invalid_decision_value_is_rejected(self, client, db_session: Session):
         host, listing_id = _make_host_and_listing(db_session, email="apps-host-k@test.com")

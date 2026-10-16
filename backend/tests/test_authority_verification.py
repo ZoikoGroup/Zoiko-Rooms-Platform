@@ -234,7 +234,8 @@ class TestOwnerRoute:
                                               "Supply address: 12 Lake View Road, Hyderabad 500001"))
         f.submit()
         assert f.body["state"] == "ACTION_REQUIRED"
-        assert "DOCUMENT_TYPE_UNRECOGNIZED" in f.body["reasonCodes"]
+        # ZR-HAV-001: told plainly that a utility bill never proves ownership.
+        assert "NOT_OWNERSHIP_PROOF" in f.body["reasonCodes"]
 
     def test_requirements_carry_the_country_keywords(self, client, db_session):
         user, prop, _ = _host(db_session, "auth-keywords@test.com")

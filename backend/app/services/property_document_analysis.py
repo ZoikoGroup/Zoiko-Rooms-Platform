@@ -235,15 +235,18 @@ def analyze(content: bytes, content_type: str, *, evidence_type: str, canonical_
     line1 = canonical_address.get("address_line_1") or ""
     postal = re.sub(r"\s", "", canonical_address.get("postal_code") or "").upper()
     compact = re.sub(r"\s", "", body)
-    result.postal_matched = (postal in compact) if postal else None
-    line_ok = (_phrase_in(body, line1, tolerant) if line1 else False) or \
-        identity_matches(text, canonical_address, tolerant)
+    from app.services.match_confidence import accepted, name_confidence, phrase_confidence, postal_confidence
+
+    # 75%+ confidence counts as a match (OCR slips, spacing, small typing differences).
+    result.postal_matched = (postal in compact or accepted(postal_confidence(body, postal))) if postal else None
+    line_ok = bool(line1) and (_phrase_in(body, line1, tolerant) or accepted(phrase_confidence(body, line1)))
+    line_ok = line_ok or identity_matches(text, canonical_address, tolerant)
     result.address_matched = bool(line_ok and (result.postal_matched is not False))
     if unit:
         u = _norm(unit)
         result.unit_matched = u in body.split() or u in body
     if owner_name:
-        result.owner_name_matched = _phrase_in(body, owner_name, tolerant)
+        result.owner_name_matched = _phrase_in(body, owner_name, tolerant) or accepted(name_confidence(body, owner_name))
 
     keywords = TYPE_KEYWORDS.get(evidence_type, ())
     if keywords:

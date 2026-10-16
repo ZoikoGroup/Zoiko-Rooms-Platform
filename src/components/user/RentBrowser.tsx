@@ -38,6 +38,7 @@ import {
   listHostedListings,
   listPublicListings,
   listRentalApplications,
+  getUserPreferences,
   submitRentalApplication,
 } from "@/lib/user-api";
 import { useUserSession } from "@/components/user/UserSessionContext";
@@ -58,7 +59,7 @@ export interface FindARoomItem {
   availableDate: string;
   roomState: "available" | "offer";
   applicationsState: "open" | "closed";
-  furnishedState: "yes" | "part" | "no";
+  furnishedState: "yes" | "part" | "no" | "unknown";
   bathroomType: "Private" | "Shared";
   amenities: string[];
   accessibility: string[];
@@ -96,7 +97,7 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
 
   // Furnished determination
   const amenitiesLower = (item.amenities || []).map((a) => a.toLowerCase());
-  let furnishedState: "yes" | "part" | "no" = "no";
+  let furnishedState: "yes" | "part" | "no" | "unknown" = "no";
   if (
     amenitiesLower.some(
       (a) => a.includes("furnished") && !a.includes("part") && !a.includes("unfurnished")
@@ -108,7 +109,7 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
   } else if (amenitiesLower.some((a) => a.includes("unfurnished"))) {
     furnishedState = "no";
   } else {
-    furnishedState = "yes";
+    furnishedState = "unknown";  // the listing doesn't say
   }
 
   // Accessibility tags
@@ -121,15 +122,15 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
 
   const houseRules = hosted.agreementDetails?.houseRules
     ? Object.values(hosted.agreementDetails.houseRules as unknown as Record<string, string>).filter(Boolean)
-    : ["Quiet hours after 10 PM", "No indoor smoking", "Keep common areas clean"];
+    : [];
 
   return {
     id: String(item.id),
     listingId: String(item.id),
     isBackendListing: true,
-    title: item.name || "Verified Private Room",
-    area: item.location || item.city || "Central",
-    city: item.city || "Hyderabad",
+    title: item.name || "Private room",
+    area: item.location || item.city || "",
+    city: item.city || "",
     roomNumber: item.roomId ? `Room #${item.roomId}` : `Room #${item.id.slice(0, 4)}`,
     roomType: item.roomType || "Private room",
     monthlyRent,
@@ -140,16 +141,14 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
     applicationsState: isAvailable ? "open" : "closed",
     furnishedState,
     bathroomType,
-    amenities: item.amenities && item.amenities.length > 0 ? item.amenities : ["Wi-Fi", "Furnished"],
+    amenities: item.amenities || [],
     accessibility,
     photos,
     toneColor: "#E3E9F6",
     freshnessScore: idx,
-    description:
-      item.description ||
-      "Verified private room with secure access, high standards, and documented rental tenancy terms.",
+    description: item.description || "",
     houseRules,
-    ownerName: hosted.contactName || "Verified Host",
+    ownerName: hosted.contactName || "Host",
   };
 }
 
@@ -172,6 +171,14 @@ export function RentBrowser() {
   // Filter controls
   const [viewMode, setViewMode] = useState<"list" | "map">("list");
   const [sortBy, setSortBy] = useState<"best" | "plow" | "phigh" | "soon">("best");
+  // Settings > Privacy "Personalised recommendations" (on unless switched off).
+  const [personalized, setPersonalized] = useState(false);
+  useEffect(() => {
+    if (!user) return;
+    getUserPreferences()
+      .then((p) => setPersonalized(p.personalizedRecommendations))
+      .catch(() => setPersonalized(false));
+  }, [user]);
   const [priceFilter, setPriceFilter] = useState("all");
   const [roomTypeFilter, setRoomTypeFilter] = useState("all");
   const [furnishedFilter, setFurnishedFilter] = useState("all");
@@ -198,8 +205,6 @@ export function RentBrowser() {
   const [applySubmitting, setApplySubmitting] = useState(false);
   const [applyError, setApplyError] = useState("");
 
-  const [askModalRoom, setAskModalRoom] = useState<FindARoomItem | null>(null);
-  const [questionText, setQuestionText] = useState("");
 
   // Toast
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -221,7 +226,7 @@ export function RentBrowser() {
 
   // Lock body scroll and reset drawer scroll to top when drawer or modals open
   useEffect(() => {
-    if (drawerRoom || applyModalRoom || askModalRoom) {
+    if (drawerRoom || applyModalRoom) {
       const originalStyle = document.body.style.overflow;
       document.body.style.overflow = "hidden";
       if (drawerRoom && drawerBodyRef.current) {
@@ -231,7 +236,7 @@ export function RentBrowser() {
         document.body.style.overflow = originalStyle;
       };
     }
-  }, [drawerRoom, applyModalRoom, askModalRoom]);
+  }, [drawerRoom, applyModalRoom]);
 
   // Dynamic Backend State
   const [allRooms, setAllRooms] = useState<FindARoomItem[]>([]);
@@ -305,6 +310,13 @@ export function RentBrowser() {
   }, [allRooms]);
 
   // Filter & match logic
+  // Cities the renter has shown interest in: rooms they applied to and places they searched.
+  const preferredCities = useMemo(() => {
+    if (!personalized) return new Set<string>();
+    const cities = allRooms.filter((r) => appliedRooms[r.id]).map((r) => r.city);
+    return new Set([...cities, ...recentSearches].map((c) => c.trim().toLowerCase()).filter(Boolean));
+  }, [personalized, allRooms, appliedRooms, recentSearches]);
+
   const filteredRooms = useMemo(() => {
     const q = activeLocationQuery.toLowerCase().trim();
 
@@ -367,15 +379,20 @@ export function RentBrowser() {
         if (sortBy === "phigh") return b.monthlyRent - a.monthlyRent;
         if (sortBy === "soon") return a.availableDate.localeCompare(b.availableDate);
 
-        // Best match algorithm
+        // Best match algorithm. With personalised recommendations on, rooms in
+        // cities the renter applied to or searched come first -- but never ahead
+        // of a room that fits their stay or is still open to applications.
+        const bonusA = preferredCities.has(a.city.trim().toLowerCase()) ? 4e9 : 0;
+        const bonusB = preferredCities.has(b.city.trim().toLowerCase()) ? 4e9 : 0;
         const diffA = Math.abs(new Date(a.availableDate).getTime() - new Date(moveInDate).getTime());
         const diffB = Math.abs(new Date(b.availableDate).getTime() - new Date(moveInDate).getTime());
         const penaltyA = (a.minStayMonths > stayMonths && stayMonths ? 9e9 : 0) + (a.applicationsState === "closed" ? 2e10 : 0);
         const penaltyB = (b.minStayMonths > stayMonths && stayMonths ? 9e9 : 0) + (b.applicationsState === "closed" ? 2e10 : 0);
-        return diffA + penaltyA + a.freshnessScore * 1e7 - (diffB + penaltyB + b.freshnessScore * 1e7);
+        return diffA + penaltyA - bonusA + a.freshnessScore * 1e7 - (diffB + penaltyB - bonusB + b.freshnessScore * 1e7);
       });
   }, [
     allRooms,
+    preferredCities,
     activeLocationQuery,
     priceFilter,
     roomTypeFilter,
@@ -442,24 +459,6 @@ export function RentBrowser() {
     } finally {
       setApplySubmitting(false);
     }
-  };
-
-  // Open Ask a Question Modal
-  const handleOpenQuestion = (room: FindARoomItem, e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    if (!user) {
-      router.push("/account/login");
-      return;
-    }
-    setAskModalRoom(room);
-    setQuestionText("");
-  };
-
-  const handleConfirmQuestion = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!askModalRoom) return;
-    showToast(`Question sent to the lister of ${askModalRoom.title}. You will be notified of responses.`);
-    setAskModalRoom(null);
   };
 
   // Map view areas computed dynamically from actual rooms
@@ -1074,7 +1073,7 @@ export function RentBrowser() {
 
                     {/* Specs summary */}
                     <p className="mt-1.5 text-xs text-slate-600 dark:text-slate-400 line-clamp-1">
-                      {room.roomType} · {room.amenities.join(" · ")}
+                      {[room.roomType, ...room.amenities].join(" · ")}
                     </p>
                   </div>
 
@@ -1242,7 +1241,7 @@ export function RentBrowser() {
                   {drawerTab === "overview" && (
                     <div className="space-y-4">
                       <p className="text-sm text-slate-600 dark:text-slate-300">
-                        {drawerRoom.description}
+                        {drawerRoom.description || "The host hasn't added a description yet."}
                       </p>
                       <div className="grid grid-cols-2 gap-3 pt-2">
                         <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/40">
@@ -1254,7 +1253,7 @@ export function RentBrowser() {
                         <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/40">
                           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Furnishing</span>
                           <p className="mt-0.5 text-sm font-bold text-[#0E2F73] dark:text-white capitalize">
-                            {drawerRoom.furnishedState === "yes" ? "Fully Furnished" : drawerRoom.furnishedState === "part" ? "Part Furnished" : "Unfurnished"}
+                            {drawerRoom.furnishedState === "yes" ? "Fully Furnished" : drawerRoom.furnishedState === "part" ? "Part Furnished" : drawerRoom.furnishedState === "no" ? "Unfurnished" : "Not stated"}
                           </p>
                         </div>
                       </div>
@@ -1263,7 +1262,11 @@ export function RentBrowser() {
 
                   {drawerTab === "amenities" && (
                     <div className="space-y-3">
-                      <h4 className="font-bold text-[#0E2F73] dark:text-white">Verified Amenities</h4>
+                      <h4 className="font-bold text-[#0E2F73] dark:text-white">Amenities</h4>
+                      <p className="text-[11px] text-slate-500">As listed by the host.</p>
+                      {drawerRoom.amenities.length === 0 && (
+                        <p className="text-slate-500">The host hasn&apos;t listed any amenities.</p>
+                      )}
                       <ul className="grid grid-cols-2 gap-2">
                         {drawerRoom.amenities.map((am) => (
                           <li key={am} className="flex items-center gap-2 rounded-lg bg-slate-50 p-2.5 dark:bg-slate-800/40">
@@ -1313,6 +1316,9 @@ export function RentBrowser() {
                   {drawerTab === "rules" && (
                     <div className="space-y-2">
                       <h4 className="font-bold text-[#0E2F73] dark:text-white">Host House Rules</h4>
+                      {(drawerRoom.houseRules || []).length === 0 && (
+                        <p className="text-slate-500">The host hasn&apos;t listed any house rules.</p>
+                      )}
                       <ul className="space-y-2">
                         {(drawerRoom.houseRules || []).map((rule, idx) => (
                           <li key={idx} className="flex items-start gap-2">
@@ -1347,14 +1353,10 @@ export function RentBrowser() {
 
               {/* Drawer Fixed Footer Actions */}
               <div className="border-t border-slate-200 bg-white p-4 sm:px-6 flex items-center justify-between gap-3 dark:border-slate-800 dark:bg-slate-900 shrink-0">
-                <button
-                  type="button"
-                  onClick={(e) => handleOpenQuestion(drawerRoom, e)}
-                  className="flex items-center gap-2 rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-[#0E2F73] hover:bg-slate-50 dark:border-slate-700 dark:text-blue-300"
-                >
-                  <MessageSquare className="h-4 w-4" />
-                  <span>Ask a Question</span>
-                </button>
+                <p className="flex max-w-[55%] items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                  <MessageSquare className="h-4 w-4 shrink-0" />
+                  <span>Questions? Add them to your application message -- the host replies in your application&apos;s chat.</span>
+                </p>
 
                 {appliedRooms[drawerRoom.id] ? (
                   <span className="flex items-center gap-2 rounded-xl bg-emerald-50 px-6 py-2.5 text-xs font-bold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
@@ -1467,74 +1469,6 @@ export function RentBrowser() {
                     className="rounded-xl bg-[#0E2F73] px-6 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#0B2560] disabled:opacity-50"
                   >
                     {applySubmitting ? "Submitting..." : "Submit Application"}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>,
-          document.body
-        )}
-
-      {/* 8. Ask a Question Modal */}
-      {mounted &&
-        askModalRoom &&
-        createPortal(
-          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
-            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs" onClick={() => setAskModalRoom(null)} />
-            <div className="relative z-10 w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl dark:bg-slate-900 max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in-95 duration-150">
-              <div className="flex items-start justify-between">
-                <div>
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#0E2F73] dark:text-blue-300">
-                    Ask a Question
-                  </span>
-                  <h3 className="font-heading text-lg font-extrabold text-[#0E2F73] dark:text-white mt-0.5">
-                    Inquire about {askModalRoom.title}
-                  </h3>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setAskModalRoom(null)}
-                  className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800"
-                >
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-
-              <form onSubmit={handleConfirmQuestion} className="mt-4 space-y-4">
-                <div>
-                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                    Your question
-                  </label>
-                  <textarea
-                    rows={4}
-                    required
-                    value={questionText}
-                    onChange={(e) => setQuestionText(e.target.value)}
-                    placeholder="Ask about utilities, quiet hours, proximity to public transit, or room arrangements..."
-                    className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs focus:border-[#0E2F73] focus:outline-none dark:border-slate-700 dark:bg-slate-800"
-                  />
-                </div>
-
-                <div className="rounded-xl bg-[#F7F9FD] p-3 text-xs text-slate-600 dark:bg-slate-800/40 dark:text-slate-300">
-                  <p className="font-semibold text-[#0E2F73] dark:text-blue-300">Safe In-Platform Messaging</p>
-                  <p className="mt-0.5 text-[11px]">
-                    All communications remain securely within Zoiko Rooms. Do not send off-platform payments or sensitive personal data.
-                  </p>
-                </div>
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setAskModalRoom(null)}
-                    className="rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="rounded-xl bg-[#0E2F73] px-6 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#0B2560]"
-                  >
-                    Send Inquiry
                   </button>
                 </div>
               </form>
