@@ -19,6 +19,7 @@ import {
   errorMessage,
 } from "@/lib/user-api";
 import { SubletPaymentsPanel } from "@/components/user/SubletPaymentsPanel";
+import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 import { formatDate } from "@/lib/utils";
 
 function safeFormatDate(date?: string | null): string {
@@ -823,8 +824,8 @@ export function SubletRequestsList() {
           align-items: center;
           gap: 8px;
           height: 46px;
-          padding: 0 14px;
-          border-radius: 14px;
+          padding: 0 16px;
+          border-radius: 9999px;
           background: #f4f6fb;
           border: 1px solid #d5ddea;
         }
@@ -877,7 +878,6 @@ export function SubletRequestsList() {
           font-weight: 700;
           color: #3a4866;
         }
-        .field select,
         .field input {
           height: 46px;
           min-width: 136px;
@@ -887,6 +887,17 @@ export function SubletRequestsList() {
           background: #ffffff;
           font-size: 13.5px;
           outline: none;
+        }
+        .field select {
+          height: 46px;
+          min-width: 136px;
+          padding: 0 16px;
+          border-radius: 9999px;
+          border: 1px solid #d5ddea;
+          background: #ffffff;
+          font-size: 13.5px;
+          outline: none;
+          cursor: pointer;
         }
         @media (max-width: 1199px) {
           .field select {
@@ -1678,6 +1689,11 @@ export function SubletRequestsList() {
           font-family: inherit;
           outline: none;
         }
+        select.tinput {
+          border-radius: 9999px;
+          padding: 0 16px;
+          cursor: pointer;
+        }
         .dlg-acts {
           display: flex;
           justify-content: flex-end;
@@ -1898,79 +1914,74 @@ export function SubletRequestsList() {
             )}
 
             {/* Status */}
-            <div className="field">
-              <label htmlFor="f-status">Status</label>
-              <select
-                id="f-status"
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-              >
-                <option value="all">All statuses</option>
-                <option value="draft">Draft</option>
-                <option value="review">Under Review</option>
-                <option value="info">Information Requested</option>
-                <option value="approved">Approved</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Status"
+              value={statusFilter}
+              onChange={setStatusFilter}
+              options={[
+                { value: "all", label: "All statuses" },
+                { value: "draft", label: "Draft" },
+                { value: "review", label: "Under Review" },
+                { value: "info", label: "Information Requested" },
+                { value: "approved", label: "Approved" },
+              ]}
+              size="md"
+            />
 
             {/* Parent Rental */}
-            <div className="field">
-              <label htmlFor="f-rental">Parent Rental</label>
-              <select
-                id="f-rental"
-                value={rentalFilter}
-                onChange={(e) => setRentalFilter(e.target.value)}
-              >
-                <option value="all">All rentals</option>
-                {occupancies.map((occ) => (
-                  <option key={occ.id} value={String(occ.id)}>
-                    {occ.listingName || `Rental #${occ.id}`} · Room #{occ.roomId}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Parent Rental"
+              value={rentalFilter}
+              onChange={setRentalFilter}
+              options={[
+                { value: "all", label: "All rentals" },
+                ...occupancies.map((occ) => ({
+                  value: String(occ.id),
+                  label: `${occ.listingName || `Rental #${occ.id}`} · Room #${occ.roomId}`,
+                })),
+              ]}
+              size="md"
+            />
 
             {/* Dates */}
-            <div className="field">
-              <label htmlFor="f-dates">Requested Dates</label>
-              <select
-                id="f-dates"
-                value={datesFilter}
-                onChange={(e) => setDatesFilter(e.target.value)}
-              >
-                <option value="all">Any dates</option>
-                <option value="2026">Starting in 2026</option>
-                <option value="2027">Starting in 2027</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Requested Dates"
+              value={datesFilter}
+              onChange={setDatesFilter}
+              options={[
+                { value: "all", label: "Any dates" },
+                { value: "2026", label: "Starting in 2026" },
+                { value: "2027", label: "Starting in 2027" },
+              ]}
+              size="md"
+            />
 
             {/* Scope */}
-            <div className="field">
-              <label htmlFor="f-scope">Scope</label>
-              <select
-                id="f-scope"
-                value={scopeFilter}
-                onChange={(e) => setScopeFilter(e.target.value)}
-              >
-                <option value="all">Any scope</option>
-                <option value="named">Named Subtenant</option>
-                <option value="principle">Permission in Principle</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Scope"
+              value={scopeFilter}
+              onChange={setScopeFilter}
+              options={[
+                { value: "all", label: "Any scope" },
+                { value: "named", label: "Named Subtenant" },
+                { value: "principle", label: "Permission in Principle" },
+              ]}
+              size="md"
+            />
 
             {/* Sort */}
-            <div className="field">
-              <label htmlFor="f-sort">Sort</label>
-              <select
-                id="f-sort"
-                value={sortFilter}
-                onChange={(e) => setSortFilter(e.target.value as "action" | "start" | "updated")}
-              >
-                <option value="action">Action required first</option>
-                <option value="start">Requested start</option>
-                <option value="updated">Recently updated</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Sort"
+              value={sortFilter}
+              onChange={(val) => setSortFilter(val as "action" | "start" | "updated")}
+              options={[
+                { value: "action", label: "Action required first" },
+                { value: "start", label: "Requested start" },
+                { value: "updated", label: "Recently updated" },
+              ]}
+              align="right"
+              size="md"
+            />
 
             {mobileFiltersOpen && (
               <button

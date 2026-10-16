@@ -1138,7 +1138,7 @@ export function HostingPaymentsManager() {
                 value={disputeReason}
                 onChange={(e) => setDisputeReason(e.target.value)}
                 aria-label="Select discrepancy reason"
-                className="w-full rounded-xl bg-slate-50 dark:bg-slate-800 p-2.5 outline-none border border-slate-200 dark:border-slate-700"
+                className="w-full rounded-full cursor-pointer bg-slate-50 dark:bg-slate-800 px-4 py-2.5 outline-none border border-slate-200 dark:border-slate-700"
               >
                 <option value="NOT_ARRIVED">Payment has not arrived</option>
                 <option value="AMOUNT_DIFFERENT">Amount received is different</option>

@@ -1936,7 +1936,7 @@ export function HostApplicationsManager() {
                       setReplaceReason(e.target.value);
                       setReplaceReasonError(false);
                     }}
-                    className="w-full h-11 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                    className="w-full h-11 px-4 rounded-full border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
                   >
                     <option value="">Choose a reason</option>
                     <option value="Previous applicant didn’t respond">Previous applicant didn’t respond</option>
@@ -2023,7 +2023,7 @@ export function HostApplicationsManager() {
               <select
                 value={declineReason}
                 onChange={(e) => setDeclineReason(e.target.value)}
-                className="w-full h-11 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                className="w-full h-11 px-4 rounded-full border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
               >
                 <option value="Room no longer available">Room no longer available</option>
                 <option value="Another applicant progressed">Another applicant progressed</option>
@@ -2073,7 +2073,7 @@ export function HostApplicationsManager() {
               <select
                 value={reqInfoItem}
                 onChange={(e) => setReqInfoItem(e.target.value)}
-                className="w-full h-11 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                className="w-full h-11 px-4 rounded-full border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
               >
                 <option value="Rental reference">Rental reference</option>
                 <option value="Employer reference">Employer reference</option>

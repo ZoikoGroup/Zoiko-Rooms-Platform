@@ -13,6 +13,9 @@ import { cn } from "@/lib/utils";
 export const inputClass =
   "w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm text-slate-800 outline-none ring-1 ring-slate-200 transition-all focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700";
 
+export const selectClass =
+  "w-full rounded-full bg-slate-50 px-4 py-2.5 text-sm text-slate-800 outline-none ring-1 ring-slate-200 transition-all focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700 cursor-pointer";
+
 export function Field({
   label,
   hint,

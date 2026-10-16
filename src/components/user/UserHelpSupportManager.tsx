@@ -1757,7 +1757,7 @@ export function UserHelpSupportManager() {
                         item: items[0],
                       }));
                     }}
-                    className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-800"
+                    className="h-11 w-full rounded-full border border-slate-300 bg-white px-4 text-sm cursor-pointer dark:border-slate-700 dark:bg-slate-800"
                   >
                     {CATEGORIES.map((cat) => (
                       <option key={cat.id} value={cat.id}>
@@ -1780,7 +1780,7 @@ export function UserHelpSupportManager() {
                     onChange={(e) =>
                       setContactForm((prev) => ({ ...prev, issue: e.target.value }))
                     }
-                    className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-800"
+                    className="h-11 w-full rounded-full border border-slate-300 bg-white px-4 text-sm cursor-pointer dark:border-slate-700 dark:bg-slate-800"
                   >
                     {(CAT_ISSUES[contactForm.cat] || ["General inquiry"]).map((iss) => (
                       <option key={iss} value={iss}>

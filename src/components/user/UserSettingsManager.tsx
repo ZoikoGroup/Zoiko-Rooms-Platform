@@ -83,6 +83,8 @@ const TIME_ZONES = ["Europe/London", "Asia/Kolkata", "America/New_York", "Americ
 const cardCls = "space-y-4 rounded-2xl border border-neutral-200 bg-white p-5 shadow-xs dark:border-neutral-800 dark:bg-neutral-900";
 const inputCls =
   "mt-1 w-full rounded-xl border border-neutral-300 bg-white p-2.5 text-sm outline-none focus:border-primary-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-white";
+const selectCls =
+  "mt-1 w-full rounded-full border border-neutral-300 bg-white px-4 py-2.5 text-sm outline-none cursor-pointer focus:border-primary-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-white";
 const primaryBtn = "rounded-xl bg-primary-900 px-4 py-2 text-xs font-bold text-white hover:bg-primary-800 disabled:opacity-50";
 const secondaryBtn =
   "rounded-xl border border-neutral-300 bg-white px-4 py-2 text-xs font-bold text-neutral-800 hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200";
@@ -569,7 +571,7 @@ export function UserSettingsManager({
                         value={prefs[key]}
                         disabled={savingPrefs}
                         onChange={(e) => savePrefs({ [key]: e.target.value } as Partial<UserPreferences>)}
-                        className={inputCls}
+                        className={selectCls}
                       >
                         {options.map(([value, text]) => (
                           <option key={value} value={value}>{text}</option>
@@ -579,7 +581,7 @@ export function UserSettingsManager({
                   ))}
                   <label className="text-xs font-bold text-neutral-700 dark:text-neutral-300">
                     Time zone
-                    <select value={prefs.timeZone} disabled={savingPrefs} onChange={(e) => savePrefs({ timeZone: e.target.value })} className={inputCls}>
+                    <select value={prefs.timeZone} disabled={savingPrefs} onChange={(e) => savePrefs({ timeZone: e.target.value })} className={selectCls}>
                       {Array.from(new Set([prefs.timeZone, ...TIME_ZONES])).map((tz) => (
                         <option key={tz} value={tz}>{tz}</option>
                       ))}
@@ -591,7 +593,7 @@ export function UserSettingsManager({
                       value={prefs.timeFormat}
                       disabled={savingPrefs}
                       onChange={(e) => savePrefs({ timeFormat: e.target.value as UserPreferences["timeFormat"] })}
-                      className={inputCls}
+                      className={selectCls}
                     >
                       <option value="24h">24-hour</option>
                       <option value="12h">12-hour</option>
@@ -603,7 +605,7 @@ export function UserSettingsManager({
                       value={prefs.density}
                       disabled={savingPrefs}
                       onChange={(e) => savePrefs({ density: e.target.value as UserPreferences["density"] })}
-                      className={inputCls}
+                      className={selectCls}
                     >
                       <option value="comfortable">Comfortable</option>
                       <option value="compact">Compact</option>
@@ -615,7 +617,7 @@ export function UserSettingsManager({
                       value={prefs.motion}
                       disabled={savingPrefs}
                       onChange={(e) => savePrefs({ motion: e.target.value as UserPreferences["motion"] })}
-                      className={inputCls}
+                      className={selectCls}
                     >
                       <option value="system">Follow my device</option>
                       <option value="reduce">Reduce motion</option>
@@ -674,7 +676,7 @@ export function UserSettingsManager({
                       value={prefs.defaultWorkspace}
                       disabled={savingPrefs}
                       onChange={(e) => savePrefs({ defaultWorkspace: e.target.value as UserPreferences["defaultWorkspace"] })}
-                      className={inputCls}
+                      className={selectCls}
                     >
                       <option value="renter">Renter</option>
                       <option value="host">Host</option>

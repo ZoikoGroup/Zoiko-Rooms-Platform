@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Card, Field, Toast, inputClass, useToast } from "@/components/user/ui";
+import { Card, Field, Toast, inputClass, selectClass, useToast } from "@/components/user/ui";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { IdentityCapture } from "@/components/user/IdentityCapture";
 import { documentTypeLabel } from "@/lib/identity-documents";
@@ -411,7 +411,7 @@ function DetailsStep({ profile, countries, busy, onSave, onBack }: {
         <p className="mt-1 text-xs text-slate-400">Type your name exactly as it appears on your document -- accents and non-Latin scripts are kept as you type them.</p>
       </fieldset>
       <Field label="Country / territory" hint="This decides which documents are accepted and the legal wording you see.">
-        <select className={inputClass} value={country} onChange={(e) => setCountry(e.target.value)}>
+        <select className={selectClass} value={country} onChange={(e) => setCountry(e.target.value)}>
           {countries.map((c) => <option key={c.countryCode} value={c.countryCode}>{c.countryName}</option>)}
           <option value={DEFAULT_COUNTRY}>Another country</option>
         </select>
@@ -558,7 +558,8 @@ function StatusScreen({ profile, onStart, onRefresh, errors, onContinueCapture, 
 }) {
   const state = profile.state;
   const current = profile.currentSession;
-  const role = (profile.currentSession?.roleContext || "OWNER") as IdentityRole;
+  const rawRole = current?.roleContext;
+  const role: IdentityRole = rawRole && rawRole in ROLE_NEXT ? (rawRole as IdentityRole) : "OWNER";
   const checking = state === "PROCESSING" || state === "PENDING_REVIEW";
   const available = profile.pack.providerAvailable;
 
@@ -625,7 +626,7 @@ function StatusScreen({ profile, onStart, onRefresh, errors, onContinueCapture, 
           </div>
           <Actions>
             <Link href="/account"><Button variant="ghost" fullWidth>Return to dashboard</Button></Link>
-            <Link href={ROLE_NEXT[role].href}><Button fullWidth>Continue to authority verification</Button></Link>
+            <Link href={(ROLE_NEXT[role] ?? ROLE_NEXT.OWNER).href}><Button fullWidth>Continue to authority verification</Button></Link>
           </Actions>
           <details className="text-sm">
             <summary className="cursor-pointer text-slate-500">Your legal name or date of birth changed?</summary>

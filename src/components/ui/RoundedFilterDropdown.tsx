@@ -10,7 +10,7 @@ export interface DropdownOption {
 
 export interface RoundedFilterDropdownProps {
   label?: string;
-  value: string;
+  value: string | number;
   onChange: (val: string) => void;
   options: DropdownOption[];
   placeholder?: string;
@@ -19,6 +19,7 @@ export interface RoundedFilterDropdownProps {
   labelClassName?: string;
   align?: "left" | "right";
   size?: "sm" | "md";
+  id?: string;
 }
 
 /**
@@ -36,6 +37,7 @@ export function RoundedFilterDropdown({
   labelClassName = "",
   align = "left",
   size = "md",
+  id,
 }: RoundedFilterDropdownProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -64,7 +66,8 @@ export function RoundedFilterDropdown({
     };
   }, [open]);
 
-  const selectedOption = options.find((o) => o.value === value) || options[0];
+  const selectedOption = options.find((o) => String(o.value) === String(value));
+  const displayText = selectedOption?.label ?? placeholder ?? (value !== undefined && value !== null && value !== "" ? String(value) : "");
   const heightClass = size === "sm" ? "h-10 px-3.5" : "h-11 px-4";
 
   return (
@@ -85,6 +88,7 @@ export function RoundedFilterDropdown({
         {/* Trigger Box: Rounder pill/stadium box */}
         <button
           type="button"
+          id={id}
           onClick={() => setOpen((prev) => !prev)}
           aria-haspopup="listbox"
           aria-expanded={open}
@@ -94,7 +98,7 @@ export function RoundedFilterDropdown({
               : "border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600"
           } ${buttonClassName}`}
         >
-          <span className="truncate font-medium">{selectedOption?.label || placeholder || value}</span>
+          <span className="truncate font-medium">{displayText}</span>
           <ChevronDown
             className={`size-3.5 shrink-0 transition-transform duration-200 ${
               open ? "rotate-180 text-[#0C2B4E] dark:text-primary-400" : "text-slate-400"
@@ -108,10 +112,10 @@ export function RoundedFilterDropdown({
             role="listbox"
             className={`absolute top-full ${
               align === "right" ? "right-0" : "left-0"
-            } w-full min-w-[150px] max-h-64 overflow-y-auto mt-2 z-50 bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-700/80 rounded-2xl shadow-xl shadow-slate-900/10 dark:shadow-black/50 p-1.5 space-y-0.5 animate-in fade-in zoom-in-95 duration-150`}
+            } min-w-full w-max max-w-[280px] sm:max-w-[340px] max-h-64 overflow-y-auto mt-2 z-50 bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-700/80 rounded-2xl shadow-xl shadow-slate-900/10 dark:shadow-black/50 p-1.5 space-y-0.5 animate-in fade-in zoom-in-95 duration-150`}
           >
             {options.map((opt) => {
-              const isSelected = opt.value === value;
+              const isSelected = String(opt.value) === String(value);
               return (
                 <button
                   key={opt.value}

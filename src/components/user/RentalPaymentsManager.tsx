@@ -1093,7 +1093,7 @@ export function RentalPaymentsManager() {
               <select
                 value={disputeReason}
                 onChange={(e) => setDisputeReason(e.target.value)}
-                className="w-full p-2.5 bg-slate-50 border rounded-xl"
+                className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full cursor-pointer outline-none focus:ring-2 focus:ring-primary-400"
               >
                 <option value="">Select a reason...</option>
                 {DISCREPANCY_OPTIONS.map((opt) => (

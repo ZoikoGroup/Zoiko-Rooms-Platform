@@ -44,9 +44,9 @@ export default function AccountLayout({ children }: { children: React.ReactNode 
           onOpenChat={() => setChatOpen(true)}
         />
 
-        <div className="flex min-h-screen flex-1 flex-col lg:min-w-0">
+        <div className="flex min-h-screen flex-1 flex-col min-w-0 w-full">
           <UserTopbar onOpenMobileSidebar={() => setMobileOpen(true)} />
-          <main key={pathname} className="animate-fade-up flex-1 p-4 sm:p-6 lg:p-8">
+          <main key={pathname} className="animate-fade-up flex-1 p-4 sm:p-6 lg:p-8 min-w-0">
             {children}
           </main>
         </div>

@@ -42,6 +42,7 @@ import {
   submitRentalApplication,
 } from "@/lib/user-api";
 import { useUserSession } from "@/components/user/UserSessionContext";
+import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 
 /** Room representation dynamically mapped from backend listings */
 export interface FindARoomItem {
@@ -637,20 +638,7 @@ export function RentBrowser() {
               </button>
             </div>
 
-            {/* Sort Dropdown */}
-            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-500">
-              <span>Sort</span>
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as "best" | "plow" | "phigh" | "soon")}
-                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-              >
-                <option value="best">Best Match</option>
-                <option value="plow">Price, low to high</option>
-                <option value="phigh">Price, high to low</option>
-                <option value="soon">Soonest available</option>
-              </select>
-            </div>
+            
 
             {/* Save Search Button */}
             <button
@@ -659,7 +647,7 @@ export function RentBrowser() {
                 setSearchSaved((s) => !s);
                 showToast(searchSaved ? "Search unsaved." : "Search saved. Alerts on for new verified matches.");
               }}
-              className={`flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition-colors ${
+              className={`flex items-center gap-1.5 rounded-full border px-4 py-2 text-xs font-bold transition-colors ${
                 searchSaved
                   ? "border-[#0E2F73] bg-[#0E2F73] text-white"
                   : "border-slate-200 bg-white text-[#0E2F73] hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-blue-300"
@@ -673,75 +661,82 @@ export function RentBrowser() {
 
         {/* Filter Pills / Dropdowns Row */}
         <div className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-xs dark:border-slate-800 dark:bg-slate-900">
-          <div className="flex flex-wrap items-end gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-3 items-end">
             {/* Price Filter */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] font-bold text-[#0E2F73] dark:text-blue-300">Price (per month)</label>
-              <select
-                value={priceFilter}
-                onChange={(e) => setPriceFilter(e.target.value)}
-                className="h-10 min-w-36 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-              >
-                <option value="all">Any price</option>
-                <option value="20000">Up to ₹20,000</option>
-                <option value="25000">Up to ₹25,000</option>
-                <option value="30000">Up to ₹30,000</option>
-                <option value="50000">Up to ₹50,000</option>
-                <option value="100000">Up to ₹100,000</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Price (per month)"
+              value={priceFilter}
+              onChange={setPriceFilter}
+              options={[
+                { value: "all", label: "Any price" },
+                { value: "20000", label: "Up to ₹20,000" },
+                { value: "25000", label: "Up to ₹25,000" },
+                { value: "30000", label: "Up to ₹30,000" },
+                { value: "50000", label: "Up to ₹50,000" },
+                { value: "100000", label: "Up to ₹100,000" },
+              ]}
+              size="sm"
+            />
 
             {/* Room Type Filter */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] font-bold text-[#0E2F73] dark:text-blue-300">Room Type</label>
-              <select
-                value={roomTypeFilter}
-                onChange={(e) => setRoomTypeFilter(e.target.value)}
-                className="h-10 min-w-36 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-              >
-                <option value="all">Any type</option>
-                {availableRoomTypes.map((rt) => (
-                  <option key={rt} value={rt}>
-                    {rt}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Room Type"
+              value={roomTypeFilter}
+              onChange={setRoomTypeFilter}
+              options={[
+                { value: "all", label: "Any type" },
+                ...availableRoomTypes.map((rt) => ({ value: rt, label: rt })),
+              ]}
+              size="sm"
+            />
 
             {/* Furnished Filter */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] font-bold text-[#0E2F73] dark:text-blue-300">Furnished</label>
-              <select
-                value={furnishedFilter}
-                onChange={(e) => setFurnishedFilter(e.target.value)}
-                className="h-10 min-w-36 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-              >
-                <option value="all">Any</option>
-                <option value="yes">Furnished</option>
-                <option value="part">Part furnished</option>
-                <option value="no">Unfurnished</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Furnished"
+              value={furnishedFilter}
+              onChange={setFurnishedFilter}
+              options={[
+                { value: "all", label: "Any" },
+                { value: "yes", label: "Furnished" },
+                { value: "part", label: "Part furnished" },
+                { value: "no", label: "Unfurnished" },
+              ]}
+              size="sm"
+            />
 
             {/* Availability Filter */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] font-bold text-[#0E2F73] dark:text-blue-300">Availability</label>
-              <select
-                value={availabilityFilter}
-                onChange={(e) => setAvailabilityFilter(e.target.value)}
-                className="h-10 min-w-36 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-800 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-              >
-                <option value="all">Any</option>
-                <option value="date">By my move-in date</option>
-                <option value="future">Later is fine</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Availability"
+              value={availabilityFilter}
+              onChange={setAvailabilityFilter}
+              options={[
+                { value: "all", label: "Any" },
+                { value: "date", label: "By my move-in date" },
+                { value: "future", label: "Later is fine" },
+              ]}
+              size="sm"
+            />
+
+            {/* Sort Dropdown */}
+            <RoundedFilterDropdown
+              label="Sort"
+              value={sortBy}
+              onChange={(val) => setSortBy(val as typeof sortBy)}
+              options={[
+                { value: "best", label: "Best Match" },
+                { value: "plow", label: "Price, low to high" },
+                { value: "phigh", label: "Price, high to low" },
+                { value: "soon", label: "Soonest available" },
+              ]}
+              align="right"
+              size="sm"
+            />
 
             {/* More Filters Toggle */}
             <button
               type="button"
               onClick={() => setMoreFiltersOpen((o) => !o)}
-              className="flex h-10 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 text-xs font-bold text-[#0E2F73] hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-blue-300"
+              className="flex h-10 items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 text-xs font-bold text-[#0E2F73] hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-blue-300 self-end"
             >
               <SlidersHorizontal className="h-3.5 w-3.5" />
               <span>More Filters</span>

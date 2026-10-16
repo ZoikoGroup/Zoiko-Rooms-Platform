@@ -38,6 +38,7 @@ import {
 import { matchRentalPaymentObligation } from "@/lib/rentalPaymentMatch";
 import { SingleObligationPaymentCard } from "@/components/user/RentalPaymentsManager";
 import { DirectPaymentNotice, usePaymentCapabilities } from "@/components/user/DirectPaymentNotice";
+import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 import { formatCurrency, formatDate, formatDateTime } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 
@@ -1108,8 +1109,8 @@ export function ApplicationsManager() {
           align-items: center;
           gap: 8px;
           height: 46px;
-          padding: 0 14px;
-          border-radius: 14px;
+          padding: 0 16px;
+          border-radius: 9999px;
           background: #f4f6fb;
           border: 1px solid #d5ddea;
         }
@@ -1147,8 +1148,8 @@ export function ApplicationsManager() {
         .field select {
           height: 46px;
           min-width: 136px;
-          padding: 0 12px;
-          border-radius: 14px;
+          padding: 0 16px;
+          border-radius: 9999px;
           border: 1px solid #d5ddea;
           background: #ffffff;
           font-size: 13.5px;
@@ -1903,7 +1904,7 @@ export function ApplicationsManager() {
             gap: 6px;
             height: 46px;
             padding: 0 16px;
-            border-radius: 14px;
+            border-radius: 9999px;
             font-size: 13.5px;
             font-weight: 700;
             white-space: nowrap;
@@ -2169,77 +2170,74 @@ export function ApplicationsManager() {
             </button>
           </div>
 
-          <div className="field">
-            <label htmlFor="f-stage">Stage</label>
-            <select
-              id="f-stage"
-              value={selectedStage}
-              onChange={(e) => setSelectedStage(e.target.value)}
-            >
-              <option value="all">All stages</option>
-              <option value="application">Application</option>
-              <option value="offer">Offer</option>
-              <option value="agreement">Agreement</option>
-            </select>
-          </div>
+          {/* Stage */}
+          <RoundedFilterDropdown
+            label="Stage"
+            value={selectedStage}
+            onChange={setSelectedStage}
+            options={[
+              { value: "all", label: "All stages" },
+              { value: "application", label: "Application" },
+              { value: "offer", label: "Offer" },
+              { value: "agreement", label: "Agreement" },
+            ]}
+            size="md"
+          />
 
-          <div className="field">
-            <label htmlFor="f-status">Status</label>
-            <select
-              id="f-status"
-              value={selectedStatus}
-              onChange={(e) => setSelectedStatus(e.target.value)}
-            >
-              <option value="all">All statuses</option>
-              <option value="submitted">Submitted</option>
-              <option value="review">Under Review</option>
-              <option value="info">Information Requested</option>
-              <option value="offer">Offer Received</option>
-              <option value="agr">Agreement</option>
-            </select>
-          </div>
+          {/* Status */}
+          <RoundedFilterDropdown
+            label="Status"
+            value={selectedStatus}
+            onChange={setSelectedStatus}
+            options={[
+              { value: "all", label: "All statuses" },
+              { value: "submitted", label: "Submitted" },
+              { value: "review", label: "Under Review" },
+              { value: "info", label: "Information Requested" },
+              { value: "offer", label: "Offer Received" },
+              { value: "agr", label: "Agreement" },
+            ]}
+            size="md"
+          />
 
-          <div className="field">
-            <label htmlFor="f-loc">Location</label>
-            <select
-              id="f-loc"
-              value={selectedLoc}
-              onChange={(e) => setSelectedLoc(e.target.value)}
-            >
-              <option value="all">All locations</option>
-              {uniqueLocations.map((loc) => (
-                <option key={loc} value={loc}>
-                  {loc}
-                </option>
-              ))}
-            </select>
-          </div>
+          {/* Location */}
+          <RoundedFilterDropdown
+            label="Location"
+            value={selectedLoc}
+            onChange={setSelectedLoc}
+            options={[
+              { value: "all", label: "All locations" },
+              ...uniqueLocations.map((loc) => ({ value: loc, label: loc })),
+            ]}
+            size="md"
+          />
 
-          <div className="field">
-            <label htmlFor="f-move">Move-in</label>
-            <select
-              id="f-move"
-              value={selectedMove}
-              onChange={(e) => setSelectedMove(e.target.value)}
-            >
-              <option value="all">Any time</option>
-              <option value="this_month">This month</option>
-              <option value="next_month">Next month</option>
-            </select>
-          </div>
+          {/* Move-in */}
+          <RoundedFilterDropdown
+            label="Move-in"
+            value={selectedMove}
+            onChange={setSelectedMove}
+            options={[
+              { value: "all", label: "Any time" },
+              { value: "this_month", label: "This month" },
+              { value: "next_month", label: "Next month" },
+            ]}
+            size="md"
+          />
 
-          <div className="field">
-            <label htmlFor="f-sort">Sort</label>
-            <select
-              id="f-sort"
-              value={selectedSort}
-              onChange={(e) => setSelectedSort(e.target.value)}
-            >
-              <option value="action">Action required first</option>
-              <option value="applied">Recently applied</option>
-              <option value="movein">Earliest move-in</option>
-            </select>
-          </div>
+          {/* Sort */}
+          <RoundedFilterDropdown
+            label="Sort"
+            value={selectedSort}
+            onChange={setSelectedSort}
+            options={[
+              { value: "action", label: "Action required first" },
+              { value: "applied", label: "Recently applied" },
+              { value: "movein", label: "Earliest move-in" },
+            ]}
+            align="right"
+            size="md"
+          />
 
           <button
             type="button"
@@ -2964,7 +2962,7 @@ export function ApplicationsManager() {
                                         ) : capabilities?.rent_collection_enabled ? (
                                           <div className="flex items-center gap-2">
                                             <select
-                                              className="h-9 rounded-lg border border-slate-300 px-2 text-xs"
+                                              className="h-9 rounded-full border border-slate-300 px-3 text-xs cursor-pointer dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                                               value={selectedMethod[o.id] ?? ""}
                                               onChange={(e) =>
                                                 setSelectedMethod((prev) => ({ ...prev, [o.id]: e.target.value }))

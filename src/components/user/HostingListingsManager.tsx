@@ -68,7 +68,7 @@ import {
 } from "@/lib/user-api";
 import { ListARoomWizard, submitOutcomeMessage } from "@/components/user/ListARoomWizard";
 import { useUserSession } from "@/components/user/UserSessionContext";
-import { Field, Toast, inputClass, useToast } from "@/components/user/ui";
+import { Field, Toast, inputClass, selectClass, useToast } from "@/components/user/ui";
 import { HostMoveInSteps } from "@/components/user/HostMoveInSteps";
 import {
   ListingAgreementDetailsFields,
@@ -2547,7 +2547,7 @@ export function HostingListingsManager() {
               <select
                 value={form?.currency ?? "USD"}
                 onChange={(e) => setForm((f) => (f ? { ...f, currency: e.target.value } : f))}
-                className={inputClass}
+                className={selectClass}
               >
                 {SUPPORTED_CURRENCIES.map((c) => (
                   <option key={c} value={c}>

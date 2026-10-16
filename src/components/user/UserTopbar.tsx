@@ -156,7 +156,7 @@ export function UserTopbar({ onOpenMobileSidebar }: { onOpenMobileSidebar: () =>
           </button>
 
           {notifOpen && (
-            <div className="animate-scale-in absolute right-0 mt-2 w-80 origin-top-right rounded-2xl bg-white p-2 shadow-xl shadow-primary-900/15 ring-1 ring-slate-100 dark:bg-slate-800 dark:shadow-black/40 dark:ring-white/10">
+            <div className="animate-scale-in absolute right-0 mt-2 w-[calc(100vw-2rem)] sm:w-80 max-w-sm origin-top-right rounded-2xl bg-white p-2 shadow-xl shadow-primary-900/15 ring-1 ring-slate-100 dark:bg-slate-800 dark:shadow-black/40 dark:ring-white/10">
               <div className="flex items-center justify-between px-3 py-2">
                 <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Notifications</p>
                 {notifications.some((n) => !n.isRead) && (
