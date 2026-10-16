@@ -358,6 +358,23 @@ def decide_application_as_host(
     still go through decide_application/super_admin above."""
     if not user.party_id or party_id_for_listing(application.listing) != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only decide applications for your own listings")
+    if application.status == "DECIDED":
+        # Shortlisting records an approval, so a shortlisted applicant can still be
+        # selected (the approval stands -- nothing new is recorded or sent) or
+        # declined, until an offer is made.
+        latest = max(application.decisions, key=lambda d: (d.decided_at, d.id), default=None)
+        offer = application.offer
+        live_offer = offer is not None and offer.status not in ("DECLINED", "EXPIRED", "WITHDRAWN")
+        if latest is not None and latest.decision == "REJECTED":
+            raise HTTPException(status.HTTP_409_CONFLICT, "This application has already been declined")
+        if live_offer:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This applicant already has an offer. Withdraw the offer before changing the decision.",
+            )
+        if data.decision == "APPROVED" and latest is not None:
+            return latest
+        return _apply_application_decision(db, application, data, admin_id=None, user_id=user.id)
     if application.status != "SUBMITTED":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Application in status {application.status} cannot be decided")
     return _apply_application_decision(db, application, data, admin_id=None, user_id=user.id)
