@@ -72,19 +72,11 @@ const ALWAYS_ON: Array<{ title: string; description: string }> = [
 const LANGUAGES: Array<[UserPreferences["language"], string]> = [
   ["en-GB", "English (UK)"],
   ["en-US", "English (US)"],
-  ["hi-IN", "हिन्दी"],
-  ["te-IN", "తెలుగు"],
 ];
 const REGIONS: Array<[UserPreferences["region"], string]> = [
   ["GB", "United Kingdom"],
   ["US", "United States"],
   ["IN", "India"],
-];
-const CURRENCIES: Array<[UserPreferences["currencyDisplay"], string]> = [
-  ["LISTING", "Match listing currency"],
-  ["GBP", "GBP £"],
-  ["USD", "USD $"],
-  ["INR", "INR ₹"],
 ];
 const TIME_ZONES = ["Europe/London", "Asia/Kolkata", "America/New_York", "America/Chicago", "America/Los_Angeles"];
 
@@ -485,7 +477,8 @@ export function UserSettingsManager({
                 <Loader label="Loading…" />
               ) : (
                 <>
-                  <h2 className="font-heading text-base font-bold text-neutral-900 dark:text-white">In-app notifications</h2>
+                  <h2 className="font-heading text-base font-bold text-neutral-900 dark:text-white">Notifications</h2>
+                  <p className="text-xs text-neutral-500">These choices apply to notifications in the app and to emails.</p>
                   <ul className="divide-y divide-neutral-100 dark:divide-neutral-800">
                     {OPTABLE.map((c) => {
                       const on = !notif.optedOutCategories.includes(c.key);
@@ -524,7 +517,7 @@ export function UserSettingsManager({
                   <div className="space-y-3 border-t border-neutral-100 pt-4 dark:border-neutral-800">
                     <div className="flex items-center justify-between gap-4">
                       <div>
-                        <p className="text-sm font-semibold text-neutral-900 dark:text-white">Quiet hours (UTC)</p>
+                        <p className="text-sm font-semibold text-neutral-900 dark:text-white">Quiet hours ({prefs.timeZone})</p>
                         <p className="text-xs text-neutral-500">Hold routine notifications during these hours. Urgent ones still arrive.</p>
                       </div>
                       <Toggle label="Quiet hours" checked={notif.quietHoursEnabled} onChange={(v) => saveNotif({ ...notif, quietHoursEnabled: v })} />
@@ -568,7 +561,6 @@ export function UserSettingsManager({
                     [
                       ["Language", "language", LANGUAGES],
                       ["Region & formats", "region", REGIONS],
-                      ["Currency display", "currencyDisplay", CURRENCIES],
                     ] as const
                   ).map(([label, key, options]) => (
                     <label key={key} className="text-xs font-bold text-neutral-700 dark:text-neutral-300">
@@ -653,8 +645,7 @@ export function UserSettingsManager({
                 <section className={cardCls}>
                   {(
                     [
-                      ["personalizedRecommendations", "Personalised recommendations", "Use your searches and saved rooms to suggest listings."],
-                      ["optionalAnalytics", "Optional analytics", "Share anonymous usage data to help improve Zoiko Rooms."],
+                      ["personalizedRecommendations", "Personalised recommendations", "In Find a Room, show rooms in cities you've applied to or searched first when sorting by Best match."],
                     ] as const
                   ).map(([key, title, description]) => (
                     <div key={key} className="flex items-center justify-between gap-4">
