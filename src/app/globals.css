@@ -399,3 +399,14 @@ html[data-motion="reduce"] *::after {
   transition-duration: 0.01ms !important;
   scroll-behavior: auto !important;
 }
+
+/* Rounded dropdown styling across all pages */
+select:not([multiple]):not([size]) {
+  border-radius: 9999px !important;
+}
+
+[role="listbox"],
+[role="menu"] {
+  border-radius: 1rem !important;
+}
+

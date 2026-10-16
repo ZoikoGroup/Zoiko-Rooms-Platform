@@ -144,15 +144,14 @@ export function HostingPropertiesManager() {
   // Three-dots menus open state
   const [openPropertyMenuId, setOpenPropertyMenuId] = useState<number | null>(null);
   const [openRoomMenuId, setOpenRoomMenuId] = useState<number | null>(null);
-  const propMenuRef = useRef<HTMLDivElement>(null);
-  const roomMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (propMenuRef.current && !propMenuRef.current.contains(event.target as Node)) {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest("[data-property-menu]")) {
         setOpenPropertyMenuId(null);
       }
-      if (roomMenuRef.current && !roomMenuRef.current.contains(event.target as Node)) {
+      if (!target?.closest("[data-room-menu]")) {
         setOpenRoomMenuId(null);
       }
     }
@@ -678,20 +677,20 @@ export function HostingPropertiesManager() {
     <div className="w-full space-y-5 font-sans">
       {/* 1. Page Header Section matching Figma Frame (UNTOUCHED Add Property & List a Room buttons) */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pt-1">
-        <div className="space-y-1.5">
-          <p className="text-[11px] font-bold text-[#D80B0B] dark:text-red-400 uppercase tracking-widest font-heading">
+        <div className="space-y-1 sm:space-y-1.5">
+          <p className="text-[10px] sm:text-[11px] font-bold text-[#D80B0B] dark:text-red-400 uppercase tracking-widest font-heading">
             Host workspace
           </p>
-          <h1 className="text-3xl sm:text-4xl font-extrabold text-[#0E2F73] dark:text-white leading-tight font-heading">
+          <h1 className="text-2xl sm:text-3xl md:text-4xl font-extrabold text-[#0E2F73] dark:text-white leading-tight font-heading">
             Properties &amp; Rooms
           </h1>
-          <p className="text-sm sm:text-base text-slate-500 dark:text-slate-400 font-normal max-w-3xl">
+          <p className="text-xs sm:text-sm md:text-base text-slate-500 dark:text-slate-400 font-normal max-w-3xl">
             Manage your properties, rooms, availability, listings, applications, agreements and occupancy.
           </p>
         </div>
 
-        {/* Action Buttons top right - Exact working Add Property and List a Room preserved */}
-        <div className="flex items-center gap-3 shrink-0 flex-wrap">
+        {/* Action Buttons top right - Responsive side-by-side on mobile, flex on desktop */}
+        <div className="grid grid-cols-2 sm:flex sm:items-center gap-2.5 sm:gap-3 w-full sm:w-auto shrink-0">
           <button
             onClick={() =>
               setPropertyForm({
@@ -703,48 +702,48 @@ export function HostingPropertiesManager() {
                 regionLocked: false,
               })
             }
-            className="h-11 px-6 rounded-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-[#0E2F73] dark:text-white font-bold text-sm hover:bg-slate-50 dark:hover:bg-slate-800 shadow-2xs transition flex items-center justify-center gap-2 cursor-pointer"
+            className="h-10 sm:h-11 px-3 sm:px-6 rounded-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-[#0E2F73] dark:text-white font-bold text-xs sm:text-sm hover:bg-slate-50 dark:hover:bg-slate-800 shadow-2xs transition flex items-center justify-center gap-1.5 sm:gap-2 cursor-pointer w-full sm:w-auto"
           >
-            <Plus className="size-4 text-[#0E2F73] dark:text-white" />
-            <span>Add Property</span>
+            <Plus className="size-3.5 sm:size-4 text-[#0E2F73] dark:text-white shrink-0" />
+            <span className="truncate">Add Property</span>
           </button>
 
           <button
             onClick={() => setWizardOpen(true)}
-            className="h-11 px-6 rounded-full bg-[#0E2F73] hover:bg-[#0a2358] text-white font-bold text-sm shadow-md transition flex items-center justify-center gap-2 cursor-pointer"
+            className="h-10 sm:h-11 px-3 sm:px-6 rounded-full bg-[#0E2F73] hover:bg-[#0a2358] text-white font-bold text-xs sm:text-sm shadow-md transition flex items-center justify-center gap-1.5 sm:gap-2 cursor-pointer w-full sm:w-auto"
           >
-            <Plus className="size-4 text-white" />
-            <span>List a Room</span>
+            <Plus className="size-3.5 sm:size-4 text-white shrink-0" />
+            <span className="truncate">List a Room</span>
           </button>
         </div>
       </div>
 
       {/* 2. Five KPI Metric Cards - Interactive filter buttons matching Figma */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5 pt-1">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5 sm:gap-3.5 pt-1">
         {/* Card 1: Total Rooms */}
         <button
           type="button"
           onClick={() => setCardFilter((prev) => (prev === "all" ? "all" : "all"))}
           aria-pressed={cardFilter === "all"}
-          className={`text-left rounded-3xl border-2 p-4 sm:p-5 flex flex-col justify-between shadow-2xs transition cursor-pointer ${
+          className={`text-left rounded-3xl border-2 p-3.5 sm:p-4 md:p-5 flex flex-col justify-between shadow-2xs transition cursor-pointer ${
             cardFilter === "all"
               ? "border-[#0E2F73] dark:border-sky-400 bg-[#F5F8FE] dark:bg-slate-800"
               : "border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-300"
           }`}
         >
-          <div className="flex items-center gap-3">
-            <div className="size-9 rounded-xl bg-[#EAF0FB] flex items-center justify-center text-[#0E2F73] shrink-0">
-              <LayoutGrid className="size-4" />
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <div className="size-8 sm:size-9 rounded-xl bg-[#EAF0FB] flex items-center justify-center text-[#0E2F73] shrink-0">
+              <LayoutGrid className="size-3.5 sm:size-4" />
             </div>
-            <span className="text-3xl font-extrabold text-[#0B1B3F] dark:text-white font-heading leading-none">
+            <span className="text-2xl sm:text-3xl font-extrabold text-[#0B1B3F] dark:text-white font-heading leading-none">
               {metrics.totalRooms}
             </span>
           </div>
-          <div className="mt-3.5 space-y-1">
-            <p className="text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading leading-tight">
+          <div className="mt-3 sm:mt-3.5 space-y-1">
+            <p className="text-xs sm:text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading leading-tight truncate">
               Total Rooms
             </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400 leading-normal">
+            <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 leading-normal line-clamp-2">
               {metrics.availableCount} Available · {metrics.underOfferCount} Under Offer · {metrics.occupiedCount} Occupied
             </p>
           </div>
@@ -755,25 +754,25 @@ export function HostingPropertiesManager() {
           type="button"
           onClick={() => setCardFilter((prev) => (prev === "available" ? "all" : "available"))}
           aria-pressed={cardFilter === "available"}
-          className={`text-left rounded-3xl border-2 p-4 sm:p-5 flex flex-col justify-between shadow-2xs transition cursor-pointer ${
+          className={`text-left rounded-3xl border-2 p-3.5 sm:p-4 md:p-5 flex flex-col justify-between shadow-2xs transition cursor-pointer ${
             cardFilter === "available"
               ? "border-[#0E2F73] dark:border-sky-400 bg-[#F5F8FE] dark:bg-slate-800"
               : "border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-300"
           }`}
         >
-          <div className="flex items-center gap-3">
-            <div className="size-9 rounded-xl bg-[#E7F8EF] flex items-center justify-center text-[#05603A] shrink-0">
-              <Check className="size-4" />
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <div className="size-8 sm:size-9 rounded-xl bg-[#E7F8EF] flex items-center justify-center text-[#05603A] shrink-0">
+              <Check className="size-3.5 sm:size-4" />
             </div>
-            <span className="text-3xl font-extrabold text-[#0B1B3F] dark:text-white font-heading leading-none">
+            <span className="text-2xl sm:text-3xl font-extrabold text-[#0B1B3F] dark:text-white font-heading leading-none">
               {metrics.availableCount}
             </span>
           </div>
-          <div className="mt-3.5 space-y-1">
-            <p className="text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading leading-tight">
+          <div className="mt-3 sm:mt-3.5 space-y-1">
+            <p className="text-xs sm:text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading leading-tight truncate">
               Available
             </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400">Ready to rent</p>
+            <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400">Ready to rent</p>
           </div>
         </button>
 
@@ -782,25 +781,25 @@ export function HostingPropertiesManager() {
           type="button"
           onClick={() => setCardFilter((prev) => (prev === "offer" ? "all" : "offer"))}
           aria-pressed={cardFilter === "offer"}
-          className={`text-left rounded-3xl border-2 p-4 sm:p-5 flex flex-col justify-between shadow-2xs transition cursor-pointer ${
+          className={`text-left rounded-3xl border-2 p-3.5 sm:p-4 md:p-5 flex flex-col justify-between shadow-2xs transition cursor-pointer ${
             cardFilter === "offer"
               ? "border-[#0E2F73] dark:border-sky-400 bg-[#F5F8FE] dark:bg-slate-800"
               : "border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-300"
           }`}
         >
-          <div className="flex items-center gap-3">
-            <div className="size-9 rounded-xl bg-[#FFF4E0] flex items-center justify-center text-[#93370D] shrink-0">
-              <Clock className="size-4" />
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <div className="size-8 sm:size-9 rounded-xl bg-[#FFF4E0] flex items-center justify-center text-[#93370D] shrink-0">
+              <Clock className="size-3.5 sm:size-4" />
             </div>
-            <span className="text-3xl font-extrabold text-[#0B1B3F] dark:text-white font-heading leading-none">
+            <span className="text-2xl sm:text-3xl font-extrabold text-[#0B1B3F] dark:text-white font-heading leading-none">
               {metrics.underOfferCount}
             </span>
           </div>
-          <div className="mt-3.5 space-y-1">
-            <p className="text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading leading-tight">
+          <div className="mt-3 sm:mt-3.5 space-y-1">
+            <p className="text-xs sm:text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading leading-tight truncate">
               Under Offer
             </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400">Awaiting decision</p>
+            <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400">Awaiting decision</p>
           </div>
         </button>
 
@@ -809,25 +808,25 @@ export function HostingPropertiesManager() {
           type="button"
           onClick={() => setCardFilter((prev) => (prev === "occupied" ? "all" : "occupied"))}
           aria-pressed={cardFilter === "occupied"}
-          className={`text-left rounded-3xl border-2 p-4 sm:p-5 flex flex-col justify-between shadow-2xs transition cursor-pointer ${
+          className={`text-left rounded-3xl border-2 p-3.5 sm:p-4 md:p-5 flex flex-col justify-between shadow-2xs transition cursor-pointer ${
             cardFilter === "occupied"
               ? "border-[#0E2F73] dark:border-sky-400 bg-[#F5F8FE] dark:bg-slate-800"
               : "border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-300"
           }`}
         >
-          <div className="flex items-center gap-3">
-            <div className="size-9 rounded-xl bg-[#EAF0FB] flex items-center justify-center text-[#0E2F73] shrink-0">
-              <DoorOpen className="size-4" />
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <div className="size-8 sm:size-9 rounded-xl bg-[#EAF0FB] flex items-center justify-center text-[#0E2F73] shrink-0">
+              <DoorOpen className="size-3.5 sm:size-4" />
             </div>
-            <span className="text-3xl font-extrabold text-[#0B1B3F] dark:text-white font-heading leading-none">
+            <span className="text-2xl sm:text-3xl font-extrabold text-[#0B1B3F] dark:text-white font-heading leading-none">
               {metrics.occupiedCount}
             </span>
           </div>
-          <div className="mt-3.5 space-y-1">
-            <p className="text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading leading-tight">
+          <div className="mt-3 sm:mt-3.5 space-y-1">
+            <p className="text-xs sm:text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading leading-tight truncate">
               Occupied
             </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400">
               {metrics.occupiedCount === 1 ? "1 currently active" : `${metrics.occupiedCount} active`}
             </p>
           </div>
@@ -838,25 +837,25 @@ export function HostingPropertiesManager() {
           type="button"
           onClick={() => setCardFilter((prev) => (prev === "action" ? "all" : "action"))}
           aria-pressed={cardFilter === "action"}
-          className={`text-left rounded-3xl border-2 p-4 sm:p-5 flex flex-col justify-between shadow-2xs transition cursor-pointer col-span-2 sm:col-span-1 ${
+          className={`text-left rounded-3xl border-2 p-3.5 sm:p-4 md:p-5 flex flex-col justify-between shadow-2xs transition cursor-pointer col-span-2 sm:col-span-1 ${
             cardFilter === "action"
               ? "border-[#B42318] dark:border-red-400 bg-[#FFF7F7] dark:bg-red-950/20"
               : "border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-300"
           }`}
         >
-          <div className="flex items-center gap-3">
-            <div className="size-9 rounded-xl bg-[#FDECEC] flex items-center justify-center text-[#B42318] shrink-0">
-              <AlertTriangle className="size-4" />
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <div className="size-8 sm:size-9 rounded-xl bg-[#FDECEC] flex items-center justify-center text-[#B42318] shrink-0">
+              <AlertTriangle className="size-3.5 sm:size-4" />
             </div>
-            <span className="text-3xl font-extrabold text-[#B42318] font-heading leading-none">
+            <span className="text-2xl sm:text-3xl font-extrabold text-[#B42318] font-heading leading-none">
               {metrics.actionRequiredCount}
             </span>
           </div>
-          <div className="mt-3.5 space-y-1">
-            <p className="text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading leading-tight">
+          <div className="mt-3 sm:mt-3.5 space-y-1">
+            <p className="text-xs sm:text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading leading-tight truncate">
               Action Required
             </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400">
               {metrics.actionRequiredCount > 0 ? "Needs your attention" : "All clear"}
             </p>
           </div>
@@ -879,7 +878,7 @@ export function HostingPropertiesManager() {
           </div>
           <Link
             href="/account/host/applications"
-            className="h-10 px-5 rounded-full bg-[#0E2F73] hover:bg-[#0a2358] text-white text-xs font-bold font-heading shadow-sm transition flex items-center justify-center shrink-0"
+            className="h-10 px-5 rounded-full bg-[#0E2F73] hover:bg-[#0a2358] text-white text-xs font-bold font-heading shadow-sm transition flex items-center justify-center shrink-0 w-full sm:w-auto"
           >
             Review Offers
           </Link>
@@ -887,10 +886,10 @@ export function HostingPropertiesManager() {
       )}
 
       {/* 4. Filter & Search Bar matching Figma Frame */}
-      <div className="w-full bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 shadow-2xs space-y-3">
-        <div className="flex flex-col lg:flex-row lg:items-end gap-3.5">
+      <div className="w-full bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 p-3.5 sm:p-5 shadow-2xs space-y-3">
+        <div className="flex flex-col xl:flex-row xl:items-end gap-3 sm:gap-3.5">
           {/* Search Box */}
-          <div className="flex-1 min-w-[240px]">
+          <div className="w-full xl:flex-1 xl:min-w-[240px]">
             <div className="relative">
               <Search className="size-4 text-slate-400 absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
@@ -898,55 +897,58 @@ export function HostingPropertiesManager() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search properties, rooms or addresses…"
-                className="w-full h-11 pl-10 pr-4 bg-[#F4F6FB] dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full text-xs text-[#0E2F73] dark:text-slate-200 placeholder:text-slate-400 outline-none focus:ring-2 focus:ring-[#0E2F73] font-normal shadow-2xs"
+                className="w-full h-10 sm:h-11 pl-10 pr-4 bg-[#F4F6FB] dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full text-xs text-[#0E2F73] dark:text-slate-200 placeholder:text-slate-400 outline-none focus:ring-2 focus:ring-[#0E2F73] font-normal shadow-2xs"
               />
             </div>
           </div>
 
-          {/* 1. Room Status Dropdown */}
-          <RoundedFilterDropdown
-            label="Room Status"
-            value={roomStatusFilter}
-            onChange={setRoomStatusFilter}
-            options={roomStatusOptions}
-          />
+          {/* Filter Dropdowns Grid */}
+          <div className="grid grid-cols-1 min-[480px]:grid-cols-2 md:grid-cols-3 xl:flex xl:items-end gap-2.5 sm:gap-3 w-full xl:w-auto">
+            {/* 1. Room Status Dropdown */}
+            <RoundedFilterDropdown
+              label="Room Status"
+              value={roomStatusFilter}
+              onChange={setRoomStatusFilter}
+              options={roomStatusOptions}
+            />
 
-          {/* 2. Property Dropdown */}
-          <RoundedFilterDropdown
-            label="Property"
-            value={propertyFilter}
-            onChange={setPropertyFilter}
-            options={propertyOptions}
-          />
+            {/* 2. Property Dropdown */}
+            <RoundedFilterDropdown
+              label="Property"
+              value={propertyFilter}
+              onChange={setPropertyFilter}
+              options={propertyOptions}
+            />
 
-          {/* 3. Listing Status Dropdown */}
-          <RoundedFilterDropdown
-            label="Listing Status"
-            value={listingStatusFilter}
-            onChange={setListingStatusFilter}
-            options={listingStatusOptions}
-          />
+            {/* 3. Listing Status Dropdown */}
+            <RoundedFilterDropdown
+              label="Listing Status"
+              value={listingStatusFilter}
+              onChange={setListingStatusFilter}
+              options={listingStatusOptions}
+            />
 
-          {/* 4. Verification Status Dropdown */}
-          <RoundedFilterDropdown
-            label="Verification Status"
-            value={verificationFilter}
-            onChange={setVerificationFilter}
-            options={verificationOptions}
-          />
+            {/* 4. Verification Status Dropdown */}
+            <RoundedFilterDropdown
+              label="Verification Status"
+              value={verificationFilter}
+              onChange={setVerificationFilter}
+              options={verificationOptions}
+            />
 
-          {/* 5. Sort Dropdown */}
-          <RoundedFilterDropdown
-            label="Sort"
-            value={sortOption}
-            onChange={setSortOption}
-            options={sortOptions}
-            align="right"
-          />
+            {/* 5. Sort Dropdown */}
+            <RoundedFilterDropdown
+              label="Sort"
+              value={sortOption}
+              onChange={setSortOption}
+              options={sortOptions}
+              align="right"
+            />
+          </div>
         </div>
 
         {/* Counter bottom and Clear filters */}
-        <div className="flex items-center justify-between pt-1">
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100 dark:border-slate-800/60">
           <p className="text-xs text-slate-500 dark:text-slate-400">
             Showing {totalFilteredRooms} of {metrics.totalRooms} rooms
           </p>
@@ -971,12 +973,12 @@ export function HostingPropertiesManager() {
       {/* 5. Property Cards (Accordions) from Figma Frame */}
       {filteredProperties.length === 0 ? (
         /* Empty State Card matching Figma Frame */
-        <div className="p-12 text-center bg-white dark:bg-slate-900 rounded-3xl border border-dashed border-slate-300 dark:border-slate-800 flex flex-col items-center justify-center gap-4">
-          <div className="size-16 rounded-3xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 shadow-inner">
-            <Home className="size-8 text-[#0E2F73] dark:text-white" />
+        <div className="p-6 sm:p-12 text-center bg-white dark:bg-slate-900 rounded-3xl border border-dashed border-slate-300 dark:border-slate-800 flex flex-col items-center justify-center gap-4">
+          <div className="size-14 sm:size-16 rounded-3xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 shadow-inner">
+            <Home className="size-7 sm:size-8 text-[#0E2F73] dark:text-white" />
           </div>
           <div className="space-y-1">
-            <h3 className="text-slate-900 dark:text-white font-extrabold text-lg font-heading">
+            <h3 className="text-slate-900 dark:text-white font-extrabold text-base sm:text-lg font-heading">
               {metrics.totalRooms === 0 ? "No properties yet" : "No rooms match these filters"}
             </h3>
             <p className="text-slate-500 dark:text-slate-400 text-xs max-w-md mx-auto">
@@ -985,7 +987,7 @@ export function HostingPropertiesManager() {
                 : "Try adjusting your search query or filters."}
             </p>
           </div>
-          <div className="flex items-center gap-2.5 mt-2">
+          <div className="flex flex-wrap items-center justify-center gap-2.5 mt-2 w-full sm:w-auto">
             <button
               onClick={() =>
                 setPropertyForm({
@@ -997,13 +999,13 @@ export function HostingPropertiesManager() {
                   regionLocked: false,
                 })
               }
-              className="px-5 py-2.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-[#0E2F73] dark:text-white text-xs font-bold font-heading rounded-full shadow-2xs hover:bg-slate-50 transition cursor-pointer"
+              className="h-10 px-5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-[#0E2F73] dark:text-white text-xs font-bold font-heading rounded-full shadow-2xs hover:bg-slate-50 transition cursor-pointer w-full sm:w-auto"
             >
               Add Property
             </button>
             <button
               onClick={() => setWizardOpen(true)}
-              className="px-5 py-2.5 bg-[#0E2F73] text-white text-xs font-bold font-heading rounded-full shadow-sm hover:bg-[#0a2358] transition cursor-pointer"
+              className="h-10 px-5 bg-[#0E2F73] text-white text-xs font-bold font-heading rounded-full shadow-sm hover:bg-[#0a2358] transition cursor-pointer w-full sm:w-auto"
             >
               List a Room
             </button>
@@ -1028,13 +1030,13 @@ export function HostingPropertiesManager() {
                 className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden"
               >
                 {/* Property Accordion Header */}
-                <div className="px-5 py-4 bg-[#F7F9FD] dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800 flex flex-col md:flex-row md:items-start justify-between gap-3.5">
-                  <div className="flex items-start gap-3.5 flex-1 min-w-0">
+                <div className="px-4 py-3.5 sm:px-5 sm:py-4 bg-[#F7F9FD] dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800 flex flex-col md:flex-row md:items-start justify-between gap-3.5">
+                  <div className="flex items-start gap-3 sm:gap-3.5 flex-1 min-w-0">
                     {/* Accordion Expand/Collapse button */}
                     <button
                       type="button"
                       onClick={() => togglePropertyCollapse(prop.id)}
-                      className="size-9 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 flex items-center justify-center text-[#0E2F73] hover:text-slate-900 transition cursor-pointer mt-1 shrink-0"
+                      className="size-8 sm:size-9 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 flex items-center justify-center text-[#0E2F73] hover:text-slate-900 transition cursor-pointer mt-0.5 sm:mt-1 shrink-0"
                       title={isCollapsed ? "Expand property" : "Collapse property"}
                     >
                       <ChevronDown
@@ -1045,28 +1047,28 @@ export function HostingPropertiesManager() {
                     </button>
 
                     {/* Property icon */}
-                    <div className="size-10 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-[#0E2F73] dark:text-white shrink-0 mt-0.5">
-                      <Building2 className="size-5" />
+                    <div className="size-8 sm:size-10 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-[#0E2F73] dark:text-white shrink-0 mt-0.5">
+                      <Building2 className="size-4 sm:size-5" />
                     </div>
 
                     {/* Property details */}
                     <div className="space-y-1 flex-1 min-w-0">
-                      <div className="flex items-baseline gap-2.5 flex-wrap">
-                        <h2 className="text-lg font-extrabold text-[#0E2F73] dark:text-white font-heading">
+                      <div className="flex items-baseline gap-2 flex-wrap">
+                        <h2 className="text-base sm:text-lg font-extrabold text-[#0E2F73] dark:text-white font-heading">
                           {prop.name}
                         </h2>
                         <span className="text-xs font-semibold text-slate-500">
                           Property #{prop.code}
                         </span>
                       </div>
-                      <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                      <p className="text-xs text-slate-500 dark:text-slate-400 break-words line-clamp-2 sm:truncate">
                         {prop.address}
                       </p>
 
                       {/* Verified pills + Room Counts */}
-                      <div className="flex items-center gap-2 pt-1 flex-wrap">
+                      <div className="flex items-center gap-1.5 sm:gap-2 pt-1 flex-wrap">
                         {prop.propertyVerified ? (
-                          <div className="px-2.5 py-1 bg-[#E7F8EF] text-[#05603A] rounded-full text-xs font-bold flex items-center gap-1.5 border border-[#8FD9B4]">
+                          <div className="px-2.5 py-0.5 sm:py-1 bg-[#E7F8EF] text-[#05603A] rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 border border-[#8FD9B4]">
                             <ShieldCheck className="size-3 text-[#05603A]" />
                             <span>Property Verified</span>
                           </div>
@@ -1079,7 +1081,7 @@ export function HostingPropertiesManager() {
                                 label: `${prop.address} · Property #${prop.id}`,
                               })
                             }
-                            className="px-2.5 py-1 bg-[#EEF3FF] hover:bg-sky-100 text-[#1D3F8F] rounded-full text-xs font-bold flex items-center gap-1.5 border border-[#AFC2EE] cursor-pointer transition"
+                            className="px-2.5 py-0.5 sm:py-1 bg-[#EEF3FF] hover:bg-sky-100 text-[#1D3F8F] rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 border border-[#AFC2EE] cursor-pointer transition"
                           >
                             <Clock className="size-3 text-[#1D3F8F]" />
                             <span>Property verification In Review</span>
@@ -1087,7 +1089,7 @@ export function HostingPropertiesManager() {
                         )}
 
                         {prop.authorityVerified ? (
-                          <div className="px-2.5 py-1 bg-[#E7F8EF] text-[#05603A] rounded-full text-xs font-bold flex items-center gap-1.5 border border-[#8FD9B4]">
+                          <div className="px-2.5 py-0.5 sm:py-1 bg-[#E7F8EF] text-[#05603A] rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 border border-[#8FD9B4]">
                             <ShieldCheck className="size-3 text-[#05603A]" />
                             <span>Listing Authority Verified</span>
                           </div>
@@ -1100,14 +1102,14 @@ export function HostingPropertiesManager() {
                                 label: `${prop.address} · Property #${prop.id}`,
                               })
                             }
-                            className="px-2.5 py-1 bg-[#EEF3FF] hover:bg-sky-100 text-[#1D3F8F] rounded-full text-xs font-bold flex items-center gap-1.5 border border-[#AFC2EE] cursor-pointer transition"
+                            className="px-2.5 py-0.5 sm:py-1 bg-[#EEF3FF] hover:bg-sky-100 text-[#1D3F8F] rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 border border-[#AFC2EE] cursor-pointer transition"
                           >
                             <Clock className="size-3 text-[#1D3F8F]" />
                             <span>Listing authority In Review</span>
                           </button>
                         )}
 
-                        <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                        <span className="text-[11px] sm:text-xs font-semibold text-slate-600 dark:text-slate-300 w-full sm:w-auto mt-0.5 sm:mt-0">
                           {prop.rooms.length} {prop.rooms.length === 1 ? "room" : "rooms"}
                           {prop.rooms.length > 0 &&
                             ` · ${availableCount} Available · ${occupiedCount} Occupied · ${underOfferCount} Under Offer · ${notMarketedCount} Not Marketed`}
@@ -1117,7 +1119,7 @@ export function HostingPropertiesManager() {
                   </div>
 
                   {/* Header Actions */}
-                  <div className="flex items-center gap-2 shrink-0 relative">
+                  <div className="flex items-center gap-2 shrink-0 relative w-full md:w-auto pt-2 md:pt-0 border-t md:border-t-0 border-slate-200/60 dark:border-slate-800 justify-between sm:justify-end">
                     <button
                       onClick={() =>
                         setRoomForm({
@@ -1127,7 +1129,7 @@ export function HostingPropertiesManager() {
                           hasEnsuite: false,
                         })
                       }
-                      className="h-10 px-4 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 text-[#0E2F73] dark:text-white text-xs font-bold font-heading rounded-full shadow-2xs transition flex items-center gap-1.5 cursor-pointer"
+                      className="flex-1 sm:flex-initial h-9 sm:h-10 px-3 sm:px-4 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 text-[#0E2F73] dark:text-white text-xs font-bold font-heading rounded-full shadow-2xs transition flex items-center justify-center gap-1.5 cursor-pointer"
                     >
                       <Plus className="size-3.5 text-[#0E2F73] dark:text-white" />
                       <span>Add Room</span>
@@ -1144,15 +1146,15 @@ export function HostingPropertiesManager() {
                           regionLocked: prop.rawProperty.regionLocked,
                         });
                       }}
-                      className="h-10 px-4 bg-[#EEF2F9] hover:bg-slate-200 dark:bg-slate-800 text-[#0E2F73] dark:text-white text-xs font-bold font-heading rounded-full transition cursor-pointer"
+                      className="flex-1 sm:flex-initial h-9 sm:h-10 px-3 sm:px-4 bg-[#EEF2F9] hover:bg-slate-200 dark:bg-slate-800 text-[#0E2F73] dark:text-white text-xs font-bold font-heading rounded-full transition flex items-center justify-center cursor-pointer"
                     >
                       Manage Property
                     </button>
 
                     {/* Three-dots menu trigger */}
                     <div
-                      className="relative"
-                      ref={openPropertyMenuId === prop.id ? propMenuRef : null}
+                      className="relative shrink-0"
+                      data-property-menu
                     >
                       <button
                         type="button"
@@ -1261,20 +1263,10 @@ export function HostingPropertiesManager() {
                         </button>
                       </div>
                     ) : (
-                      /* Table of Real Rooms matching Figma design */
-                      <div className="w-full overflow-x-auto">
-                        {/* Table Header Row */}
-                        <div className="min-w-[920px] px-6 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center text-[11px] font-bold text-slate-500 font-heading uppercase tracking-wider bg-[#F7F9FD] dark:bg-slate-800/40">
-                          <div className="w-56 shrink-0">Room</div>
-                          <div className="w-36 shrink-0">Room status</div>
-                          <div className="w-52 shrink-0">Listing status</div>
-                          <div className="w-52 shrink-0">Current rental / offer</div>
-                          <div className="w-48 shrink-0">Next milestone</div>
-                          <div className="flex-1 text-right">Action</div>
-                        </div>
-
-                        {/* Room Rows */}
-                        <div className="divide-y divide-slate-100 dark:divide-slate-800 min-w-[920px]">
+                      /* Rooms Display: Dual Mobile Card & Desktop Table View */
+                      <div className="w-full">
+                        {/* A. Mobile & Tablet Card Layout (block lg:hidden) */}
+                        <div className="block lg:hidden divide-y divide-slate-100 dark:divide-slate-800">
                           {prop.rooms.map((room) => {
                             return (
                               <div
@@ -1282,132 +1274,188 @@ export function HostingPropertiesManager() {
                                 onClick={() =>
                                   setSelectedRoomForDrawer({ room, property: prop })
                                 }
-                                className={`px-6 py-3.5 flex items-center transition cursor-pointer ${
+                                className={`p-4 sm:p-5 space-y-3.5 transition cursor-pointer ${
                                   room.actionPrimary
                                     ? "bg-[#FFF8F8] dark:bg-red-950/10 hover:bg-red-50/40"
                                     : "hover:bg-slate-50/60 dark:hover:bg-slate-800/30"
                                 }`}
                               >
-                                {/* 1. Room info + thumbnail */}
-                                <div className="w-56 shrink-0 flex items-center gap-3">
+                                {/* 1. Room info + thumbnail + 3-dots */}
+                                <div className="flex items-start gap-3">
                                   <img
                                     src={resolveImageUrl(room.image)}
                                     alt={room.title}
-                                    className="w-13 h-11 rounded-xl object-cover bg-slate-100 shrink-0 border border-slate-200/60 dark:border-slate-700"
+                                    className="size-14 sm:size-16 rounded-xl object-cover bg-slate-100 shrink-0 border border-slate-200/60 dark:border-slate-700"
                                   />
-                                  <div className="space-y-0.5 min-w-0">
-                                    <p className="text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading truncate hover:text-[#D80B0B]">
-                                      {room.title}
-                                    </p>
+                                  <div className="min-w-0 flex-1 space-y-1">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <p className="text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading truncate leading-tight hover:text-[#D80B0B]">
+                                        {room.title}
+                                      </p>
+
+                                      {/* Three dots button */}
+                                      <div
+                                        className="relative shrink-0"
+                                        data-room-menu
+                                      >
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setOpenRoomMenuId((prev) =>
+                                              prev === room.id ? null : room.id
+                                            );
+                                          }}
+                                          className="size-8 rounded-full flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 transition cursor-pointer"
+                                        >
+                                          <MoreVertical className="size-4" />
+                                        </button>
+
+                                        {openRoomMenuId === room.id && (
+                                          <div
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="absolute right-0 top-8 z-30 w-44 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl py-1.5 animate-in fade-in zoom-in-95 duration-100"
+                                          >
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setOpenRoomMenuId(null);
+                                                setRoomForm({
+                                                  propertyId: prop.id,
+                                                  id: room.id,
+                                                  size: String(room.size),
+                                                  hasEnsuite: room.hasEnsuite,
+                                                });
+                                              }}
+                                              className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                            >
+                                              Edit room
+                                            </button>
+                                            {room.listing && (
+                                              <Link
+                                                href={`/account/host/listings`}
+                                                className="block w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                              >
+                                                View Listing
+                                              </Link>
+                                            )}
+                                            {room.occupancyId && (
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  setOpenRoomMenuId(null);
+                                                  setRecordOccupancyId(room.occupancyId ?? null);
+                                                }}
+                                                className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                              >
+                                                Rental Record
+                                              </button>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
                                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                                      {room.type} {room.size > 0 ? `· ${room.size} sq ft` : ""}
+                                      {room.type} {room.size > 0 ? `· ${room.size} sq ft` : ""}{room.hasEnsuite ? " · Ensuite" : ""}
                                     </p>
                                   </div>
                                 </div>
 
-                                {/* 2. Room Status Badge */}
-                                <div className="w-36 shrink-0">
+                                {/* 2. Badges Row: Room Status + Listing Status */}
+                                <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-100 dark:border-slate-800/60">
+                                  {/* Room Status Badge */}
                                   {room.roomStatus === "UNDER_OFFER" && (
-                                    <div className="px-2.5 py-1 rounded-full bg-[#FFF4E0] text-[#93370D] border border-[#F2B866] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 w-fit">
+                                    <div className="px-2.5 py-0.5 rounded-full bg-[#FFF4E0] text-[#93370D] border border-[#F2B866] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5">
                                       <Clock className="size-3 text-[#93370D]" />
                                       <span>Under Offer</span>
                                     </div>
                                   )}
                                   {room.roomStatus === "AVAILABLE" && (
-                                    <div className="px-2.5 py-1 rounded-full bg-[#E7F8EF] text-[#05603A] border border-[#8FD9B4] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 w-fit">
+                                    <div className="px-2.5 py-0.5 rounded-full bg-[#E7F8EF] text-[#05603A] border border-[#8FD9B4] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5">
                                       <Check className="size-3 text-[#05603A]" />
                                       <span>Available</span>
                                     </div>
                                   )}
                                   {room.roomStatus === "NOTICE_GIVEN" && (
-                                    <div className="px-2.5 py-1 rounded-full bg-[#EAF0FB] text-[#0E2F73] border border-[#0E2F73] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 w-fit">
+                                    <div className="px-2.5 py-0.5 rounded-full bg-[#EAF0FB] text-[#0E2F73] border border-[#0E2F73] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5">
                                       <Calendar className="size-3 text-[#0E2F73]" />
                                       <span>Notice Given</span>
                                     </div>
                                   )}
                                   {room.roomStatus === "OCCUPIED" && (
-                                    <div className="px-2.5 py-1 rounded-full bg-[#0E2F73] text-white text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 w-fit">
+                                    <div className="px-2.5 py-0.5 rounded-full bg-[#0E2F73] text-white text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5">
                                       <Key className="size-3 text-white" />
                                       <span>Occupied</span>
                                     </div>
                                   )}
-                                </div>
 
-                                {/* 3. Listing Status */}
-                                <div className="w-52 shrink-0 space-y-0.5">
-                                  <div className="flex items-center gap-1.5">
+                                  {/* Listing Status Badge */}
+                                  <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-[11px] font-medium text-slate-600 dark:text-slate-300">
                                     <span
                                       className={`size-2 rounded-full ${
                                         room.listingStatus === "LIVE" ? "bg-[#12A15E]" : "bg-slate-400"
                                       }`}
                                     />
-                                    <span
-                                      className={`text-sm font-bold font-heading ${
-                                        room.listingStatus === "LIVE"
-                                          ? "text-[#05603A]"
-                                          : "text-slate-600 dark:text-slate-300"
-                                      }`}
-                                    >
+                                    <span className="font-bold">
                                       {room.listingStatus === "LIVE" ? "Live" : "Paused"}
                                     </span>
+                                    <span className="text-slate-400 dark:text-slate-500">· {room.listingStatusSubtext}</span>
                                   </div>
-                                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-tight">
-                                    {room.listingStatusSubtext}
-                                  </p>
                                 </div>
 
-                                {/* 4. Current Rental / Offer */}
-                                <div className="w-52 shrink-0 space-y-0.5">
-                                  {room.currentRentalOrOffer === "—" ? (
-                                    <span className="text-slate-400">—</span>
-                                  ) : (
-                                    <>
-                                      <p className="text-sm font-bold text-[#0E2F73] dark:text-white font-heading">
-                                        {room.currentRentalOrOffer}
+                                {/* 3. Key Details: Current Rental / Offer & Next Milestone */}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-3 rounded-xl bg-slate-50/70 dark:bg-slate-800/40 text-xs">
+                                  <div>
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block font-heading">
+                                      Current Rental / Offer
+                                    </span>
+                                    <p className="font-extrabold text-sm text-[#0E2F73] dark:text-white font-heading mt-0.5">
+                                      {room.currentRentalOrOffer}
+                                    </p>
+                                    {room.currentRentalDate && (
+                                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                                        {room.currentRentalDate}
                                       </p>
-                                      {room.currentRentalDate && (
-                                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                                          {room.currentRentalDate}
-                                        </p>
-                                      )}
-                                    </>
-                                  )}
+                                    )}
+                                  </div>
+
+                                  <div>
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block font-heading">
+                                      Next Milestone
+                                    </span>
+                                    {room.nextMilestone === "—" ? (
+                                      <span className="text-slate-400 text-xs block mt-0.5">—</span>
+                                    ) : (
+                                      <div className="flex items-center gap-1.5 mt-0.5">
+                                        {room.nextMilestoneTone === "urgent" && (
+                                          <AlertTriangle className="size-3.5 text-[#B42318] shrink-0" />
+                                        )}
+                                        {room.nextMilestoneTone === "positive" && (
+                                          <Calendar className="size-3.5 text-[#05603A] shrink-0" />
+                                        )}
+                                        <span
+                                          className={`text-xs font-semibold ${
+                                            room.nextMilestoneTone === "urgent"
+                                              ? "text-[#B42318] font-bold"
+                                              : room.nextMilestoneTone === "positive"
+                                              ? "text-[#05603A] font-bold"
+                                              : "text-slate-600 dark:text-slate-300"
+                                          }`}
+                                        >
+                                          {room.nextMilestone}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
                                 </div>
 
-                                {/* 5. Next Milestone */}
-                                <div className="w-48 shrink-0">
-                                  {room.nextMilestone === "—" ? (
-                                    <span className="text-slate-400">—</span>
-                                  ) : (
-                                    <div className="flex items-center gap-1.5">
-                                      {room.nextMilestoneTone === "urgent" && (
-                                        <AlertTriangle className="size-3.5 text-[#B42318] shrink-0" />
-                                      )}
-                                      {room.nextMilestoneTone === "positive" && (
-                                        <Calendar className="size-3.5 text-[#05603A] shrink-0" />
-                                      )}
-                                      <span
-                                        className={`text-xs font-semibold ${
-                                          room.nextMilestoneTone === "urgent"
-                                            ? "text-[#B42318] font-bold"
-                                            : room.nextMilestoneTone === "positive"
-                                            ? "text-[#05603A] font-bold"
-                                            : "text-slate-600 dark:text-slate-300"
-                                        }`}
-                                      >
-                                        {room.nextMilestone}
-                                      </span>
-                                    </div>
-                                  )}
-                                </div>
-
-                                {/* 6. Action Button & Three dots */}
-                                <div className="flex-1 flex items-center justify-end gap-2 relative">
+                                {/* 4. Action Button (Full width on mobile/tablet) */}
+                                <div className="pt-1">
                                   {room.actionPrimary ? (
                                     <Link
                                       href="/account/host/applications"
                                       onClick={(e) => e.stopPropagation()}
-                                      className="inline-flex items-center justify-center h-9 px-4 bg-[#0E2F73] hover:bg-[#0a2358] text-white text-xs font-bold font-heading rounded-full shadow-xs transition"
+                                      className="w-full h-10 px-4 rounded-full bg-[#0E2F73] hover:bg-[#0a2358] text-white text-xs font-bold font-heading shadow-xs transition flex items-center justify-center cursor-pointer"
                                     >
                                       {room.actionLabel}
                                     </Link>
@@ -1423,77 +1471,251 @@ export function HostingPropertiesManager() {
                                           setSelectedRoomForDrawer({ room, property: prop });
                                         }
                                       }}
-                                      className="h-9 px-4 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 text-[#0E2F73] dark:text-white text-xs font-bold font-heading rounded-full shadow-2xs transition cursor-pointer"
+                                      className="w-full h-10 px-4 rounded-full bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 text-[#0E2F73] dark:text-white text-xs font-bold font-heading shadow-2xs transition flex items-center justify-center cursor-pointer"
                                     >
                                       {room.actionLabel}
                                     </button>
                                   )}
-
-                                  {/* Three dots button */}
-                                  <div
-                                    className="relative"
-                                    ref={openRoomMenuId === room.id ? roomMenuRef : null}
-                                  >
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setOpenRoomMenuId((prev) =>
-                                          prev === room.id ? null : room.id
-                                        );
-                                      }}
-                                      className="size-8 rounded-full flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 transition cursor-pointer"
-                                    >
-                                      <MoreVertical className="size-4" />
-                                    </button>
-
-                                    {openRoomMenuId === room.id && (
-                                      <div
-                                        onClick={(e) => e.stopPropagation()}
-                                        className="absolute right-0 top-9 z-30 w-44 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl py-1.5 animate-in fade-in zoom-in-95 duration-100"
-                                      >
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setOpenRoomMenuId(null);
-                                            setRoomForm({
-                                              propertyId: prop.id,
-                                              id: room.id,
-                                              size: String(room.size),
-                                              hasEnsuite: room.hasEnsuite,
-                                            });
-                                          }}
-                                          className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                                        >
-                                          Edit room
-                                        </button>
-                                        {room.listing && (
-                                          <Link
-                                            href={`/account/host/listings`}
-                                            className="block w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                                          >
-                                            View Listing
-                                          </Link>
-                                        )}
-                                        {room.occupancyId && (
-                                          <button
-                                            type="button"
-                                            onClick={() => {
-                                              setOpenRoomMenuId(null);
-                                              setRecordOccupancyId(room.occupancyId ?? null);
-                                            }}
-                                            className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                                          >
-                                            Rental Record
-                                          </button>
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
                                 </div>
                               </div>
                             );
                           })}
+                        </div>
+
+                        {/* B. Desktop Table Layout (hidden lg:block) */}
+                        <div className="hidden lg:block w-full overflow-x-auto">
+                          {/* Table Header Row */}
+                          <div className="min-w-[920px] px-6 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center text-[11px] font-bold text-slate-500 font-heading uppercase tracking-wider bg-[#F7F9FD] dark:bg-slate-800/40">
+                            <div className="w-56 shrink-0">Room</div>
+                            <div className="w-36 shrink-0">Room status</div>
+                            <div className="w-52 shrink-0">Listing status</div>
+                            <div className="w-52 shrink-0">Current rental / offer</div>
+                            <div className="w-48 shrink-0">Next milestone</div>
+                            <div className="flex-1 text-right">Action</div>
+                          </div>
+
+                          {/* Room Rows */}
+                          <div className="divide-y divide-slate-100 dark:divide-slate-800 min-w-[920px]">
+                            {prop.rooms.map((room) => {
+                              return (
+                                <div
+                                  key={room.id}
+                                  onClick={() =>
+                                    setSelectedRoomForDrawer({ room, property: prop })
+                                  }
+                                  className={`px-6 py-3.5 flex items-center transition cursor-pointer ${
+                                    room.actionPrimary
+                                      ? "bg-[#FFF8F8] dark:bg-red-950/10 hover:bg-red-50/40"
+                                      : "hover:bg-slate-50/60 dark:hover:bg-slate-800/30"
+                                  }`}
+                                >
+                                  {/* 1. Room info + thumbnail */}
+                                  <div className="w-56 shrink-0 flex items-center gap-3">
+                                    <img
+                                      src={resolveImageUrl(room.image)}
+                                      alt={room.title}
+                                      className="w-13 h-11 rounded-xl object-cover bg-slate-100 shrink-0 border border-slate-200/60 dark:border-slate-700"
+                                    />
+                                    <div className="space-y-0.5 min-w-0">
+                                      <p className="text-sm font-extrabold text-[#0E2F73] dark:text-white font-heading truncate hover:text-[#D80B0B]">
+                                        {room.title}
+                                      </p>
+                                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                                        {room.type} {room.size > 0 ? `· ${room.size} sq ft` : ""}
+                                      </p>
+                                    </div>
+                                  </div>
+
+                                  {/* 2. Room Status Badge */}
+                                  <div className="w-36 shrink-0">
+                                    {room.roomStatus === "UNDER_OFFER" && (
+                                      <div className="px-2.5 py-1 rounded-full bg-[#FFF4E0] text-[#93370D] border border-[#F2B866] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 w-fit">
+                                        <Clock className="size-3 text-[#93370D]" />
+                                        <span>Under Offer</span>
+                                      </div>
+                                    )}
+                                    {room.roomStatus === "AVAILABLE" && (
+                                      <div className="px-2.5 py-1 rounded-full bg-[#E7F8EF] text-[#05603A] border border-[#8FD9B4] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 w-fit">
+                                        <Check className="size-3 text-[#05603A]" />
+                                        <span>Available</span>
+                                      </div>
+                                    )}
+                                    {room.roomStatus === "NOTICE_GIVEN" && (
+                                      <div className="px-2.5 py-1 rounded-full bg-[#EAF0FB] text-[#0E2F73] border border-[#0E2F73] text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 w-fit">
+                                        <Calendar className="size-3 text-[#0E2F73]" />
+                                        <span>Notice Given</span>
+                                      </div>
+                                    )}
+                                    {room.roomStatus === "OCCUPIED" && (
+                                      <div className="px-2.5 py-1 rounded-full bg-[#0E2F73] text-white text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1.5 w-fit">
+                                        <Key className="size-3 text-white" />
+                                        <span>Occupied</span>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {/* 3. Listing Status */}
+                                  <div className="w-52 shrink-0 space-y-0.5">
+                                    <div className="flex items-center gap-1.5">
+                                      <span
+                                        className={`size-2 rounded-full ${
+                                          room.listingStatus === "LIVE" ? "bg-[#12A15E]" : "bg-slate-400"
+                                        }`}
+                                      />
+                                      <span
+                                        className={`text-sm font-bold font-heading ${
+                                          room.listingStatus === "LIVE"
+                                            ? "text-[#05603A]"
+                                            : "text-slate-600 dark:text-slate-300"
+                                        }`}
+                                      >
+                                        {room.listingStatus === "LIVE" ? "Live" : "Paused"}
+                                      </span>
+                                    </div>
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 leading-tight">
+                                      {room.listingStatusSubtext}
+                                    </p>
+                                  </div>
+
+                                  {/* 4. Current Rental / Offer */}
+                                  <div className="w-52 shrink-0 space-y-0.5">
+                                    {room.currentRentalOrOffer === "—" ? (
+                                      <span className="text-slate-400">—</span>
+                                    ) : (
+                                      <>
+                                        <p className="text-sm font-bold text-[#0E2F73] dark:text-white font-heading">
+                                          {room.currentRentalOrOffer}
+                                        </p>
+                                        {room.currentRentalDate && (
+                                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                                            {room.currentRentalDate}
+                                          </p>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+
+                                  {/* 5. Next Milestone */}
+                                  <div className="w-48 shrink-0">
+                                    {room.nextMilestone === "—" ? (
+                                      <span className="text-slate-400">—</span>
+                                    ) : (
+                                      <div className="flex items-center gap-1.5">
+                                        {room.nextMilestoneTone === "urgent" && (
+                                          <AlertTriangle className="size-3.5 text-[#B42318] shrink-0" />
+                                        )}
+                                        {room.nextMilestoneTone === "positive" && (
+                                          <Calendar className="size-3.5 text-[#05603A] shrink-0" />
+                                        )}
+                                        <span
+                                          className={`text-xs font-semibold ${
+                                            room.nextMilestoneTone === "urgent"
+                                              ? "text-[#B42318] font-bold"
+                                              : room.nextMilestoneTone === "positive"
+                                              ? "text-[#05603A] font-bold"
+                                              : "text-slate-600 dark:text-slate-300"
+                                          }`}
+                                        >
+                                          {room.nextMilestone}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {/* 6. Action Button & Three dots */}
+                                  <div className="flex-1 flex items-center justify-end gap-2 relative">
+                                    {room.actionPrimary ? (
+                                      <Link
+                                        href="/account/host/applications"
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="inline-flex items-center justify-center h-9 px-4 bg-[#0E2F73] hover:bg-[#0a2358] text-white text-xs font-bold font-heading rounded-full shadow-xs transition"
+                                      >
+                                        {room.actionLabel}
+                                      </Link>
+                                    ) : (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (room.actionLabel === "View Rental" && room.occupancyId) {
+                                            setRecordOccupancyId(room.occupancyId);
+                                          } else if (room.actionLabel === "Resume Listing") {
+                                            showToast(`Manage listing for ${room.title} in My Listings`);
+                                          } else {
+                                            setSelectedRoomForDrawer({ room, property: prop });
+                                          }
+                                        }}
+                                        className="h-9 px-4 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 text-[#0E2F73] dark:text-white text-xs font-bold font-heading rounded-full shadow-2xs transition cursor-pointer"
+                                      >
+                                        {room.actionLabel}
+                                      </button>
+                                    )}
+
+                                    {/* Three dots button */}
+                                    <div
+                                      className="relative"
+                                      data-room-menu
+                                    >
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setOpenRoomMenuId((prev) =>
+                                            prev === room.id ? null : room.id
+                                          );
+                                        }}
+                                        className="size-8 rounded-full flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 transition cursor-pointer"
+                                      >
+                                        <MoreVertical className="size-4" />
+                                      </button>
+
+                                      {openRoomMenuId === room.id && (
+                                        <div
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="absolute right-0 top-9 z-30 w-44 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl py-1.5 animate-in fade-in zoom-in-95 duration-100"
+                                        >
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setOpenRoomMenuId(null);
+                                              setRoomForm({
+                                                propertyId: prop.id,
+                                                id: room.id,
+                                                size: String(room.size),
+                                                hasEnsuite: room.hasEnsuite,
+                                              });
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                          >
+                                            Edit room
+                                          </button>
+                                          {room.listing && (
+                                            <Link
+                                              href={`/account/host/listings`}
+                                              className="block w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                            >
+                                              View Listing
+                                            </Link>
+                                          )}
+                                          {room.occupancyId && (
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setOpenRoomMenuId(null);
+                                                setRecordOccupancyId(room.occupancyId ?? null);
+                                              }}
+                                              className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                            >
+                                              Rental Record
+                                            </button>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
                       </div>
                     )}
@@ -1523,7 +1745,7 @@ export function HostingPropertiesManager() {
 
           {/* Drawer Panel */}
           <aside
-            className="relative w-full max-w-[480px] h-full bg-white dark:bg-slate-900 shadow-2xl flex flex-col z-10 overflow-y-auto animate-in slide-in-from-right duration-200 p-6 space-y-4"
+            className="relative w-full max-w-[480px] h-full bg-white dark:bg-slate-900 shadow-2xl flex flex-col z-10 overflow-y-auto animate-in slide-in-from-right duration-200 p-4 sm:p-6 space-y-4"
             role="dialog"
             aria-modal="true"
           >

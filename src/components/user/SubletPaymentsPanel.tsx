@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Wallet } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Field, inputClass } from "@/components/user/ui";
+import { Field, inputClass, selectClass } from "@/components/user/ui";
 import { errorMessage } from "@/lib/user-api";
 import { formatDate, formatMoney } from "@/lib/utils";
 import {
@@ -193,7 +193,7 @@ function ArrangementForm({ view, onDone, onCancel }: {
       </fieldset>
       {a.terms.depositAmount > 0 && (
         <Field label="Where is the deposit paid?">
-          <select className={inputClass} value={route} onChange={(e) => setRoute(e.target.value as DepositRoute)}>
+          <select className={selectClass} value={route} onChange={(e) => setRoute(e.target.value as DepositRoute)}>
             {routeOptions.map((r) => <option key={r} value={r}>{depositRouteLabel[r]}</option>)}
           </select>
         </Field>

@@ -102,7 +102,7 @@ export default function UserRegisterPage() {
           </span>
         </div>
 
-        <div className="animate-scale-in stagger-1 rounded-3xl bg-white p-8 shadow-2xl shadow-black/30 ring-1 ring-white/10 sm:p-10 dark:bg-slate-900">
+        <div className="animate-scale-in stagger-1 rounded-3xl bg-white p-6 shadow-2xl shadow-black/30 ring-1 ring-white/10 sm:p-10 dark:bg-slate-900">
           <h2 className="font-heading text-2xl font-extrabold text-primary-900 dark:text-white">Create your account</h2>
           <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
             One account lets you rent a room and host your own. You will verify your identity next.

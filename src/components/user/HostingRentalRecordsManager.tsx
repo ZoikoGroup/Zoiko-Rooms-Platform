@@ -21,6 +21,7 @@ import { Toast, useToast } from "@/components/user/ui";
 import { DepositClaimsSection } from "@/components/user/DepositClaimsSection";
 import { Modal } from "@/components/ui/Modal";
 import { Loader } from "@/components/ui/Loader";
+import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 import { HostMoveInSteps } from "@/components/user/HostMoveInSteps";
 import { cn, formatCurrency, formatDate, formatDateTime } from "@/lib/utils";
 import {
@@ -112,7 +113,7 @@ const CHANGE_LABEL: Record<string, string> = {
 };
 
 const selectCls =
-  "h-10 rounded-xl border border-neutral-200 bg-white px-3 text-xs font-semibold text-neutral-800 outline-none transition focus:border-primary-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200";
+  "h-10 rounded-full border border-neutral-200 bg-white px-4 text-xs font-semibold text-neutral-800 outline-none transition focus:border-primary-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200 cursor-pointer";
 const inputCls =
   "mt-1 w-full rounded-xl border border-neutral-300 bg-white p-2.5 text-xs outline-none focus:border-primary-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-white";
 
@@ -504,39 +505,63 @@ export function HostingRentalRecordsManager() {
           <section className="space-y-3 rounded-2xl border border-neutral-200 bg-white p-4 shadow-xs dark:border-neutral-800 dark:bg-neutral-900">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
               <div className="relative flex-1">
-                <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
+                <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
                 <input
                   type="search"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search renter, rental ID, listing, property or agreement"
-                  className="w-full rounded-xl border border-neutral-200 bg-neutral-50/50 py-2.5 pl-10 pr-4 text-sm outline-none focus:border-primary-600 focus:bg-white dark:border-neutral-700 dark:bg-neutral-800 dark:text-white"
+                  className="w-full h-10 rounded-full border border-neutral-200 bg-neutral-50/50 py-2 pl-10 pr-4 text-xs outline-none focus:border-primary-600 focus:bg-white dark:border-neutral-700 dark:bg-neutral-800 dark:text-white transition shadow-2xs"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
-                <select aria-label="Status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)} className={selectCls}>
-                  <option value="all">All statuses</option>
-                  {(Object.keys(STATUS_CONFIG) as HostRentalStatus[]).map((s) => (
-                    <option key={s} value={s}>{STATUS_CONFIG[s].label}</option>
-                  ))}
-                </select>
-                <select aria-label="Property" value={propertyFilter} onChange={(e) => setPropertyFilter(e.target.value)} className={selectCls}>
-                  <option value="all">All properties</option>
-                  {properties.map(([id, address]) => (
-                    <option key={id} value={id}>{address}</option>
-                  ))}
-                </select>
-                <select aria-label="Agreement" value={agreementFilter} onChange={(e) => setAgreementFilter(e.target.value as typeof agreementFilter)} className={selectCls}>
-                  <option value="all">Any agreement</option>
-                  <option value="signed">Signed</option>
-                  <option value="host">Your signature required</option>
-                  <option value="renter">Renter signature required</option>
-                </select>
-                <select aria-label="Sort" value={sortFilter} onChange={(e) => setSortFilter(e.target.value as typeof sortFilter)} className={selectCls}>
-                  <option value="action">Action required first</option>
-                  <option value="start">Start date</option>
-                  <option value="updated">Recently updated</option>
-                </select>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:flex lg:flex-wrap gap-2.5 items-end">
+                <RoundedFilterDropdown
+                  label="Status"
+                  value={statusFilter}
+                  onChange={(val) => setStatusFilter(val as typeof statusFilter)}
+                  options={[
+                    { value: "all", label: "All statuses" },
+                    ...(Object.keys(STATUS_CONFIG) as HostRentalStatus[]).map((s) => ({
+                      value: s,
+                      label: STATUS_CONFIG[s].label,
+                    })),
+                  ]}
+                  size="sm"
+                />
+                <RoundedFilterDropdown
+                  label="Property"
+                  value={propertyFilter}
+                  onChange={setPropertyFilter}
+                  options={[
+                    { value: "all", label: "All properties" },
+                    ...properties.map(([id, address]) => ({ value: id, label: address })),
+                  ]}
+                  size="sm"
+                />
+                <RoundedFilterDropdown
+                  label="Agreement"
+                  value={agreementFilter}
+                  onChange={(val) => setAgreementFilter(val as typeof agreementFilter)}
+                  options={[
+                    { value: "all", label: "Any agreement" },
+                    { value: "signed", label: "Signed" },
+                    { value: "host", label: "Your signature required" },
+                    { value: "renter", label: "Renter signature required" },
+                  ]}
+                  size="sm"
+                />
+                <RoundedFilterDropdown
+                  label="Sort"
+                  value={sortFilter}
+                  onChange={(val) => setSortFilter(val as typeof sortFilter)}
+                  options={[
+                    { value: "action", label: "Action required first" },
+                    { value: "start", label: "Start date" },
+                    { value: "updated", label: "Recently updated" },
+                  ]}
+                  align="right"
+                  size="sm"
+                />
               </div>
             </div>
           </section>
@@ -1163,7 +1188,7 @@ export function HostingRentalRecordsManager() {
                 return (
                   <div className="space-y-3 border-t pt-3 dark:border-neutral-800">
                     <p>This was contested, so the tenancy continues. If a court or tribunal decides it, record the order here and it&apos;s applied automatically.</p>
-                    <select value={orderOutcome} onChange={(e) => setOrderOutcome(e.target.value as typeof orderOutcome)} className={inputCls}>
+                    <select value={orderOutcome} onChange={(e) => setOrderOutcome(e.target.value as typeof orderOutcome)} className={selectCls}>
                       <option value="ENDS_ON_DATE">The order ends the tenancy</option>
                       <option value="TENANCY_CONTINUES">The order says the tenancy continues</option>
                     </select>

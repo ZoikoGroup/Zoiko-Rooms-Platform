@@ -153,7 +153,7 @@ function RequestCard({ item, onChange }: { item: RenterRequestView; onChange: (v
             <Flag className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
             <label htmlFor={`report-${item.outreachId}`} className="text-slate-500">Report this listing:</label>
             <select id={`report-${item.outreachId}`} value={reason} onChange={(e) => setReason(e.target.value as ReportReason)}
-                    className="rounded-lg border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800">
+                    className="rounded-full border border-slate-300 px-3 py-1 text-xs dark:border-slate-700 dark:bg-slate-800">
               <option value="STALE">No longer available</option>
               <option value="INACCURATE">Details are wrong</option>
               <option value="SUSPICIOUS">Looks suspicious</option>

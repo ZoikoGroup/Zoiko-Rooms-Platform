@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
-import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, useToast } from "@/components/user/ui";
+import { Card, EmptyState, Field, SectionHeading, Toast, inputClass, selectClass, useToast } from "@/components/user/ui";
 import { RentalPaymentEvidenceList } from "@/components/user/RentalPaymentEvidenceList";
 import { COUNTRY_OPTIONS, resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
 import { HostReturnsManager } from "@/components/user/RentalPaymentReturns";
@@ -338,8 +338,9 @@ export function RecipientRentalPaymentsManager() {
               <EmptyState message="No payment records yet." />
             </Card>
           ) : (
-            <Card className="!p-0">
-              <div className="overflow-x-auto">
+            <Card className="!p-0 overflow-hidden">
+              {/* Desktop Table View (sm+) */}
+              <div className="hidden sm:block overflow-x-auto">
                 <table className="w-full min-w-[640px] text-left text-sm">
                   <thead>
                     <tr className="border-b border-slate-100 text-xs font-bold uppercase tracking-wide text-slate-400 dark:border-white/10">
@@ -352,7 +353,7 @@ export function RecipientRentalPaymentsManager() {
                   </thead>
                   <tbody>
                     {allRecords.map(({ record, obligation }) => (
-                      <tr key={record.id} className="border-b border-slate-50 last:border-0 dark:border-white/5">
+                      <tr key={record.id} className="border-b border-slate-50 last:border-0 dark:border-white/5 hover:bg-slate-50/50 dark:hover:bg-slate-800/40 transition-colors">
                         <td className="px-5 py-3 text-slate-500 dark:text-slate-400">{formatDate(record.declaredDate)}</td>
                         <td className="px-5 py-3 capitalize text-slate-600 dark:text-slate-300">{obligation.displayLabel}</td>
                         <td className="px-5 py-3 font-semibold text-primary-900 dark:text-white">
@@ -367,7 +368,7 @@ export function RecipientRentalPaymentsManager() {
                           )}
                         </td>
                         <td className="px-5 py-3 text-right">
-                          <button onClick={() => setReviewing({ record, obligation })} className="text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300">
+                          <button onClick={() => setReviewing({ record, obligation })} className="text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300 cursor-pointer">
                             Open record
                           </button>
                         </td>
@@ -375,6 +376,39 @@ export function RecipientRentalPaymentsManager() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+
+              {/* Mobile Card View (sm:hidden) */}
+              <div className="sm:hidden divide-y divide-slate-100 dark:divide-slate-800">
+                {allRecords.map(({ record, obligation }) => (
+                  <div key={record.id} className="p-4 space-y-2.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="text-xs font-bold capitalize text-primary-900 dark:text-white">{obligation.displayLabel}</p>
+                        <p className="text-[11px] text-slate-400">{formatDate(record.declaredDate)}</p>
+                      </div>
+                      <span className="text-base font-extrabold text-primary-900 dark:text-white">
+                        {formatMoney(record.declaredAmount, record.declaredCurrency)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-50 dark:border-slate-800/60">
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Badge tone={rentalPaymentStatusTone[record.status] ?? "neutral"}>
+                          {rentalPaymentStatusLabel[record.status] ?? record.status}
+                        </Badge>
+                        {record.excessStatus === "REVIEW_REQUIRED" && (
+                          <Badge tone="warning" className="text-[10px]">Overpayment</Badge>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => setReviewing({ record, obligation })}
+                        className="text-xs font-bold text-primary-700 dark:text-primary-300 hover:underline"
+                      >
+                        Open record &rarr;
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             </Card>
           )}
@@ -700,7 +734,7 @@ function ReviewModal({
                   <select
                     value={reason}
                     onChange={(e) => setReason(e.target.value as RentalPaymentDiscrepancyReason)}
-                    className={inputClass}
+                    className={selectClass}
                   >
                     {DISCREPANCY_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -931,7 +965,7 @@ function ExcessDecisionModal({
             {action === "apply" ? (
               <div>
                 <FieldLabel htmlFor={`${ids}-target`} text="Apply to" required />
-                <select id={`${ids}-target`} value={targetId} onChange={(e) => setTargetId(e.target.value)} className={inputClass}>
+                <select id={`${ids}-target`} value={targetId} onChange={(e) => setTargetId(e.target.value)} className={selectClass}>
                   {targets.map((t) => (
                     <option key={t.id} value={t.id}>
                       {t.displayLabel} due {formatDate(t.dueDate)} -- {formatMoney(t.outstandingAmount, t.currency)} owed
@@ -1336,7 +1370,7 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
                 setMethodSubtype("");
                 setBankDetails({});
               }}
-              className={inputClass}
+              className={selectClass}
             >
               {METHOD_OPTIONS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
@@ -1355,7 +1389,7 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
                   setMethodSubtype("");
                   setBankDetails({});
                 }}
-                className={inputClass}
+                className={selectClass}
               >
                 {COUNTRY_OPTIONS.map((c) => (
                   <option key={c.code} value={c.code}>{c.label}</option>

@@ -30,7 +30,7 @@ import {
 } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { errorMessage, renterDisputes } from "@/lib/user-api";
-import { Card, EmptyState, Field, inputClass } from "@/components/user/ui";
+import { Card, EmptyState, Field, inputClass, selectClass } from "@/components/user/ui";
 import type { ToastTone } from "@/components/user/ui";
 
 /** ZR-ENG-CLR-010: this panel is shared by the renter side (embedded per
@@ -142,7 +142,7 @@ function NewClaimFields({
   return (
     <>
       <Field label="Claim family">
-        <select value={claimFamily} onChange={(e) => setClaimFamily(e.target.value as DisputeClaimFamily)} className={inputClass}>
+        <select value={claimFamily} onChange={(e) => setClaimFamily(e.target.value as DisputeClaimFamily)} className={selectClass}>
           {DISPUTE_CLAIM_FAMILIES.map((family) => (
             <option key={family} value={family}>
               {disputeClaimFamilyLabel[family] ?? family}
@@ -869,7 +869,7 @@ function DisputeCaseDetail({
                       </p>
                       {fileClaimId === claim.id ? (
                         <>
-                          <select className={inputClass} value={fileBody} onChange={(e) => setFileBody(e.target.value)}>
+                          <select className={selectClass} value={fileBody} onChange={(e) => setFileBody(e.target.value)}>
                             {OUTSIDE_BODIES.map((b) => <option key={b.value} value={b.value}>{b.label}</option>)}
                           </select>
                           <input className={inputClass} placeholder="Name of the body" value={fileName} onChange={(e) => setFileName(e.target.value)} />
@@ -1264,7 +1264,7 @@ function DisputeCaseDetail({
                     </span>
                     {decisionFor === e.id && (
                       <div className="w-full space-y-2 pt-2">
-                        <select className={inputClass} value={decisionOutcome} onChange={(ev) => setDecisionOutcome(ev.target.value)}>
+                        <select className={selectClass} value={decisionOutcome} onChange={(ev) => setDecisionOutcome(ev.target.value)}>
                           {OUTSIDE_OUTCOMES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                         </select>
                         <input type="date" className={inputClass} value={decisionDate} onChange={(ev) => setDecisionDate(ev.target.value)} />
