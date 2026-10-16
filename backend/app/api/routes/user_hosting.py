@@ -46,6 +46,7 @@ from app.schemas.leasing import (
     OfferRead,
     OfferTermsCreate,
     OfferTermsRead,
+    SharedRoomEnd,
     SubletChronologyEvent,
     SubletRequestDecision,
     SubletRequestRead,
@@ -1243,3 +1244,22 @@ def get_hosted_rental_transaction_record(
     if not user.party_id or not occupancy.room or occupancy.room.property.owner_party_id != user.party_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view rental records for your own rooms")
     return build_rental_transaction_record(db, occupancy, include_identity=False)
+
+
+@router.post("/sublet-requests/{sublet_request_id}/end-shared-room", response_model=SubletRequestRead)
+def end_hosted_shared_room(
+    sublet_request_id: int,
+    request: Request,
+    payload: SharedRoomEnd | None = None,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The Host ends a co-tenancy on their own listing."""
+    sublet_request = sublet_crud.get_sublet_request_for_host_or_404(db, sublet_request_id, user)
+    updated = sublet_crud.end_shared_room(db, sublet_request, user, payload.reason if payload else "")
+    log_audit_event(
+        db, None, "user_sublet_request.co_tenancy_end", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)

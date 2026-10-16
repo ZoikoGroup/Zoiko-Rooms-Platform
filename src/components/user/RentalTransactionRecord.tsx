@@ -5,7 +5,7 @@ import { ClipboardList } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Loader } from "@/components/ui/Loader";
 import { RentalTransactionRecord as RentalTransactionRecordData } from "@/lib/types";
-import { getHostedRentalTransactionRecord, getRentalTransactionRecord } from "@/lib/user-api";
+import { getCoTenancyTransactionRecord, getHostedRentalTransactionRecord, getRentalTransactionRecord } from "@/lib/user-api";
 import {
   agreementStatusLabel,
   agreementStatusTone,
@@ -37,7 +37,17 @@ import { Card, EmptyState } from "@/components/user/ui";
  *  (and therefore which authorization check) applies; the host endpoint
  *  never returns identityVerification, so that section simply doesn't
  *  render for a host viewer. */
-export function RentalTransactionRecord({ occupancyId, role }: { occupancyId: number; role: "renter" | "host" }) {
+/** role "co_tenant": the renter's tenancy, read-only, for the person sharing
+ *  the room -- loaded through their co-tenancy (coTenancyId), not the occupancy. */
+export function RentalTransactionRecord({
+  occupancyId,
+  role,
+  coTenancyId,
+}: {
+  occupancyId: number;
+  role: "renter" | "host" | "co_tenant";
+  coTenancyId?: number;
+}) {
   const [record, setRecord] = useState<RentalTransactionRecordData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -46,8 +56,13 @@ export function RentalTransactionRecord({ occupancyId, role }: { occupancyId: nu
     let cancelled = false;
     setLoading(true);
     setError(false);
-    const fetcher = role === "host" ? getHostedRentalTransactionRecord : getRentalTransactionRecord;
-    fetcher(occupancyId)
+    const load =
+      role === "co_tenant"
+        ? getCoTenancyTransactionRecord(coTenancyId ?? 0)
+        : role === "host"
+          ? getHostedRentalTransactionRecord(occupancyId)
+          : getRentalTransactionRecord(occupancyId);
+    load
       .then((data) => {
         if (!cancelled) setRecord(data);
       })
@@ -60,7 +75,7 @@ export function RentalTransactionRecord({ occupancyId, role }: { occupancyId: nu
     return () => {
       cancelled = true;
     };
-  }, [occupancyId, role]);
+  }, [occupancyId, role, coTenancyId]);
 
   if (loading) return <Loader label="Loading transaction record..." />;
   if (error || !record) return <EmptyState message="This transaction record is unavailable right now." />;

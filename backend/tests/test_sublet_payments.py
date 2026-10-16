@@ -118,14 +118,6 @@ class TestSubleasePaysTheOriginalRenter:
         assert rp_crud.resolve_rent_recipient_for_occupancy(db_session, sub_occupancy) == original_renter.id
 
 
-class TestCoTenantPaysTheHost:
-    def test_a_co_tenant_owes_the_host(self, client, db_session: Session):
-        tenant_user, _proposed, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="sp5")
-        body = _approve(client, db_session, occupancy_id, tenant_user, proposed_party_id, "ADD_CO_TENANT", "sp5")
-        rent = _obligations(db_session, body["newAgreementId"])["RENT"]
-        assert rent.recipient_party_id != tenant_user.party_id
-
-
 class TestAssignmentMovesOpenRent:
     def test_unpaid_rent_moves_to_the_assignee(self, client, db_session: Session):
         tenant_user, proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="sp6")

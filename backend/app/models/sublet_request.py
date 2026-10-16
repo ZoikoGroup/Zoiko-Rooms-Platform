@@ -47,6 +47,14 @@ SUBLET_REQUEST_STATUSES = (
     # "no destructive/automatic undo" doctrine as every other terminal
     # record in this codebase (TerminationCase, DisputeResolutionCase).
     "cancelled_by_authority",
+    # ADD_CO_TENANT only: the named co-tenant must agree before the Host is
+    # asked. awaiting_co_tenant is still open (blocks a second request);
+    # declined_by_co_tenant closes it.
+    "awaiting_co_tenant",
+    "declined_by_co_tenant",
+    # ADD_CO_TENANT only: an approved shared room that the renter, co-tenant
+    # or Host has since ended.
+    "ended",
 )
 
 # ZR-SUB-003 Section 5.3/FAIRNESS CONTROL: "Reason codes, required
@@ -90,6 +98,11 @@ CO_TENANCY_ARRANGEMENT_TYPES = ("SUBLEASE_PARTIAL", "ADD_CO_TENANT", "LODGER_OR_
 # Record-only: approving these never creates an agreement, obligation, or
 # occupancy -- just a permission on file.
 NO_TENANCY_ARRANGEMENT_TYPES = ("ADDITIONAL_OCCUPANT",)
+# A co-tenant shares the renter's room under the renter's own tenancy: they
+# agree to the request themselves, pay the renter (off-platform) rather than
+# the Host, get no agreement/obligations of their own, and see the renter's
+# tenancy read-only while the shared room is active.
+SHARED_ROOM_ARRANGEMENT_TYPES = ("ADD_CO_TENANT",)
 
 # Section 3's liability state model (14.4), trimmed to the states this MVP
 # actually drives.
@@ -232,12 +245,19 @@ class SubletRequest(Base):
     cancelled_by_authority_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     cancelled_by_authority_reason: Mapped[str] = mapped_column(String(2000), default="")
 
+    # ADD_CO_TENANT: when the named co-tenant accepted/declined, and when (and
+    # by whom) an approved shared room was ended.
+    co_tenant_responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
+    end_reason: Mapped[str] = mapped_column(String(2000), default="", server_default="")
+
     __mapper_args__ = {"version_id_col": version}
 
     current_occupancy: Mapped["Occupancy"] = relationship(foreign_keys=[current_occupancy_id])
     new_agreement: Mapped["Agreement"] = relationship(foreign_keys=[new_agreement_id])
     proposed_renter_party: Mapped["Party"] = relationship()
     decided_by_admin: Mapped["AdminUser"] = relationship(foreign_keys=[decided_by_admin_id])
-    decided_by_user: Mapped["UserAccount"] = relationship()
+    decided_by_user: Mapped["UserAccount"] = relationship(foreign_keys=[decided_by_user_id])
     requested_by_guest: Mapped["Guest"] = relationship(foreign_keys=[requested_by_guest_id])
     cancelled_by_authority_admin: Mapped["AdminUser"] = relationship(foreign_keys=[cancelled_by_authority_admin_id])

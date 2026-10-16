@@ -1140,8 +1140,8 @@ export function UserHelpSupportManager() {
               <div className="flex items-start gap-2.5 rounded-2xl border border-amber-300 bg-amber-50 p-3.5 text-xs font-medium text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
                 <span>
-                  Never send rent using bank details received by message or email. Only use
-                  instructions on the verified screen.
+                  Never send rent using bank details received by message or email. Only use the
+                  payment method on the verified screen.
                 </span>
               </div>
             )}
@@ -1250,7 +1250,7 @@ export function UserHelpSupportManager() {
             <ul className="divide-y divide-slate-100 rounded-2xl border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
               {[
                 ["Fraud or fake listing", "Suspicious listing, property or authority", "safety"],
-                ["Suspicious payment instructions", "Don’t send money until you’ve reviewed verified instructions", "payments"],
+                ["Suspicious payment method", "Don’t send money until you’ve reviewed the verified payment method", "payments"],
                 ["Harassment or threats", "We’ll preserve evidence and help with communication controls", "safety"],
                 ["Discrimination concern", "Routed to Trust & Safety and Legal/Compliance", "safety"],
                 ["Unsafe property", "Your legal rights depend on local law — we’ll record and route it", "safety"],

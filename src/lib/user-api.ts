@@ -429,6 +429,32 @@ export function withdrawSubletRequest(subletRequestId: number): Promise<SubletRe
   return apiClientFetch<SubletRequest>(`/api/users/rentals/sublet-requests/${subletRequestId}/withdraw`, { method: "POST" });
 }
 
+/** Co-tenancy requests that name the current user (they're the co-tenant). */
+export function listCoTenancies(): Promise<SubletRequest[]> {
+  return apiClientFetch<SubletRequest[]>("/api/users/rentals/co-tenancies");
+}
+
+/** The named co-tenant accepts (sends it to the host) or declines (closes it). */
+export function respondToCoTenancy(subletRequestId: number, accept: boolean): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/rentals/co-tenancies/${subletRequestId}/respond`, {
+    method: "POST",
+    body: JSON.stringify({ accept }),
+  });
+}
+
+/** The renter or the co-tenant ends a shared room. */
+export function endCoTenancy(subletRequestId: number, reason = ""): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/rentals/co-tenancies/${subletRequestId}/end`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/** The renter's tenancy, read-only, for the co-tenant sharing it. */
+export function getCoTenancyTransactionRecord(subletRequestId: number): Promise<RentalTransactionRecord> {
+  return apiClientFetch<RentalTransactionRecord>(`/api/users/rentals/co-tenancies/${subletRequestId}/transaction-record`);
+}
+
 /** The tenant's own downloadable decision record (ZR-SUB-003 Wireframe J) --
  *  a direct link, a plain authenticated URL built client-side. 409s until the
  *  request reaches a completed state (approved/rejected/withdrawn). */
@@ -828,6 +854,14 @@ export function approveHostedSubletRequest(
       notes: "", conditions: "", expiresAt: null, conditionList: [], authorityConfirmed: false, stepUpPassword: "",
       overrideReason: "", ...payload,
     }),
+  });
+}
+
+/** The host ends a co-tenancy on their own listing. */
+export function endHostedSharedRoom(subletRequestId: number, reason = ""): Promise<SubletRequest> {
+  return apiClientFetch<SubletRequest>(`/api/users/hosting/sublet-requests/${subletRequestId}/end-shared-room`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
   });
 }
 

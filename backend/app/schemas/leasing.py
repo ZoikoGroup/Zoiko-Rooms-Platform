@@ -616,6 +616,23 @@ class SubletRequestRead(CamelModel):
     cancelled_by_authority_admin_id: int | None = None
     cancelled_by_authority_reason: str = ""
 
+    # ADD_CO_TENANT shared room: the co-tenant's own answer, the room's live
+    # shared state, and both people's live identity status.
+    co_tenant_responded_at: datetime | None = None
+    ended_at: datetime | None = None
+    end_reason: str = ""
+    shared_room_active: bool = False
+    current_tenant_identity_verified: bool = False
+    proposed_renter_identity_verified: bool = False
+
+
+class CoTenancyResponse(CamelModel):
+    accept: bool
+
+
+class SharedRoomEnd(CamelModel):
+    reason: str = ""
+
 
 class SubletRequestDecision(CamelModel):
     """Optional review notes recorded with a sublet approval, decline, or

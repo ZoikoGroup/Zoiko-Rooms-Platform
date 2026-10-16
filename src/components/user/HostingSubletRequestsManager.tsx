@@ -43,6 +43,7 @@ import { formatDate } from "@/lib/utils";
 import {
   approveHostedSubletRequest,
   declineHostedSubletRequest,
+  endHostedSharedRoom,
   errorMessage,
   hostSubletDecisionRecordUrl,
   listHostedProperties,
@@ -164,6 +165,7 @@ export function HostingSubletRequestsManager({
 
   // View details modal
   const [detailsTarget, setDetailsTarget] = useState<SubletRequest | null>(null);
+  const [endingSharedRoom, setEndingSharedRoom] = useState(false);
 
   // Send to owner modal
   const [sendToOwnerTarget, setSendToOwnerTarget] = useState<SubletRequest | null>(null);
@@ -249,6 +251,21 @@ export function HostingSubletRequestsManager({
   );
 
   // Status classification helpers
+  async function handleEndSharedRoom(request: SubletRequest) {
+    if (!window.confirm("End this co-tenancy? The tenant and co-tenant will be told.")) return;
+    setEndingSharedRoom(true);
+    try {
+      const updated = await endHostedSharedRoom(request.id);
+      setRequests((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+      setDetailsTarget(updated);
+      showToast("Co-tenancy ended — tenant and co-tenant notified.", "success");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not end this co-tenancy."), "error");
+    } finally {
+      setEndingSharedRoom(false);
+    }
+  }
+
   const isRequestNew = (req: SubletRequest) =>
     req.status === "pending_admin_review" ||
     req.status === "pending_verification" ||
@@ -1676,12 +1693,51 @@ export function HostingSubletRequestsManager({
                 </span>
               </div>
               <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-xl">
-                <span className="text-[10px] uppercase font-bold text-slate-400 block">Proposed Subtenant</span>
+                <span className="text-[10px] uppercase font-bold text-slate-400 block">
+                  {detailsTarget.arrangementType === "ADD_CO_TENANT" ? "Co-tenant" : "Proposed Subtenant"}
+                </span>
                 <span className="font-bold text-slate-900 dark:text-slate-100">
                   {detailsTarget.proposedRenterName || "Permission in principle"}
                 </span>
               </div>
             </div>
+
+            {detailsTarget.arrangementType === "ADD_CO_TENANT" && (
+              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-xl space-y-2">
+                <span className="text-[10px] uppercase font-bold text-slate-400 block">Shared room</span>
+                <p className="text-slate-600 dark:text-slate-300">
+                  {detailsTarget.status === "awaiting_co_tenant"
+                    ? "Waiting for the co-tenant to accept. You can decide once they do."
+                    : "The co-tenant shares the room under the tenant's own tenancy and pays the tenant directly. The tenant stays responsible for the full rent."}
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-bold text-slate-900 dark:text-slate-100">{detailsTarget.currentTenantName || "Tenant"}</span>
+                  <Badge tone={detailsTarget.currentTenantIdentityVerified ? "success" : "warning"}>
+                    {detailsTarget.currentTenantIdentityVerified ? "Verified" : "Not verified"}
+                  </Badge>
+                  <span className="font-bold text-slate-900 dark:text-slate-100">{detailsTarget.proposedRenterName || "Co-tenant"}</span>
+                  <Badge tone={detailsTarget.proposedRenterIdentityVerified ? "success" : "warning"}>
+                    {detailsTarget.proposedRenterIdentityVerified ? "Verified" : "Not verified"}
+                  </Badge>
+                </div>
+                {detailsTarget.sharedRoomActive && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    loading={endingSharedRoom}
+                    onClick={() => handleEndSharedRoom(detailsTarget)}
+                  >
+                    End co-tenancy
+                  </Button>
+                )}
+                {detailsTarget.status === "ended" && detailsTarget.endedAt && (
+                  <p className="text-slate-500">
+                    Ended {formatDate(detailsTarget.endedAt)}
+                    {detailsTarget.endReason && ` — ${detailsTarget.endReason}`}
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Conditions list */}
             {detailsTarget.approvalConditionList && detailsTarget.approvalConditionList.length > 0 && (

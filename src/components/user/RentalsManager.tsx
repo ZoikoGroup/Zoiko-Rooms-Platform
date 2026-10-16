@@ -1936,7 +1936,7 @@ export function RentalsManager() {
                         onClick={() => openPaymentInstructionsModal(selectedItem.occupancy)}
                         className="px-4 py-2.5 rounded-xl bg-[#0E2F73] hover:bg-[#0B2560] text-white text-xs font-bold transition-colors"
                       >
-                        View payment instructions
+                        View payment method
                       </button>
                       <Link
                         href="/account/payments"
@@ -2369,7 +2369,7 @@ export function RentalsManager() {
               </div>
 
               <p className="text-xs text-[#B42318] font-medium bg-[#FFF5F5] p-3 rounded-xl border border-[#F3C2C2]">
-                Never send rent using details from chat messages or external emails. Only use recipient instructions confirmed on this portal.
+                Never send rent using details from chat messages or external emails. Only use recipient payment methods confirmed on this portal.
               </p>
 
               <div className="flex justify-end gap-2.5 pt-2">
@@ -2408,7 +2408,7 @@ export function RentalsManager() {
             }}
           />
         ) : (
-          <Modal open onClose={() => setActiveModal(null)} title="Payment instructions">
+          <Modal open onClose={() => setActiveModal(null)} title="Payment method">
             <p className="text-sm text-slate-600">Nothing is due on this rental right now.</p>
           </Modal>
         );

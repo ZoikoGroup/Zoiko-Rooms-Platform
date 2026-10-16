@@ -402,7 +402,7 @@ export function RentalPaymentsManager() {
             Payments
           </h1>
           <p className="mt-1 text-xs sm:text-sm text-slate-500 dark:text-slate-400 max-w-3xl leading-relaxed">
-            Track rent and deposits, view verified payment instructions, record payments you have made, and see when receipt is confirmed.
+            Track rent and deposits, view verified payment methods, record payments you have made, and see when receipt is confirmed.
           </p>
         </div>
 
@@ -781,9 +781,9 @@ export function RentalPaymentsManager() {
                                 <button
                                   onClick={() => setViewingInstructions(o)}
                                   className="inline-flex items-center justify-center px-3 py-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[#0C2B4E] dark:text-slate-200 hover:bg-slate-50 text-xs font-bold shadow-sm transition cursor-pointer"
-                                  title="View payment instructions"
+                                  title="View payment method"
                                 >
-                                  Instructions
+                                  Payment Method
                                 </button>
                               </>
                             ) : (
@@ -910,7 +910,7 @@ export function RentalPaymentsManager() {
                             onClick={() => setViewingInstructions(o)}
                             className="px-4 py-2.5 rounded-xl bg-white border border-slate-200 text-[#0C2B4E] text-xs font-bold shadow-sm"
                           >
-                            Instructions
+                            Payment Method
                           </button>
                         </>
                       ) : (
@@ -1158,7 +1158,22 @@ export function InstructionsModalView({
     setLoading(true);
     setError("");
     getHowToPay(obligation.id)
-      .then(setView)
+      .then(async (v) => {
+        // Show whatever payment details the payee set up (e.g. PayPal), even when
+        // that method isn't in the default accepted list -- the host for a rental
+        // or a full handover, the original tenant for a sublease.
+        if (!v.details && !v.blockedReason && !v.custodian && v.method && ["LANDLORD_AGENT", "SUBLESSOR"].includes(v.payee.type)) {
+          try {
+            const instruction = await getMyRentalPaymentInstructions(obligation.id);
+            if (instruction.bankDetails) {
+              v = { ...v, details: instruction.bankDetails, additionalInstructions: instruction.additionalInstructions };
+            }
+          } catch {
+            // Fall through to the summary without details.
+          }
+        }
+        setView(v);
+      })
       .catch((err) => setError(errorMessage(err, "Payment details aren't available yet.")))
       .finally(() => setLoading(false));
   }, [obligation]);
@@ -1181,10 +1196,10 @@ export function InstructionsModalView({
     <Modal
       open={Boolean(obligation)}
       onClose={onClose}
-      title={`Payment Instructions · ${obligation.displayLabel}`}
+      title={`Payment Method · ${obligation.displayLabel}`}
     >
       {loading ? (
-        <div className="py-8 text-center text-xs text-slate-500">Loading instructions...</div>
+        <div className="py-8 text-center text-xs text-slate-500">Loading payment method...</div>
       ) : error ? (
         <div className="p-4 bg-amber-50 text-amber-800 rounded-xl text-xs">{error}</div>
       ) : view ? (
@@ -1542,7 +1557,7 @@ export function SingleObligationPaymentCard({
         </div>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" onClick={() => setShowInstructions(true)}>
-            Instructions
+            Payment Method
           </Button>
           <Button size="sm" onClick={() => setPaying(true)}>
             I&apos;ve Made This Payment

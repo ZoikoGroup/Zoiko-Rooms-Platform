@@ -56,6 +56,8 @@ import { rentalPaymentStatusLabel, rentalPaymentStatusTone } from "@/lib/status"
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { InstructionsManager } from "@/components/user/RecipientRentalPaymentsManager";
 import { paymentMethodDisplay } from "@/components/user/payment-methods/PaymentMethodFields";
+import { resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
+import { InstructionsModalView } from "@/components/user/RentalPaymentsManager";
 
 /** Format short due date like "Nov 1", "Nov 15", "Oct 15" */
 function formatShortDueDate(dateStr?: string | null): string {
@@ -88,6 +90,9 @@ export function HostingPaymentsManager() {
   const [loading, setLoading] = useState(true);
   const [obligations, setObligations] = useState<RentalPaymentObligation[]>([]);
   const [instructions, setInstructions] = useState<RentalPaymentInstruction[]>([]);
+  // Payments this user receives; anything else in the list is one they owe
+  // (e.g. rent taken over in a sublet handover).
+  const [receivableIds, setReceivableIds] = useState<Set<number>>(new Set());
   const [paymentDetailsOpen, setPaymentDetailsOpen] = useState(false);
   const [properties, setProperties] = useState<Property[]>([]);
 
@@ -101,6 +106,8 @@ export function HostingPaymentsManager() {
 
   // Modal states
   const [viewingInstructions, setViewingInstructions] = useState<RentalPaymentObligation | null>(null);
+  // The host's own active payment method -- what the tenant is shown to pay with.
+  const activeInstruction = instructions.find((i) => i.status === "ACTIVE") ?? null;
   const [viewingRecord, setViewingRecord] = useState<{
     obligation: RentalPaymentObligation;
     record: RentalPaymentRecord;
@@ -132,6 +139,7 @@ export function HostingPaymentsManager() {
       const combined = Array.from(allItemsMap.values());
 
       setObligations(combined);
+      setReceivableIds(new Set((recipientPage.items || []).map((item) => item.id)));
       setInstructions(instr);
       setProperties(props);
     } catch (err) {
@@ -399,7 +407,7 @@ export function HostingPaymentsManager() {
             Payments
           </h1>
           <p className="mt-1 text-xs sm:text-sm text-slate-500 dark:text-slate-400 max-w-3xl leading-relaxed">
-            Track rent and deposits for your properties, manage tenant payment instructions, review payment declarations, and confirm receipts.
+            Track rent and deposits for your properties, manage tenant payment methods, review payment declarations, and confirm receipts.
           </p>
         </div>
 
@@ -797,7 +805,7 @@ export function HostingPaymentsManager() {
                               onClick={() => setViewingInstructions(o)}
                               className="inline-flex items-center justify-center px-4 py-2.5 rounded-xl bg-[#0C2B4E] hover:bg-[#071c33] text-white text-xs font-bold shadow-sm transition cursor-pointer"
                             >
-                              Payment Instructions
+                              Payment Method
                             </button>
                           ) : (
                             <button
@@ -915,7 +923,7 @@ export function HostingPaymentsManager() {
                           onClick={() => setViewingInstructions(o)}
                           className="w-full py-2.5 rounded-xl bg-[#0C2B4E] text-white text-xs font-bold shadow-sm cursor-pointer"
                         >
-                          Payment Instructions
+                          Payment Method
                         </button>
                       )}
                     </div>
@@ -938,11 +946,21 @@ export function HostingPaymentsManager() {
       {/* ======================================================== */}
       {/* MODAL 1: Payment Instructions Modal                      */}
       {/* ======================================================== */}
-      {viewingInstructions && (
+      {viewingInstructions && !receivableIds.has(viewingInstructions.id) && (
+        <InstructionsModalView
+          obligation={viewingInstructions}
+          onClose={() => setViewingInstructions(null)}
+          onRecordPayment={() => {
+            setViewingInstructions(null);
+            window.location.assign("/account/rent-payments");
+          }}
+        />
+      )}
+      {viewingInstructions && receivableIds.has(viewingInstructions.id) && (
         <Modal
           open={Boolean(viewingInstructions)}
           onClose={() => setViewingInstructions(null)}
-          title={`Payment Instructions for Tenant · ${viewingInstructions.displayLabel}`}
+          title={`Payment Method for Tenant · ${viewingInstructions.displayLabel}`}
         >
           <div className="space-y-4 text-xs">
             <div className="p-3.5 bg-slate-50 dark:bg-slate-800 rounded-xl space-y-2">
@@ -982,12 +1000,38 @@ export function HostingPaymentsManager() {
                 <ShieldCheck className="h-4 w-4" />
                 <span>Designated Host Payee Information</span>
               </div>
-              <div className="text-slate-700 dark:text-slate-300">
-                Payee: {getObligationPropertyInfo(viewingInstructions).recipientName}
-              </div>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 pt-1">
-                These payment instructions and reference code are provided to the tenant for direct bank transfer or UPI.
-              </p>
+              {activeInstruction ? (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Pay to:</span>
+                    <span className="font-bold text-slate-800 dark:text-slate-100">{activeInstruction.recipientName}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Payment method:</span>
+                    <span className="font-semibold text-slate-700 dark:text-slate-200">{activeInstruction.methodLabel || activeInstruction.method}</span>
+                  </div>
+                  {Object.entries(activeInstruction.bankDetails ?? {}).map(([key, value]) => (
+                    <div key={key} className="flex justify-between">
+                      <span className="text-slate-500">
+                        {resolveBankFieldSchema(activeInstruction.countryCode, activeInstruction.method, activeInstruction.methodSubtype)
+                          ?.fields.find((f) => f.key === key)?.label ?? key}:
+                      </span>
+                      <span className="font-mono font-bold text-slate-800 dark:text-slate-100">{value}</span>
+                    </div>
+                  ))}
+                  {activeInstruction.additionalInstructions && (
+                    <p className="text-slate-600 dark:text-slate-300 whitespace-pre-wrap pt-1">{activeInstruction.additionalInstructions}</p>
+                  )}
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 pt-1">
+                    The tenant sees this payment method and reference, and pays you directly.
+                  </p>
+                </>
+              ) : (
+                <p className="text-amber-800 dark:text-amber-300">
+                  You haven&apos;t got an active payment method, so the tenant has no details to pay you with. Add one under
+                  Payment Methods.
+                </p>
+              )}
             </div>
 
             <div className="flex justify-end pt-2">

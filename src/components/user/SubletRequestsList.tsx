@@ -100,6 +100,8 @@ const HISTORY_STATUSES = new Set([
   "expired",
   "superseded",
   "cancelled_by_authority",
+  "declined_by_co_tenant",
+  "ended",
 ]);
 
 interface StatusBadgeMeta {
@@ -122,7 +124,17 @@ const STATUS_META: Record<string, StatusBadgeMeta> = {
   expired: { label: "Expired", fg: "#344054", bg: "#F0F2F6", bd: "#C3CAD6", icon: "clock" },
   superseded: { label: "Superseded", fg: "#344054", bg: "#F0F2F6", bd: "#C3CAD6", icon: "pause" },
   cancelled_by_authority: { label: "Cancelled", fg: "#344054", bg: "#F0F2F6", bd: "#C3CAD6", icon: "pause" },
+  awaiting_co_tenant: { label: "Awaiting Co-tenant", fg: "#93370D", bg: "#FFF4E0", bd: "#F2B866", icon: "clock" },
+  declined_by_co_tenant: { label: "Declined by Co-tenant", fg: "#344054", bg: "#F0F2F6", bd: "#C3CAD6", icon: "xcirc" },
+  ended: { label: "Ended", fg: "#344054", bg: "#F0F2F6", bd: "#C3CAD6", icon: "pause" },
 };
+
+// A co-tenant shares the room under the renter's own tenancy -- there's no
+// downstream agreement to wait for.
+function downstreamLabel(request: SubletRequest): string {
+  if (request.arrangementType === "ADD_CO_TENANT") return request.sharedRoomActive ? "Room Shared" : "Not Shared";
+  return request.newAgreementId ? "Agreement Signed" : "Agreement Pending";
+}
 
 export function SubletRequestsList() {
   const [requests, setRequests] = useState<SubletRequest[]>([]);
@@ -264,6 +276,7 @@ export function SubletRequestsList() {
       if (r.status === "draft") draft++;
       if (
         r.status === "pending_verification" ||
+        r.status === "awaiting_co_tenant" ||
         r.status === "pending_admin_review" ||
         r.status === "tenant_response_submitted" ||
         r.status === "more_information_requested"
@@ -302,7 +315,7 @@ export function SubletRequestsList() {
             if (x.status !== "approved") return false;
           } else if (activeCard === "review") {
             if (
-              !["pending_verification", "pending_admin_review", "tenant_response_submitted", "more_information_requested"].includes(
+              !["pending_verification", "awaiting_co_tenant", "pending_admin_review", "tenant_response_submitted", "more_information_requested"].includes(
                 x.status
               )
             )
@@ -317,7 +330,7 @@ export function SubletRequestsList() {
           if (statusFilter === "draft" && x.status !== "draft") return false;
           if (
             statusFilter === "review" &&
-            !["pending_verification", "pending_admin_review", "tenant_response_submitted"].includes(x.status)
+            !["pending_verification", "awaiting_co_tenant", "pending_admin_review", "tenant_response_submitted"].includes(x.status)
           )
             return false;
           if (statusFilter === "info" && x.status !== "more_information_requested") return false;
@@ -481,7 +494,7 @@ export function SubletRequestsList() {
       ? Math.round((Date.parse(occ.expectedEndDate) - Date.parse(todayIso)) / 86400000)
       : null;
     if (daysLeft === null || daysLeft < 30) return "A sublet needs at least 30 nights left on the agreement.";
-    const OPEN = ["pending_verification", "pending_admin_review", "more_information_requested", "tenant_response_submitted"];
+    const OPEN = ["pending_verification", "awaiting_co_tenant", "pending_admin_review", "more_information_requested", "tenant_response_submitted"];
     if (requests.some((r) => r.currentOccupancyId === occ.id && OPEN.includes(r.status))) {
       return "There's already an open sublet request for this rental.";
     }
@@ -2189,7 +2202,7 @@ export function SubletRequestsList() {
                         {x.status === "approved" && (
                           <span className="vflag">
                             <SvgIcon name="swap" size={12} strokeWidth={2.2} />
-                            Sublet: {x.newAgreementId ? "Agreement Signed" : "Agreement Pending"}
+                            Sublet: {downstreamLabel(x)}
                           </span>
                         )}
                         {isHistory && (
@@ -2310,7 +2323,7 @@ export function SubletRequestsList() {
                 {activeRequest.status === "approved" && (
                   <span className="vflag">
                     <SvgIcon name="swap" size={13} strokeWidth={2.2} />
-                    Sublet: {activeRequest.newAgreementId ? "Agreement Signed" : "Agreement Pending"}
+                    Sublet: {downstreamLabel(activeRequest)}
                   </span>
                 )}
               </div>
@@ -2657,7 +2670,7 @@ export function SubletRequestsList() {
                             </div>
                             <div>
                               <span>Downstream sublet</span>
-                              <strong>{activeRequest.newAgreementId ? "Agreement Signed" : "Agreement Pending"}</strong>
+                              <strong>{downstreamLabel(activeRequest)}</strong>
                             </div>
                             <div>
                               <span>Approval expires</span>

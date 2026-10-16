@@ -50,7 +50,7 @@ class TestESignatureGateOptIn:
         tenant_user, proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="esig1")
         _allow_co_tenant(db_session, occupancy_id)
         sublet_request = sublet_crud.submit_sublet_request(
-            db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT",
+            db_session, tenant_user, occupancy_id, proposed_party_id, "SUBLEASE_PARTIAL",
         )
         host_user = _host_for(db_session, "esig1")
 
@@ -69,7 +69,7 @@ class TestESignatureGateOptIn:
         tenant_user, proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="esig2")
         _allow_co_tenant(db_session, occupancy_id)
         sublet_request = sublet_crud.submit_sublet_request(
-            db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT",
+            db_session, tenant_user, occupancy_id, proposed_party_id, "SUBLEASE_PARTIAL",
         )
         host_user = _host_for(db_session, "esig2")
 
@@ -87,7 +87,7 @@ class TestESignatureGateOptIn:
         tenant_user, proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="esig3")
         _allow_co_tenant(db_session, occupancy_id)
         sublet_request = sublet_crud.submit_sublet_request(
-            db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT",
+            db_session, tenant_user, occupancy_id, proposed_party_id, "SUBLEASE_PARTIAL",
         )
         host_user = _host_for(db_session, "esig3")
 
@@ -125,7 +125,7 @@ class TestESignatureGateOptIn:
         tenant_user, proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="esig4")
         _allow_co_tenant(db_session, occupancy_id)
         sublet_request = sublet_crud.submit_sublet_request(
-            db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT",
+            db_session, tenant_user, occupancy_id, proposed_party_id, "SUBLEASE_PARTIAL",
         )
         host_user = _host_for(db_session, "esig4")
         r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", cookies=auth_user_cookie(host_user))

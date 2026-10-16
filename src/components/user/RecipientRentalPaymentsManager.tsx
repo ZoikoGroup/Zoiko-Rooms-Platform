@@ -218,7 +218,7 @@ export function RecipientRentalPaymentsManager() {
               "amounts-due": "Amounts due",
               records: "Payment records",
               returns: "Returns",
-              instructions: "Instructions",
+              instructions: "Payment Methods",
               "listing-fees": "Listing fees",
             }[t]}
           </button>
@@ -1190,7 +1190,7 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!authorizedRecipientConfirmed) {
-      setError("Confirm that these instructions belong to the authorized recipient before saving.");
+      setError("Confirm that this payment method belongs to the authorized recipient before saving.");
       return;
     }
     if (needsRail && !methodSubtype) {
@@ -1214,7 +1214,7 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
       onChanged();
       setConfirmingId(created.id);
     } catch (err) {
-      setError(errorMessage(err, "Could not save these payment instructions."));
+      setError(errorMessage(err, "Could not save this payment method."));
     } finally {
       setSubmitting(false);
     }
@@ -1236,7 +1236,7 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
           } — your current details stay active until then.`,
         );
       } else {
-        showToast("Payment instructions are now active. Affected tenants have been notified.");
+        showToast("Payment method is now active. Affected tenants have been notified.");
       }
       onChanged();
     } catch (err) {
@@ -1259,15 +1259,15 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SectionHeading
-          title="Payment instructions"
-          subtitle="Step-up verification required -- a new instruction only becomes active once you confirm the emailed code."
+          title="Payment methods"
+          subtitle="Step-up verification required -- a new payment method only becomes active once you confirm the emailed code."
         />
         <Button size="sm" onClick={() => setFormOpen(true)}>Save changes</Button>
       </div>
 
       {instructions.length === 0 ? (
         <Card>
-          <EmptyState message="No payment instructions set up yet." />
+          <EmptyState message="No payment methods set up yet." />
         </Card>
       ) : (
         <div className="space-y-3">
@@ -1325,7 +1325,7 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
         </div>
       )}
 
-      <Modal open={formOpen} onClose={() => setFormOpen(false)} title="Manage payment instructions">
+      <Modal open={formOpen} onClose={() => setFormOpen(false)} title="Manage payment methods">
         <form onSubmit={handleSubmit} className="space-y-4">
           {error && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">{error}</p>}
           <Field label="Method *">
@@ -1402,7 +1402,7 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
           <Field label="Reference format" hint="Optional -- what reference tenants should use.">
             <input value={referenceFormat} onChange={(e) => setReferenceFormat(e.target.value)} className={inputClass} />
           </Field>
-          <Field label="Additional instructions" hint="Optional -- anything else the tenant should know (e.g. payment timing, account name notes).">
+          <Field label="Additional notes" hint="Optional -- anything else the tenant should know (e.g. payment timing, account name notes).">
             <textarea
               value={additionalInstructions}
               onChange={(e) => setAdditionalInstructions(e.target.value)}
@@ -1418,11 +1418,11 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
               onChange={(e) => setAuthorizedRecipientConfirmed(e.target.checked)}
               className="mt-0.5"
             />
-            I confirm these instructions belong to the authorized recipient.
+            I confirm this payment method belongs to the authorized recipient.
           </label>
           <p className="flex items-start gap-1.5 text-xs text-slate-400">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> Affected tenants will be notified that payment
-            instructions changed and asked to review the new details before their next payment.
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> Affected tenants will be notified that the payment
+            method changed and asked to review the new details before their next payment.
           </p>
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="ghost" onClick={() => setFormOpen(false)}>Cancel</Button>
@@ -1431,7 +1431,7 @@ export function InstructionsManager({ instructions, onChanged }: { instructions:
         </form>
       </Modal>
 
-      <Modal open={Boolean(confirmingId)} onClose={() => setConfirmingId(null)} title="Confirm payment instructions">
+      <Modal open={Boolean(confirmingId)} onClose={() => setConfirmingId(null)} title="Confirm payment method">
         <form onSubmit={handleConfirmCode} className="space-y-4">
           {confirmError && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">{confirmError}</p>}
           <p className="text-sm text-slate-500 dark:text-slate-400">Enter the code we emailed you to activate these payment details.</p>

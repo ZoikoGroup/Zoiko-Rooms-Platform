@@ -154,7 +154,9 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
 }
 
 export function RentBrowser() {
-  const { user } = useUserSession();
+  // Anyone can browse rooms; applying needs a verified identity (the backend
+  // enforces the same rule, so this only keeps the button honest).
+  const { user, identityVerified, loading: sessionLoading } = useUserSession();
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -244,23 +246,18 @@ export function RentBrowser() {
       listRentalApplications().catch(() => []),
     ])
       .then(([publicPage, hostedListings, applications]) => {
+        // A host browsing Find a Room only sees other people's rooms -- their own
+        // listings live under My Listings (the backend also blocks self-applying).
+        const ownListingIds = new Set(
+          (Array.isArray(hostedListings) ? hostedListings : []).map((item) => String(item.id)),
+        );
+
         const roomsMap = new Map<string, FindARoomItem>();
-
-        // 1. Map public published listings
-        if (publicPage && publicPage.items && publicPage.items.length > 0) {
-          publicPage.items.forEach((item, idx) => {
+        (publicPage?.items ?? []).forEach((item, idx) => {
+          if (!ownListingIds.has(String(item.id))) {
             roomsMap.set(String(item.id), mapListingToFindARoomItem(item, idx));
-          });
-        }
-
-        // 2. Map hosted listings (ensures host-added rooms appear dynamically immediately)
-        if (Array.isArray(hostedListings) && hostedListings.length > 0) {
-          hostedListings.forEach((item, idx) => {
-            if (!roomsMap.has(String(item.id))) {
-              roomsMap.set(String(item.id), mapListingToFindARoomItem(item, roomsMap.size + idx));
-            }
-          });
-        }
+          }
+        });
 
         setAllRooms(Array.from(roomsMap.values()));
 
@@ -417,6 +414,7 @@ export function RentBrowser() {
       router.push("/account/login");
       return;
     }
+    if (!identityVerified) return;
     setApplyModalRoom(room);
     setApplyMessage("");
     setApplyDesiredMoveIn(moveInDate);
@@ -1358,14 +1356,29 @@ export function RentBrowser() {
                   <span>Ask a Question</span>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={(e) => handleOpenApply(drawerRoom, e)}
-                  className="flex items-center gap-2 rounded-xl bg-[#D80B0B] px-6 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#B80909]"
-                >
-                  <Check className="h-4 w-4" />
-                  <span>Apply for Room</span>
-                </button>
+                {appliedRooms[drawerRoom.id] ? (
+                  <span className="flex items-center gap-2 rounded-xl bg-emerald-50 px-6 py-2.5 text-xs font-bold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
+                    <Check className="h-4 w-4" />
+                    <span>Applied</span>
+                  </span>
+                ) : user && identityVerified ? (
+                  <button
+                    type="button"
+                    onClick={(e) => handleOpenApply(drawerRoom, e)}
+                    className="flex items-center gap-2 rounded-xl bg-[#D80B0B] px-6 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#B80909]"
+                  >
+                    <Check className="h-4 w-4" />
+                    <span>Apply for Room</span>
+                  </button>
+                ) : sessionLoading ? null : (
+                  <Link
+                    href={user ? "/account/identity" : "/account/login"}
+                    className="flex items-center gap-2 rounded-xl border border-[#D80B0B] px-4 py-2.5 text-xs font-bold text-[#D80B0B] hover:bg-red-50 dark:hover:bg-red-950/30"
+                  >
+                    <ShieldCheck className="h-4 w-4" />
+                    <span>{user ? "Verify identity to apply" : "Sign in to apply"}</span>
+                  </Link>
+                )}
               </div>
             </aside>
           </div>,

@@ -122,7 +122,7 @@ export function FinanceOpsManager() {
         {capabilities && !capabilities.host_payouts_enabled && (
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
             Zoiko Rooms doesn&apos;t collect or pay out rental money — renters pay hosts directly using their verified
-            payment instructions. Past payouts are shown for the record only.
+            payment methods. Past payouts are shown for the record only.
           </p>
         )}
         <div className="mt-4 space-y-2">

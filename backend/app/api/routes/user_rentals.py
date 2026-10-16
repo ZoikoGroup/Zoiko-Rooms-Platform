@@ -66,6 +66,8 @@ from app.schemas.leasing import (
     OfferAcceptRequest,
     OfferCounterCreate,
     OfferRead,
+    CoTenancyResponse,
+    SharedRoomEnd,
     SubletRenterLookup,
     SubletRequestCreate,
     SubletRequestDecision,
@@ -1637,3 +1639,73 @@ def reject_habitability_fix(
 
     guest = _own_guest_or_403(db, user)
     return crud.reject_fix(db, crud.get_habitability_incident_or_404(db, incident_id), guest, payload.note)
+
+
+# -- shared room (co-tenant's side) ------------------------------------------------
+
+@router.get("/co-tenancies", response_model=list[SubletRequestRead])
+def list_co_tenancies_naming_me(
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Co-tenancy requests that name the current user -- invitations to
+    answer, rooms they share, and past ones."""
+    if not user.party_id:
+        return []
+    return [
+        sublet_crud.to_sublet_request_read(db, sr)
+        for sr in sublet_crud.list_shared_room_requests_for_party(db, user.party_id)
+    ]
+
+
+@router.post("/co-tenancies/{sublet_request_id}/respond", response_model=SubletRequestRead)
+def respond_to_co_tenancy(
+    sublet_request_id: int,
+    payload: CoTenancyResponse,
+    request: Request,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The named co-tenant accepts (sends it to the Host) or declines (closes it)."""
+    sublet_request = sublet_crud.get_shared_room_for_co_tenant_or_404(db, sublet_request_id, user)
+    updated = sublet_crud.respond_as_co_tenant(db, sublet_request, user, accept=payload.accept)
+    log_audit_event(
+        db, None, "user_sublet_request.co_tenant_" + ("accept" if payload.accept else "decline"),
+        "sublet_request", str(sublet_request_id), get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)
+
+
+@router.get("/co-tenancies/{sublet_request_id}/transaction-record", response_model=RentalTransactionRecordRead)
+def get_shared_room_transaction_record(
+    sublet_request_id: int,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The renter's tenancy -- rent, deposit, payments -- read-only for the
+    co-tenant sharing it, while the room is shared. Same host-safe view
+    (no identity documents) the Host gets."""
+    sublet_request = sublet_crud.get_shared_room_for_co_tenant_or_404(db, sublet_request_id, user)
+    if not sublet_crud.is_active_shared_room(sublet_request):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only view the rental while you share the room")
+    return build_rental_transaction_record(db, sublet_request.current_occupancy, include_identity=False)
+
+
+@router.post("/co-tenancies/{sublet_request_id}/end", response_model=SubletRequestRead)
+def end_co_tenancy(
+    sublet_request_id: int,
+    request: Request,
+    payload: SharedRoomEnd | None = None,
+    user: UserAccount = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The renter or the co-tenant ends a shared room."""
+    sublet_request = sublet_crud.get_sublet_request(db, sublet_request_id)
+    updated = sublet_crud.end_shared_room(db, sublet_request, user, payload.reason if payload else "")
+    log_audit_event(
+        db, None, "user_sublet_request.co_tenancy_end", "sublet_request", str(sublet_request_id),
+        get_correlation_id(request), reason=f"user:{user.id}",
+    )
+    db.commit()
+    return sublet_crud.to_sublet_request_read(db, updated)

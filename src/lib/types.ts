@@ -1947,7 +1947,12 @@ export type SubletRequestStatus =
   | "withdrawn"
   | "expired"
   | "superseded"
-  | "cancelled_by_authority";
+  | "cancelled_by_authority"
+  // ADD_CO_TENANT: waiting for the named co-tenant to agree; they declined; an
+  // approved shared room that has since ended.
+  | "awaiting_co_tenant"
+  | "declined_by_co_tenant"
+  | "ended";
 
 export type SubletDeclineReasonCode =
   | "PROPERTY_UNSUITABLE_FOR_ARRANGEMENT"
@@ -2010,6 +2015,14 @@ export interface SubletRequest {
   cancelledByAuthorityAt: string | null;
   cancelledByAuthorityAdminId: number | null;
   cancelledByAuthorityReason: string;
+  // ADD_CO_TENANT shared room -- the co-tenant's answer, whether the room is
+  // shared right now, and both people's live identity status.
+  coTenantRespondedAt: string | null;
+  endedAt: string | null;
+  endReason: string;
+  sharedRoomActive: boolean;
+  currentTenantIdentityVerified: boolean;
+  proposedRenterIdentityVerified: boolean;
   // Only set for SUBLEASE_PARTIAL/ADD_CO_TENANT/LODGER_OR_LICENSEE -- the
   // co-tenant's own new agreement. When sublet.signatureMode is
   // E_SIGNATURE for this jurisdiction, it's left unsigned until both
