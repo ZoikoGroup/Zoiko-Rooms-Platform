@@ -1,3 +1,4 @@
+from datetime import timezone
 from collections.abc import Generator
 
 from fastapi import Cookie, Depends, HTTPException, status
@@ -33,6 +34,14 @@ def get_current_admin(
     admin = get_admin_by_email(db, email)
     if not admin or not admin.is_active or admin.approval_status != "approved":
         raise unauthorized
+    # A password reset ends every admin session issued before it.
+    if admin.password_changed_at is not None:
+        changed = admin.password_changed_at
+        if changed.tzinfo is None:  # SQLite hands back naive UTC
+            changed = changed.replace(tzinfo=timezone.utc)
+        issued_at = claims.get("iat")
+        if not isinstance(issued_at, (int, float)) or issued_at < int(changed.timestamp()):
+            raise unauthorized
     return admin
 
 
@@ -78,6 +87,16 @@ def get_current_user(
     if user.password_changed_at is not None:
         issued_at = claims.get("iat") if claims else None
         if not isinstance(issued_at, (int, float)) or issued_at < user.password_changed_at.timestamp():
+            raise unauthorized
+    # "Sign out of other sessions" / authenticated password change. Stored
+    # truncated to the second, so the fresh token handed to the caller in that
+    # same second (iat is whole seconds) still passes.
+    if user.sessions_revoked_at is not None:
+        revoked = user.sessions_revoked_at
+        if revoked.tzinfo is None:  # SQLite hands back naive UTC
+            revoked = revoked.replace(tzinfo=timezone.utc)
+        issued_at = claims.get("iat") if claims else None
+        if not isinstance(issued_at, (int, float)) or issued_at < revoked.timestamp():
             raise unauthorized
     return user
 

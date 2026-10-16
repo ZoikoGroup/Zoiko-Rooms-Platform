@@ -63,7 +63,9 @@ class AgreementAmendment(Base):
     # Agreement.signed_by_provider_at/signed_by_renter_at or
     # _apply_signature's hardcoded two-party logic.
     proposed_guarantor: Mapped[dict] = mapped_column(JSON, default=dict)
-    requested_by_admin_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id"), nullable=False)
+    # Exactly one of these: the admin acting for the provider, or the host.
+    requested_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    requested_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     terms_proposed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

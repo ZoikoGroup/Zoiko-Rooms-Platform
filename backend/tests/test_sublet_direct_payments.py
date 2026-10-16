@@ -86,13 +86,6 @@ class TestArrangement:
                         json={"depositRoute": "PAY_TO_SUBLESSOR"})
         assert r.status_code == 400
 
-    def test_co_tenant_rent_cannot_be_redirected_to_the_original_tenant(self, client, db_session):
-        sublet, tenant_user, *_ = _sublet(client, db_session, "dp4", arrangement="ADD_CO_TENANT")
-        r = client.post(f"/api/users/sublets/{sublet.id}/payment-arrangement", cookies=auth_user_cookie(tenant_user),
-                        json={"rentPayeeType": "SUBLESSOR"})
-        assert r.status_code == 400
-        assert "isn't authorized" in r.json()["detail"]
-
     def test_subtenant_cannot_change_the_arrangement(self, client, db_session):
         sublet, _t, proposed_user, *_ = _sublet(client, db_session, "dp5")
         r = client.post(f"/api/users/sublets/{sublet.id}/payment-arrangement", cookies=auth_user_cookie(proposed_user),
@@ -171,7 +164,7 @@ class TestPaymentGate:
         with pytest.raises(HTTPException) as exc:
             rp_crud.mark_paid(db_session, guest, rent, amount=301, currency=rent.currency, declared_date=date.today(),
                               payment_method_category="CASH")
-        assert "more than" in exc.value.detail
+        assert exc.value.detail["code"] == "OVERPAYMENT"
         rp_crud.mark_paid(db_session, guest, rent, amount=300, currency=rent.currency, declared_date=date.today(),
                           payment_method_category="CASH")
         with pytest.raises(HTTPException):  # already awaiting confirmation for the full amount

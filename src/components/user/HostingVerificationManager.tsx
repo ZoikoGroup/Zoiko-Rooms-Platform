@@ -266,7 +266,7 @@ export function HostingVerificationManager() {
         propertyName: a.propertyLabel,
         role: isOwner ? "Role: Owner" : `Role: ${a.relationshipType}`,
         relationshipType: a.relationshipType,
-        state: (a.state as any) || "VERIFIED",
+        state: (a.state as VerificationAuthorityItem["state"]) || "VERIFIED",
         stateLabel,
         scope: "Scope: Create / Manage / Publish Listings",
         expiryText,

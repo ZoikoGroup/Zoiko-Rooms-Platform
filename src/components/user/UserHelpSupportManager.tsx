@@ -30,8 +30,22 @@ import {
   X,
 } from "lucide-react";
 import { useUserSession } from "@/components/user/UserSessionContext";
-import { apiClientFetch } from "@/lib/api-client";
-import { listHostedProperties, listOccupancies, listRentalApplications } from "@/lib/user-api";
+import {
+  createSupportTicket,
+  errorMessage,
+  listHostedProperties,
+  listOccupancies,
+  listRentalApplications,
+  listHelpArticles,
+  type HelpCentreArticle,
+  listSupportTickets,
+  sendHelpArticleFeedback,
+  markSupportTicketSolved,
+  reopenSupportTicket,
+  replyToSupportTicket,
+  supportAttachmentUrl,
+} from "@/lib/user-api";
+import type { SupportLinkedType, SupportTicket, SupportTicketStatus } from "@/lib/types";
 
 export type CaseStatus = "action" | "inreview" | "submitted" | "resolved" | "closed";
 
@@ -46,9 +60,52 @@ export interface SupportCase {
   linked?: string;
   req?: string;
   res?: string;
-  msgs: Array<[sender: "you" | "zr", text: string, time: string]>;
-  files?: string[];
+  msgs: Array<[sender: "you" | "zr" | "bot", text: string, time: string]>;
+  files?: Array<{ id: number; name: string }>;
 }
+
+const STATUS_FROM_API: Record<SupportTicketStatus, CaseStatus> = {
+  SUBMITTED: "submitted",
+  IN_REVIEW: "inreview",
+  ACTION_REQUIRED: "action",
+  RESOLVED: "resolved",
+  CLOSED: "closed",
+};
+
+function relativeTime(iso: string): string {
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days} d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function toCase(t: SupportTicket): SupportCase {
+  const st = STATUS_FROM_API[t.status];
+  return {
+    id: t.ref,
+    t: t.issue,
+    link: t.linkedLabel || "Not about a specific record",
+    st,
+    upd: relativeTime(t.updatedAt),
+    note: st === "action" ? "Action required" : "No action required",
+    report: t.description,
+    linked: t.linkedLabel || undefined,
+    req: t.actionRequest ?? undefined,
+    res: t.resolution ?? undefined,
+    msgs: t.messages.map((m) => [
+      m.sender === "USER" ? "you" : m.sender === "ASSISTANT" ? "bot" : "zr",
+      m.body,
+      new Date(m.createdAt).toLocaleString(),
+    ]),
+    files: t.attachments.map((a) => ({ id: a.id, name: a.originalFilename })),
+  };
+}
+
+type LinkTarget = { type: SupportLinkedType; id: number };
 
 export interface HelpArticle {
   id: string;
@@ -66,7 +123,7 @@ interface ContactFormState {
   item: string;
   desc: string;
   imp: "no" | "yes";
-  files: string[];
+  files: File[];
   ch: "both" | "app";
 }
 
@@ -107,93 +164,11 @@ const DEFAULT_FALLBACK_ITEMS: Record<string, string[]> = {
   tech: ["Platform or browser bug", "Mobile display issue", "General technical question"],
 };
 
-const ARTICLES: HelpArticle[] = [
-  {
-    id: "a1",
-    cat: "payments",
-    t: "Review verified payment instructions",
-    s: "Use the payment instructions shown in Zoiko Rooms for your rental. Do not rely on replacement details sent in chat or email.",
-    type: "How-to",
-  },
-  {
-    id: "a2",
-    cat: "payments",
-    t: "My payment is marked paid but not confirmed",
-    s: "Understand renter declarations, recipient confirmation and payment mismatches.",
-    type: "Troubleshooting",
-  },
-  {
-    id: "a3",
-    cat: "payments",
-    t: "Payment instructions changed unexpectedly",
-    s: "Review the verified recipient and report a security concern if the change is suspicious.",
-    type: "Security guidance",
-    report: true,
-  },
-  {
-    id: "a4",
-    cat: "payments",
-    t: "What Zoiko Rooms does not hold or process",
-    s: "Rent and deposits go to the verified recipient. Zoiko Rooms collects only the Listing Fee.",
-    type: "Policy",
-  },
-  {
-    id: "a5",
-    cat: "apps",
-    t: "How to review an offer",
-    s: "Check the offer terms, expiry and what happens when you accept.",
-    type: "How-to",
-  },
-  {
-    id: "a6",
-    cat: "rentals",
-    t: "How to give notice where the workflow is enabled",
-    s: "Notices are sent from My Rentals, not through Support messages.",
-    type: "Workflow guide",
-  },
-  {
-    id: "a7",
-    cat: "listings",
-    t: "Why a listing cannot publish",
-    s: "See which publication gate is blocking — verification, review or the Listing Fee.",
-    type: "Troubleshooting",
-  },
-  {
-    id: "a8",
-    cat: "verification",
-    t: "What Property Verified means",
-    s: "Property verification and listing authority are separate checks.",
-    type: "Policy",
-  },
-  {
-    id: "a9",
-    cat: "sublet",
-    t: "How to request a sublet",
-    s: "Requests go to your landlord or their authorized agent through Sublet Requests.",
-    type: "Workflow guide",
-  },
-  {
-    id: "a10",
-    cat: "account",
-    t: "Suspicious sign-in or account recovery",
-    s: "Secure your account first, then contact Support if needed.",
-    type: "Security guidance",
-  },
-  {
-    id: "a11",
-    cat: "safety",
-    t: "When to contact Support, Trust & Safety, a tribunal or emergency services",
-    s: "Know which route fits your situation — Zoiko Rooms isn’t an emergency service or court.",
-    type: "Escalation",
-  },
-  {
-    id: "a12",
-    cat: "account",
-    t: "How to update notification preferences",
-    s: "Manage email and push alerts in Settings. Essential notices are always sent.",
-    type: "How-to",
-  },
-];
+/** Help articles come from the knowledge base (GET /api/users/help/articles),
+ *  the same content the assistant answers from. */
+function toHelpArticle(a: HelpCentreArticle): HelpArticle {
+  return { id: a.id, cat: a.category, t: a.title, s: a.summary, type: a.type as HelpArticle["type"], report: a.report };
+}
 
 const STATUS_CONFIG: Record<
   CaseStatus,
@@ -239,6 +214,13 @@ export function UserHelpSupportManager() {
   const [searchQuery, setSearchQuery] = useState("");
   const [caseFilterTab, setCaseFilterTab] = useState<"open" | "resolved" | "all">("open");
 
+  const [articles, setArticles] = useState<HelpArticle[]>([]);
+  useEffect(() => {
+    listHelpArticles()
+      .then((list) => setArticles(list.map(toHelpArticle)))
+      .catch(() => setArticles([]));
+  }, []);
+
   // Dynamic Cases state - starts empty (no fake Figma data)
   const [cases, setCases] = useState<SupportCase[]>([]);
   const [casesLoading, setCasesLoading] = useState(true);
@@ -247,6 +229,10 @@ export function UserHelpSupportManager() {
 
   // Dynamic user items for ticket linking
   const [dynamicItems, setDynamicItems] = useState<Record<string, string[]>>(DEFAULT_FALLBACK_ITEMS);
+  // Item label -> the real record it points at (generic items have none).
+  const [linkTargets, setLinkTargets] = useState<Map<string, LinkTarget>>(new Map());
+  const [submitting, setSubmitting] = useState(false);
+  const [casesError, setCasesError] = useState("");
 
   // Contact Form State
   const [contactForm, setContactForm] = useState<ContactFormState>({
@@ -265,18 +251,14 @@ export function UserHelpSupportManager() {
   const [replyFile, setReplyFile] = useState<File | null>(null);
   const [replyError, setReplyError] = useState("");
 
-  // Attempt to load dynamic cases from backend or start with clean empty state
   useEffect(() => {
     let active = true;
     async function loadTickets() {
       try {
-        const fetched = await apiClientFetch<SupportCase[]>("/api/users/support/tickets");
-        if (active && Array.isArray(fetched)) {
-          setCases(fetched);
-        }
-      } catch {
-        // Backend endpoint not yet deployed - keep empty state
-        if (active) setCases([]);
+        const fetched = await listSupportTickets();
+        if (active) setCases(fetched.map(toCase));
+      } catch (err) {
+        if (active) setCasesError(errorMessage(err, "Could not load your support cases"));
       } finally {
         if (active) setCasesLoading(false);
       }
@@ -301,29 +283,39 @@ export function UserHelpSupportManager() {
         if (!active) return;
         const newItems: Record<string, string[]> = { ...DEFAULT_FALLBACK_ITEMS };
 
+        const targets = new Map<string, LinkTarget>();
+
         if (occupancies.status === "fulfilled" && occupancies.value?.length) {
-          const occStrings = occupancies.value.map(
-            (o) => `Rental #ZR-R-${o.id} · ${o.listingName || o.propertyAddress || "Room"}`
-          );
+          const occStrings = occupancies.value.map((o) => {
+            const label = `Rental #ZR-R-${o.id} · ${o.listingName || o.propertyAddress || "Room"}`;
+            targets.set(label, { type: "occupancy", id: o.id });
+            return label;
+          });
           newItems.rentals = [...occStrings, "General lease question"];
-          newItems.payments = occStrings.map((s, i) => `${s} · Payment #ZR-P-8876${i + 1}`);
+          newItems.payments = [...occStrings, "Not about a specific payment"];
+          newItems.sublet = [...occStrings, "Sublet policy inquiry"];
         }
 
         if (applications.status === "fulfilled" && applications.value?.length) {
-          const appStrings = applications.value.map(
-            (a) => `Application #ZR-A-${a.id} · ${a.listingName || `Listing #${a.listingId}`}`
-          );
+          const appStrings = applications.value.map((a) => {
+            const label = `Application #ZR-A-${a.id} · ${a.listingName || `Listing #${a.listingId}`}`;
+            targets.set(label, { type: "application", id: a.id });
+            return label;
+          });
           newItems.apps = [...appStrings, "General application question"];
         }
 
         if (properties.status === "fulfilled" && properties.value?.length) {
-          const propStrings = properties.value.map(
-            (p) => `Property #ZR-${String(p.id).padStart(7, "0")} · ${p.address || p.city}`
-          );
+          const propStrings = properties.value.map((p) => {
+            const label = `Property #ZR-${String(p.id).padStart(7, "0")} · ${p.address || p.city}`;
+            targets.set(label, { type: "property", id: p.id });
+            return label;
+          });
           newItems.listings = [...propStrings, "General listing question"];
-          newItems.verification = [...propStrings.map((s) => `${s} · Authority`), "Account identity verification"];
+          newItems.verification = [...propStrings, "Account identity verification"];
         }
 
+        setLinkTargets(targets);
         setDynamicItems(newItems);
       } catch {
         // graceful fallback to DEFAULT_FALLBACK_ITEMS
@@ -382,40 +374,28 @@ export function UserHelpSupportManager() {
     }
 
     if (contactForm.step === 5) {
-      const generatedId = `ZR-SUP-${10840 + cases.length + 1}`;
-      const payload: SupportCase = {
-        id: generatedId,
-        t: contactForm.issue,
-        link: contactForm.item,
-        st: "submitted",
-        upd: "Just now",
-        note: "No action required",
-        report: contactForm.desc,
-        msgs: [["you", contactForm.desc, "Just now"]],
-        files: contactForm.files.length ? contactForm.files : undefined,
-      };
-
+      if (submitting) return;
+      const target = linkTargets.get(contactForm.item);
+      setSubmitting(true);
       try {
-        // Attempt backend endpoint if exists
-        await apiClientFetch("/api/users/support/tickets", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            category: contactForm.cat,
-            issue: contactForm.issue,
-            linked_item: contactForm.item,
-            description: contactForm.desc,
-            time_sensitive: contactForm.imp === "yes",
-            files: contactForm.files,
-            reply_channel: contactForm.ch,
-          }),
+        const ticket = await createSupportTicket({
+          category: contactForm.cat,
+          issue: contactForm.issue,
+          description: contactForm.desc,
+          linkedType: target?.type ?? null,
+          linkedId: target?.id ?? null,
+          linkedLabel: contactForm.item,
+          timeSensitive: contactForm.imp === "yes",
+          replyChannel: contactForm.ch,
+          files: contactForm.files,
         });
-      } catch {
-        // Graceful client fallback while backend team builds the support endpoints
+        setCases((prev) => [toCase(ticket), ...prev]);
+        navigateTo("submitted", ticket.ref);
+      } catch (err) {
+        showToast(errorMessage(err, "Could not submit your request. Please try again."));
+      } finally {
+        setSubmitting(false);
       }
-
-      setCases((prev) => [payload, ...prev]);
-      navigateTo("submitted", generatedId);
       return;
     }
 
@@ -436,61 +416,35 @@ export function UserHelpSupportManager() {
     }
 
     setReplyError("");
-    const messageContent =
-      replyText.trim() + (replyFile ? ` [Uploaded: ${replyFile.name}]` : "");
-
     try {
-      await apiClientFetch(`/api/users/support/tickets/${caseId}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: messageContent }),
-      });
-    } catch {
-      // client fallback
+      const ticket = await replyToSupportTicket(caseId, replyText.trim(), replyFile ? [replyFile] : []);
+      setCases((prev) => prev.map((c) => (c.id === caseId ? toCase(ticket) : c)));
+      setReplyText("");
+      setReplyFile(null);
+      showToast("Sent. Support will update this case.");
+    } catch (err) {
+      setReplyError(errorMessage(err, "Could not send your reply"));
     }
-
-    const updated = cases.map((c) => {
-      if (c.id !== caseId) return c;
-      const msgs: Array<[sender: "you" | "zr", text: string, time: string]> = [
-        ...c.msgs,
-        ["you", messageContent, "Just now"],
-      ];
-      return {
-        ...c,
-        msgs,
-        st: c.st === "action" ? ("inreview" as CaseStatus) : c.st,
-        note: c.st === "action" ? "No action required" : c.note,
-        upd: "Just now",
-        files: replyFile ? [...(c.files || []), replyFile.name] : c.files,
-      };
-    });
-
-    setCases(updated);
-    setReplyText("");
-    setReplyFile(null);
-    showToast("Sent. Support will update this case.");
   };
 
-  const handleReopenCase = (caseId: string) => {
-    setCases((prev) =>
-      prev.map((c) => {
-        if (c.id !== caseId) return c;
-        return {
-          ...c,
-          st: "inreview" as CaseStatus,
-          upd: "Just now",
-          msgs: [
-            ...c.msgs,
-            [
-              "you",
-              "Requesting case review be reopened under the support policy.",
-              "Just now",
-            ],
-          ],
-        };
-      })
-    );
-    showToast("Case reopened. Support team notified.");
+  const handleMarkSolved = async (caseId: string) => {
+    try {
+      const ticket = await markSupportTicketSolved(caseId);
+      setCases((prev) => prev.map((c) => (c.id === caseId ? toCase(ticket) : c)));
+      showToast("Glad that helped. The case is marked as solved.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not update this case"));
+    }
+  };
+
+  const handleReopenCase = async (caseId: string) => {
+    try {
+      const ticket = await reopenSupportTicket(caseId);
+      setCases((prev) => prev.map((c) => (c.id === caseId ? toCase(ticket) : c)));
+      showToast("Case reopened. Support team notified.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not reopen this case"));
+    }
   };
 
   const currentCase = useMemo(() => {
@@ -502,10 +456,10 @@ export function UserHelpSupportManager() {
 
   const currentArticle = useMemo(() => {
     if (view === "article" && arg) {
-      return ARTICLES.find((a) => a.id === arg);
+      return articles.find((a) => a.id === arg);
     }
     return null;
-  }, [view, arg]);
+  }, [view, arg, articles]);
 
   const currentCategory = useMemo(() => {
     if (view === "topic" && arg) {
@@ -781,6 +735,8 @@ export function UserHelpSupportManager() {
 
             {casesLoading ? (
               <div className="py-6 text-center text-xs text-slate-400">Loading cases...</div>
+            ) : casesError ? (
+              <div className="py-6 text-center text-xs font-semibold text-red-600 dark:text-red-400">{casesError}</div>
             ) : cases.length === 0 ? (
               <div className="py-6 text-center">
                 <HelpCircle className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600 mb-2" />
@@ -997,7 +953,7 @@ export function UserHelpSupportManager() {
 
           {(() => {
             const q = (arg || "").toLowerCase();
-            const matched = ARTICLES.filter((a) => {
+            const matched = articles.filter((a) => {
               const full = `${a.t} ${a.s} ${a.cat}`.toLowerCase();
               return full.includes(q) || q.split(" ").every((w) => full.includes(w));
             });
@@ -1090,7 +1046,7 @@ export function UserHelpSupportManager() {
           </div>
 
           <ul className="space-y-3">
-            {ARTICLES.filter((a) => a.cat === currentCategory.id).map((art) => (
+            {articles.filter((a) => a.cat === currentCategory.id).map((art) => (
               <li
                 key={art.id}
                 className="space-y-1.5 rounded-2xl border border-slate-200 bg-white p-4 shadow-xs dark:border-slate-800 dark:bg-slate-900"
@@ -1184,8 +1140,8 @@ export function UserHelpSupportManager() {
               <div className="flex items-start gap-2.5 rounded-2xl border border-amber-300 bg-amber-50 p-3.5 text-xs font-medium text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
                 <span>
-                  Never send rent using bank details received by message or email. Only use
-                  instructions on the verified screen.
+                  Never send rent using bank details received by message or email. Only use the
+                  payment method on the verified screen.
                 </span>
               </div>
             )}
@@ -1196,7 +1152,11 @@ export function UserHelpSupportManager() {
                 <span>Was this helpful?</span>
                 <button
                   type="button"
-                  onClick={() => showToast("Thanks for your feedback!")}
+                  onClick={() =>
+                    sendHelpArticleFeedback(currentArticle.id, true)
+                      .then(() => showToast("Thanks for your feedback!"))
+                      .catch(() => showToast("Could not send feedback"))
+                  }
                   className="rounded-lg border border-slate-200 px-2 py-1 font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
                 >
                   <ThumbsUp className="h-3 w-3 inline mr-1" />
@@ -1205,7 +1165,9 @@ export function UserHelpSupportManager() {
                 <button
                   type="button"
                   onClick={() =>
-                    showToast("Thanks — we’ll use this feedback to improve the article.")
+                    sendHelpArticleFeedback(currentArticle.id, false)
+                      .then(() => showToast("Thanks — we’ll use this feedback to improve the article."))
+                      .catch(() => showToast("Could not send feedback"))
                   }
                   className="rounded-lg border border-slate-200 px-2 py-1 font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
                 >
@@ -1288,7 +1250,7 @@ export function UserHelpSupportManager() {
             <ul className="divide-y divide-slate-100 rounded-2xl border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
               {[
                 ["Fraud or fake listing", "Suspicious listing, property or authority", "safety"],
-                ["Suspicious payment instructions", "Don’t send money until you’ve reviewed verified instructions", "payments"],
+                ["Suspicious payment method", "Don’t send money until you’ve reviewed the verified payment method", "payments"],
                 ["Harassment or threats", "We’ll preserve evidence and help with communication controls", "safety"],
                 ["Discrimination concern", "Routed to Trust & Safety and Legal/Compliance", "safety"],
                 ["Unsafe property", "Your legal rights depend on local law — we’ll record and route it", "safety"],
@@ -1590,7 +1552,7 @@ export function UserHelpSupportManager() {
                     }`}
                   >
                     <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
-                      {isYou ? "You" : "Zoiko Rooms Support"} · {time}
+                      {isYou ? "You" : sender === "bot" ? "Zoiko Rooms assistant (automatic)" : "Zoiko Rooms Support"} · {time}
                     </span>
                     <p className="mt-1 whitespace-pre-wrap">{text}</p>
                   </div>
@@ -1601,12 +1563,31 @@ export function UserHelpSupportManager() {
             {currentCase.files && currentCase.files.length > 0 && (
               <div className="flex items-center gap-2 pt-2 text-xs font-medium text-[#0E2F73] dark:text-blue-400">
                 <FileText className="h-4 w-4" />
-                <span>Attached: {currentCase.files.join(", ")}</span>
+                <span>
+                  Attached:{" "}
+                  {currentCase.files.map((f, i) => (
+                    <span key={f.id}>
+                      {i > 0 && ", "}
+                      <a
+                        href={supportAttachmentUrl(currentCase.id, f.id)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline hover:no-underline"
+                      >
+                        {f.name}
+                      </a>
+                    </span>
+                  ))}
+                </span>
               </div>
             )}
 
             {/* Resolved Reopen trigger */}
-            {currentCase.st === "resolved" || currentCase.st === "closed" ? (
+            {currentCase.st === "closed" ? (
+              <div className="border-t border-slate-100 pt-4 text-xs text-slate-500 dark:border-slate-800">
+                This case is closed. If you still need help, open a new request.
+              </div>
+            ) : currentCase.st === "resolved" ? (
               <div className="flex items-center justify-between border-t border-slate-100 pt-4 dark:border-slate-800">
                 <span className="text-xs text-slate-500">Not resolved to your satisfaction?</span>
                 <button
@@ -1620,6 +1601,18 @@ export function UserHelpSupportManager() {
             ) : (
               /* Reply section */
               <div className="space-y-3 border-t border-slate-100 pt-4 dark:border-slate-800">
+                {currentCase.msgs.some(([s]) => s === "bot") && (
+                  <div className="flex items-center justify-between gap-3 rounded-xl bg-emerald-50 px-3.5 py-2.5 dark:bg-emerald-950/30">
+                    <span className="text-xs text-emerald-900 dark:text-emerald-200">Did the automatic answer solve your problem?</span>
+                    <button
+                      type="button"
+                      onClick={() => handleMarkSolved(currentCase.id)}
+                      className="rounded-xl bg-emerald-700 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-emerald-800"
+                    >
+                      Yes, mark as solved
+                    </button>
+                  </div>
+                )}
                 {currentCase.st === "action" && (
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
@@ -1809,7 +1802,7 @@ export function UserHelpSupportManager() {
 
                 {/* Instant Article Recommendation */}
                 {(() => {
-                  const rec = ARTICLES.find((a) => a.cat === contactForm.cat);
+                  const rec = articles.find((a) => a.cat === contactForm.cat);
                   if (!rec) return null;
                   return (
                     <div className="flex items-center justify-between rounded-xl bg-blue-50/70 p-3 text-xs text-blue-900 dark:bg-blue-950/20 dark:text-blue-300">
@@ -1949,7 +1942,7 @@ export function UserHelpSupportManager() {
                       Add file or screenshot
                     </span>
                     <span className="text-xs text-slate-500">
-                      PDF, JPG, PNG · up to 10 MB each
+                      PDF, JPG, PNG · up to 10 MB each, 5 files max
                     </span>
                   </div>
                   <input
@@ -1959,11 +1952,12 @@ export function UserHelpSupportManager() {
                     className="sr-only"
                     onChange={(e) => {
                       if (e.target.files?.length) {
-                        const names = Array.from(e.target.files).map((f) => f.name);
+                        const picked = Array.from(e.target.files);
                         setContactForm((prev) => ({
                           ...prev,
-                          files: [...prev.files, ...names],
+                          files: [...prev.files, ...picked].slice(0, 5),
                         }));
+                        e.target.value = "";
                       }
                     }}
                   />
@@ -1971,17 +1965,14 @@ export function UserHelpSupportManager() {
 
                 {contactForm.files.length > 0 && (
                   <ul className="space-y-2">
-                    {contactForm.files.map((fileName, idx) => (
+                    {contactForm.files.map((file, idx) => (
                       <li
                         key={idx}
                         className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
                       >
                         <div className="flex items-center gap-2">
                           <FileText className="h-4 w-4 text-[#0E2F73]" />
-                          <span>{fileName}</span>
-                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
-                            Scanned
-                          </span>
+                          <span>{file.name}</span>
                         </div>
                         <button
                           type="button"
@@ -2036,7 +2027,7 @@ export function UserHelpSupportManager() {
                   <div className="grid grid-cols-3 gap-2 py-2">
                     <dt className="font-bold text-slate-500">Evidence</dt>
                     <dd className="col-span-2 font-medium text-slate-800 dark:text-slate-200">
-                      {contactForm.files.length ? contactForm.files.join(", ") : "None attached"}
+                      {contactForm.files.length ? contactForm.files.map((f) => f.name).join(", ") : "None attached"}
                     </dd>
                   </div>
                 </dl>
@@ -2110,9 +2101,10 @@ export function UserHelpSupportManager() {
               <button
                 type="button"
                 onClick={handleNextStep}
-                className="rounded-xl bg-[#0E2F73] px-5 py-2 text-xs font-bold text-white transition hover:bg-primary-950"
+                disabled={submitting}
+                className="rounded-xl bg-[#0E2F73] px-5 py-2 text-xs font-bold text-white transition hover:bg-primary-950 disabled:opacity-60"
               >
-                {contactForm.step === 5 ? "Submit case" : "Continue"}
+                {contactForm.step === 5 ? (submitting ? "Submitting..." : "Submit case") : "Continue"}
               </button>
             </div>
           </div>

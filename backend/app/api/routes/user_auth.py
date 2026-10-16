@@ -116,13 +116,21 @@ def update_profile(
 @router.put("/password")
 def change_user_password(
     payload: UserPasswordChangeRequest,
+    response: Response,
     user: UserAccount = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Change user password."""
+    """Change user password. Signs out every other session; this one gets a
+    fresh cookie."""
     if not verify_password(payload.current_password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
+    if len(payload.new_password) < 8:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password must be at least 8 characters")
+    from app.crud.user_settings import revoke_sessions
+
     update_user_password(db, user, payload.new_password)
+    revoke_sessions(db, user)
+    _set_user_cookie(response, user.email)
     return {"ok": True}
 
 

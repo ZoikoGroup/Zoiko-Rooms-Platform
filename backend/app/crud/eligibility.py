@@ -37,6 +37,21 @@ def check_room_capacity(db, room: Room, *, exclude_occupancy_id: int | None = No
     if exclude_occupancy_id is not None:
         query = query.where(Occupancy.id != exclude_occupancy_id)
     current_occupants = db.scalar(query) or 0
+    # A co-tenant sharing a renter's room has no occupancy of their own but
+    # still takes a place in it.
+    from app.models.sublet_request import SHARED_ROOM_ARRANGEMENT_TYPES, SubletRequest
+
+    current_occupants += db.scalar(
+        select(func.count()).select_from(SubletRequest)
+        .join(Occupancy, SubletRequest.current_occupancy_id == Occupancy.id)
+        .where(
+            Occupancy.room_id == room.id,
+            Occupancy.status.in_(("PENDING_MOVE_IN", "ACTIVE")),
+            SubletRequest.arrangement_type.in_(SHARED_ROOM_ARRANGEMENT_TYPES),
+            SubletRequest.status == "approved",
+            SubletRequest.new_agreement_id.is_(None),
+        )
+    ) or 0
     if current_occupants >= room.max_occupants:
         return [f"Room is already at capacity ({current_occupants}/{room.max_occupants} occupants)"]
     return []

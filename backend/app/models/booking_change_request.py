@@ -129,6 +129,8 @@ class BookingChangeRequest(Base):
     reason: Mapped[str] = mapped_column(String(500), default="")
     decision_note: Mapped[str] = mapped_column(String(500), default="")
     decided_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    # Set instead of decided_by_admin_id when the host decided it themselves.
+    decided_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Set once approval drives the amendment engine -- lets a caller follow
     # this request through to the resulting AgreementAmendment/re-signature.

@@ -160,6 +160,11 @@ class DepositRecordRead(CamelModel):
     claimed_amount: float = 0
     disputed_amount: float = 0
     currency: str = "USD"
+    occupancy_id: int | None = None
+    # When the host's window to claim closes (set once the tenancy has ended);
+    # anything unclaimed is returned to the renter automatically after it.
+    claim_window_ends_at: datetime | None = None
+    room_label: str = ""
 
 
 class DepositRelease(CamelModel):
@@ -197,24 +202,38 @@ class DepositClaimItemRespond(CamelModel):
 
 class DepositClaimItemFinalAmount(CamelModel):
     item_id: int
-    final_amount: float
+    final_amount: float = Field(ge=0, le=MAX_MONEY_AMOUNT)
 
 
-class DepositClaimResolve(CamelModel):
+class DepositClaimItemRevise(CamelModel):
+    """The host lowering (or dropping, with 0) a disputed item."""
+    amount: float = Field(ge=0, le=MAX_MONEY_AMOUNT)
+
+
+class DepositSchemeDecisionCreate(CamelModel):
+    """Either party recording the deposit scheme's decision on the disputed items."""
     item_final_amounts: list[DepositClaimItemFinalAmount]
-    notes: str = ""
+    scheme_reference: str = Field(min_length=1, max_length=200)
+    notes: str = Field(default="", max_length=2000)
 
 
 class DepositClaimRead(CamelModel):
     id: int
     deposit_record_id: int
     status: str
-    submitted_by_admin_id: int
+    submitted_by_admin_id: int | None = None
+    submitted_by_user_id: int | None = None
     submitted_at: datetime
+    response_due_at: datetime | None = None
     renter_responded_at: datetime | None
+    negotiation_ends_at: datetime | None = None
+    referred_at: datetime | None = None
     resolved_by_admin_id: int | None
+    resolved_by_user_id: int | None = None
     resolved_at: datetime | None
+    scheme_reference: str = ""
     resolution_notes: str
+    currency: str = "USD"
     items: list[DepositClaimItemRead] = []
 
 
@@ -290,7 +309,7 @@ class RefundRequestRead(CamelModel):
     reason: str
     idempotency_key: str
     status: str
-    requested_by_admin_id: int
+    requested_by_admin_id: int | None = None
     decided_by_admin_id: int | None
     created_at: datetime
     decided_at: datetime | None

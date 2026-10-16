@@ -119,7 +119,7 @@ class TestDueStatusesAndReminders:
         guest = get_guest_for_user(db_session, _user)
         record = rp_crud.mark_paid(
             db_session, guest, rent, amount=float(rent.amount), currency=rent.currency,
-            declared_date=date.today(), payment_method_category="UPI",
+            declared_date=date.today(), payment_method_category="BANK_TRANSFER",
         )
         record.created_at = datetime.now(timezone.utc) - timedelta(days=settings.payment_confirmation_reminder_days + 1)
         db_session.commit()

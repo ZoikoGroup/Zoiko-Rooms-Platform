@@ -16,11 +16,14 @@ from sqlalchemy.orm import Session
 from app.crud.agreement_legal_hold import get_active_legal_hold
 from app.crud.audit import log_audit_event
 from app.crud.events import emit_event
-from app.crud.party import assert_provider_access, party_id_for_listing
-from app.models.admin_user import AdminUser
+from app.crud.party import assert_provider_access_any, party_id_for_listing
+from app.crud.provider_actor import ProviderActor, admin_id, admin_or_none, audit_reason, user_id
 from app.models.agreement_amendment import AMENDMENT_TYPES, AgreementAmendment
 from app.models.leasing import Agreement, AgreementVersion
 from app.services.agreement_profile import no_agreement_profile_message, resolve_agreement_profile
+
+# Every step below takes the provider-side actor: an admin acting for the
+# provider party, or the self-service host (crud/provider_actor.py).
 
 _PROPOSABLE_TERM_KEYS = ("monthlyRent", "depositAmount", "startDate", "termMonths")
 
@@ -32,11 +35,11 @@ def get_amendment_or_404(db: Session, agreement: Agreement, amendment_id: int) -
     return amendment
 
 
-def request_amendment(db: Session, agreement: Agreement, admin: AdminUser, reason: str) -> AgreementAmendment:
+def request_amendment(db: Session, agreement: Agreement, admin: ProviderActor, reason: str) -> AgreementAmendment:
     """REQUESTED. Only once the agreement is fully SIGNED -- before that,
     AC-06's own in-place reversioning (_invalidate_pending_agreement_version)
     is the correct path, not an amendment."""
-    assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(agreement.offer.listing))
     if agreement.status != "SIGNED":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -56,7 +59,7 @@ def request_amendment(db: Session, agreement: Agreement, admin: AdminUser, reaso
 
     amendment = AgreementAmendment(
         agreement_id=agreement.id, source_version_id=source_version.id, reason=reason,
-        requested_by_admin_id=admin.id, status="REQUESTED",
+        requested_by_admin_id=admin_id(admin), requested_by_user_id=user_id(admin), status="REQUESTED",
     )
     db.add(amendment)
     db.commit()
@@ -64,9 +67,9 @@ def request_amendment(db: Session, agreement: Agreement, admin: AdminUser, reaso
     return amendment
 
 
-def classify_amendment(db: Session, amendment: AgreementAmendment, admin: AdminUser, amendment_type: str) -> AgreementAmendment:
+def classify_amendment(db: Session, amendment: AgreementAmendment, admin: ProviderActor, amendment_type: str) -> AgreementAmendment:
     """REQUESTED -> CLASSIFIED."""
-    assert_provider_access(db, admin, party_id_for_listing(amendment.agreement.offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(amendment.agreement.offer.listing))
     if amendment.status != "REQUESTED":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a REQUESTED amendment can be classified")
     if amendment_type not in AMENDMENT_TYPES:
@@ -80,13 +83,13 @@ def classify_amendment(db: Session, amendment: AgreementAmendment, admin: AdminU
     return amendment
 
 
-def propose_terms(db: Session, amendment: AgreementAmendment, admin: AdminUser, proposed_terms: dict) -> AgreementAmendment:
+def propose_terms(db: Session, amendment: AgreementAmendment, admin: ProviderActor, proposed_terms: dict) -> AgreementAmendment:
     """CLASSIFIED -> TERMS_PROPOSED -> APPROVALS_PENDING. Both transitions
     happen in this one call -- see models/agreement_amendment.py's own
     docstring on why that's not a partial implementation: proposing terms
     IS submitting for approval, there is no additional fact the spec
     describes in between."""
-    assert_provider_access(db, admin, party_id_for_listing(amendment.agreement.offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(amendment.agreement.offer.listing))
     if amendment.status != "CLASSIFIED":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a CLASSIFIED amendment can have terms proposed")
 
@@ -107,14 +110,14 @@ def propose_terms(db: Session, amendment: AgreementAmendment, admin: AdminUser, 
 
 
 def propose_guarantor_addition(
-    db: Session, amendment: AgreementAmendment, admin: AdminUser, *, legal_name: str, contact_email: str,
+    db: Session, amendment: AgreementAmendment, admin: ProviderActor, *, legal_name: str, contact_email: str,
 ) -> AgreementAmendment:
     """ZR-ENG-CLR-012 Section 15: the ADDENDUM-specific counterpart to
     propose_terms above -- a guarantor is a party-roster change, not a
     commercial-terms field, so it gets its own proposal slot
     (proposed_guarantor) rather than being force-fit into proposed_terms.
     CLASSIFIED -> APPROVALS_PENDING, same transition shape as propose_terms."""
-    assert_provider_access(db, admin, party_id_for_listing(amendment.agreement.offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(amendment.agreement.offer.listing))
     if amendment.status != "CLASSIFIED":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a CLASSIFIED amendment can have a guarantor proposed")
     if amendment.amendment_type != "ADDENDUM":
@@ -148,7 +151,7 @@ def _merged_snapshot(source_snapshot: dict, proposed_terms: dict) -> dict:
     return snapshot
 
 
-def approve_amendment(db: Session, amendment: AgreementAmendment, admin: AdminUser, correlation_id: str = "") -> AgreementAmendment:
+def approve_amendment(db: Session, amendment: AgreementAmendment, admin: ProviderActor, correlation_id: str = "") -> AgreementAmendment:
     """APPROVALS_PENDING -> GENERATED -> EXECUTION_PENDING. The actual
     version-generation step: builds a new AgreementVersion off the source
     version's snapshot with the proposed overrides applied, resets the
@@ -158,7 +161,7 @@ def approve_amendment(db: Session, amendment: AgreementAmendment, admin: AdminUs
     instead of being implicit."""
     from app.crud.leasing import _populate_version_detail_rows, create_signature_requests
 
-    assert_provider_access(db, admin, party_id_for_listing(amendment.agreement.offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(amendment.agreement.offer.listing))
     if amendment.status != "APPROVALS_PENDING":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only an amendment awaiting approval can be approved")
 
@@ -235,8 +238,8 @@ def approve_amendment(db: Session, amendment: AgreementAmendment, admin: AdminUs
     amendment.execution_pending_at = now
 
     log_audit_event(
-        db, admin, "agreement.amended", "agreement", str(agreement.id), correlation_id,
-        reason=amendment.amendment_type or "", before_state=f"v{source_version.version_no}", after_state=f"v{new_version.version_no}",
+        db, admin_or_none(admin), "agreement.amended", "agreement", str(agreement.id), correlation_id,
+        reason=audit_reason(admin, amendment.amendment_type or ""), before_state=f"v{source_version.version_no}", after_state=f"v{new_version.version_no}",
     )
     emit_event(
         db, "agreement.amended", "agreement", str(agreement.id),
@@ -250,3 +253,53 @@ def approve_amendment(db: Session, amendment: AgreementAmendment, admin: AdminUs
 
 def list_amendments(db: Session, agreement: Agreement) -> list[AgreementAmendment]:
     return list(agreement.amendments)
+
+
+def propose_provider_amendment(
+    db: Session, agreement: Agreement, actor: ProviderActor, *,
+    monthly_rent: float | None = None, additional_term_months: int | None = None, reason: str = "",
+) -> AgreementAmendment:
+    """The provider's own extension / rent change on a signed agreement: the
+    same four-step engine run the change-request approval path uses
+    (request -> classify -> propose -> approve), producing a new version that
+    both sides must sign. The renter's signature on that version is their
+    consent -- until they sign, the executed version stays in force."""
+    from app.crud import notification as notif_crud
+
+    assert_provider_access_any(db, actor, party_id_for_listing(agreement.offer.listing))
+    current = agreement.offer.terms[-1] if agreement.offer.terms else None
+    if current is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This agreement has no terms to amend")
+
+    proposed: dict = {}
+    labels: list[str] = []
+    if monthly_rent is not None:
+        if monthly_rent <= 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Monthly rent must be greater than zero")
+        if float(monthly_rent) == float(current.monthly_rent):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "That's the current rent")
+        proposed["monthlyRent"] = float(monthly_rent)
+        labels.append("rent change")
+    if additional_term_months:
+        if additional_term_months < 1:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "An extension must add at least one month")
+        proposed["termMonths"] = current.term_months + additional_term_months
+        labels.append("extension")
+    if not proposed:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Give a new rent or a number of months to extend by")
+
+    label = " and ".join(labels)
+    amendment = request_amendment(db, agreement, actor, reason=reason.strip() or f"Host-proposed {label}")
+    amendment = classify_amendment(db, amendment, actor, "MATERIAL_CHANGE")
+    amendment = propose_terms(db, amendment, actor, proposed)
+    amendment = approve_amendment(db, amendment, actor)
+
+    notif_crud.notify_user_by_guest(
+        db, agreement.offer.guest,
+        title=f"Your host proposed a {label}",
+        message="Review the updated agreement and sign it if you agree. Your current agreement stays in force until you do.",
+        notification_type="agreement.amendment_proposed",
+        related_entity_type="agreement", related_entity_id=f"{agreement.id}:{amendment.id}",
+    )
+    db.commit()
+    return amendment

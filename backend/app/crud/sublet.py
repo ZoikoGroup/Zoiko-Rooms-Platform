@@ -1,17 +1,12 @@
 from datetime import date, datetime, timezone
-from io import BytesIO
 
 from fastapi import HTTPException, status
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.pdfgen import canvas
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.admin_user import AdminUser
 from app.models.authority_record import AuthorityRecord
 from app.models.finance import OBLIGATION_TYPE_TO_PLANE, Obligation
-from app.models.identity_verification import IdentityVerification
 from app.models.leasing import Agreement, AgreementVersion, Application, Offer, OfferTerms
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
@@ -20,6 +15,7 @@ from app.models.sublet_request import (
     CO_TENANCY_ARRANGEMENT_TYPES,
     NO_TENANCY_ARRANGEMENT_TYPES,
     REPLACING_ARRANGEMENT_TYPES,
+    SHARED_ROOM_ARRANGEMENT_TYPES,
     SUBLET_ARRANGEMENT_TYPES,
     SUBLET_DECLINE_REASON_CODES,
     SubletRequest,
@@ -42,6 +38,7 @@ ACTIVE_SUBLET_REQUEST_STATUSES = (
     "pending_admin_review",
     "more_information_requested",
     "tenant_response_submitted",
+    "awaiting_co_tenant",
 )
 
 # ZR-SUB-003 Section 6: the states a Host/Admin can actually decide from --
@@ -120,6 +117,38 @@ def to_sublet_request_read(db: Session, sr: SubletRequest) -> SubletRequestRead:
         cancelled_by_authority_at=sr.cancelled_by_authority_at,
         cancelled_by_authority_admin_id=sr.cancelled_by_authority_admin_id,
         cancelled_by_authority_reason=sr.cancelled_by_authority_reason,
+        co_tenant_responded_at=sr.co_tenant_responded_at,
+        ended_at=sr.ended_at,
+        end_reason=sr.end_reason,
+        shared_room_active=is_active_shared_room(sr),
+        # Live, not as of submission -- either person's verification can lapse
+        # while the room is shared.
+        current_tenant_identity_verified=_guest_identity_verified(db, current_tenant),
+        proposed_renter_identity_verified=_party_identity_verified(db, sr.proposed_renter_party_id),
+    )
+
+
+def _party_identity_verified(db: Session, party_id: int | None) -> bool:
+    from app.crud.identity_verification import get_verified_identity_for_party
+
+    return bool(party_id) and get_verified_identity_for_party(db, party_id) is not None
+
+
+def _guest_identity_verified(db: Session, guest: Guest | None) -> bool:
+    user = guest_crud.get_user_for_guest(db, guest) if guest is not None else None
+    return _party_identity_verified(db, user.party_id if user else None)
+
+
+def is_active_shared_room(sr: SubletRequest) -> bool:
+    """An approved co-tenancy that still holds: not ended, and the renter's own
+    tenancy (which the co-tenant lives under) is still live."""
+    occupancy = sr.current_occupancy
+    return (
+        sr.arrangement_type in SHARED_ROOM_ARRANGEMENT_TYPES
+        and sr.status == "approved"
+        and sr.new_agreement_id is None
+        and occupancy is not None
+        and occupancy.status in ("PENDING_MOVE_IN", "ACTIVE")
     )
 
 
@@ -293,7 +322,8 @@ def submit_sublet_request(
     sublet_request = SubletRequest(
         current_occupancy_id=occupancy_id,
         proposed_renter_party_id=proposed_renter_party_id,
-        status="pending_admin_review",
+        # A co-tenant agrees to share the room before the Host is asked.
+        status="awaiting_co_tenant" if arrangement_type in SHARED_ROOM_ARRANGEMENT_TYPES else "pending_admin_review",
         authority_evidence_ref=authority_evidence_ref,
         arrangement_type=arrangement_type,
         reason=reason.strip(),
@@ -332,19 +362,19 @@ def submit_sublet_request(
     # legal-ops override visibility via the admin sublet-requests queue without
     # needing a push notification for every single submission.
     listing = occupancy.listing
-    if listing and listing.party_id:
-        notif_crud.notify_user_by_party(
-            db, listing.party_id,
-            title="A sublet was requested for your listing",
-            message=f'{user.full_name} requested to sublet "{listing.name}". Review it in your Sublet Requests dashboard.',
-            notification_type="sublet_request.submitted",
-            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
-        )
+    if sublet_request.status == "pending_admin_review":
+        _notify_host_of_submission(db, sublet_request, user.full_name)
 
     # ZR-ENG-CLR-003 Section 17.2 notification matrix: the proposed occupant must
     # be told a request naming them exists, even before any approval -- previously
     # this platform never notified them at all, at any stage.
-    if arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES:
+    if arrangement_type in SHARED_ROOM_ARRANGEMENT_TYPES:
+        room_name = f'"{listing.name}"' if listing else "their room"
+        proposed_message = (
+            f"{user.full_name} has invited you to share {room_name} as their co-tenant. "
+            "Open Sublets to accept or decline -- the host is only asked once you accept."
+        )
+    elif arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES:
         proposed_message = f"{user.full_name} has requested to add you as a co-tenant on their room, pending the host's review."
     elif arrangement_type in NO_TENANCY_ARRANGEMENT_TYPES:
         proposed_message = f"{user.full_name} has requested permission for you to reside in their room, pending the host's review."
@@ -361,6 +391,18 @@ def submit_sublet_request(
     db.commit()
     db.refresh(sublet_request)
     return sublet_request
+
+
+def _notify_host_of_submission(db: Session, sublet_request: SubletRequest, requester_name: str) -> None:
+    listing = sublet_request.current_occupancy.listing
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="A sublet was requested for your listing",
+            message=f'{requester_name} requested to sublet "{listing.name}". Review it in your Sublet Requests dashboard.',
+            notification_type="sublet_request.submitted",
+            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+        )
 
 
 def create_draft_sublet_request(db: Session, user: UserAccount, occupancy_id: int) -> SubletRequest:
@@ -436,18 +478,9 @@ def verify_sublet_identity(
     db: Session,
     sublet_request: SubletRequest,
 ) -> bool:
-    """Check if proposed renter has verified identity."""
-    now = datetime.now(timezone.utc)
-    verification = db.scalar(
-        select(IdentityVerification)
-        .where(
-            IdentityVerification.party_id == sublet_request.proposed_renter_party_id,
-            IdentityVerification.status == "verified",
-            (IdentityVerification.expires_at.is_(None)) | (IdentityVerification.expires_at > now),
-        )
-        .order_by(IdentityVerification.id.desc())
-    )
-    return verification is not None
+    """Check if proposed renter has verified identity -- the same account-level
+    gate applying for a room uses."""
+    return _party_identity_verified(db, sublet_request.proposed_renter_party_id)
 
 
 def _notify_sublet_requester(
@@ -873,11 +906,24 @@ def approve_sublet_request(
 
     listing = sublet_request.current_occupancy.listing
     proposed_guest = _guest_for_proposed_party(db, sublet_request.proposed_renter_party_id)
-    is_co_tenancy = sublet_request.arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES
+    is_shared_room = sublet_request.arrangement_type in SHARED_ROOM_ARRANGEMENT_TYPES
+    is_co_tenancy = sublet_request.arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES and not is_shared_room
     is_no_tenancy = sublet_request.arrangement_type in NO_TENANCY_ARRANGEMENT_TYPES
     policy = resolve_market_policy(db, jurisdiction_code_for_occupancy(sublet_request.current_occupancy))
 
-    if is_no_tenancy:
+    if is_shared_room:
+        # ADD_CO_TENANT: the co-tenant lives under the renter's own tenancy and
+        # pays the renter directly -- no agreement, obligation or occupancy of
+        # their own, and the renter stays fully responsible to the Host.
+        capacity_reasons = check_room_capacity(db, sublet_request.current_occupancy.room)
+        if capacity_reasons:
+            raise HTTPException(status.HTTP_409_CONFLICT, {"message": "Room cannot accept a co-tenant", "reasons": capacity_reasons})
+        sublet_request.original_renter_liability = "ACTIVE"
+        sublet_request.new_occupant_liability = "NONE"
+        sublet_request.deposit_disposition = "NOT_APPLICABLE"
+        sublet_request.payee_model = "EXTERNAL_PAYEE_RECORDED"
+        requester_guest_id = sublet_request.current_occupancy.guest_id
+    elif is_no_tenancy:
         # ADDITIONAL_OCCUPANT: "permitted to reside without becoming a
         # contractual tenant" (Section 3) -- no agreement, no obligation, no
         # occupancy row, no capacity check (they're not counted as a tenancy).
@@ -910,8 +956,6 @@ def approve_sublet_request(
                     status.HTTP_409_CONFLICT,
                     "The original renter has no account to receive the subtenant's rent",
                 )
-        elif sublet_request.arrangement_type == "ADD_CO_TENANT":
-            payee_model = "HOST_OR_LANDLORD_PAYEE"
         new_agreement = _create_co_tenancy_agreement(
             db, sublet_request.current_occupancy, proposed_guest, negotiated_rent,
             require_e_signature=(policy.sublet_signature_mode == "E_SIGNATURE"),
@@ -992,7 +1036,16 @@ def approve_sublet_request(
 
     _notify_sublet_requester(db, requester_guest_id, sublet_request.id, approved=True, notes=notes)
     _notify_sublet_host(db, sublet_request.current_occupancy, sublet_request.id, approved=True)
-    if is_no_tenancy:
+    if is_shared_room:
+        notif_crud.notify_user_by_guest(
+            db, proposed_guest,
+            title="You're now sharing the room",
+            message=f'The host approved you as a co-tenant of "{listing.name if listing else "this room"}". '
+                    "You pay your share to the renter directly; the room's rent and payments are in your Sublets page.",
+            notification_type="sublet_request.co_tenant_approved",
+            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+        )
+    elif is_no_tenancy:
         notif_crud.notify_user_by_guest(
             db, proposed_guest,
             title="You've been given permission to reside",
@@ -1041,7 +1094,7 @@ def approve_sublet_request(
     # prematurely. Skipped for ADDITIONAL_OCCUPANT: "take over occupancy" would
     # be factually wrong for a permission-only record with no tenancy at all --
     # that case already got its own accurate message above.
-    if not is_no_tenancy:
+    if not is_no_tenancy and not is_shared_room:
         notif_crud.notify_user_by_guest(
             db, proposed_guest,
             title="You've been authorized as a new occupant",
@@ -1049,7 +1102,7 @@ def approve_sublet_request(
             notification_type="sublet_request.authorized",
             related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
         )
-    if listing and listing.party_id:
+    if listing and listing.party_id and not is_shared_room:
         notif_crud.notify_user_by_party(
             db, listing.party_id,
             title="Occupant changed via sublet",
@@ -1184,6 +1237,7 @@ def respond_to_sublet_info_request(db: Session, sublet_request: SubletRequest, u
 # rejected) or an already-withdrawn request can never be withdrawn again.
 _WITHDRAWABLE_STATUSES = (
     "draft", "pending_verification", "pending_admin_review", "more_information_requested", "tenant_response_submitted",
+    "awaiting_co_tenant",
 )
 
 
@@ -1218,7 +1272,10 @@ def withdraw_sublet_request(db: Session, sublet_request: SubletRequest, user: "U
 # ZR-SUB-003 Wireframe J: "The tenant must be able to access the record after
 # the request is completed." A request still in flight has no decision to
 # record yet -- these are the terminal states a download is meaningful for.
-_COMPLETED_STATUSES = ("approved", "rejected", "withdrawn", "expired", "superseded", "cancelled_by_authority")
+_COMPLETED_STATUSES = (
+    "approved", "rejected", "withdrawn", "expired", "superseded", "cancelled_by_authority",
+    "declined_by_co_tenant", "ended",
+)
 
 
 def generate_sublet_decision_record_pdf(db: Session, sublet_request: SubletRequest) -> bytes:
@@ -1245,56 +1302,154 @@ def generate_sublet_decision_record_pdf(db: Session, sublet_request: SubletReque
     else:
         authority = "Tenant withdrew before a decision" if sublet_request.status == "withdrawn" else "—"
 
-    buffer = BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    _, height = A4
-    x = 20 * mm
-    y = height - 25 * mm
+    from app.services.sublet_decision_document import (
+        SubletDecisionModel, content_fingerprint, generated_at_label, render_sublet_decision_pdf,
+    )
 
-    def write(text: str, size: float = 10, bold: bool = False, gap: float = 7 * mm) -> None:
-        nonlocal y
-        pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        pdf.drawString(x, y, text)
-        y -= gap
+    occupancy = sublet_request.current_occupancy
+    snapshot = sublet_request.policy_snapshot or {}
+    currency = listing.currency if listing else ""
+    arrangement = sublet_request.arrangement_type
+    is_shared_room = arrangement in SHARED_ROOM_ARRANGEMENT_TYPES
+    proposed_name = proposed_user.full_name if proposed_user else (f"Party #{proposed_party.id}" if proposed_party else "—")
 
-    write("Zoiko Rooms -- Sublet Request Decision Record", size=16, bold=True, gap=10 * mm)
-    write(f"Request ID: ZR-SUB-{sublet_request.id:06d}", size=10)
-    write(f"Status: {sublet_request.status.replace('_', ' ').upper()}", size=10, gap=10 * mm)
+    def when(value) -> str:
+        return value.strftime("%d %b %Y, %H:%M UTC") if value else "—"
 
-    write("Property / Rental", size=12, bold=True)
-    write(listing.name if listing else f"Occupancy #{sublet_request.current_occupancy_id}")
-    write(listing.city if listing else "", gap=10 * mm)
+    def day(value) -> str:
+        return value.strftime("%d %b %Y") if value else "—"
 
-    write("Parties", size=12, bold=True)
-    write(f"Requesting tenant: {requester.name if requester else 'Unknown'}")
-    write(f"Proposed occupant: {proposed_user.full_name if proposed_user else (proposed_party.id if proposed_party else 'Unknown')}", gap=10 * mm)
+    def verified(flag: bool) -> str:
+        return "Verified" if flag else "Not verified"
 
-    write("Arrangement", size=12, bold=True)
-    write(f"Type: {sublet_request.arrangement_type}")
-    write(f"Requested: {sublet_request.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
-    if sublet_request.reason:
-        write(f"Reason: {sublet_request.reason}", gap=10 * mm)
-    else:
-        y -= 3 * mm
-
-    write("Decision", size=12, bold=True)
-    write(f"Authority: {authority}")
-    if sublet_request.decided_at:
-        write(f"Decided: {sublet_request.decided_at.strftime('%Y-%m-%d %H:%M UTC')}")
-    if sublet_request.withdrawn_at:
-        write(f"Withdrawn: {sublet_request.withdrawn_at.strftime('%Y-%m-%d %H:%M UTC')}")
-    if sublet_request.admin_notes:
-        write(f"Notes: {sublet_request.admin_notes}")
-    if sublet_request.approval_conditions:
-        write(f"Conditions: {sublet_request.approval_conditions}")
+    summary_rows = [
+        ("Decision", _DECISION_LABELS.get(sublet_request.status, sublet_request.status.replace("_", " ").title())),
+        ("Decided by", authority),
+        ("Decision date", when(sublet_request.decided_at or sublet_request.withdrawn_at or sublet_request.co_tenant_responded_at)),
+        ("Request submitted", when(sublet_request.created_at)),
+    ]
     if sublet_request.approval_expires_at:
-        write(f"Approval expires: {sublet_request.approval_expires_at.strftime('%Y-%m-%d')}")
-    y -= 3 * mm
+        summary_rows.append(("Approval valid until", day(sublet_request.approval_expires_at)))
+    if sublet_request.decline_reason_code:
+        summary_rows.append(("Decline reason", sublet_request.decline_reason_code.replace("_", " ").capitalize()))
+    if sublet_request.status == "approved" or sublet_request.status == "ended":
+        summary_rows.append(("Authority confirmed by host", "Yes" if sublet_request.approved_with_authority_confirmation else "Not recorded"))
 
-    pdf.setFont("Helvetica-Oblique", 7)
-    pdf.drawString(x, 15 * mm, "Zoiko Rooms routed and recorded this decision; it did not grant permission on the owner's behalf.")
-    pdf.save()
-    return buffer.getvalue()
+    property_rows = [
+        ("Listing", listing.name if listing else "—"),
+        ("City", listing.city if listing else "—"),
+        ("Room type", listing.room_type if listing else "—"),
+        ("Rental reference", f"Occupancy #{sublet_request.current_occupancy_id}"),
+    ]
+    agreement = occupancy.offer.agreement if occupancy and occupancy.offer else None
+    if agreement is not None:
+        property_rows.append(("Occupancy agreement", f"Agreement #{agreement.id}"))
+    if occupancy is not None:
+        property_rows.append(("Tenancy end date", day(occupancy.expected_end_date)))
+
+    decider_party = decider.party_id if sublet_request.decided_by_user_id and decider else None
+    party_rows = [
+        ("Requesting tenant", requester.name if requester else "—", "Asked the host for permission",
+         verified(_guest_identity_verified(db, requester))),
+        ("Co-tenant" if is_shared_room else "Proposed occupant", proposed_name,
+         _OCCUPANT_ROLE.get(arrangement, "Named in the request"),
+         verified(_party_identity_verified(db, sublet_request.proposed_renter_party_id))),
+    ]
+    if sublet_request.decided_by_user_id or sublet_request.decided_by_admin_id:
+        party_rows.append(("Decision maker", authority, "Decided the request",
+                           verified(_party_identity_verified(db, decider_party)) if decider_party else "—"))
+
+    terms_rows = [("Arrangement", _ARRANGEMENT_DESCRIPTIONS.get(arrangement, arrangement))]
+    if sublet_request.proposed_start_date or sublet_request.proposed_end_date:
+        terms_rows.append(("Proposed period", f"{day(sublet_request.proposed_start_date)} to {day(sublet_request.proposed_end_date)}"))
+    if snapshot.get("proposed_monthly_rent") is not None:
+        label = "Agreed amount paid to the renter" if is_shared_room else "Proposed monthly rent"
+        terms_rows.append((label, f"{currency} {float(snapshot['proposed_monthly_rent']):,.2f} / month".strip()))
+    if sublet_request.reason:
+        terms_rows.append(("Tenant's reason", sublet_request.reason))
+    if sublet_request.status in ("approved", "ended"):
+        terms_rows += [
+            ("Original tenant's responsibility", _LIABILITY_LABELS.get(sublet_request.original_renter_liability, sublet_request.original_renter_liability)),
+            ("New occupant's responsibility", _LIABILITY_LABELS.get(sublet_request.new_occupant_liability, sublet_request.new_occupant_liability)),
+            ("Deposit", _DEPOSIT_LABELS.get(sublet_request.deposit_disposition, sublet_request.deposit_disposition or "—")),
+            ("Who is paid", _payee_text(sublet_request)),
+        ]
+        if sublet_request.occupant_risk_tier and sublet_request.occupant_risk_tier != "NONE":
+            terms_rows.append(("Overlap check", f"{sublet_request.occupant_risk_tier}: {sublet_request.occupant_risk_reason}"))
+
+    conditions = [c for c in (sublet_request.approval_condition_list or []) if c]
+    if sublet_request.approval_conditions and sublet_request.approval_conditions not in conditions:
+        conditions.append(sublet_request.approval_conditions)
+    notes = sublet_request.admin_notes or ""
+    if sublet_request.end_reason:
+        notes = (notes + "\n" if notes else "") + f"Co-tenancy ended: {sublet_request.end_reason}"
+
+    jurisdiction = snapshot.get("jurisdiction") or "—"
+    model = SubletDecisionModel(
+        record_ref=f"ZR-SUB-{sublet_request.id:06d}",
+        status_label=_DECISION_LABELS.get(sublet_request.status, sublet_request.status.replace("_", " ").title()),
+        arrangement_label=_ARRANGEMENT_SHORT.get(arrangement, arrangement),
+        decided_on=day(sublet_request.decided_at or sublet_request.withdrawn_at or sublet_request.co_tenant_responded_at),
+        jurisdiction_label=jurisdiction,
+        summary_rows=summary_rows, property_rows=property_rows, party_rows=party_rows, terms_rows=terms_rows,
+        conditions=conditions, decision_notes=notes,
+        history_rows=[
+            (when(e.timestamp), e.summary.replace(f"({arrangement})", f"({_ARRANGEMENT_SHORT.get(arrangement, arrangement).lower()})"))
+            for e in build_sublet_audit_trail(sublet_request)
+        ],
+    )
+    model.certificate_rows = [
+        ("Record ID", model.record_ref),
+        ("Request version", str(sublet_request.version)),
+        ("Market policy", f"{jurisdiction}, pack v{snapshot.get('policy_pack_version', '—')}"),
+        ("Generated", generated_at_label()),
+        ("Content fingerprint (SHA-256)", content_fingerprint(model)),
+    ]
+    return render_sublet_decision_pdf(model)
+
+
+_DECISION_LABELS = {
+    "approved": "Approved", "rejected": "Declined", "withdrawn": "Withdrawn by tenant", "expired": "Approval expired",
+    "superseded": "Superseded", "cancelled_by_authority": "Cancelled by authority",
+    "declined_by_co_tenant": "Declined by co-tenant", "ended": "Approved (co-tenancy since ended)",
+}
+_ARRANGEMENT_SHORT = {
+    "ASSIGNMENT_FULL": "Full handover", "REPLACEMENT_OCCUPANT": "Replacement occupant",
+    "SUBLEASE_PARTIAL": "Partial sublease", "ADD_CO_TENANT": "Co-tenant", "LODGER_OR_LICENSEE": "Lodger / licensee",
+    "ADDITIONAL_OCCUPANT": "Additional occupant",
+}
+_ARRANGEMENT_DESCRIPTIONS = {
+    "ASSIGNMENT_FULL": "Full handover — the tenant moves out and the new occupant takes over the tenancy completely.",
+    "REPLACEMENT_OCCUPANT": "Replacement occupant — the tenant moves out and the new occupant lives in the room.",
+    "SUBLEASE_PARTIAL": "Partial sublease — the tenant stays on and the subtenant gets their own agreement.",
+    "ADD_CO_TENANT": "Co-tenant — shares the room with the tenant and pays the tenant directly; the tenant stays responsible to the host.",
+    "LODGER_OR_LICENSEE": "Lodger / licensee — lives in the room without full tenancy rights.",
+    "ADDITIONAL_OCCUPANT": "Additional occupant — permitted to live in the room with no tenancy or agreement of their own.",
+}
+_OCCUPANT_ROLE = {
+    "ASSIGNMENT_FULL": "Takes over the tenancy", "REPLACEMENT_OCCUPANT": "Replaces the tenant as occupant",
+    "SUBLEASE_PARTIAL": "Subtenant with their own agreement", "ADD_CO_TENANT": "Shares the room with the tenant",
+    "LODGER_OR_LICENSEE": "Lodger / licensee", "ADDITIONAL_OCCUPANT": "Permitted to reside",
+}
+_LIABILITY_LABELS = {
+    "ACTIVE": "Remains fully responsible", "LIMITED": "Remains responsible on a limited basis", "RELEASED": "Released",
+    "NONE": "No responsibility to the host", "SUBORDINATE": "Responsible under the tenant's tenancy",
+    "ASSIGNEE": "Takes over full responsibility", "JOINT": "Jointly responsible", "LICENSEE": "Licensee only",
+}
+_DEPOSIT_LABELS = {
+    "NOT_APPLICABLE": "Not affected", "SEPARATE_DEPOSIT_CREATED": "A separate deposit applies to the new occupant",
+    "RETAINED_BY_ORIGINAL_TENANCY": "Stays with the original tenancy",
+}
+
+
+def _payee_text(sublet_request: SubletRequest) -> str:
+    if sublet_request.arrangement_type in SHARED_ROOM_ARRANGEMENT_TYPES:
+        return "The co-tenant pays the tenant directly; the tenant keeps paying the host."
+    return {
+        "ORIGINAL_RENTER_PAYEE": "The new occupant pays the original tenant.",
+        "HOST_OR_LANDLORD_PAYEE": "The new occupant pays the host directly.",
+        "EXTERNAL_PAYEE_RECORDED": "No payment is made through this arrangement.",
+    }.get(sublet_request.payee_model, sublet_request.payee_model or "—")
 
 
 def list_sublet_requests_for_guest(db: Session, guest_id: str) -> list[SubletRequest]:
@@ -1502,11 +1657,16 @@ def build_sublet_audit_trail(sublet_request: SubletRequest) -> list[SubletChrono
             events.append(SubletChronologyEvent(timestamp=timestamp, event_type=event_type, summary=summary))
 
     add(sublet_request.created_at, "sublet_request.submitted", f"Sublet request #{sublet_request.id} submitted ({sublet_request.arrangement_type}).")
+    if sublet_request.co_tenant_responded_at is not None:
+        accepted = sublet_request.status != "declined_by_co_tenant"
+        add(sublet_request.co_tenant_responded_at, "sublet_request.co_tenant_" + ("accepted" if accepted else "declined"),
+            "Co-tenant accepted the request." if accepted else "Co-tenant declined the request.")
     add(sublet_request.info_requested_at, "sublet_request.more_information_requested", f"More information requested: {sublet_request.info_request_note[:120]}")
     add(sublet_request.info_responded_at, "sublet_request.tenant_response_submitted", f"Tenant responded: {sublet_request.info_response_note[:120]}")
     if sublet_request.decided_at is not None:
         add(sublet_request.decided_at, f"sublet_request.{sublet_request.admin_decision}", f"Decision recorded: {sublet_request.admin_decision}.")
     add(sublet_request.withdrawn_at, "sublet_request.withdrawn", "Request withdrawn by the tenant.")
+    add(sublet_request.ended_at, "sublet_request.co_tenancy_ended", "Co-tenancy ended.")
     add(sublet_request.expired_at, "sublet_request.expired", "Approval expired.")
     add(sublet_request.cancelled_by_authority_at, "sublet_request.cancelled_by_authority", f"Decision cancelled by authority: {sublet_request.cancelled_by_authority_reason[:120]}")
     if sublet_request.superseded_by_sublet_request_id is not None:
@@ -1514,3 +1674,114 @@ def build_sublet_audit_trail(sublet_request: SubletRequest) -> list[SubletChrono
 
     events.sort(key=lambda event: event.timestamp)
     return events
+
+
+# -- shared room (ADD_CO_TENANT) ---------------------------------------------------
+
+def _shared_room_or_404(sublet_request: SubletRequest | None) -> SubletRequest:
+    if sublet_request is None or sublet_request.arrangement_type not in SHARED_ROOM_ARRANGEMENT_TYPES:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Co-tenancy not found")
+    return sublet_request
+
+
+def list_shared_room_requests_for_party(db: Session, party_id: int) -> list[SubletRequest]:
+    """Every co-tenancy request that names this person -- the co-tenant's own
+    view (the renter's list only holds requests they submitted)."""
+    return list(
+        db.scalars(
+            select(SubletRequest)
+            .where(
+                SubletRequest.proposed_renter_party_id == party_id,
+                SubletRequest.arrangement_type.in_(SHARED_ROOM_ARRANGEMENT_TYPES),
+            )
+            .order_by(SubletRequest.created_at.desc())
+        )
+    )
+
+
+def get_shared_room_for_co_tenant_or_404(db: Session, sublet_request_id: int, user: UserAccount) -> SubletRequest:
+    sublet_request = _shared_room_or_404(db.get(SubletRequest, sublet_request_id))
+    if not user.party_id or sublet_request.proposed_renter_party_id != user.party_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This co-tenancy doesn't name you")
+    return sublet_request
+
+
+def respond_as_co_tenant(db: Session, sublet_request: SubletRequest, user: UserAccount, *, accept: bool) -> SubletRequest:
+    """The named co-tenant agrees (or not) to share the room. Nobody is added
+    to a room without saying yes, and the Host only sees requests the
+    co-tenant has accepted."""
+    if sublet_request.status != "awaiting_co_tenant":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This request is no longer waiting for your answer")
+    now = datetime.now(timezone.utc)
+    requester = db.get(Guest, sublet_request.requested_by_guest_id) if sublet_request.requested_by_guest_id else None
+    listing = sublet_request.current_occupancy.listing
+    room_name = f'"{listing.name}"' if listing else "your room"
+
+    if accept:
+        if not verify_sublet_identity(db, sublet_request):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Verify your identity before accepting a co-tenancy")
+        capacity_reasons = check_room_capacity(db, sublet_request.current_occupancy.room)
+        if capacity_reasons:
+            raise HTTPException(status.HTTP_409_CONFLICT, {"message": "Room cannot accept a co-tenant", "reasons": capacity_reasons})
+        sublet_request.status = "pending_admin_review"
+        sublet_request.co_tenant_responded_at = now
+        _notify_host_of_submission(db, sublet_request, requester.name if requester else "A renter")
+        if requester is not None:
+            notif_crud.notify_user_by_guest(
+                db, requester,
+                title="Your co-tenant accepted",
+                message=f"{user.full_name} agreed to share {room_name}. It's now with the host for review.",
+                notification_type="sublet_request.co_tenant_accepted",
+                related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+            )
+    else:
+        sublet_request.status = "declined_by_co_tenant"
+        sublet_request.co_tenant_responded_at = now
+        if requester is not None:
+            notif_crud.notify_user_by_guest(
+                db, requester,
+                title="Your co-tenant declined",
+                message=f"{user.full_name} declined to share {room_name}. The request is closed.",
+                notification_type="sublet_request.co_tenant_declined",
+                related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+            )
+    db.commit()
+    db.refresh(sublet_request)
+    return sublet_request
+
+
+def end_shared_room(db: Session, sublet_request: SubletRequest, user: UserAccount, reason: str = "") -> SubletRequest:
+    """The renter, the co-tenant or the Host ends an active shared room; the
+    other two are told."""
+    _shared_room_or_404(sublet_request)
+    if not is_active_shared_room(sublet_request):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This room isn't currently shared")
+    occupancy = sublet_request.current_occupancy
+    listing = occupancy.listing
+    guest = guest_crud.get_guest_for_user(db, user)
+    is_renter = guest is not None and guest.id == occupancy.guest_id
+    is_co_tenant = bool(user.party_id) and user.party_id == sublet_request.proposed_renter_party_id
+    is_host = bool(user.party_id) and listing is not None and party_id_for_listing(listing) == user.party_id
+    if not (is_renter or is_co_tenant or is_host):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the renter, the co-tenant or the host can end this co-tenancy")
+
+    sublet_request.status = "ended"
+    sublet_request.ended_at = datetime.now(timezone.utc)
+    sublet_request.ended_by_user_id = user.id
+    sublet_request.end_reason = reason.strip()[:2000]
+
+    room_name = f'"{listing.name}"' if listing else "the room"
+    message = f"{user.full_name} ended the co-tenancy of {room_name}." + (f" Reason: {reason.strip()}" if reason.strip() else "")
+    common = dict(
+        title="Co-tenancy ended", message=message, notification_type="sublet_request.co_tenancy_ended",
+        related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+    )
+    if not is_renter and occupancy.guest is not None:
+        notif_crud.notify_user_by_guest(db, occupancy.guest, **common)
+    if not is_co_tenant and sublet_request.proposed_renter_party_id:
+        notif_crud.notify_user_by_party(db, sublet_request.proposed_renter_party_id, **common)
+    if not is_host and listing is not None and listing.party_id:
+        notif_crud.notify_user_by_party(db, listing.party_id, **common)
+    db.commit()
+    db.refresh(sublet_request)
+    return sublet_request

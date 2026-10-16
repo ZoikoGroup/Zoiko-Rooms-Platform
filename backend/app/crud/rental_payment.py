@@ -32,16 +32,17 @@ from app.models.payment_recipient_authority import PaymentRecipientAuthority
 from app.models.rental_payment import (
     RENTAL_PAYMENT_DISCREPANCY_REASONS,
     RENTAL_PAYMENT_INSTRUCTION_METHODS,
-    RENTAL_PAYMENT_METHOD_CATEGORIES,
     RentalPaymentAllocation,
     RentalPaymentCorrection,
     RentalPaymentDispute,
     RentalPaymentEvidenceHold,
+    RentalPaymentExcessAllocation,
     RentalPaymentInstruction,
     RentalPaymentObligation,
     RentalPaymentRecord,
 )
 from app.services.bank_field_schemas import resolve_bank_field_schema, validate_bank_details
+from app.services import payment_method_catalog as method_catalog
 from app.schemas.rental_transaction_record import RentalTransactionTimelineEntryRead
 
 # ZR-PAY-002 Section 11: 'Append corrective event -- Tenant: Controlled,
@@ -52,13 +53,15 @@ from app.schemas.rental_transaction_record import RentalTransactionTimelineEntry
 # (own tenant_correct_own_record) or the dispute is still OPEN (own
 # recipient_update_own_open_dispute) -- i.e. before the other side has acted
 # on it, never after.
-TENANT_CORRECTABLE_RECORD_FIELDS = ("payment_method_category", "external_reference")
+TENANT_CORRECTABLE_RECORD_FIELDS = ("payment_method_category", "payment_method_subtype", "external_reference")
 
 # ZR-PAY-002 Section 7.2/A10: only these record fields may ever be corrected,
 # and only by an admin with a reason -- never an arbitrary attribute set.
 # Status corrections go through their own explicit transitions below
 # (reverse_record), not through this generic field-correction path.
-CORRECTABLE_RECORD_FIELDS = ("declared_amount", "declared_date", "external_reference", "payment_method_category")
+CORRECTABLE_RECORD_FIELDS = (
+    "declared_amount", "declared_date", "external_reference", "payment_method_category", "payment_method_subtype",
+)
 
 # ZR-PAY-LINK-003 Section 16/G6: the status-transition matrix. Every mutating
 # function below guards its precondition against one of these named sets
@@ -749,9 +752,129 @@ def _payer_share_outstanding(obligation: RentalPaymentObligation, guest_id: str)
     return max(float(allocation.allocated_amount) - confirmed, 0.0)
 
 
+def resolve_obligation_method(
+    obligation: RentalPaymentObligation, *, category: str, subtype: str = "", description: str = "",
+    reference: str = "",
+) -> method_catalog.MethodSelection:
+    """ZR-PAY-METHODS-GLOBAL-001 Section 10: the chosen category/rail must
+    be enabled for this rental's country and obligation type right now."""
+    return method_catalog.resolve_selection(
+        category=category, subtype=subtype, description=description, reference=reference,
+        country=obligation.country_code, context=method_catalog.context_for_obligation_type(obligation.obligation_type),
+    )
+
+
+def _method_columns(method: method_catalog.MethodSelection) -> dict:
+    return {
+        "payment_method_category": method.category, "payment_method_subtype": method.subtype,
+        "payment_method_description": method.description, "payment_method_label": method.label,
+        "payment_method_config_version": method.config_version,
+    }
+
+
+POSSIBLE_DUPLICATE_CODE = "POSSIBLE_DUPLICATE"
+OVERPAYMENT_CODE = "OVERPAYMENT"
+
+
+def _overpayment_error(currency: str, owed: float, who: str) -> HTTPException:
+    """Section 10 'Overpayment -- do not silently allocate'. The caller
+    resends with acknowledgeOverpayment to record it anyway; the extra is
+    then held for the recipient to apply or return."""
+    return HTTPException(status.HTTP_400_BAD_REQUEST, {
+        "code": OVERPAYMENT_CODE,
+        "message": (
+            f"That's more than the {currency} {owed:.2f} still owed. If {who} really more, confirm it: "
+            "the extra won't be applied automatically -- the recipient decides whether it goes towards "
+            "another payment or is sent back."
+        ),
+    })
+
+
+def _apply_confirmed_amount(record: RentalPaymentRecord, confirmed: float, owed: float) -> None:
+    """Counts at most what was owed toward this obligation; anything above
+    it becomes the record's excess, waiting for the recipient's decision."""
+    applied = min(_round2(confirmed), max(_round2(owed), 0.0))
+    excess = _round2(confirmed - applied)
+    record.confirmed_amount = applied
+    record.excess_amount = excess
+    record.excess_status = "REVIEW_REQUIRED" if excess > 0 else ""
+
+
+def is_possible_duplicate(
+    *, amount: float, paid_on: date, method: method_catalog.MethodSelection,
+    other_amount: float, other_date: date, other_reference: str, other_category: str, other_subtype: str,
+) -> bool:
+    """Section 8 'Duplicate detection': same amount and date, and either the
+    same reference or -- with no reference on one side -- the same method.
+    Two different references are two different payments."""
+    if _round2(other_amount) != _round2(amount) or other_date != paid_on:
+        return False
+    ours, theirs = method.reference.strip().lower(), (other_reference or "").strip().lower()
+    if ours and theirs:
+        return ours == theirs
+    return other_category == method.category and (other_subtype or "") == method.subtype
+
+
+def assert_not_possible_duplicate(
+    obligation: RentalPaymentObligation, *, amount: float, paid_on: date, method: method_catalog.MethodSelection,
+    payer_guest_id: str | None = None,
+) -> None:
+    """Warn before a second record for what looks like the same payment
+    (criterion 22) -- never silently duplicate. The caller can still save it
+    by resending with confirmNotDuplicate once the person confirms."""
+    joint = bool(obligation.payer_allocations)
+    for existing in obligation.records:
+        if existing.status in ("REVERSED", "CANCELLED"):
+            continue
+        # Co-tenants paying equal shares on the same day are separate payments.
+        if joint and payer_guest_id and existing.declared_by_guest_id != payer_guest_id:
+            continue
+        if is_possible_duplicate(
+            amount=amount, paid_on=paid_on, method=method, other_amount=float(existing.declared_amount),
+            other_date=existing.declared_date, other_reference=existing.external_reference,
+            other_category=existing.payment_method_category, other_subtype=existing.payment_method_subtype,
+        ):
+            raise HTTPException(status.HTTP_409_CONFLICT, {
+                "code": POSSIBLE_DUPLICATE_CODE,
+                "message": (
+                    f"A payment of {obligation.currency} {_round2(amount):.2f} on {paid_on.isoformat()} is already "
+                    "recorded for this. If this is a separate payment, confirm and record it again."
+                ),
+            })
+
+
+def _apply_method_field_correction(record: RentalPaymentRecord, field_name: str, new_value: str) -> str:
+    """Corrects the category (optionally as CATEGORY:SUBTYPE), the subtype,
+    or the reference, keeping the label snapshot in step. Returns the value
+    stored on the correction row."""
+    if field_name == "payment_method_category":
+        category, _, subtype = (new_value or "").partition(":")
+        category, subtype = method_catalog.normalize_stored_method(category, subtype)
+        record.payment_method_category, record.payment_method_subtype = category, subtype
+        if category != "OTHER" and subtype != "OTHER":
+            record.payment_method_description = ""
+        value = f"{category}:{subtype}" if subtype else category
+    elif field_name == "payment_method_subtype":
+        _, subtype = method_catalog.normalize_stored_method(record.payment_method_category, new_value)
+        record.payment_method_subtype = subtype
+        value = subtype
+    else:
+        value = (new_value or "").strip()
+        if method_catalog.looks_like_card_number(value):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "That looks like a full card number -- never enter card numbers")
+        record.external_reference = value
+        return value
+    record.payment_method_label = method_catalog.method_label(
+        record.payment_method_category, record.payment_method_subtype, record.payment_method_description,
+    )
+    return value
+
+
 def mark_paid(
     db: Session, guest: Guest, obligation: RentalPaymentObligation, *, amount: float, currency: str,
     declared_date: date, payment_method_category: str, external_reference: str = "", correlation_id: str = "",
+    payment_method_subtype: str = "", payment_method_description: str = "", confirm_not_duplicate: bool = False,
+    note: str = "", acknowledge_overpayment: bool = False,
 ) -> RentalPaymentRecord:
     """ZR-PAY-002 Section 4.3/6/A3/12.2 POST /payments/obligations/{id}/mark-paid.
     'Tenant action only' -- creates a declaration, never an authoritative
@@ -763,8 +886,10 @@ def mark_paid(
     assert_tenant_owns_obligation(obligation, guest.id)
     if obligation.status in OBLIGATION_BLOCKED_FOR_MARK_PAID_STATUSES:
         raise HTTPException(status.HTTP_409_CONFLICT, f"This obligation is {obligation.status.lower()} and cannot be marked paid")
-    if payment_method_category not in RENTAL_PAYMENT_METHOD_CATEGORIES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"paymentMethodCategory must be one of {RENTAL_PAYMENT_METHOD_CATEGORIES}")
+    method = resolve_obligation_method(
+        obligation, category=payment_method_category, subtype=payment_method_subtype,
+        description=payment_method_description, reference=external_reference,
+    )
     if sublet_collection_blocked(db, obligation):
         raise HTTPException(status.HTTP_409_CONFLICT, SUBLET_COLLECTION_BLOCKED_MESSAGE)
     from app.services.sublet_payments import payment_gate
@@ -782,20 +907,29 @@ def mark_paid(
     awaiting = sum(float(r.declared_amount or 0) for r in obligation.records
                    if r.status in ("PAYER_RECORDED", "RECIPIENT_CONFIRMATION_PENDING")
                    and (not joint or r.declared_by_guest_id == guest.id))
-    owed = _payer_share_outstanding(obligation, guest.id) - awaiting
-    if _round2(amount) > _round2(max(owed, 0.0)):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"That's more than the {max(_round2(owed), 0.0):.2f} {obligation.currency} still owed"
-            + (" (including payments already waiting for confirmation)" if awaiting else ""),
-        )
+    owed = _round2(max(_payer_share_outstanding(obligation, guest.id) - awaiting, 0.0))
+    excess = 0.0
+    if _round2(amount) > owed:
+        if owed <= 0:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Nothing more is owed on this right now"
+                + (" -- a payment is already waiting for confirmation" if awaiting else ""),
+            )
+        if not acknowledge_overpayment:
+            raise _overpayment_error(obligation.currency, owed, "you paid")
+        excess = _round2(_round2(amount) - owed)
     currency = obligation.currency
+    if not confirm_not_duplicate:
+        assert_not_possible_duplicate(
+            obligation, amount=_round2(amount), paid_on=declared_date, method=method, payer_guest_id=guest.id,
+        )
 
     record = RentalPaymentRecord(
         obligation_id=obligation.id, status="PAYER_RECORDED", provenance="TENANT_DECLARATION",
         declared_amount=_round2(amount), declared_currency=currency, declared_date=declared_date,
-        payment_method_category=payment_method_category, external_reference=external_reference,
-        declared_by_guest_id=guest.id,
+        external_reference=method.reference, declared_by_guest_id=guest.id, note=(note or "").strip()[:500],
+        excess_amount=excess, excess_status="REVIEW_REQUIRED" if excess else "", **_method_columns(method),
     )
     db.add(record)
     db.flush()
@@ -981,7 +1115,10 @@ def confirm_receipt(
     record.status = new_status
     record.provenance = "RECIPIENT_CONFIRMATION"
     record.confirmed_by_party_id = party.id
-    record.confirmed_amount = confirmed
+    if float(record.excess_amount or 0) > 0:
+        _apply_confirmed_amount(record, confirmed, _payer_share_outstanding(record.obligation, record.declared_by_guest_id))
+    else:
+        record.confirmed_amount = confirmed
     record.confirmed_at = datetime.now(timezone.utc)
     db.flush()
     recompute_obligation_status(db, record.obligation)
@@ -1023,6 +1160,8 @@ RECORD_RECEIPT_OBLIGATION_STATUSES = ("UPCOMING", "DUE", "OVERDUE", "REVERSED", 
 def record_receipt_as_recipient(
     db: Session, party: Party, obligation: RentalPaymentObligation, *, amount: float | None, received_date: date,
     payment_method_category: str, external_reference: str = "", note: str = "", correlation_id: str = "",
+    payment_method_subtype: str = "", payment_method_description: str = "", confirm_not_duplicate: bool = False,
+    acknowledge_overpayment: bool = False,
 ) -> RentalPaymentRecord:
     """Zoiko Rooms Payment Model: rent is paid straight to the host outside
     Zoiko, and recording it is optional -- so the host may simply mark money
@@ -1047,28 +1186,29 @@ def record_receipt_as_recipient(
             status.HTTP_409_CONFLICT,
             "This rent is split between several tenants -- confirm each tenant's own recorded payment instead",
         )
-    if payment_method_category not in RENTAL_PAYMENT_METHOD_CATEGORIES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"paymentMethodCategory must be one of {RENTAL_PAYMENT_METHOD_CATEGORIES}")
+    method = resolve_obligation_method(
+        obligation, category=payment_method_category, subtype=payment_method_subtype,
+        description=payment_method_description, reference=external_reference,
+    )
 
     db.expire(obligation, ["records"])
     outstanding = obligation.outstanding_amount
     received = _round2(amount) if amount is not None else outstanding
     if received <= 0:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Amount received must be greater than zero")
-    if received > outstanding:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Amount received can't be more than what's still owed ({obligation.currency} {outstanding:.2f})",
-        )
+    if received > outstanding and not acknowledge_overpayment:
+        raise _overpayment_error(obligation.currency, outstanding, "you received")
+    if not confirm_not_duplicate:
+        assert_not_possible_duplicate(obligation, amount=received, paid_on=received_date, method=method)
     new_status = "CONFIRMED" if received >= outstanding else "PARTIALLY_PAID"
     now = datetime.now(timezone.utc)
     record = RentalPaymentRecord(
         obligation_id=obligation.id, status=new_status, provenance="RECIPIENT_CONFIRMATION",
         declared_amount=received, declared_currency=obligation.currency, declared_date=received_date,
-        payment_method_category=payment_method_category, external_reference=external_reference.strip(),
-        declared_by_guest_id=obligation.tenant_guest_id, confirmed_by_party_id=party.id,
-        confirmed_amount=received, confirmed_at=now,
+        external_reference=method.reference, note=(note or "").strip()[:500], **_method_columns(method),
+        declared_by_guest_id=obligation.tenant_guest_id, confirmed_by_party_id=party.id, confirmed_at=now,
     )
+    _apply_confirmed_amount(record, received, outstanding)
     db.add(record)
     db.flush()
     recompute_obligation_status(db, obligation)
@@ -1099,6 +1239,139 @@ def record_receipt_as_recipient(
 
     on_payment_confirmed(db, record.obligation)
     return record
+
+
+def _assert_excess_open(db: Session, party: Party, record: RentalPaymentRecord, amount: float | None) -> float:
+    assert_party_is_recipient(record.obligation, party.id)
+    assert_recipient_holds_payment_receipt_authority(db, record.obligation, party.id)
+    if record.status not in ("CONFIRMED", "PARTIALLY_PAID") or record.excess_status != "REVIEW_REQUIRED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This payment has no overpayment waiting for a decision")
+    remaining = record.excess_remaining
+    chosen = _round2(amount) if amount is not None else remaining
+    if chosen <= 0 or chosen > remaining:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Choose an amount up to the {record.declared_currency} {remaining:.2f} still to be decided",
+        )
+    return chosen
+
+
+def _finish_excess_allocation(
+    db: Session, party: Party, record: RentalPaymentRecord, allocation: RentalPaymentExcessAllocation,
+    *, correlation_id: str, message: str,
+) -> RentalPaymentExcessAllocation:
+    db.add(allocation)
+    db.flush()
+    db.refresh(record)
+    if record.excess_remaining <= 0:
+        record.excess_status = "RESOLVED"
+    db.commit()
+    db.refresh(allocation)
+    log_audit_event(
+        db, None, "rental_payment.excess_allocated", "rental_payment_record", str(record.id), correlation_id,
+        reason=f"{allocation.action} {allocation.currency} {float(allocation.amount):.2f}",
+    )
+    emit_event(
+        db, "rental_payment.excess_allocated", "rental_payment_record", str(record.id),
+        {"allocationId": allocation.id, "action": allocation.action, "amount": float(allocation.amount),
+         "targetObligationId": allocation.target_obligation_id},
+        correlation_id=correlation_id, actor_kind="party", actor_id=str(party.id),
+        new_state=record.excess_status,
+    )
+    db.commit()
+    notif_crud.notify_user_by_guest(
+        db, record.obligation.tenant, title="Overpayment decided", message=message,
+        notification_type="rental_payment.excess_allocated",
+        related_entity_type="rental_payment_record", related_entity_id=str(record.id),
+    )
+    return allocation
+
+
+def apply_excess_to_obligation(
+    db: Session, party: Party, record: RentalPaymentRecord, *, target_obligation_id: int,
+    amount: float | None = None, note: str = "", correlation_id: str = "",
+) -> RentalPaymentExcessAllocation:
+    """The recipient applies (part of) an overpayment to another open
+    obligation the same renter owes them -- e.g. next month's rent. Creates
+    a confirmed record on that obligation; the original payment is untouched."""
+    remaining = record.excess_remaining
+    _assert_excess_open(db, party, record, amount)
+    target = get_obligation_or_404(db, target_obligation_id)
+    source = record.obligation
+    if target.id == source.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Choose a different payment to apply the extra to")
+    if target.recipient_party_id != party.id or target.tenant_guest_id != source.tenant_guest_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The extra can only go towards another payment from the same renter to you")
+    if (target.currency or "").upper() != (record.declared_currency or "").upper():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"That payment is owed in {target.currency}, not {record.declared_currency}")
+    if target.status not in RECORD_RECEIPT_OBLIGATION_STATUSES or target.payer_allocations:
+        raise HTTPException(status.HTTP_409_CONFLICT, "That payment can't take money right now")
+    outstanding = target.outstanding_amount
+    if outstanding <= 0:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Nothing is owed on that payment")
+    chosen = _round2(amount) if amount is not None else min(remaining, outstanding)
+    if chosen > outstanding:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"Only {target.currency} {outstanding:.2f} is owed on that payment",
+        )
+
+    now = datetime.now(timezone.utc)
+    applied = RentalPaymentRecord(
+        obligation_id=target.id, status="CONFIRMED" if chosen >= outstanding else "PARTIALLY_PAID",
+        provenance="RECIPIENT_CONFIRMATION", declared_amount=chosen, declared_currency=target.currency,
+        declared_date=record.declared_date, payment_method_category=record.payment_method_category,
+        payment_method_subtype=record.payment_method_subtype,
+        payment_method_description=record.payment_method_description,
+        payment_method_label=record.payment_method_label, payment_method_config_version=record.payment_method_config_version,
+        external_reference=record.external_reference,
+        note=(f"Overpayment from payment #{record.id} applied here. " + (note or "").strip())[:500].strip(),
+        declared_by_guest_id=record.declared_by_guest_id, confirmed_by_party_id=party.id,
+        confirmed_amount=chosen, confirmed_at=now,
+    )
+    db.add(applied)
+    db.flush()
+    recompute_obligation_status(db, target)
+    allocation = RentalPaymentExcessAllocation(
+        record_id=record.id, action="APPLY_TO_OBLIGATION", amount=chosen, currency=record.declared_currency,
+        target_obligation_id=target.id, target_record_id=applied.id, note=(note or "").strip()[:500],
+        actor_party_id=party.id,
+    )
+    result = _finish_excess_allocation(
+        db, party, record, allocation, correlation_id=correlation_id,
+        message=(f"Your host applied {record.declared_currency} {chosen:.2f} you overpaid towards your "
+                 f"{target.display_label} due {target.due_date:%d %b %Y}."),
+    )
+    from app.services.sublet_payments import on_payment_confirmed
+
+    on_payment_confirmed(db, target)
+    return result
+
+
+def return_excess_to_payer(
+    db: Session, party: Party, record: RentalPaymentRecord, *, returned_date: date, payment_method_category: str,
+    payment_method_subtype: str = "", payment_method_description: str = "", external_reference: str = "",
+    amount: float | None = None, note: str = "", correlation_id: str = "",
+) -> RentalPaymentExcessAllocation:
+    """The recipient records sending (part of) an overpayment back to the
+    payer directly -- outside Zoiko, like every rental payment."""
+    chosen = _assert_excess_open(db, party, record, amount)
+    if returned_date > date.today():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The date sent back can't be in the future")
+    method = method_catalog.resolve_selection(
+        category=payment_method_category, subtype=payment_method_subtype, description=payment_method_description,
+        reference=external_reference, country=record.obligation.country_code, context="return_record",
+    )
+    allocation = RentalPaymentExcessAllocation(
+        record_id=record.id, action="RETURN_TO_PAYER", amount=chosen, currency=record.declared_currency,
+        returned_date=returned_date, payment_method_category=method.category, payment_method_subtype=method.subtype,
+        payment_method_label=method.label, external_reference=method.reference, note=(note or "").strip()[:500],
+        actor_party_id=party.id,
+    )
+    return _finish_excess_allocation(
+        db, party, record, allocation, correlation_id=correlation_id,
+        message=(f"Your host recorded sending back {record.declared_currency} {chosen:.2f} you overpaid "
+                 f"({method.label}). If it hasn't arrived, report a problem on the payment."),
+    )
 
 
 def admin_confirm_receipt(
@@ -1184,7 +1457,13 @@ def confirm_receipt_as_provider(
     record.status = "CONFIRMED"
     record.provenance = "PROVIDER_CONFIRMATION"
     record.provider_reference = provider_reference
-    record.confirmed_amount = _round2(float(record.declared_amount))
+    if float(record.excess_amount or 0) > 0:
+        _apply_confirmed_amount(
+            record, float(record.declared_amount),
+            _payer_share_outstanding(record.obligation, record.declared_by_guest_id),
+        )
+    else:
+        record.confirmed_amount = _round2(float(record.declared_amount))
     record.confirmed_at = datetime.now(timezone.utc)
     db.flush()
     recompute_obligation_status(db, record.obligation)
@@ -1245,7 +1524,13 @@ def _apply_dispute_outcome(
         if party_id is not None:
             record.confirmed_by_party_id = party_id
         if record.confirmed_amount is None:
-            record.confirmed_amount = record.declared_amount
+            if float(record.excess_amount or 0) > 0:
+                _apply_confirmed_amount(
+                    record, float(record.declared_amount),
+                    _payer_share_outstanding(record.obligation, record.declared_by_guest_id),
+                )
+            else:
+                record.confirmed_amount = record.declared_amount
         record.confirmed_at = datetime.now(timezone.utc)
     elif outcome == "PAYMENT_NOT_RECEIVED" and record.status in ("PAYER_RECORDED", "DISPUTED", "CONFIRMED", "PARTIALLY_PAID"):
         db.add(RentalPaymentCorrection(
@@ -1435,18 +1720,17 @@ def append_correction(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"fieldName must be one of {CORRECTABLE_RECORD_FIELDS}")
 
     previous_value = str(getattr(record, field_name))
-    correction = RentalPaymentCorrection(
-        record_id=record.id, field_name=field_name, previous_value=previous_value, new_value=new_value,
-        reason=reason, actor_admin_id=admin.id,
-    )
-    db.add(correction)
-
     if field_name in ("declared_amount",):
         setattr(record, field_name, _round2(float(new_value)))
     elif field_name == "declared_date":
         setattr(record, field_name, date.fromisoformat(new_value))
     else:
-        setattr(record, field_name, new_value)
+        new_value = _apply_method_field_correction(record, field_name, new_value)
+    correction = RentalPaymentCorrection(
+        record_id=record.id, field_name=field_name, previous_value=previous_value, new_value=new_value,
+        reason=reason, actor_admin_id=admin.id,
+    )
+    db.add(correction)
     db.commit()
     db.refresh(correction)
 
@@ -1480,12 +1764,12 @@ def tenant_correct_own_record(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"fieldName must be one of {TENANT_CORRECTABLE_RECORD_FIELDS}")
 
     previous_value = str(getattr(record, field_name))
+    new_value = _apply_method_field_correction(record, field_name, new_value)
     correction = RentalPaymentCorrection(
         record_id=record.id, field_name=field_name, previous_value=previous_value, new_value=new_value,
         reason=reason, actor_guest_id=guest.id,
     )
     db.add(correction)
-    setattr(record, field_name, new_value)
     db.commit()
     db.refresh(correction)
 
@@ -1711,10 +1995,36 @@ def _notify_affected_tenants_instructions_changed(db: Session, party_id: int) ->
             )
 
 
+def _normalize_instruction_method(method: str, subtype: str, country_code: str) -> tuple[str, str]:
+    """Canonical category + rail for a payment instruction. The legacy bare
+    "UPI" maps onto INSTANT_BANK_PAYMENT/UPI; categories whose rail is the
+    whole point (instant rail, wallet, mobile money) must name one that is
+    configured for the instruction's country."""
+    method = (method or "").strip().upper()
+    subtype = (subtype or "").strip().upper()
+    if method in method_catalog.LEGACY_METHOD_MAP:
+        method, legacy_subtype = method_catalog.LEGACY_METHOD_MAP[method]
+        subtype = subtype or legacy_subtype
+    if method not in RENTAL_PAYMENT_INSTRUCTION_METHODS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"method must be one of {RENTAL_PAYMENT_INSTRUCTION_METHODS}")
+    category = method_catalog.get_category(method)
+    options = method_catalog.available_subtypes(category, method_catalog.country_for(country_code), date.today())
+    if subtype:
+        if not any(s.code == subtype for s in options):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"That {category.subtype_label.lower()} isn't available here")
+    elif category.subtype_required:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Choose the {category.subtype_label.lower()}")
+    if method in ("BANK_TRANSFER", "CASH"):
+        # A bank-transfer rail is the payer's choice, not the payee's.
+        subtype = ""
+    return method, subtype
+
+
 def submit_rental_payment_instruction(
     db: Session, party: Party, *, method: str, recipient_name: str, country_code: str,
     bank_details: dict[str, str], authorized_recipient_confirmed: bool,
     reference_format: str = "", additional_instructions: str = "", correlation_id: str = "",
+    method_subtype: str = "",
 ) -> tuple[RentalPaymentInstruction, str]:
     """ZR-PAY-002 Section 9/12.2 PUT /payments/instructions/{rentalId} /
     ZR-PAY-LINK-003 Wireframe D. bank_details is validated against
@@ -1728,8 +2038,7 @@ def submit_rental_payment_instruction(
     account_identifier_last4 (derived from the schema's primary field) and
     a one-way fingerprint of the whole dict are ever exposed/compared in
     the clear."""
-    if method not in RENTAL_PAYMENT_INSTRUCTION_METHODS:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"method must be one of {RENTAL_PAYMENT_INSTRUCTION_METHODS}")
+    method, method_subtype = _normalize_instruction_method(method, method_subtype, country_code)
     # ZR-AI-SEARCH-001 SRCH-12: unverified external providers never receive
     # Zoiko-issued payment instructions.
     from app.services.provider_journey import payment_block_reason
@@ -1746,25 +2055,25 @@ def submit_rental_payment_instruction(
     country_code = country_code.strip().upper()
     bank_details = {k: v.strip() for k, v in bank_details.items()}
     try:
-        validate_bank_details(country_code, bank_details, method)
+        validate_bank_details(country_code, bank_details, method, method_subtype)
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
-    schema = resolve_bank_field_schema(country_code, method)
+    schema = resolve_bank_field_schema(country_code, method, method_subtype)
     # Only the schema's own fields are stored -- nothing else the form sent.
     bank_details = {field.key: bank_details[field.key] for field in schema.fields}
     # Cash has no account at all, so nothing to mask.
     primary_value = bank_details.get(schema.primary_field_key, "") if schema.primary_field_key else ""
-    # Country only means anything alongside real bank routing fields
-    # (BANK_TRANSFER) -- persisting it for UPI/CASH/CARD/OTHER would just be a
-    # confusing leftover from whatever the form happened to have selected.
-    if method != "BANK_TRANSFER":
+    # Country picks the bank fields and which rails exist; cash has neither,
+    # so it would only be a leftover from whatever the form had selected.
+    if method == "CASH":
         country_code = ""
 
     is_high_risk, high_risk_reason, destination_fingerprint = _assess_instruction_change_risk(
         db, party, bank_details=bank_details,
     )
     instruction = RentalPaymentInstruction(
-        party_id=party.id, method=method, recipient_name=recipient_name, country_code=country_code,
+        party_id=party.id, method=method, method_subtype=method_subtype, recipient_name=recipient_name,
+        country_code=country_code,
         account_identifier_last4=primary_value[-4:], destination_fingerprint=destination_fingerprint,
         encrypted_bank_details=encrypt_json(bank_details), authorized_recipient_confirmed=True,
         reference_format=reference_format, additional_instructions=additional_instructions,
@@ -1823,24 +2132,25 @@ def confirm_rental_payment_instruction(
     instruction.verified_at = datetime.now(timezone.utc)
 
     if instruction.is_high_risk:
-        # Section 9.1 step 7: strong auth alone isn't enough for a high-risk
-        # change -- it still needs a restricted admin's approval before it
-        # can supersede the current instruction. The previous ACTIVE row is
-        # left untouched here; approve_pending_review_instruction is the
-        # only place that supersedes it.
-        instruction.status = "PENDING_REVIEW"
+        # Section 9.1 step 7, without an admin: a high-risk change waits out a
+        # cooling-off window (the current instruction stays active), the host
+        # is told so they can cancel it if it wasn't them, and tenants are
+        # warned to keep paying to the current details until then.
+        instruction.status = "COOLING_OFF"
+        instruction.activates_at = datetime.now(timezone.utc) + timedelta(hours=_cooling_off_hours())
         db.commit()
         db.refresh(instruction)
 
         log_audit_event(
-            db, None, "payment_instruction.pending_review", "rental_payment_instruction", str(instruction.id),
+            db, None, "payment_instruction.cooling_off", "rental_payment_instruction", str(instruction.id),
             correlation_id,
         )
         emit_event(
-            db, "payment_instruction.pending_review", "rental_payment_instruction", str(instruction.id),
+            db, "payment_instruction.cooling_off", "rental_payment_instruction", str(instruction.id),
             {"partyId": instruction.party_id, "highRiskReason": instruction.high_risk_reason},
-            correlation_id=correlation_id, new_state="PENDING_REVIEW",
+            correlation_id=correlation_id, new_state="COOLING_OFF",
         )
+        _notify_cooling_off(db, instruction)
         db.commit()
         return instruction
 
@@ -1867,26 +2177,39 @@ def confirm_rental_payment_instruction(
     return instruction
 
 
-def list_rental_payment_instructions_pending_review(db: Session) -> list[RentalPaymentInstruction]:
-    return list(
-        db.scalars(
-            select(RentalPaymentInstruction)
-            .where(RentalPaymentInstruction.status == "PENDING_REVIEW")
-            .order_by(RentalPaymentInstruction.created_at)
-        )
+def _cooling_off_hours() -> int:
+    from app.services.policy import get_policy
+
+    return int(get_policy(None, "payment.instruction_cooling_off_hours"))
+
+
+def _notify_cooling_off(db: Session, instruction: RentalPaymentInstruction) -> None:
+    when = instruction.activates_at.strftime("%d %b %Y %H:%M UTC")
+    notif_crud.notify_user_by_party(
+        db, instruction.party_id, title="Payment details change scheduled",
+        message=(
+            f"Your new payment details take effect on {when}. If you didn't make this change, cancel it now "
+            "and change your password."
+        ),
+        notification_type="payment_instruction.cooling_off", related_entity_type="rental_payment_instruction",
+        related_entity_id=str(instruction.id),
     )
+    tenant_guest_ids = {
+        o.tenant_guest_id for o in list_obligations_for_recipient(db, instruction.party_id)
+        if o.status not in OBLIGATION_TERMINAL_STATUSES
+    }
+    for guest_id in tenant_guest_ids:
+        guest = db.get(Guest, guest_id)
+        if guest:
+            notif_crud.notify_user_by_guest(
+                db, guest, title="Your host's payment details are changing",
+                message=f"New payment details take effect on {when}. Until then, keep paying to the current details.",
+                notification_type="payment_instruction.cooling_off_for_tenant",
+                related_entity_type="rental_payment_instruction", related_entity_id=str(instruction.id),
+            )
 
 
-def approve_pending_review_instruction(
-    db: Session, admin: AdminUser, instruction: RentalPaymentInstruction, reason: str = "", correlation_id: str = "",
-) -> RentalPaymentInstruction:
-    """Section 9.1 step 7's admin side: a restricted admin clears a high-risk
-    instruction change to become active. Only now does it supersede whatever
-    was previously ACTIVE for this party -- mirrors
-    confirm_rental_payment_instruction's own non-high-risk path."""
-    if instruction.status != "PENDING_REVIEW":
-        raise HTTPException(status.HTTP_409_CONFLICT, "This instruction is not awaiting review")
-
+def _activate(db: Session, instruction: RentalPaymentInstruction, *, correlation_id: str = "") -> None:
     previous = db.scalar(
         select(RentalPaymentInstruction).where(
             RentalPaymentInstruction.party_id == instruction.party_id, RentalPaymentInstruction.status == "ACTIVE",
@@ -1894,56 +2217,55 @@ def approve_pending_review_instruction(
     )
     if previous:
         previous.status = "SUPERSEDED"
-
     instruction.status = "ACTIVE"
-    instruction.reviewed_by_admin_id = admin.id
-    instruction.reviewed_at = datetime.now(timezone.utc)
-    instruction.review_reason = reason
-    db.commit()
-    db.refresh(instruction)
-
     log_audit_event(
-        db, admin, "payment_instruction.activated", "rental_payment_instruction", str(instruction.id), correlation_id,
-        reason=reason,
+        db, None, "payment_instruction.activated", "rental_payment_instruction", str(instruction.id), correlation_id,
+        reason="cooling-off period ended",
     )
     emit_event(
         db, "payment_instruction.activated", "rental_payment_instruction", str(instruction.id),
-        {"partyId": instruction.party_id}, correlation_id=correlation_id, actor_kind="admin", actor_id=str(admin.id),
-        new_state="ACTIVE",
+        {"partyId": instruction.party_id}, correlation_id=correlation_id, new_state="ACTIVE",
     )
-    db.commit()
-
     _notify_affected_tenants_instructions_changed(db, instruction.party_id)
-    db.commit()
-    return instruction
 
 
-def reject_pending_review_instruction(
-    db: Session, admin: AdminUser, instruction: RentalPaymentInstruction, reason: str = "", correlation_id: str = "",
-) -> RentalPaymentInstruction:
-    """The previously ACTIVE instruction, if any, is left untouched -- a
-    rejection means the change never takes effect."""
-    if instruction.status != "PENDING_REVIEW":
-        raise HTTPException(status.HTTP_409_CONFLICT, "This instruction is not awaiting review")
-
-    instruction.status = "REJECTED"
-    instruction.reviewed_by_admin_id = admin.id
-    instruction.reviewed_at = datetime.now(timezone.utc)
-    instruction.review_reason = reason
+def cancel_cooling_off_instruction(db: Session, instruction: RentalPaymentInstruction) -> RentalPaymentInstruction:
+    """The host stopping a scheduled change -- the current instruction stays
+    in force."""
+    if instruction.status != "COOLING_OFF":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This change isn't waiting to take effect")
+    instruction.status = "CANCELLED"
+    instruction.activates_at = None
+    log_audit_event(db, None, "payment_instruction.cancelled", "rental_payment_instruction", str(instruction.id))
+    emit_event(
+        db, "payment_instruction.cancelled", "rental_payment_instruction", str(instruction.id),
+        {"partyId": instruction.party_id}, new_state="CANCELLED",
+    )
     db.commit()
     db.refresh(instruction)
-
-    log_audit_event(
-        db, admin, "payment_instruction.rejected", "rental_payment_instruction", str(instruction.id), correlation_id,
-        reason=reason,
-    )
-    emit_event(
-        db, "payment_instruction.rejected", "rental_payment_instruction", str(instruction.id),
-        {"partyId": instruction.party_id}, correlation_id=correlation_id, actor_kind="admin", actor_id=str(admin.id),
-        new_state="REJECTED",
-    )
-    db.commit()
     return instruction
+
+
+def activate_due_instructions(db: Session) -> int:
+    """Scheduler job: cooling-off changes whose window has passed take effect.
+    Older rows left in the retired PENDING_REVIEW queue go through the same
+    window, counted from now."""
+    now = datetime.now(timezone.utc)
+    for legacy in db.scalars(select(RentalPaymentInstruction).where(RentalPaymentInstruction.status == "PENDING_REVIEW")):
+        legacy.status = "COOLING_OFF"
+        legacy.activates_at = now + timedelta(hours=_cooling_off_hours())
+        _notify_cooling_off(db, legacy)
+    activated = 0
+    for instruction in db.scalars(
+        select(RentalPaymentInstruction).where(RentalPaymentInstruction.status == "COOLING_OFF")
+        .order_by(RentalPaymentInstruction.id)
+    ):
+        due = instruction.activates_at
+        if due is not None and (due if due.tzinfo else due.replace(tzinfo=timezone.utc)) <= now:
+            _activate(db, instruction)
+            activated += 1
+    db.commit()
+    return activated
 
 
 def get_rental_payment_instruction_or_404(db: Session, instruction_id: int) -> RentalPaymentInstruction:

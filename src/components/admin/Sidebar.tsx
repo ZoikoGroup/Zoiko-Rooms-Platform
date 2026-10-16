@@ -13,6 +13,7 @@ import {
   DoorOpen,
   Gavel,
   LayoutDashboard,
+  LifeBuoy,
   LogOut,
   Settings,
   ShieldCheck,
@@ -39,6 +40,7 @@ const navItems = [
   { href: "/payments", label: "Payments", icon: CreditCard, superAdminOnly: true },
   { href: "/reviews", label: "Reviews", icon: Star, superAdminOnly: true },
   { href: "/trust-safety", label: "Trust & Safety", icon: ShieldCheck, superAdminOnly: true },
+  { href: "/support", label: "Support", icon: LifeBuoy, superAdminOnly: false },
   { href: "/team", label: "Team", icon: UsersRound, superAdminOnly: true },
   { href: "/settings", label: "Settings", icon: Settings, superAdminOnly: false },
 ];

@@ -26,6 +26,7 @@ const GENERIC_IDENTIFIER = /^.{4,64}$/;
 const IN_IFSC = /^[A-Za-z]{4}0[A-Za-z0-9]{6}$/;
 const IN_ACCOUNT_NUMBER = /^\d{9,18}$/;
 const UPI_ID = /^[A-Za-z0-9.\-_]{2,256}@[A-Za-z][A-Za-z0-9]{1,63}$/;
+const PAYMENT_ALIAS = /^.{3,128}$/;
 
 const GB_SCHEMA: BankFieldSchema = {
   fields: [
@@ -51,6 +52,22 @@ const IN_SCHEMA: BankFieldSchema = {
 export const UPI_SCHEMA: BankFieldSchema = {
   fields: [{ key: "upi_id", label: "UPI ID", pattern: UPI_ID, hint: "e.g. name@okhdfcbank" }],
   primaryFieldKey: "upi_id",
+};
+/** Instant rails other than UPI: a PayID, Pix key, PayNow ID, ... */
+export const INSTANT_ALIAS_SCHEMA: BankFieldSchema = {
+  fields: [{
+    key: "payment_alias", label: "Payment ID / alias", pattern: PAYMENT_ALIAS,
+    hint: "e.g. PayID, Pix key, PayNow ID, or the phone/email registered for instant payments",
+  }],
+  primaryFieldKey: "payment_alias",
+};
+export const WALLET_HANDLE_SCHEMA: BankFieldSchema = {
+  fields: [{ key: "account_handle", label: "Wallet / app account", pattern: PAYMENT_ALIAS, hint: "The email, phone number or username to pay" }],
+  primaryFieldKey: "account_handle",
+};
+export const MOBILE_MONEY_SCHEMA: BankFieldSchema = {
+  fields: [{ key: "account_handle", label: "Mobile money number / account", pattern: PAYMENT_ALIAS, hint: "The number registered with the service" }],
+  primaryFieldKey: "account_handle",
 };
 /** Cash is paid in person -- no account details; the host describes where
  *  and when in the instruction's notes. */
@@ -90,6 +107,18 @@ export const COUNTRY_OPTIONS: { code: string; label: string }[] = [
   { code: "IE", label: "Ireland" },
   { code: "PT", label: "Portugal" },
   { code: "BE", label: "Belgium" },
+  { code: "AU", label: "Australia" },
+  { code: "CA", label: "Canada" },
+  { code: "BR", label: "Brazil" },
+  { code: "SG", label: "Singapore" },
+  { code: "MY", label: "Malaysia" },
+  { code: "TH", label: "Thailand" },
+  { code: "HK", label: "Hong Kong" },
+  { code: "PH", label: "Philippines" },
+  { code: "ID", label: "Indonesia" },
+  { code: "KE", label: "Kenya" },
+  { code: "GH", label: "Ghana" },
+  { code: "UG", label: "Uganda" },
   { code: "OTHER", label: "Other" },
 ];
 
@@ -99,8 +128,12 @@ export const COUNTRY_OPTIONS: { code: string; label: string }[] = [
  *  fallback regardless of country. Mirrors
  *  backend/app/services/bank_field_schemas.py:resolve_bank_field_schema's
  *  own method check exactly. */
-export function resolveBankFieldSchema(countryCode: string, method: string = "BANK_TRANSFER"): BankFieldSchema {
-  if (method === "UPI") return UPI_SCHEMA;
+export function resolveBankFieldSchema(countryCode: string, method: string = "BANK_TRANSFER", subtype = ""): BankFieldSchema {
+  // Canonical categories (ZR-PAY-METHODS-GLOBAL-001); a bare "UPI" is the legacy form.
+  if (method === "UPI" || (method === "INSTANT_BANK_PAYMENT" && subtype === "UPI")) return UPI_SCHEMA;
+  if (method === "INSTANT_BANK_PAYMENT") return INSTANT_ALIAS_SCHEMA;
+  if (method === "DIGITAL_WALLET_P2P") return WALLET_HANDLE_SCHEMA;
+  if (method === "MOBILE_MONEY") return MOBILE_MONEY_SCHEMA;
   if (method === "CASH") return CASH_SCHEMA;
   if (method !== "BANK_TRANSFER") return FALLBACK_SCHEMA;
   return BANK_FIELD_SCHEMAS[countryCode.toUpperCase()] ?? FALLBACK_SCHEMA;

@@ -11,6 +11,10 @@ from app.models.dispute_evidence import DisputeEvidenceClaimLink, DisputeEvidenc
 from app.models.dispute_external_proceeding import DisputeExternalProceeding, DisputeExternalProceedingClaimLink
 from app.models.dispute_deadline import DisputeDeadline
 from app.models.dispute_message import DisputeCaseMessage
+from app.models.rental_message import RentalConversation, RentalMessage
+from app.models.support_ticket import SupportTicket, SupportTicketAttachment, SupportTicketMessage
+from app.models.user_settings import EmailChangeRequest, UserPreference
+from app.models.host_refund import HostRefund
 from app.models.dispute_party import DisputeParty
 from app.models.dispute_settlement import DisputeSettlement, DisputeSettlementClaimLink
 from app.models.user_account import UserAccount
@@ -43,7 +47,7 @@ from app.models.agreement_version_detail import AgreementPremises, CommercialTer
 from app.models.disclosure_requirement import DisclosureRequirement
 from app.models.signature_provider import SignatureProviderEvent, SignatureProviderStatus, SignatureRequest
 from app.models.termination_record import TerminationRecord
-from app.models.termination_case import MitigationRecord, TerminationCase, TerminationDecision
+from app.models.termination_case import MitigationRecord, TerminationCase, TerminationCaseResponse, TerminationDecision
 from app.models.refund_entitlement import RefundEntitlement, RefundEntitlementLineItem
 from app.models.habitability_incident import HabitabilityIncident
 from app.models.host_entry_visit import HostEntryVisit
@@ -111,6 +115,7 @@ from app.models.rental_payment import (
     RentalPaymentCorrection,
     RentalPaymentDispute,
     RentalPaymentEvidenceHold,
+    RentalPaymentExcessAllocation,
     RentalPaymentInstruction,
     RentalPaymentObligation,
     RentalPaymentRecord,
@@ -218,6 +223,14 @@ __all__ = [
     "DisputeSettlementClaimLink",
     "DisputeDeadline",
     "DisputeCaseMessage",
+    "RentalConversation",
+    "RentalMessage",
+    "SupportTicket",
+    "SupportTicketMessage",
+    "SupportTicketAttachment",
+    "UserPreference",
+    "EmailChangeRequest",
+    "HostRefund",
     "DisputeParty",
     "ReconciliationRun",
     "LedgerAccount",
@@ -252,6 +265,7 @@ __all__ = [
     "RoomAlert",
     "RentalPaymentObligation",
     "RentalPaymentRecord",
+    "RentalPaymentExcessAllocation",
     "RentalPaymentDispute",
     "RentalPaymentCorrection",
     "RentalPaymentInstruction",

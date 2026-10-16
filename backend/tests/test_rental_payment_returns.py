@@ -30,7 +30,7 @@ def _paid_booking(client, db_session: Session, suffix: str, *, occupancy_status:
     recipient = db_session.get(Party, obligations["RENT"].recipient_party_id)
     for obligation in obligations.values():
         rp_crud.record_receipt_as_recipient(
-            db_session, recipient, obligation, amount=None, received_date=date.today(), payment_method_category="UPI",
+            db_session, recipient, obligation, amount=None, received_date=date.today(), payment_method_category="BANK_TRANSFER",
         )
     agreement = db_session.get(Agreement, agreement_id)
     occupancy = db_session.scalar(select(Occupancy).where(Occupancy.offer_id == agreement.offer_id))
@@ -59,7 +59,7 @@ class TestDepositReturn:
         with pytest.raises(HTTPException) as exc:
             returns_crud.record_return(
                 db_session, recipient, occupancy, kind="DEPOSIT_RETURN",
-                amount=float(obligations["DEPOSIT"].amount) + 1, payment_method_category="UPI", returned_date=date.today(),
+                amount=float(obligations["DEPOSIT"].amount) + 1, payment_method_category="BANK_TRANSFER", returned_date=date.today(),
             )
         assert exc.value.status_code == 400
 
@@ -76,7 +76,7 @@ class TestDepositReturn:
         _user, recipient, occupancy, _obligations = _paid_booking(client, db_session, "rt-early", occupancy_status="ACTIVE")
         with pytest.raises(HTTPException) as exc:
             returns_crud.record_return(
-                db_session, recipient, occupancy, kind="DEPOSIT_RETURN", amount=10, payment_method_category="UPI",
+                db_session, recipient, occupancy, kind="DEPOSIT_RETURN", amount=10, payment_method_category="BANK_TRANSFER",
                 returned_date=date.today(),
             )
         assert exc.value.status_code == 409
@@ -85,7 +85,7 @@ class TestDepositReturn:
         user, recipient, occupancy, obligations = _paid_booking(client, db_session, "rt-disp", occupancy_status="ENDED")
         deposit = float(obligations["DEPOSIT"].amount)
         record = returns_crud.record_return(
-            db_session, recipient, occupancy, kind="DEPOSIT_RETURN", amount=deposit, payment_method_category="UPI",
+            db_session, recipient, occupancy, kind="DEPOSIT_RETURN", amount=deposit, payment_method_category="BANK_TRANSFER",
             returned_date=date.today(),
         )
         guest = get_guest_for_user(db_session, user)
@@ -93,7 +93,7 @@ class TestDepositReturn:
         assert disputed.status == "DISPUTED"
         # The disputed one no longer counts, so the host can record the resend.
         again = returns_crud.record_return(
-            db_session, recipient, occupancy, kind="DEPOSIT_RETURN", amount=deposit, payment_method_category="UPI",
+            db_session, recipient, occupancy, kind="DEPOSIT_RETURN", amount=deposit, payment_method_category="BANK_TRANSFER",
             returned_date=date.today(), external_reference="RESENT",
         )
         assert again.status == "RECORDED"
@@ -105,7 +105,7 @@ class TestDepositReturn:
         db_session.commit()
         with pytest.raises(HTTPException) as exc:
             returns_crud.record_return(
-                db_session, stranger, occupancy, kind="DEPOSIT_RETURN", amount=10, payment_method_category="UPI",
+                db_session, stranger, occupancy, kind="DEPOSIT_RETURN", amount=10, payment_method_category="BANK_TRANSFER",
                 returned_date=date.today(),
             )
         assert exc.value.status_code == 403
@@ -134,7 +134,7 @@ class TestCancellationReturn:
 
         r = client.post(
             f"/api/users/rental-payments/recipient/occupancies/{occupancy.id}/returns",
-            json={"kind": "CANCELLATION_RETURN", "amount": candidate["remaining"], "paymentMethodCategory": "UPI",
+            json={"kind": "CANCELLATION_RETURN", "amount": candidate["remaining"], "paymentMethodCategory": "BANK_TRANSFER",
                   "returnedDate": date.today().isoformat(), "externalReference": "UTR99"},
             cookies=host_cookies,
         )

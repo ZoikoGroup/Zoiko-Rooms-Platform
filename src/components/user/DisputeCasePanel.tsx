@@ -83,6 +83,21 @@ export const DISPUTE_CLAIM_FAMILIES: DisputeClaimFamily[] = [
 ];
 
 const TERMINAL_CLAIM_STATUSES = new Set(["UPHELD", "PARTLY_UPHELD", "NOT_UPHELD", "SETTLED", "WITHDRAWN"]);
+/** Host<->renter claims the two sides settle themselves (A0/A6 stay with Zoiko Rooms). */
+const PARTY_RESOLVED_AUTHORITIES = new Set(["A1", "A2"]);
+const ANSWERABLE_CLAIM_STATUSES = new Set(["OPEN", "RESPONSE_DUE", "EVIDENCE"]);
+const OUTSIDE_BODIES: { value: string; label: string }[] = [
+  { value: "DEPOSIT_SCHEME", label: "Deposit protection scheme" },
+  { value: "TRIBUNAL_COURT", label: "Tribunal or court" },
+  { value: "MEDIATION_ADR", label: "Mediation" },
+  { value: "OTHER", label: "Other" },
+];
+const OUTSIDE_OUTCOMES: { value: string; label: string }[] = [
+  { value: "UPHELD", label: "Claim upheld" },
+  { value: "PARTLY_UPHELD", label: "Partly upheld" },
+  { value: "NOT_UPHELD", label: "Not upheld" },
+  { value: "SETTLED", label: "Settled" },
+];
 const TERMINAL_SETTLEMENT_STATUSES = new Set(["ACCEPTED", "REJECTED", "EXPIRED", "EFFECTIVE", "VOID"]);
 
 function parseOptionalNumber(value: string): number | undefined {
@@ -379,6 +394,20 @@ function DisputeCaseDetail({
   const [parties, setParties] = useState<DisputePartyRead[]>([]);
   const [external, setExternal] = useState<DisputeExternalProceedingRead[]>([]);
 
+  // Answering a claim / the outside body (host<->renter claims, no admin)
+  const [answerBusy, setAnswerBusy] = useState<number | null>(null);
+  const [contestClaimId, setContestClaimId] = useState<number | null>(null);
+  const [contestNote, setContestNote] = useState("");
+  const [fileClaimId, setFileClaimId] = useState<number | null>(null);
+  const [fileBody, setFileBody] = useState("DEPOSIT_SCHEME");
+  const [fileName, setFileName] = useState("");
+  const [fileRef, setFileRef] = useState("");
+  const [decisionFor, setDecisionFor] = useState<number | null>(null);
+  const [decisionOutcome, setDecisionOutcome] = useState("UPHELD");
+  const [decisionDate, setDecisionDate] = useState("");
+  const [decisionFinal, setDecisionFinal] = useState(true);
+  const [outsideBusy, setOutsideBusy] = useState(false);
+
   // Payment-record problem (resolved between tenant and host)
   const [paymentConfirm, setPaymentConfirm] = useState<{ claimId: number; action: PaymentDisputePartyAction } | null>(null);
   const [paymentNotes, setPaymentNotes] = useState("");
@@ -638,6 +667,69 @@ function DisputeCaseDetail({
     }
   }
 
+  async function handleAnswerClaim(claimId: number, response: "ACCEPT" | "CONTEST") {
+    setAnswerBusy(claimId);
+    try {
+      await client.respondToClaim(caseId, claimId, response, response === "CONTEST" ? contestNote.trim() : "");
+      showToast(response === "ACCEPT" ? "Claim accepted." : "Claim contested -- try to agree a settlement before the deadline.");
+      setContestClaimId(null);
+      setContestNote("");
+      await loadAll();
+      onChanged();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not answer this claim."), "error");
+    } finally {
+      setAnswerBusy(null);
+    }
+  }
+
+  async function handleFileOutside() {
+    if (fileClaimId == null) return;
+    if (!fileName.trim() || !fileRef.trim()) {
+      showToast("Enter the body's name and your case reference.", "error");
+      return;
+    }
+    setOutsideBusy(true);
+    try {
+      await client.fileExternalProceeding(caseId, {
+        claimIds: [fileClaimId], authorityType: fileBody, authorityName: fileName.trim(), externalReference: fileRef.trim(),
+      });
+      showToast("Recorded. Come back and record the decision once you have it.");
+      setFileClaimId(null);
+      setFileName("");
+      setFileRef("");
+      await loadAll();
+      onChanged();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not record this."), "error");
+    } finally {
+      setOutsideBusy(false);
+    }
+  }
+
+  async function handleRecordDecision() {
+    if (decisionFor == null) return;
+    if (!decisionDate) {
+      showToast("Enter the decision date.", "error");
+      return;
+    }
+    setOutsideBusy(true);
+    try {
+      await client.recordExternalDecision(caseId, decisionFor, {
+        outcome: decisionOutcome, decisionDate, finalityState: decisionFinal ? "FINAL" : "UNDER_REVIEW",
+      });
+      showToast("Decision recorded and applied.");
+      setDecisionFor(null);
+      setDecisionDate("");
+      await loadAll();
+      onChanged();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not record the decision."), "error");
+    } finally {
+      setOutsideBusy(false);
+    }
+  }
+
   async function handleVoidSettlement(settlementId: number) {
     setSettlementActionBusy(settlementId);
     try {
@@ -725,6 +817,75 @@ function DisputeCaseDetail({
                     </span>
                   </div>
                   {claim.requestedRemedy && <p className="text-xs text-slate-500 dark:text-slate-400">&ldquo;{claim.requestedRemedy}&rdquo;</p>}
+                  {claim.authorityClass && PARTY_RESOLVED_AUTHORITIES.has(claim.authorityClass) && ANSWERABLE_CLAIM_STATUSES.has(claim.status) && (
+                    claim.claimantRole !== viewerRole ? (
+                      <div className="space-y-2 border-t border-slate-200 pt-2 dark:border-slate-700">
+                        <p className="text-xs text-slate-600 dark:text-slate-300">
+                          Answer this claim. If you don&apos;t answer before the response deadline, it counts as accepted.
+                        </p>
+                        {contestClaimId === claim.id ? (
+                          <>
+                            <textarea
+                              className={inputClass}
+                              rows={2}
+                              placeholder="Why you disagree (optional)"
+                              value={contestNote}
+                              onChange={(e) => setContestNote(e.target.value)}
+                            />
+                            <div className="flex gap-2">
+                              <Button size="sm" variant="primary" loading={answerBusy === claim.id} onClick={() => handleAnswerClaim(claim.id, "CONTEST")}>
+                                Contest claim
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => setContestClaimId(null)}>Cancel</Button>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="flex gap-2">
+                            <Button size="sm" variant="outline" loading={answerBusy === claim.id} onClick={() => handleAnswerClaim(claim.id, "ACCEPT")}>
+                              Accept
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => { setContestClaimId(claim.id); setContestNote(""); }}>
+                              Contest
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Waiting for the other side to answer. If they don&apos;t answer by the deadline, your claim is accepted.
+                      </p>
+                    )
+                  )}
+                  {claim.authorityClass && PARTY_RESOLVED_AUTHORITIES.has(claim.authorityClass) && claim.status === "NEGOTIATION" && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Contested. Try to agree a settlement below; if you can&apos;t before the deadline, it goes to the outside body.
+                    </p>
+                  )}
+                  {claim.authorityClass && PARTY_RESOLVED_AUTHORITIES.has(claim.authorityClass) && claim.status === "EXTERNAL_REFERRAL"
+                    && !external.some((e) => e.claimIds.includes(claim.id)) && (
+                    <div className="space-y-2 border-t border-slate-200 pt-2 dark:border-slate-700">
+                      <p className="text-xs text-slate-600 dark:text-slate-300">
+                        No settlement was reached. Take this to the body that handles it (for a deposit, the deposit protection scheme), then record it here.
+                      </p>
+                      {fileClaimId === claim.id ? (
+                        <>
+                          <select className={inputClass} value={fileBody} onChange={(e) => setFileBody(e.target.value)}>
+                            {OUTSIDE_BODIES.map((b) => <option key={b.value} value={b.value}>{b.label}</option>)}
+                          </select>
+                          <input className={inputClass} placeholder="Name of the body" value={fileName} onChange={(e) => setFileName(e.target.value)} />
+                          <input className={inputClass} placeholder="Your case reference" value={fileRef} onChange={(e) => setFileRef(e.target.value)} />
+                          <div className="flex gap-2">
+                            <Button size="sm" variant="primary" loading={outsideBusy} onClick={handleFileOutside}>Save</Button>
+                            <Button size="sm" variant="ghost" onClick={() => setFileClaimId(null)}>Cancel</Button>
+                          </div>
+                        </>
+                      ) : (
+                        <Button size="sm" variant="outline" onClick={() => setFileClaimId(claim.id)}>
+                          <Gavel className="h-3.5 w-3.5" /> I&apos;ve taken it to an outside body
+                        </Button>
+                      )}
+                    </div>
+                  )}
                   {isPaymentClaim(claim) && !TERMINAL_CLAIM_STATUSES.has(claim.status) && (
                     <div className="space-y-2 pt-1">
                       <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -1093,7 +1254,30 @@ function DisputeCaseDetail({
                       {e.finalityState ? ` · ${label(e.finalityState)}` : ""}
                       {e.decisionDate ? ` · Decided ${formatDate(e.decisionDate)}` : ""}
                     </span>
-                    <Badge tone={disputeExternalProceedingStatusTone[e.status] ?? "neutral"}>{label(e.status)}</Badge>
+                    <span className="flex items-center gap-2">
+                      <Badge tone={disputeExternalProceedingStatusTone[e.status] ?? "neutral"}>{label(e.status)}</Badge>
+                      {e.status !== "DECIDED" && e.filedByAdminId == null && decisionFor !== e.id && (
+                        <Button size="sm" variant="ghost" onClick={() => { setDecisionFor(e.id); setDecisionDate(""); }}>
+                          Record decision
+                        </Button>
+                      )}
+                    </span>
+                    {decisionFor === e.id && (
+                      <div className="w-full space-y-2 pt-2">
+                        <select className={inputClass} value={decisionOutcome} onChange={(ev) => setDecisionOutcome(ev.target.value)}>
+                          {OUTSIDE_OUTCOMES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                        <input type="date" className={inputClass} value={decisionDate} onChange={(ev) => setDecisionDate(ev.target.value)} />
+                        <label className="flex items-center gap-2">
+                          <input type="checkbox" checked={decisionFinal} onChange={(ev) => setDecisionFinal(ev.target.checked)} />
+                          This decision is final (no appeal pending)
+                        </label>
+                        <div className="flex gap-2">
+                          <Button size="sm" variant="primary" loading={outsideBusy} onClick={handleRecordDecision}>Save decision</Button>
+                          <Button size="sm" variant="ghost" onClick={() => setDecisionFor(null)}>Cancel</Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

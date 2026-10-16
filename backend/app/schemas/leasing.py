@@ -240,7 +240,8 @@ class AgreementAmendmentRead(CamelModel):
     reason: str
     proposed_terms: dict = {}
     proposed_guarantor: dict = {}
-    requested_by_admin_id: int
+    requested_by_admin_id: int | None = None
+    requested_by_user_id: int | None = None
     created_at: datetime
     classified_at: datetime | None = None
     terms_proposed_at: datetime | None = None
@@ -465,6 +466,9 @@ class UserOccupancyRead(CamelModel):
     listing_id: str
     listing_name: str = ""
     room_id: int
+    # The tenant's own guest id -- how a termination case names them in
+    # pendingResponders / proposer.
+    guest_id: str = ""
     property_address: str = ""
     property_city: str = ""
     host_name: str = ""
@@ -497,6 +501,9 @@ class UserOccupancyRead(CamelModel):
     # Whether the room has a free place for another tenancy -- the sublet
     # arrangements that share the room (crud/sublet.py CO_TENANCY types) need one.
     room_has_space_for_co_tenant: bool = False
+    # The application this tenancy came from -- the key for host<->renter
+    # messages (crud/rental_message.py), also for a subtenant who never applied.
+    application_id: int | None = None
 
 
 class SubletRequestCreate(CamelModel):
@@ -608,6 +615,23 @@ class SubletRequestRead(CamelModel):
     cancelled_by_authority_at: datetime | None = None
     cancelled_by_authority_admin_id: int | None = None
     cancelled_by_authority_reason: str = ""
+
+    # ADD_CO_TENANT shared room: the co-tenant's own answer, the room's live
+    # shared state, and both people's live identity status.
+    co_tenant_responded_at: datetime | None = None
+    ended_at: datetime | None = None
+    end_reason: str = ""
+    shared_room_active: bool = False
+    current_tenant_identity_verified: bool = False
+    proposed_renter_identity_verified: bool = False
+
+
+class CoTenancyResponse(CamelModel):
+    accept: bool
+
+
+class SharedRoomEnd(CamelModel):
+    reason: str = ""
 
 
 class SubletRequestDecision(CamelModel):
@@ -802,6 +826,7 @@ class BookingChangeRequestRead(CamelModel):
     reason: str
     decision_note: str
     decided_by_admin_id: int | None = None
+    decided_by_user_id: int | None = None
     decided_at: datetime | None = None
     resulting_amendment_id: int | None = None
     created_at: datetime

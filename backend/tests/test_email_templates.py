@@ -38,6 +38,7 @@ ALL_SENDERS = [
         "a@x.com", "Ravi", status_display="Action required", variant="action-required",
         message="Add the evidence still required for your role.", property_label="Property #6", verification_id=9)),
     ("ZR-EML-ID-002", lambda: mailer.send_welcome_email("a@x.com", "Ravi Kumar")),
+    ("ZR-EML-ID-005", lambda: mailer.send_email_change_confirmation_email("a@x.com", "https://app/confirm?t=1", 60, "Ravi")),
     ("ZR-EML-ID-006", lambda: mailer.send_password_reset_email("a@x.com", "https://app/reset?t=1", 30, "Ravi")),
     ("ZR-EML-ID-003", lambda: mailer.send_payout_beneficiary_verification_code_email("a@x.com", "Ravi", "482913", 15)),
     ("ZR-EML-ID-003", lambda: mailer.send_rental_payment_instruction_verification_code_email("a@x.com", "Ravi", "482913", 15)),

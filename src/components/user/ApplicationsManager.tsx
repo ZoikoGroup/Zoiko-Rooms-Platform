@@ -11,6 +11,7 @@ import {
   BookingChangeRequest,
   PaymentPreview,
   RentalPaymentObligation,
+  RentalMessage,
 } from "@/lib/types";
 import {
   listRentalApplications,
@@ -30,6 +31,8 @@ import {
   getObligationAvailableMethods,
   listMyRentalPaymentObligations,
   payOwnObligation,
+  listRenterApplicationMessages,
+  sendRenterApplicationMessage,
 } from "@/lib/user-api";
 import { matchRentalPaymentObligation } from "@/lib/rentalPaymentMatch";
 import { SingleObligationPaymentCard } from "@/components/user/RentalPaymentsManager";
@@ -816,19 +819,34 @@ export function ApplicationsManager() {
     }
   };
 
-  const handleSendMessage = (appId: string) => {
-    if (!messageInput.trim()) return;
-    const newMsg = {
-      from: "user" as const,
-      text: messageInput.trim(),
-      time: "Just now",
-    };
-    setChatMessages((prev) => ({
-      ...prev,
-      [appId]: [...(prev[appId] || []), newMsg],
-    }));
-    setMessageInput("");
-    showToast("Message sent in Zoiko Rooms.");
+  const toChatMessage = (m: RentalMessage) => ({
+    from: m.senderRole === "HOST" ? ("host" as const) : ("user" as const),
+    text: m.body,
+    time: formatDate(m.createdAt),
+  });
+
+  // Load the real thread (and mark the host's messages read) whenever the
+  // Messages tab is opened for an application.
+  useEffect(() => {
+    if (activeDrawerTab !== "messages" || !selectedApp) return;
+    const key = selectedApp.id;
+    listRenterApplicationMessages(selectedApp.rawApp.id)
+      .then((items) => setChatMessages((prev) => ({ ...prev, [key]: items.map(toChatMessage) })))
+      .catch(() => setChatMessages((prev) => ({ ...prev, [key]: prev[key] ?? [] })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDrawerTab, selectedApp?.id]);
+
+  const handleSendMessage = async (appId: string) => {
+    const text = messageInput.trim();
+    if (!text || !selectedApp || selectedApp.id !== appId) return;
+    try {
+      const sent = await sendRenterApplicationMessage(selectedApp.rawApp.id, text);
+      setChatMessages((prev) => ({ ...prev, [appId]: [...(prev[appId] || []), toChatMessage(sent)] }));
+      setMessageInput("");
+      showToast("Message sent to the host.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not send your message."));
+    }
   };
 
   // Get status badge metadata
@@ -2590,7 +2608,7 @@ export function ApplicationsManager() {
                     role="tab"
                     className="dtab"
                     aria-selected={activeDrawerTab === tabKey}
-                    onClick={() => setActiveDrawerTab(tabKey as any)}
+                    onClick={() => setActiveDrawerTab(tabKey as typeof activeDrawerTab)}
                   >
                     {tabLabel}
                   </button>
@@ -2783,10 +2801,10 @@ export function ApplicationsManager() {
                 {activeDrawerTab === "messages" && (
                   <>
                     <div className="thread">
-                      {(chatMessages[selectedApp.id] || [
-                        { from: "host" as const, text: "Thanks for applying — we are reviewing applications this week.", time: "Oct 2" },
-                        { from: "host" as const, text: "Feel free to message here if you have any questions.", time: "Oct 2" },
-                      ]).map((m, idx) => (
+                      {(chatMessages[selectedApp.id] ?? []).length === 0 && (
+                        <p className="text-xs text-[#5b6886]">No messages yet. Ask the host anything about this room.</p>
+                      )}
+                      {(chatMessages[selectedApp.id] ?? []).map((m, idx) => (
                         <div key={idx} className={`bub ${m.from === "host" ? "in" : "out"}`}>
                           <span>{m.text}</span>
                           <time>{m.time}</time>
@@ -2794,7 +2812,8 @@ export function ApplicationsManager() {
                       ))}
                     </div>
 
-                    {!["notsel", "withdrawn", "closed", "oexp", "odecl"].includes(selectedApp.st) && (
+                    {/* Messaging stays open once the agreement is signed ("closed" = SIGNED/ACTIVE). */}
+                    {!["notsel", "withdrawn", "oexp", "odecl"].includes(selectedApp.st) && (
                       <>
                         <div className="composer">
                           <input

@@ -9,20 +9,18 @@ import { ApiError, apiClientFetch } from "@/lib/api-client";
 import { EvidenceArtifact, RentalPaymentEvidenceHold, RentalPaymentObligation, RentalPaymentRecord } from "@/lib/types";
 import { rentalPaymentStatusLabel, rentalPaymentStatusTone } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { maskReference, paymentMethodDisplay } from "@/components/user/payment-methods/PaymentMethodFields";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const BASE = "/api/finance/rental-payments";
-
-const METHOD_LABELS: Record<string, string> = {
-  BANK_TRANSFER: "Bank transfer", UPI: "UPI", CASH: "Cash", CARD: "Card", OTHER: "Other",
-};
 
 // Record fields support may correct (crud/rental_payment.py:CORRECTABLE_RECORD_FIELDS).
 const CORRECTABLE_FIELDS = [
   { value: "declared_amount", label: "Amount" },
   { value: "declared_date", label: "Date paid (YYYY-MM-DD)" },
-  { value: "external_reference", label: "Transaction reference" },
-  { value: "payment_method_category", label: "Method (BANK_TRANSFER, UPI, CASH, OTHER)" },
+  { value: "external_reference", label: "Payment reference / transaction ID" },
+  { value: "payment_method_category", label: "Method (canonical code, optionally CATEGORY:RAIL, e.g. INSTANT_BANK_PAYMENT:UPI)" },
+  { value: "payment_method_subtype", label: "Rail / provider code (e.g. FASTER_PAYMENTS)" },
 ];
 
 type Action =
@@ -255,8 +253,8 @@ export function RentalPaymentSupportManager({ showToast }: { showToast: (message
                     <Badge tone={rentalPaymentStatusTone[r.status] ?? "neutral"}>{rentalPaymentStatusLabel[r.status] ?? r.status}</Badge>
                   </div>
                   <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                    {METHOD_LABELS[r.paymentMethodCategory] ?? r.paymentMethodCategory} on {formatDate(r.declaredDate)}
-                    {r.externalReference ? ` · ref ${r.externalReference}` : ""} · {r.provenance.replace(/_/g, " ").toLowerCase()}
+                    {paymentMethodDisplay(r)} on {formatDate(r.declaredDate)}
+                    {r.externalReference ? ` · ref ${maskReference(r.externalReference)}` : ""} · {r.provenance.replace(/_/g, " ").toLowerCase()}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">

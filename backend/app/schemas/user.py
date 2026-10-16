@@ -29,6 +29,8 @@ class UserRead(CamelModel):
     email_verified: bool
     is_active: bool
     created_at: datetime
+    has_avatar: bool = False
+    avatar_updated_at: datetime | None = None
 
 
 class UserPasswordChangeRequest(CamelModel):

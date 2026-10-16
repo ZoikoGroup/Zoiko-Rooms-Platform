@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   Building2,
@@ -30,9 +31,12 @@ import {
   XCircle,
 } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
-import { Application, HostedListing, Property, Offer } from "@/lib/types";
+import {
+  RentalMessage, Application, HostedListing, Property, Offer } from "@/lib/types";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import {
+  listHostApplicationMessages,
+  sendHostApplicationMessage,
   decideHostedApplication,
   errorMessage,
   listHostedApplications,
@@ -221,6 +225,8 @@ export function HostApplicationsManager() {
     "overview"
   );
   const [chatInput, setChatInput] = useState("");
+  // The real host <-> renter thread for the open application.
+  const [thread, setThread] = useState<RentalMessage[]>([]);
 
   // Modals state
   const [pendingModal, setPendingModal] = useState<{
@@ -288,6 +294,21 @@ export function HostApplicationsManager() {
       buildApplicationRecord(app, listingMap, propertyMap)
     );
   }, [rawApplications, listingMap, propertyMap]);
+
+  // Deep link (?applicationId=) from Rental Records' "Message renter":
+  // open that application's thread once the data has loaded.
+  const searchParams = useSearchParams();
+  const deepLinkId = Number(searchParams.get("applicationId")) || null;
+  const [deepLinkHandled, setDeepLinkHandled] = useState(false);
+  useEffect(() => {
+    if (!deepLinkId || deepLinkHandled || appRecords.length === 0) return;
+    const target = appRecords.find((a) => a.id === deepLinkId);
+    if (target) {
+      setDrawerTarget(target);
+      setDrawerTab("messages");
+    }
+    setDeepLinkHandled(true);
+  }, [deepLinkId, deepLinkHandled, appRecords]);
 
   // Close menus on outside click or escape
   useEffect(() => {
@@ -527,7 +548,7 @@ export function HostApplicationsManager() {
                   ...x.decisions,
                   {
                     id: Date.now(),
-                    decision: "APPROVED" as any,
+                    decision: "APPROVED" as const,
                     reasonCode: "REVIEW_STARTED",
                     note: "Host opened review",
                     decidedByAdminId: null,
@@ -642,14 +663,24 @@ export function HostApplicationsManager() {
     setPendingModal(null);
   };
 
-  const handleSendMessage = () => {
+  // Load the thread (and mark the renter's messages read) when the Messages tab opens.
+  useEffect(() => {
+    if (drawerTab !== "messages" || !drawerTarget) return;
+    setThread([]);
+    listHostApplicationMessages(drawerTarget.id).then(setThread).catch(() => setThread([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawerTab, drawerTarget?.id]);
+
+  const handleSendMessage = async () => {
     if (!drawerTarget || !chatInput.trim()) return;
-    const msg = chatInput.trim();
-    setDrawerTarget((curr) =>
-      curr ? { ...curr, messages: [...curr.messages, `Host: ${msg}`] } : null
-    );
-    setChatInput("");
-    showToast("Message sent to applicant.", "success");
+    try {
+      const sent = await sendHostApplicationMessage(drawerTarget.id, chatInput.trim());
+      setThread((prev) => [...prev, sent]);
+      setChatInput("");
+      showToast("Message sent to applicant.", "success");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not send your message."), "error");
+    }
   };
 
   const resetAllFilters = () => {
@@ -1696,12 +1727,14 @@ export function HostApplicationsManager() {
               {drawerTab === "messages" && (
                 <div className="space-y-4">
                   <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">
-                    {drawerTarget.messages.length === 0 ? (
+                    {drawerTarget.messages.length === 0 && thread.length === 0 ? (
                       <p className="text-xs text-slate-400 text-center py-6">No messages yet.</p>
                     ) : (
-                      drawerTarget.messages.map((m, idx) => {
-                        const isHost = m.startsWith("Host: ");
-                        const text = isHost ? m.replace("Host: ", "") : m;
+                      [
+                        // The renter's note from their application, then the live thread.
+                        ...drawerTarget.messages.map((m) => ({ isHost: false, text: m, time: drawerTarget.submittedDateText })),
+                        ...thread.map((m) => ({ isHost: m.senderRole === "HOST", text: m.body, time: formatDate(m.createdAt) })),
+                      ].map(({ isHost, text, time }, idx) => {
                         return (
                           <div
                             key={idx}
@@ -1712,9 +1745,7 @@ export function HostApplicationsManager() {
                             }`}
                           >
                             <p>{text}</p>
-                            <span className="text-[10px] opacity-75 block text-right mt-1">
-                              {drawerTarget.submittedDateText}
-                            </span>
+                            <span className="text-[10px] opacity-75 block text-right mt-1">{time}</span>
                           </div>
                         );
                       })

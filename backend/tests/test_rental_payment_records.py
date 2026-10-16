@@ -548,7 +548,7 @@ class TestPaymentInstructions:
         assert second.is_high_risk
         assert "has not been used by this account before" in second.high_risk_reason
         activated_second = rp_crud.confirm_rental_payment_instruction(db_session, second, second_code)
-        assert activated_second.status == "PENDING_REVIEW"
+        assert activated_second.status == "COOLING_OFF"
 
     def test_a_change_soon_after_an_authority_change_is_flagged_for_review(self, db_session: Session):
         """ZR-PAY-LINK-003 Section 14.1's 'timing' signal: an instruction
@@ -612,7 +612,7 @@ class TestInstructionRiskControlsAndManualReview:
         activated = rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
         assert activated.status == "ACTIVE"
 
-    def test_password_changed_minutes_ago_is_routed_to_manual_review(self, db_session: Session):
+    def test_password_changed_minutes_ago_waits_out_the_cooling_off_window(self, db_session: Session):
         recent = datetime.now(timezone.utc) - timedelta(minutes=10)
         recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=recent)
         instruction, code = rp_crud.submit_rental_payment_instruction(
@@ -623,9 +623,9 @@ class TestInstructionRiskControlsAndManualReview:
         assert instruction.high_risk_reason
 
         reviewed = rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
-        assert reviewed.status == "PENDING_REVIEW"
-        # Strong auth (the code) was still verified -- this isn't a rejection
-        # of the code, only a second, admin-controlled gate on top of it.
+        assert reviewed.status == "COOLING_OFF"
+        # Strong auth (the code) was still verified -- the cooling-off window
+        # is a second, time-based gate on top of it (no admin).
         assert reviewed.verified_at is not None
         # A high-risk change must never become the tenant-facing active
         # instruction on its own.
@@ -642,67 +642,49 @@ class TestInstructionRiskControlsAndManualReview:
         activated = rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
         assert activated.status == "ACTIVE"
 
-    def test_admin_approves_pending_review_and_it_supersedes_the_previous_active(self, db_session: Session):
+    def _cooling_off_change(self, db_session: Session, first_account: str, second_account: str):
         recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=None)
         first, first_code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            country_code="ZZ", bank_details={"account_identifier": "00112233440004"}, authorized_recipient_confirmed=True,
+            country_code="ZZ", bank_details={"account_identifier": first_account}, authorized_recipient_confirmed=True,
         )
         rp_crud.confirm_rental_payment_instruction(db_session, first, first_code)
-
-        # Simulate a password reset happening right before the next change.
+        # A password reset right before the next change makes it high-risk.
         from app.crud.user import get_user_by_party_id
-        host_user = get_user_by_party_id(db_session, recipient.id)
-        host_user.password_changed_at = datetime.now(timezone.utc)
+        get_user_by_party_id(db_session, recipient.id).password_changed_at = datetime.now(timezone.utc)
         db_session.flush()
-
         second, second_code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd (new)",
-            country_code="ZZ", bank_details={"account_identifier": "00112233440005"}, authorized_recipient_confirmed=True,
+            country_code="ZZ", bank_details={"account_identifier": second_account}, authorized_recipient_confirmed=True,
         )
         pending = rp_crud.confirm_rental_payment_instruction(db_session, second, second_code)
-        assert pending.status == "PENDING_REVIEW"
+        assert pending.status == "COOLING_OFF"
         db_session.refresh(first)
-        assert first.status == "ACTIVE", "rejection/pending review must never touch the previously active instruction"
+        assert first.status == "ACTIVE", "a scheduled change never touches the current instruction"
+        return recipient, first, pending
 
-        admin = _make_admin(db_session)
-        approved = rp_crud.approve_pending_review_instruction(db_session, admin, pending, reason="Verified with recipient by phone")
-        assert approved.status == "ACTIVE"
-        assert approved.reviewed_by_admin_id == admin.id
+    def test_change_takes_effect_on_its_own_after_the_cooling_off_window(self, db_session: Session):
+        recipient, first, pending = self._cooling_off_change(db_session, "00112233440004", "00112233440005")
+        assert rp_crud.activate_due_instructions(db_session) == 0  # window not over yet
+
+        pending.activates_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db_session.commit()
+        assert rp_crud.activate_due_instructions(db_session) == 1
         db_session.refresh(first)
-        assert first.status == "SUPERSEDED"
+        db_session.refresh(pending)
+        assert pending.status == "ACTIVE" and first.status == "SUPERSEDED"
+        assert rp_crud.get_active_rental_payment_instruction(db_session, recipient.id).id == pending.id
 
-        active = rp_crud.get_active_rental_payment_instruction(db_session, recipient.id)
-        assert active.id == second.id
+    def test_host_cancels_and_previous_instruction_stays_active(self, db_session: Session):
+        recipient, first, pending = self._cooling_off_change(db_session, "00112233440006", "00112233440007")
+        cancelled = rp_crud.cancel_cooling_off_instruction(db_session, pending)
+        assert cancelled.status == "CANCELLED"
+        pending.activates_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db_session.commit()
+        assert rp_crud.activate_due_instructions(db_session) == 0
+        assert rp_crud.get_active_rental_payment_instruction(db_session, recipient.id).id == first.id
 
-    def test_admin_rejects_pending_review_and_previous_instruction_stays_active(self, db_session: Session):
-        recent = datetime.now(timezone.utc) - timedelta(minutes=5)
-        recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=None)
-        first, first_code = rp_crud.submit_rental_payment_instruction(
-            db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
-            country_code="ZZ", bank_details={"account_identifier": "00112233440006"}, authorized_recipient_confirmed=True,
-        )
-        rp_crud.confirm_rental_payment_instruction(db_session, first, first_code)
-
-        from app.crud.user import get_user_by_party_id
-        host_user = get_user_by_party_id(db_session, recipient.id)
-        host_user.password_changed_at = recent
-        db_session.flush()
-
-        second, second_code = rp_crud.submit_rental_payment_instruction(
-            db_session, recipient, method="BANK_TRANSFER", recipient_name="Suspicious New Recipient",
-            country_code="ZZ", bank_details={"account_identifier": "00112233440007"}, authorized_recipient_confirmed=True,
-        )
-        pending = rp_crud.confirm_rental_payment_instruction(db_session, second, second_code)
-
-        admin = _make_admin(db_session)
-        rejected = rp_crud.reject_pending_review_instruction(db_session, admin, pending, reason="Could not verify with recipient")
-        assert rejected.status == "REJECTED"
-
-        active = rp_crud.get_active_rental_payment_instruction(db_session, recipient.id)
-        assert active.id == first.id
-
-    def test_cannot_approve_or_reject_an_instruction_that_is_not_pending_review(self, db_session: Session):
+    def test_only_a_scheduled_change_can_be_cancelled(self, db_session: Session):
         recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=None)
         instruction, code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
@@ -710,15 +692,21 @@ class TestInstructionRiskControlsAndManualReview:
         )
         activated = rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
         assert activated.status == "ACTIVE"
-
-        admin = _make_admin(db_session)
         with pytest.raises(HTTPException) as exc:
-            rp_crud.approve_pending_review_instruction(db_session, admin, activated)
+            rp_crud.cancel_cooling_off_instruction(db_session, activated)
         assert exc.value.status_code == 409
 
-    def test_http_admin_review_queue_and_approve_route(self, client, db_session: Session):
+    def test_legacy_pending_review_rows_join_the_cooling_off_flow(self, db_session: Session):
+        recipient, first, pending = self._cooling_off_change(db_session, "00112233440010", "00112233440011")
+        pending.status, pending.activates_at = "PENDING_REVIEW", None
+        db_session.commit()
+        rp_crud.activate_due_instructions(db_session)
+        db_session.refresh(pending)
+        assert pending.status == "COOLING_OFF" and pending.activates_at is not None
+
+    def test_http_host_cancel_route_and_admin_review_routes_are_gone(self, client, db_session: Session):
         recent = datetime.now(timezone.utc) - timedelta(minutes=1)
-        recipient, _user = self._make_recipient_with_user(db_session, password_changed_at=recent)
+        recipient, user = self._make_recipient_with_user(db_session, password_changed_at=recent)
         instruction, code = rp_crud.submit_rental_payment_instruction(
             db_session, recipient, method="BANK_TRANSFER", recipient_name="Example Property Ltd",
             country_code="ZZ", bank_details={"account_identifier": "00112233440009"}, authorized_recipient_confirmed=True,
@@ -728,18 +716,19 @@ class TestInstructionRiskControlsAndManualReview:
 
         admin = _make_admin(db_session, email="instr-review-admin@test.com", role="super_admin")
         db_session.commit()
+        assert client.get("/api/finance/rental-payments/instructions/pending-review", cookies=auth_admin_cookie(admin)).status_code in (404, 405, 422)
+        r = client.post(f"/api/finance/rental-payments/instructions/{instruction.id}/approve", json={"reason": "x"}, cookies=auth_admin_cookie(admin))
+        assert r.status_code in (404, 405)
 
-        r = client.get("/api/finance/rental-payments/instructions/pending-review", cookies=auth_admin_cookie(admin))
-        assert r.status_code == 200, r.text
-        ids = [row["id"] for row in r.json()]
-        assert instruction.id in ids
+        # The host cancels it themselves (password_changed_at is in the past,
+        # so this session's token is still valid).
+        from tests.conftest import auth_user_cookie
 
-        r = client.post(
-            f"/api/finance/rental-payments/instructions/{instruction.id}/approve",
-            json={"reason": "Confirmed via phone"}, cookies=auth_admin_cookie(admin),
-        )
+        user.password_changed_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        db_session.commit()
+        r = client.post(f"/api/users/rental-payments/recipient/instructions/{instruction.id}/cancel", cookies=auth_user_cookie(user))
         assert r.status_code == 200, r.text
-        assert r.json()["status"] == "ACTIVE"
+        assert r.json()["status"] == "CANCELLED"
 
 
 class TestObligationStatusDerivation:

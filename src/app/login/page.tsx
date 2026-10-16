@@ -51,7 +51,7 @@ export default function AdminLoginPage() {
     setError("");
     setSubmitting(true);
     try {
-      await login(email.trim(), password);
+      await login(email.trim(), password, remember);
       router.push("/");
       router.refresh();
     } catch (err) {
@@ -158,9 +158,9 @@ export default function AdminLoginPage() {
                 />
                 Remember me
               </label>
-              <a href="#" className="font-medium text-primary-700 transition-colors hover:text-accent-600 dark:text-primary-300">
+              <Link href="/login/forgot-password" className="font-medium text-primary-700 transition-colors hover:text-accent-600 dark:text-primary-300">
                 Forgot password?
-              </a>
+              </Link>
             </div>
 
             {error && (

@@ -112,7 +112,7 @@ def _compute_external_filing_deadline(
 def file_proceeding(
     db: Session,
     case: DisputeResolutionCase,
-    admin: AdminUser,
+    admin: AdminUser | None,
     *,
     authority_type: str,
     authority_name: str,
@@ -136,7 +136,7 @@ def file_proceeding(
         filed_after_deadline=filed_after_deadline,
         status="FILED",
         filed_at=filed_at,
-        filed_by_admin_id=admin.id,
+        filed_by_admin_id=admin.id if admin is not None else None,
     )
     db.add(proceeding)
     db.flush()
@@ -193,7 +193,7 @@ def update_status(db: Session, proceeding: DisputeExternalProceeding, admin: Adm
                 transition_claim(claim, resolved_outcome, note=f"external proceeding {new_status.lower()}")
                 claim.outcome = resolved_outcome
                 claim.decided_at = datetime.now(timezone.utc)
-                claim.decided_by_admin_id = admin.id
+                claim.decided_by_admin_id = admin.id if admin is not None else None
                 record_dispute_decision(
                     db, claim, outcome=resolved_outcome, basis=f"EXTERNAL_PROCEEDING_{new_status}", authority="external_proceeding",
                     decided_by_admin_id=admin.id, external_proceeding_id=proceeding.id,
@@ -228,7 +228,7 @@ def _requires_external_proceeding_dual_control(db: Session, proceeding: DisputeE
 def record_decision(
     db: Session,
     proceeding: DisputeExternalProceeding,
-    admin: AdminUser,
+    admin: AdminUser | None,
     *,
     outcome: str,
     decision_date: date,
@@ -240,7 +240,10 @@ def record_decision(
     # configured threshold or for a safety/legal-review case -- below every
     # trigger, the filer may also record the decision (mirrors
     # crud/disputes.py's financial-hold maker-checker gating exactly).
-    if admin.id == proceeding.filed_by_admin_id and _requires_external_proceeding_dual_control(db, proceeding):
+    # admin=None: a party recording the outside body's decision on a host<->
+    # renter claim (crud/dispute_party_flow.py) -- the order itself is the
+    # authority, so there is no second admin to separate from.
+    if admin is not None and admin.id == proceeding.filed_by_admin_id and _requires_external_proceeding_dual_control(db, proceeding):
         raise HTTPException(status.HTTP_409_CONFLICT, "The admin who filed this proceeding cannot also record its decision")
     if proceeding.status not in ("FILED", "ACCEPTED", "PENDING"):
         raise HTTPException(status.HTTP_409_CONFLICT, f"Cannot record a decision on a proceeding that is already {proceeding.status}")
@@ -253,7 +256,7 @@ def record_decision(
     proceeding.decision_date = decision_date
     proceeding.finality_state = finality_state
     proceeding.outcome_evidence_id = outcome_evidence_id
-    proceeding.decided_by_admin_id = admin.id
+    proceeding.decided_by_admin_id = admin.id if admin is not None else None
 
     for claim_id in claim_ids_for_proceeding(db, proceeding):
         claim = db.get(DisputeResolutionClaim, claim_id)
@@ -263,10 +266,10 @@ def record_decision(
         claim.outcome = outcome
         claim.reason_code = reason_code
         claim.decided_at = datetime.now(timezone.utc)
-        claim.decided_by_admin_id = admin.id
+        claim.decided_by_admin_id = admin.id if admin is not None else None
         record_dispute_decision(
             db, claim, outcome=outcome, basis="EXTERNAL_PROCEEDING_DECIDED", authority="external_proceeding",
-            decided_by_admin_id=admin.id, reason_code=reason_code, external_proceeding_id=proceeding.id,
+            decided_by_admin_id=admin.id if admin is not None else None, reason_code=reason_code, external_proceeding_id=proceeding.id,
         )
 
     _sync_case_status_after_claim_change(proceeding.case)

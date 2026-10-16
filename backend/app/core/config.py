@@ -162,6 +162,10 @@ class Settings(BaseSettings):
     # mounted, same convention as identity_upload_dir. Disclosure class (not
     # the storage location) is what gates who can ever fetch one back out.
     evidence_upload_dir: str = "secure_uploads/dispute_evidence"
+    # Help & Support attachments (models/support_ticket.py) -- never mounted.
+    support_upload_dir: str = "secure_uploads/support"
+    avatar_upload_dir: str = "secure_uploads/avatars"
+    email_change_token_expire_minutes: int = 60
     evidence_document_max_size_mb: int = 10
     # ZR-ENG-CLR-010 Section 20: "Maker-checker: Mandatory above configured
     # thresholds or for safety/legal/manual override cases." A reasonable

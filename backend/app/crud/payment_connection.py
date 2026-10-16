@@ -50,7 +50,7 @@ def get_payment_connection_for_room(db: Session, room: Room) -> PaymentConnectio
         if destination is None:
             candidates = list_rental_payment_instructions_for_party(db, recipient_party_id)
             latest = candidates[0] if candidates else None
-            if latest is not None and latest.status in ("PENDING_VERIFICATION", "PENDING_REVIEW", "REJECTED"):
+            if latest is not None and latest.status in ("PENDING_VERIFICATION", "COOLING_OFF", "PENDING_REVIEW", "REJECTED", "CANCELLED"):
                 destination = latest
 
     state = _derive_state(authority, destination)
@@ -103,7 +103,7 @@ def _derive_state(authority, destination) -> str:
         return "RECIPIENT_SETUP_REQUIRED"
     if destination.status == "ACTIVE":
         return "ACTIVE"
-    if destination.status in ("PENDING_VERIFICATION", "PENDING_REVIEW"):
+    if destination.status in ("PENDING_VERIFICATION", "COOLING_OFF", "PENDING_REVIEW"):
         return "PENDING_VERIFICATION"
     if destination.status == "REJECTED":
         return "SUSPENDED"

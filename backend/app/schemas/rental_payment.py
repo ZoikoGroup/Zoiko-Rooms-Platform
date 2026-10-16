@@ -55,6 +55,21 @@ class RentalPaymentCorrectionRead(CamelModel):
     created_at: datetime
 
 
+class RentalPaymentExcessAllocationRead(CamelModel):
+    id: int
+    record_id: int
+    action: str
+    amount: float
+    currency: str
+    target_obligation_id: int | None
+    target_record_id: int | None
+    returned_date: date | None
+    payment_method_label: str
+    external_reference: str
+    note: str
+    created_at: datetime
+
+
 class RentalPaymentRecordRead(CamelModel):
     id: int
     obligation_id: int
@@ -64,7 +79,18 @@ class RentalPaymentRecordRead(CamelModel):
     declared_currency: str
     declared_date: date
     payment_method_category: str
+    payment_method_subtype: str = ""
+    payment_method_description: str = ""
+    payment_method_label: str = ""
+    payment_method_config_version: str = ""
     external_reference: str
+    note: str = ""
+    # Overpayment above what was owed: REVIEW_REQUIRED until the recipient
+    # applies or returns all of it (excess_remaining reaches 0).
+    excess_amount: float = 0.0
+    excess_remaining: float = 0.0
+    excess_status: str = ""
+    excess_allocations: list[RentalPaymentExcessAllocationRead] = []
     declared_by_guest_id: str
     confirmed_by_party_id: int | None
     confirmed_amount: float | None
@@ -105,6 +131,8 @@ class RentalPaymentObligationRead(CamelModel):
     due_date: date
     status: str
     display_label: str
+    # ISO country the payment-method list resolves from ("" = unknown).
+    country_code: str = ""
     waived_reason: str
     waived_at: datetime | None
     created_at: datetime
@@ -156,7 +184,16 @@ class RentalPaymentMarkPaidRequest(CamelModel):
     currency: str = Field(min_length=3, max_length=3)
     declared_date: date
     payment_method_category: str
+    # ZR-PAY-METHODS-GLOBAL-001: the rail/provider and, for "Other", how it was paid.
+    payment_method_subtype: str = ""
+    payment_method_description: str = ""
     external_reference: str = ""
+    note: str = Field(default="", max_length=500)
+    # Resend with true after the person confirms a possible-duplicate warning.
+    confirm_not_duplicate: bool = False
+    # Resend with true to record more than is owed; the excess then waits
+    # for the recipient to apply or return it.
+    acknowledge_overpayment: bool = False
 
 
 class RentalPaymentConfirmReceiptRequest(CamelModel):
@@ -176,8 +213,29 @@ class RentalPaymentRecordReceiptRequest(CamelModel):
     amount: float | None = Field(default=None, gt=0, le=MAX_MONEY_AMOUNT)
     received_date: date
     payment_method_category: str
+    payment_method_subtype: str = ""
+    payment_method_description: str = ""
     external_reference: str = ""
     note: str = ""
+    confirm_not_duplicate: bool = False
+    acknowledge_overpayment: bool = False
+
+
+class RentalPaymentExcessApplyRequest(CamelModel):
+    target_obligation_id: int
+    # Omitted = as much as both the excess and the target's balance allow.
+    amount: float | None = Field(default=None, gt=0, le=MAX_MONEY_AMOUNT)
+    note: str = Field(default="", max_length=500)
+
+
+class RentalPaymentExcessReturnRequest(CamelModel):
+    amount: float | None = Field(default=None, gt=0, le=MAX_MONEY_AMOUNT)
+    returned_date: date
+    payment_method_category: str
+    payment_method_subtype: str = ""
+    payment_method_description: str = ""
+    external_reference: str = ""
+    note: str = Field(default="", max_length=500)
 
 
 class RentalPaymentProviderConfirmRequest(CamelModel):
@@ -205,6 +263,7 @@ class RentalPaymentDisputeAdminRead(RentalPaymentDisputeRead):
     declared_currency: str
     declared_date: date
     payment_method_category: str
+    payment_method_label: str = ""
     external_reference: str
     obligation_id: int
     obligation_label: str
@@ -257,6 +316,9 @@ class RentalPaymentEvidenceHoldRead(CamelModel):
 
 class RentalPaymentInstructionSubmit(CamelModel):
     method: str
+    # The rail/provider code -- required for INSTANT_BANK_PAYMENT,
+    # DIGITAL_WALLET_P2P and MOBILE_MONEY (e.g. "UPI").
+    method_subtype: str = ""
     recipient_name: str
     # ZR-PAY-LINK-003 Wireframe D: country_code resolves which structured
     # field set (services/bank_field_schemas.py) bank_details is validated
@@ -282,6 +344,8 @@ class RentalPaymentInstructionRead(CamelModel):
     party_id: int
     status: str
     method: str
+    method_subtype: str = ""
+    method_label: str = ""
     recipient_name: str
     country_code: str = ""
     account_identifier_masked: str
@@ -303,6 +367,7 @@ class RentalPaymentInstructionRead(CamelModel):
     high_risk_reason: str = ""
     reviewed_at: datetime | None = None
     review_reason: str = ""
+    activates_at: datetime | None = None
 
 
 class RentalPaymentInstructionReviewRequest(CamelModel):

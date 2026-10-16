@@ -352,20 +352,22 @@ class TestPayeeModelResolution:
         assert r.status_code == 200, r.text
         assert r.json()["payeeModel"] == "HOST_OR_LANDLORD_PAYEE"  # MarketPolicyPack's sublet_assignment_payee_model default
 
-    def test_co_tenancy_uses_the_sublease_payee_model_not_the_assignment_one(self, client, db_session: Session):
-        tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="payeesublease")
+    def test_a_co_tenant_pays_the_renter_not_the_host(self, client, db_session: Session):
+        tenant_user, proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="payeesublease")
         occupancy = db_session.get(Occupancy, occupancy_id)
         occupancy.room.max_occupants = 2
         db_session.commit()
 
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT")
+        sublet_crud.respond_as_co_tenant(db_session, sublet_request, proposed_user, accept=True)
         host_user = _host_for(db_session, "payeesublease")
 
         r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text
-        # A co-tenant is the host's own joint tenant -- they pay the host, not
-        # the renter who brought them in.
-        assert r.json()["payeeModel"] == "HOST_OR_LANDLORD_PAYEE"
+        # A co-tenant shares the renter's room and pays the renter directly --
+        # nothing of theirs is collected through the platform.
+        assert r.json()["payeeModel"] == "EXTERNAL_PAYEE_RECORDED"
+        assert r.json()["newAgreementId"] is None
 
     def test_a_sublease_uses_the_markets_sublease_payee_model(self, client, db_session: Session):
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="payeesub2")
@@ -419,18 +421,19 @@ class TestCoTenancyRequiresCapacity:
         db_session.commit()
 
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT")
-        assert sublet_request.status == "pending_admin_review"
+        # The co-tenant answers first; the host is only asked after that.
+        assert sublet_request.status == "awaiting_co_tenant"
 
 
 class TestCoTenancyCreatesRealSeparateAgreement:
-    def test_approving_add_co_tenant_creates_its_own_agreement_and_obligations(self, client, db_session: Session):
+    def test_approving_a_sublease_creates_its_own_agreement_and_obligations(self, client, db_session: Session):
         tenant_user, _proposed_user, proposed_party_id, occupancy_id = _make_active_tenancy(db_session, suffix="realagreement")
         occupancy = db_session.get(Occupancy, occupancy_id)
         occupancy.room.max_occupants = 2
         db_session.commit()
         original_offer_id = occupancy.offer_id
 
-        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT")
+        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "SUBLEASE_PARTIAL")
         host_user = _host_for(db_session, "realagreement")
 
         r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
@@ -471,7 +474,7 @@ class TestCoTenancyCreatesRealSeparateAgreement:
         db_session.commit()
         master_end = occupancy.expected_end_date
 
-        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT")
+        sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "SUBLEASE_PARTIAL")
         host_user = _host_for(db_session, "dateinvariant")
         r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
         assert r.status_code == 200, r.text

@@ -21,8 +21,15 @@ from sqlalchemy.orm import Session
 
 from app.crud.events import emit_event
 from app.models.rental_payment import RentalPaymentObligation
-from app.models.sublet_payment import DEPOSIT_ROUTES, DIRECT_PAYMENT_METHODS, RENT_PAYEE_TYPES, SubletPaymentArrangement
+from app.models.sublet_payment import (
+    DEPOSIT_ROUTES,
+    DIRECT_PAYMENT_METHODS,
+    IN_PERSON_PAYMENT_METHODS,
+    RENT_PAYEE_TYPES,
+    SubletPaymentArrangement,
+)
 from app.models.sublet_request import SubletRequest
+from app.services.payment_method_catalog import LEGACY_METHOD_MAP, method_label
 from app.models.user_account import UserAccount
 
 RESOURCE = "sublet_payment_arrangement"
@@ -216,13 +223,34 @@ def ensure_arrangement(db: Session, sublet: SubletRequest, *, rent_amount: float
     return arrangement
 
 
+DEFAULT_ACCEPTED_METHODS = ["BANK_TRANSFER", "INSTANT_BANK_PAYMENT", "CASH"]
+
+
+def normalize_methods(methods) -> list[str]:
+    """Canonical, de-duplicated categories -- a legacy "UPI" is the
+    INSTANT_BANK_PAYMENT category now; anything unknown is dropped."""
+    out = []
+    for m in methods or []:
+        m = LEGACY_METHOD_MAP.get(m, (m, ""))[0]
+        if m in DIRECT_PAYMENT_METHODS and m not in out:
+            out.append(m)
+    return out
+
+
 def _default_methods(db: Session, party_id: int | None) -> list[str]:
     from app.crud.rental_payment import get_active_rental_payment_instruction
 
     instruction = get_active_rental_payment_instruction(db, party_id) if party_id else None
-    if instruction is not None and instruction.method in DIRECT_PAYMENT_METHODS:
-        return [instruction.method] if instruction.method == "CASH" else [instruction.method, "CASH"]
-    return ["BANK_TRANSFER", "UPI", "CASH"]
+    method = _instruction_category(instruction)
+    if method:
+        return [method] if method == "CASH" else [method, "CASH"]
+    return list(DEFAULT_ACCEPTED_METHODS)
+
+
+def _instruction_category(instruction) -> str:
+    """The canonical category a payee instruction is for ("" if none)."""
+    methods = normalize_methods([instruction.method]) if instruction is not None else []
+    return methods[0] if methods else ""
 
 
 def _payee_readiness(db: Session, party_id: int | None, methods: list[str]) -> str | None:
@@ -231,10 +259,11 @@ def _payee_readiness(db: Session, party_id: int | None, methods: list[str]) -> s
 
     if not party_id:
         return "PAYEE_MISSING"
-    if "CASH" in methods:
+    methods = normalize_methods(methods)
+    if any(m in IN_PERSON_PAYMENT_METHODS for m in methods):
         return None
     instruction = get_active_rental_payment_instruction(db, party_id)
-    if instruction is None or instruction.method not in methods:
+    if _instruction_category(instruction) not in methods:
         return "PAYMENT_SETUP_INCOMPLETE"
     return None
 
@@ -355,9 +384,9 @@ def update_arrangement(db: Session, user: UserAccount, sublet: SubletRequest, ch
         # Keep the receipt-authority check (crud/rental_payment.py) in step.
         sublet.payee_model = "ORIGINAL_RENTER_PAYEE" if kind == "SUBLESSOR" else "HOST_OR_LANDLORD_PAYEE"
     if "accepted_methods" in changes:
-        methods = [m for m in dict.fromkeys(changes["accepted_methods"] or []) if m in DIRECT_PAYMENT_METHODS]
+        methods = normalize_methods(changes["accepted_methods"])
         if not methods:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Choose at least one of bank transfer, UPI or cash")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Choose at least one accepted payment method")
         target.accepted_methods = methods
     if "deposit_route" in changes:
         route = changes["deposit_route"]
@@ -543,7 +572,7 @@ def arrangement_view(db: Session, sublet: SubletRequest, role: str) -> dict:
                         "custodianInstructions": a.custodian_instructions,
                         "custodianHint": custodian_hint(sublet), "sublessorAllowed": pack["sublessor_allowed"],
                         "packRoute": pack["route"]},
-            "acceptedMethods": list(a.accepted_methods or []),
+            "acceptedMethods": normalize_methods(a.accepted_methods),
             "terms": {"rentAmount": float(a.rent_amount or 0), "depositAmount": float(a.deposit_amount or 0),
                       "currency": a.currency, "rentDueDay": a.rent_due_day, "firstPaymentDate": a.first_payment_date,
                       "platformFee": 0.0},
@@ -584,6 +613,8 @@ def transactions_view(db: Session, sublet: SubletRequest, role: str) -> dict:
             entry = {"kind": "PAYMENT", "at": r.created_at, "obligationId": o.id, "recordId": r.id,
                      "purpose": o.obligation_type, "amount": float(r.confirmed_amount or r.declared_amount),
                      "currency": r.declared_currency, "status": r.status, "method": r.payment_method_category,
+                     "methodLabel": r.payment_method_label or method_label(r.payment_method_category,
+                                                                           r.payment_method_subtype),
                      "paidOn": r.declared_date, "confirmedAt": r.confirmed_at,
                      "evidence": EVIDENCE_LABEL.get(r.provenance, r.provenance)}
             if role != "LANDLORD" or landlord_is_payee:
@@ -595,6 +626,8 @@ def transactions_view(db: Session, sublet: SubletRequest, role: str) -> dict:
             items.append({"kind": "RETURN", "at": ret.created_at, "obligationId": ret.obligation_id, "returnId": ret.id,
                           "purpose": ret.kind, "amount": float(ret.amount), "currency": ret.currency,
                           "status": ret.status, "method": ret.payment_method_category,
+                          "methodLabel": ret.payment_method_label or method_label(ret.payment_method_category,
+                                                                                  ret.payment_method_subtype),
                           "evidence": "Return recorded by payee" if ret.status == "RECORDED" else
                           "Return confirmed by payer" if ret.status == "CONFIRMED" else "Return disputed"})
     items.sort(key=lambda i: (i["at"] or _now()))
@@ -609,7 +642,8 @@ def transactions_view(db: Session, sublet: SubletRequest, role: str) -> dict:
 
 def how_to_pay(db: Session, obligation: RentalPaymentObligation) -> dict:
     """Screens C/D/E for the payer: payee, why, amount, the payee's direct
-    payment details (bank account or UPI ID) and the reference to quote.
+    payment details (bank account, UPI ID / payment alias, wallet or mobile-money
+    account) and the reference to quote.
     Full details only after the agreement is accepted; every view is audited
     by the caller."""
     from app.core.field_encryption import decrypt_json
@@ -626,9 +660,9 @@ def how_to_pay(db: Session, obligation: RentalPaymentObligation) -> dict:
     accepted = agreement is None or bool(getattr(agreement, "signed_by_renter_at", None)) or \
         agreement.status in ("PAYMENT_IN_PROGRESS", "SIGNED", "ACTIVE")
     instruction = get_active_rental_payment_instruction(db, obligation.recipient_party_id)
-    methods = list(a.accepted_methods) if a else ["BANK_TRANSFER", "UPI", "CASH"]
+    methods = normalize_methods(a.accepted_methods) if a else list(DEFAULT_ACCEPTED_METHODS)
     details = None
-    if instruction is not None and accepted and not blocked and instruction.method in methods:
+    if instruction is not None and accepted and not blocked and _instruction_category(instruction) in methods:
         details = decrypt_json(instruction.encrypted_bank_details) if instruction.encrypted_bank_details else {}
     custodian = None
     if a and obligation.obligation_type == "DEPOSIT" and a.deposit_route == "PAY_TO_CUSTODIAN":
@@ -644,10 +678,12 @@ def how_to_pay(db: Session, obligation: RentalPaymentObligation) -> dict:
                   "type": obligation.payee_type, "why": PAYEE_BASIS_TEXT.get(basis, "")},
         "acceptedMethods": methods, "paymentReference": obligation.payment_reference or f"ZR-{obligation.id}",
         "method": instruction.method if instruction else "", "countryCode": instruction.country_code if instruction else "",
+        "methodSubtype": instruction.method_subtype if instruction else "",
+        "methodLabel": method_label(instruction.method, instruction.method_subtype) if instruction else "",
         "details": details, "custodian": custodian,
         "additionalInstructions": instruction.additional_instructions if instruction and details is not None else "",
         "blockedReason": blocked or ("" if accepted else "Payment details appear once the agreement is accepted."),
-        "setupIncomplete": instruction is None and "CASH" not in methods,
+        "setupIncomplete": instruction is None and not any(m in IN_PERSON_PAYMENT_METHODS for m in methods),
         "zoikoNotice": "Zoiko Rooms does not receive this payment. You pay the payee directly.",
     }
 

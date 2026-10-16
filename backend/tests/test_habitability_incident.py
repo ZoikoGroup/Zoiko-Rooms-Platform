@@ -29,6 +29,29 @@ def _verify_payout_beneficiary(db: Session, party_id: int) -> None:
     db.commit()
 
 
+def _parties(db: Session, occupancy, suffix: str):
+    """A host user on the room's owning party and a renter user on the
+    occupancy's guest -- the two people who settle an incident now."""
+    from app.models.guest import Guest
+
+    host = _make_user(db, email=f"hab-host-{suffix}@test.com")
+    host.party_id = occupancy.room.property.owner_party_id
+    renter = _make_user(db, email=f"hab-renter-{suffix}@test.com")
+    guest = db.get(Guest, occupancy.guest_id)
+    guest.user_account_id = renter.id
+    db.commit()
+    return host, renter
+
+
+def _resolve_by_parties(client, db: Session, occupancy, incident_id: int, suffix: str, parties=None):
+    host, renter = parties or _parties(db, occupancy, suffix)
+    r = client.post(f"/api/users/hosting/habitability-incidents/{incident_id}/fixed", json={"notes": "fixed"}, cookies=auth_user_cookie(host))
+    assert r.status_code == 200, r.text
+    r = client.post(f"/api/users/rentals/habitability-incidents/{incident_id}/confirm-fixed", cookies=auth_user_cookie(renter))
+    assert r.status_code == 200, r.text
+    return r
+
+
 def _pay_obligation(db: Session, guest_id: str, obligation: Obligation, amount: float, *, suffix: str) -> None:
     payment = SimulatedPayment(
         guest_id=guest_id, amount=amount, currency="INR", idempotency_key=f"habitability-{suffix}", status="SUCCEEDED",
@@ -147,12 +170,8 @@ class TestResolveHabitabilityIncident:
         room = db_session.get(Room, occupancy.room_id)
         assert room.status == "inactive"
 
-        r = client.post(
-            f"/api/occupancy/habitability-incidents/{incident_id}/resolve",
-            json={"resolutionNotes": "plumber fixed it"}, cookies=admin_cookies,
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["status"] == "RESOLVED"
+        r = _resolve_by_parties(client, db_session, occupancy, incident_id, "resolve")
+        assert r.json()["status"] == "RESOLVED" and r.json()["resolutionBasis"] == "RENTER_CONFIRMED"
 
         db_session.refresh(room)
         assert room.status == "active"
@@ -180,14 +199,15 @@ class TestResolveHabitabilityIncident:
         )
         incident1_id, incident2_id = r1.json()["id"], r2.json()["id"]
 
-        client.post(f"/api/occupancy/habitability-incidents/{incident1_id}/resolve", cookies=admin_cookies)
+        parties = _parties(db_session, occupancy, "multi")
+        _resolve_by_parties(client, db_session, occupancy, incident1_id, "multi", parties)
         room = db_session.get(Room, occupancy.room_id)
         assert room.status == "inactive"  # incident2 is still open
         assert db_session.scalar(
             select(DomainEvent).where(DomainEvent.event_type == "booking.inventory_reopened")
         ) is None
 
-        client.post(f"/api/occupancy/habitability-incidents/{incident2_id}/resolve", cookies=admin_cookies)
+        _resolve_by_parties(client, db_session, occupancy, incident2_id, "multi", parties)
         db_session.refresh(room)
         assert room.status == "active"
         assert db_session.scalar(
@@ -197,7 +217,7 @@ class TestResolveHabitabilityIncident:
             )
         ) is not None
 
-    def test_resolving_an_already_resolved_incident_is_rejected(self, client, db_session: Session):
+    def test_confirming_an_already_resolved_incident_is_rejected(self, client, db_session: Session):
         admin = _make_admin(db_session, email="hab-doubleresolve-admin@test.com", role="super_admin")
         occupancy, _guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix="doubleresolve")
         admin_cookies = auth_admin_cookie(admin)
@@ -206,9 +226,10 @@ class TestResolveHabitabilityIncident:
             f"/api/occupancy/{occupancy.id}/habitability-incidents", json={"severity": "H1"}, cookies=admin_cookies,
         )
         incident_id = r.json()["id"]
-        client.post(f"/api/occupancy/habitability-incidents/{incident_id}/resolve", cookies=admin_cookies)
+        host, renter = _parties(db_session, occupancy, "doubleresolve")
+        _resolve_by_parties(client, db_session, occupancy, incident_id, "doubleresolve", (host, renter))
 
-        r = client.post(f"/api/occupancy/habitability-incidents/{incident_id}/resolve", cookies=admin_cookies)
+        r = client.post(f"/api/users/rentals/habitability-incidents/{incident_id}/confirm-fixed", cookies=auth_user_cookie(renter))
         assert r.status_code == 409, r.text
 
 
@@ -293,131 +314,84 @@ class TestHabitabilityBlocksPayout:
 
         r = client.post(f"/api/occupancy/{occupancy.id}/habitability-incidents", json={"severity": "H2"}, cookies=admin_cookies)
         incident_id = r.json()["id"]
-        client.post(f"/api/occupancy/habitability-incidents/{incident_id}/resolve", cookies=admin_cookies)
+        _resolve_by_parties(client, db_session, occupancy, incident_id, "payout2")
 
         r = client.post("/api/finance/payouts/run", json={"partyId": party_id, "periodKey": "2026-09"}, cookies=admin_cookies)
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "PAID"
 
 
-class TestApplyHabitabilityCredit:
-    """ZR-ENG-CLR-006 Section 9.1 H1: 'possible rent adjustment/credit' --
-    an admin-applied amount against a paid RENT obligation, executed as a
-    real refund, never a computed abatement formula."""
+class TestHabitabilitySettledBetweenParties:
+    """The host acknowledges and reports a fix; the renter confirms or
+    rejects it; deadlines confirm unanswered fixes and credit rent for a
+    serious issue not fixed in time. No admin step."""
 
-    def _open_h1_incident_with_paid_obligation(self, client, db_session: Session, *, suffix: str):
-        admin = _make_admin(db_session, email=f"hab-credit-{suffix}@test.com", role="super_admin")
-        occupancy, guest, _listing, agreement = _make_active_occupancy(db_session, admin=admin, suffix=suffix)
-        admin_cookies = auth_admin_cookie(admin)
+    def _incident(self, client, db_session: Session, suffix: str, severity: str):
+        admin = _make_admin(db_session, email=f"hab-auto-{suffix}@test.com", role="super_admin")
+        occupancy, _guest, _listing, _agreement = _make_active_occupancy(db_session, admin=admin, suffix=suffix)
+        r = client.post(f"/api/occupancy/{occupancy.id}/habitability-incidents", json={"severity": severity}, cookies=auth_admin_cookie(admin))
+        assert r.status_code == 201, r.text
+        assert r.json()["fixDueAt"] is not None
+        host, renter = _parties(db_session, occupancy, suffix)
+        return occupancy, r.json()["id"], host, renter
 
-        from sqlalchemy import select
-        obligation = db_session.scalar(
-            select(Obligation).where(Obligation.agreement_id == agreement.id, Obligation.obligation_type == "RENT")
-        )
-        _pay_obligation(db_session, guest.id, obligation, 1000.0, suffix=suffix)
+    def test_acknowledge_fix_reject_then_confirm(self, client, db_session: Session):
+        _occ, incident_id, host, renter = self._incident(client, db_session, "a1", "H1")
+        r = client.post(f"/api/users/hosting/habitability-incidents/{incident_id}/acknowledge", cookies=auth_user_cookie(host))
+        assert r.json()["status"] == "ACKNOWLEDGED"
+        client.post(f"/api/users/hosting/habitability-incidents/{incident_id}/fixed", json={"notes": "replaced"}, cookies=auth_user_cookie(host))
+        r = client.post(f"/api/users/rentals/habitability-incidents/{incident_id}/reject-fix", json={"note": "still leaking"}, cookies=auth_user_cookie(renter))
+        assert r.json()["status"] == "ACKNOWLEDGED" and r.json()["fixRejectedCount"] == 1
+        _resolve_by_parties(client, db_session, _occ, incident_id, "a1", (host, renter))
 
-        r = client.post(f"/api/occupancy/{occupancy.id}/habitability-incidents", json={"severity": "H1"}, cookies=admin_cookies)
-        incident_id = r.json()["id"]
-        return admin, admin_cookies, obligation, incident_id
+    def test_unanswered_fix_is_confirmed_after_the_window(self, client, db_session: Session):
+        from datetime import timedelta
 
-    def test_admin_applies_a_credit_against_a_paid_obligation(self, client, db_session: Session):
-        _admin, admin_cookies, obligation, incident_id = self._open_h1_incident_with_paid_obligation(client, db_session, suffix="credit1")
+        from app.models.habitability_incident import HabitabilityIncident
 
-        r = client.post(
-            f"/api/occupancy/habitability-incidents/{incident_id}/apply-credit",
-            json={"obligationId": obligation.id, "amount": 150.0, "reason": "No hot water for 3 days"},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert float(body["creditedAmount"]) == 150.0
-        assert body["creditedRefundRequestId"] is not None
+        _occ, incident_id, host, _renter = self._incident(client, db_session, "a2", "H2")
+        client.post(f"/api/users/hosting/habitability-incidents/{incident_id}/fixed", json={}, cookies=auth_user_cookie(host))
+        incident = db_session.get(HabitabilityIncident, incident_id)
+        incident.fix_reported_at = datetime.now(timezone.utc) - timedelta(days=6)
+        db_session.commit()
+        habitability_crud.apply_habitability_deadlines(db_session)
+        db_session.refresh(incident)
+        assert incident.status == "RESOLVED" and incident.resolution_basis == "DEEMED_CONFIRMED"
 
-        db_session.refresh(obligation)
-        assert obligation.status in ("PARTIALLY_PAID", "PAID")
-
-    def test_a_second_credit_on_the_same_incident_is_rejected(self, client, db_session: Session):
-        _admin, admin_cookies, obligation, incident_id = self._open_h1_incident_with_paid_obligation(client, db_session, suffix="credit2")
-        client.post(
-            f"/api/occupancy/habitability-incidents/{incident_id}/apply-credit",
-            json={"obligationId": obligation.id, "amount": 100.0, "reason": "First credit"},
-            cookies=admin_cookies,
-        )
-
-        r = client.post(
-            f"/api/occupancy/habitability-incidents/{incident_id}/apply-credit",
-            json={"obligationId": obligation.id, "amount": 50.0, "reason": "Second credit"},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 409, r.text
-
-    def test_a_credit_on_a_non_h1_incident_is_rejected(self, client, db_session: Session):
-        admin = _make_admin(db_session, email="hab-credit-nonh1@test.com", role="super_admin")
-        occupancy, guest, _listing, agreement = _make_active_occupancy(db_session, admin=admin, suffix="creditnonh1")
-        admin_cookies = auth_admin_cookie(admin)
-
-        from sqlalchemy import select
-        obligation = db_session.scalar(
-            select(Obligation).where(Obligation.agreement_id == agreement.id, Obligation.obligation_type == "RENT")
-        )
-        _pay_obligation(db_session, guest.id, obligation, 1000.0, suffix="creditnonh1")
-
-        r = client.post(f"/api/occupancy/{occupancy.id}/habitability-incidents", json={"severity": "H0"}, cookies=admin_cookies)
-        incident_id = r.json()["id"]
-
-        r = client.post(
-            f"/api/occupancy/habitability-incidents/{incident_id}/apply-credit",
-            json={"obligationId": obligation.id, "amount": 50.0, "reason": "trying anyway"},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 400, r.text
-
-    def test_a_blank_reason_is_rejected(self, client, db_session: Session):
-        _admin, admin_cookies, obligation, incident_id = self._open_h1_incident_with_paid_obligation(client, db_session, suffix="credit4")
-
-        r = client.post(
-            f"/api/occupancy/habitability-incidents/{incident_id}/apply-credit",
-            json={"obligationId": obligation.id, "amount": 50.0, "reason": ""},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 400, r.text
-
-    def test_an_obligation_from_a_different_occupancy_is_rejected(self, client, db_session: Session):
-        admin, admin_cookies, _obligation, incident_id = self._open_h1_incident_with_paid_obligation(client, db_session, suffix="credit5")
-
-        _other_occupancy, other_guest, _other_listing, other_agreement = _make_active_occupancy(db_session, admin=admin, suffix="credit5other")
-        from sqlalchemy import select
-        other_obligation = db_session.scalar(
-            select(Obligation).where(Obligation.agreement_id == other_agreement.id, Obligation.obligation_type == "RENT")
-        )
-        _pay_obligation(db_session, other_guest.id, other_obligation, 1000.0, suffix="credit5other")
-
-        r = client.post(
-            f"/api/occupancy/habitability-incidents/{incident_id}/apply-credit",
-            json={"obligationId": other_obligation.id, "amount": 50.0, "reason": "wrong occupancy"},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 400, r.text
-
-    def test_no_paid_allocation_to_credit_against_is_rejected(self, client, db_session: Session):
-        admin = _make_admin(db_session, email="hab-credit-nopay@test.com", role="super_admin")
-        occupancy, _guest, _listing, agreement = _make_active_occupancy(db_session, admin=admin, suffix="creditnopay")
-        admin_cookies = auth_admin_cookie(admin)
-
+    def test_serious_issue_past_its_fix_date_reduces_the_next_rent_once(self, client, db_session: Session):
         from datetime import date, timedelta
-        unpaid_obligation = Obligation(
-            obligation_type="RENT", money_plane="OCCUPANCY", amount=500.0, currency="INR",
-            due_date=date.today() + timedelta(days=30), status="PENDING", occupancy_id=occupancy.id,
+
+        from app.models.habitability_incident import HabitabilityIncident
+        from app.models.rental_payment import RentalPaymentObligation
+
+        occ, incident_id, host, _renter = self._incident(client, db_session, "a3", "H3")
+        rent = RentalPaymentObligation(
+            obligation_type="RENT", occupancy_id=occ.id, tenant_guest_id=occ.guest_id, recipient_party_id=host.party_id,
+            amount=1000.0, currency="INR", due_date=date.today() + timedelta(days=10), status="UPCOMING",
         )
-        db_session.add(unpaid_obligation)
+        db_session.add(rent)
+        incident = db_session.get(HabitabilityIncident, incident_id)
+        incident.fix_due_at = datetime.now(timezone.utc) - timedelta(hours=1)
         db_session.commit()
 
-        r = client.post(f"/api/occupancy/{occupancy.id}/habitability-incidents", json={"severity": "H1"}, cookies=admin_cookies)
-        incident_id = r.json()["id"]
+        assert habitability_crud.apply_habitability_deadlines(db_session) == 1
+        db_session.refresh(rent)
+        db_session.refresh(incident)
+        assert float(rent.amount) == 500.0 and float(incident.credited_amount) == 500.0
+        assert habitability_crud.apply_habitability_deadlines(db_session) == 0  # once only
 
-        r = client.post(
-            f"/api/occupancy/habitability-incidents/{incident_id}/apply-credit",
-            json={"obligationId": unpaid_obligation.id, "amount": 50.0, "reason": "no payment yet"},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 409, r.text
+    def test_only_the_rooms_host_and_tenant_can_act(self, client, db_session: Session):
+        _occ, incident_id, _host, _renter = self._incident(client, db_session, "a4", "H1")
+        stranger = _make_user(db_session, email="hab-stranger-a4@test.com")
+        db_session.commit()
+        assert client.post(f"/api/users/hosting/habitability-incidents/{incident_id}/fixed", json={}, cookies=auth_user_cookie(stranger)).status_code == 403
+        assert client.post(f"/api/users/rentals/habitability-incidents/{incident_id}/confirm-fixed", cookies=auth_user_cookie(stranger)).status_code == 403
+
+    def test_admin_resolve_and_credit_routes_are_gone(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="hab-noadmin@test.com", role="super_admin")
+        db_session.commit()
+        for path in ("resolve", "apply-credit"):
+            r = client.post(f"/api/occupancy/habitability-incidents/1/{path}", json={}, cookies=auth_admin_cookie(admin))
+            assert r.status_code in (404, 405)
+
+

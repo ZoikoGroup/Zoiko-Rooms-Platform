@@ -13,7 +13,7 @@ export default function PaymentsPage() {
           <Link href="/account/rent-payments" className="font-semibold text-primary-700 dark:text-primary-300">
             Rent &amp; Deposit Payments
           </Link>{" "}
-          to view payment instructions and record a payment.
+          to view the payment method and record a payment.
         </p>
       </div>
       <PaymentsHistory />

@@ -20,12 +20,14 @@ RECIPIENT_TYPES = ("user", "admin")
 # habitability, identity-fraud, or adverse-screening notification is never
 # something a user should be able to silence entirely, same "cannot bypass a
 # safety control" doctrine as services/dispute_rbac.py's own AC-7.
-NOTIFICATION_CATEGORIES = ("PAYMENTS", "LEASING", "OCCUPANCY", "DISPUTES_AND_SAFETY")
+# ACCOUNT (support-ticket replies) is not optable either: it is the reply to
+# something the user asked for themselves.
+NOTIFICATION_CATEGORIES = ("PAYMENTS", "LEASING", "OCCUPANCY", "DISPUTES_AND_SAFETY", "ACCOUNT")
 NOTIFICATION_OPTABLE_CATEGORIES = ("PAYMENTS", "LEASING", "OCCUPANCY")
 NOTIFICATION_PRIORITIES = ("NORMAL", "HIGH")
 
 _CATEGORY_BY_TYPE_PREFIX = {
-    "agreement": "LEASING", "application": "LEASING", "offer": "LEASING", "listing": "LEASING",
+    "agreement": "LEASING", "application": "LEASING", "offer": "LEASING", "listing": "LEASING", "rental_message": "LEASING",
     "payment": "PAYMENTS", "payout": "PAYMENTS", "refund": "PAYMENTS", "refund_entitlement": "PAYMENTS",
     "deposit": "PAYMENTS", "deposit_claim": "PAYMENTS",
     "occupancy": "OCCUPANCY", "termination_case": "OCCUPANCY", "booking_change_request": "OCCUPANCY",
@@ -33,6 +35,7 @@ _CATEGORY_BY_TYPE_PREFIX = {
     "dispute": "DISPUTES_AND_SAFETY", "dispute_case": "DISPUTES_AND_SAFETY", "dispute_claim": "DISPUTES_AND_SAFETY",
     "dispute_settlement": "DISPUTES_AND_SAFETY", "habitability_incident": "DISPUTES_AND_SAFETY",
     "identity_verification": "DISPUTES_AND_SAFETY", "screening_check": "DISPUTES_AND_SAFETY",
+    "support_ticket": "ACCOUNT",
 }
 # Section 11 gap: quiet hours only ever suppress a NORMAL-priority
 # notification (see crud/notification.py:_create) -- a HIGH-priority one

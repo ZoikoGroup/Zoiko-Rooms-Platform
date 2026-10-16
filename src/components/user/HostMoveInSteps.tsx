@@ -8,6 +8,7 @@ import {
   errorMessage,
   getHostedMoveInEligibility,
   prepareHostedHandover,
+  hostProceedDespiteDispute,
 } from "@/lib/user-api";
 import type { ToastTone } from "@/components/user/ui";
 
@@ -23,7 +24,9 @@ export function HostMoveInSteps({
   showToast: (message: string, tone?: ToastTone) => void;
   onMovedIn: () => void;
 }) {
-  const [busy, setBusy] = useState<"prepare" | "possession" | "confirm" | null>(null);
+  const [busy, setBusy] = useState<"prepare" | "possession" | "confirm" | "proceed" | null>(null);
+  // Set when move-in is held by an open dispute on this occupancy.
+  const [disputeHold, setDisputeHold] = useState(false);
 
   async function run(step: "prepare" | "possession" | "confirm") {
     setBusy(step);
@@ -45,7 +48,25 @@ export function HostMoveInSteps({
         onMovedIn();
       }
     } catch (err) {
-      showToast(errorMessage(err, "Could not complete this move-in step."), "error");
+      const message = errorMessage(err, "Could not complete this move-in step.");
+      if (message.includes("OPEN_OCCUPANCY_DISPUTE")) {
+        setDisputeHold(true);
+        showToast("Move-in is on hold while a dispute on this rental is open.", "error");
+      } else {
+        showToast(message, "error");
+      }
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function proceedDespiteDispute() {
+    setBusy("proceed");
+    try {
+      await hostProceedDespiteDispute(occupancyId);
+      showToast("Recorded. Move-in can go ahead once the renter agrees too.");
+    } catch (err) {
+      showToast(errorMessage(err, "Could not record your agreement."), "error");
     } finally {
       setBusy(null);
     }
@@ -77,6 +98,17 @@ export function HostMoveInSteps({
       >
         {busy === "confirm" ? "Confirming…" : "3. Confirm move-in"}
       </button>
+      {disputeHold && (
+        <div className="space-y-1.5 rounded-xl border border-amber-200 bg-amber-50 p-2.5 text-[11px] text-amber-900">
+          <p>
+            A dispute on this rental is still open, so move-in waits until it&apos;s resolved — or goes ahead now if you and
+            the renter both agree.
+          </p>
+          <button type="button" disabled={busy !== null} onClick={proceedDespiteDispute} className={outline}>
+            {busy === "proceed" ? "Saving…" : "Agree to move in anyway"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

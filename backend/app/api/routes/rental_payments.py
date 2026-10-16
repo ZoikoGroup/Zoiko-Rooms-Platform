@@ -17,6 +17,7 @@ from app.crud import rental_payment as rp_crud
 from app.crud.audit import log_audit_event
 from app.crud.guest import get_guest_for_user
 from app.db.session import get_db
+from app.services import payment_method_catalog as method_catalog
 from app.services.rental_payment_due_soon import sweep_rental_payment_due_soon
 from app.models.admin_user import AdminUser
 from app.models.evidence_artifact import EvidenceArtifact
@@ -38,9 +39,11 @@ from app.schemas.rental_payment import (
     RentalPaymentDisputeUpdate,
     RentalPaymentEvidenceHoldCreate,
     RentalPaymentEvidenceHoldRead,
+    RentalPaymentExcessAllocationRead,
+    RentalPaymentExcessApplyRequest,
+    RentalPaymentExcessReturnRequest,
     RentalPaymentInstructionConfirm,
     RentalPaymentInstructionRead,
-    RentalPaymentInstructionReviewRequest,
     RentalPaymentInstructionSubmit,
     RentalPaymentMarkPaidRequest,
     RentalPaymentObligationRead,
@@ -89,6 +92,8 @@ def _to_instruction_read(instruction, *, include_bank_details: bool = False) -> 
     bank_details = decrypt_json(instruction.encrypted_bank_details) if include_bank_details else None
     return RentalPaymentInstructionRead(
         id=instruction.id, party_id=instruction.party_id, status=instruction.status, method=instruction.method,
+        method_subtype=instruction.method_subtype,
+        method_label=method_catalog.method_label(instruction.method, instruction.method_subtype),
         recipient_name=instruction.recipient_name, country_code=instruction.country_code,
         account_identifier_masked=(
             f"******{instruction.account_identifier_last4}" if instruction.account_identifier_last4 else ""
@@ -97,6 +102,7 @@ def _to_instruction_read(instruction, *, include_bank_details: bool = False) -> 
         verified_at=instruction.verified_at, created_at=instruction.created_at,
         is_high_risk=instruction.is_high_risk, high_risk_reason=instruction.high_risk_reason,
         reviewed_at=instruction.reviewed_at, review_reason=instruction.review_reason,
+        activates_at=instruction.activates_at,
     )
 
 
@@ -161,7 +167,10 @@ def post_mark_rental_payment_paid(
     rp_crud.mark_paid(
         db, guest, obligation, amount=payload.amount, currency=payload.currency, declared_date=payload.declared_date,
         payment_method_category=payload.payment_method_category, external_reference=payload.external_reference,
-        correlation_id=get_correlation_id(request),
+        payment_method_subtype=payload.payment_method_subtype,
+        payment_method_description=payload.payment_method_description,
+        confirm_not_duplicate=payload.confirm_not_duplicate, note=payload.note,
+        acknowledge_overpayment=payload.acknowledge_overpayment, correlation_id=get_correlation_id(request),
     )
     db.refresh(obligation)
     return obligation
@@ -275,10 +284,50 @@ def post_record_receipt_as_recipient(
     rp_crud.record_receipt_as_recipient(
         db, party, obligation, amount=payload.amount, received_date=payload.received_date,
         payment_method_category=payload.payment_method_category, external_reference=payload.external_reference,
-        note=payload.note, correlation_id=get_correlation_id(request),
+        payment_method_subtype=payload.payment_method_subtype,
+        payment_method_description=payload.payment_method_description,
+        confirm_not_duplicate=payload.confirm_not_duplicate, note=payload.note,
+        acknowledge_overpayment=payload.acknowledge_overpayment, correlation_id=get_correlation_id(request),
     )
     db.refresh(obligation)
     return obligation
+
+
+@recipient_router.post(
+    "/records/{record_id}/excess/apply", response_model=RentalPaymentExcessAllocationRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_apply_excess_to_obligation(
+    record_id: int, payload: RentalPaymentExcessApplyRequest, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-PAY-METHODS-GLOBAL-001 Section 10 overpayment allocation: apply
+    the extra to another open payment from the same renter."""
+    party = _get_own_party_or_400(db, user)
+    record = _get_recipient_record_or_403(db, record_id, party)
+    return rp_crud.apply_excess_to_obligation(
+        db, party, record, target_obligation_id=payload.target_obligation_id, amount=payload.amount,
+        note=payload.note, correlation_id=get_correlation_id(request),
+    )
+
+
+@recipient_router.post(
+    "/records/{record_id}/excess/return", response_model=RentalPaymentExcessAllocationRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_return_excess_to_payer(
+    record_id: int, payload: RentalPaymentExcessReturnRequest, request: Request,
+    user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Record sending the extra back to the renter directly."""
+    party = _get_own_party_or_400(db, user)
+    record = _get_recipient_record_or_403(db, record_id, party)
+    return rp_crud.return_excess_to_payer(
+        db, party, record, returned_date=payload.returned_date,
+        payment_method_category=payload.payment_method_category, payment_method_subtype=payload.payment_method_subtype,
+        payment_method_description=payload.payment_method_description, external_reference=payload.external_reference,
+        amount=payload.amount, note=payload.note, correlation_id=get_correlation_id(request),
+    )
 
 
 @recipient_router.post("/records/{record_id}/confirm-receipt", response_model=RentalPaymentObligationRead)
@@ -367,7 +416,7 @@ def put_submit_rental_payment_instruction(
     step that activates it."""
     party = _get_own_party_or_400(db, user)
     instruction, _raw_code = rp_crud.submit_rental_payment_instruction(
-        db, party, method=payload.method, recipient_name=payload.recipient_name,
+        db, party, method=payload.method, method_subtype=payload.method_subtype, recipient_name=payload.recipient_name,
         country_code=payload.country_code, bank_details=payload.bank_details,
         authorized_recipient_confirmed=payload.authorized_recipient_confirmed,
         reference_format=payload.reference_format,
@@ -406,6 +455,16 @@ def post_confirm_rental_payment_instruction(
         db, instruction, payload.code, correlation_id=get_correlation_id(request),
     )
     return _to_instruction_read(updated, include_bank_details=True)
+
+
+@recipient_router.post("/instructions/{instruction_id}/cancel", response_model=RentalPaymentInstructionRead)
+def post_cancel_rental_payment_instruction(
+    instruction_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """Stop a scheduled (cooling-off) change -- e.g. one the host didn't make."""
+    party = _get_own_party_or_400(db, user)
+    instruction = _get_own_instruction_or_403(db, instruction_id, party)
+    return _to_instruction_read(rp_crud.cancel_cooling_off_instruction(db, instruction), include_bank_details=True)
 
 
 def _record_access_or_403(db: Session, record, user: UserAccount) -> tuple[bool, bool]:
@@ -530,8 +589,8 @@ def _to_dispute_admin_read(dispute: RentalPaymentDispute) -> RentalPaymentDisput
         **RentalPaymentDisputeRead.model_validate(dispute).model_dump(),
         record_status=record.status, declared_amount=float(record.declared_amount),
         declared_currency=record.declared_currency, declared_date=record.declared_date,
-        payment_method_category=record.payment_method_category, external_reference=record.external_reference,
-        obligation_id=obligation.id, obligation_label=obligation.display_label, obligation_amount=float(obligation.amount),
+        payment_method_category=record.payment_method_category, payment_method_label=record.payment_method_label,
+        external_reference=record.external_reference, obligation_id=obligation.id, obligation_label=obligation.display_label, obligation_amount=float(obligation.amount),
         obligation_status=obligation.status, tenant_guest_id=obligation.tenant_guest_id,
         recipient_party_id=obligation.recipient_party_id,
         reported_by="host" if dispute.reported_by_party_id is not None else "tenant",
@@ -609,51 +668,6 @@ def post_run_scheduled_jobs(db: Session = Depends(get_db)):
     from app.services.scheduled_jobs import run_scheduled_jobs
 
     return run_scheduled_jobs(db)
-
-
-@admin_router.get(
-    "/instructions/pending-review", response_model=list[RentalPaymentInstructionRead], dependencies=[Depends(require_super_admin)],
-)
-def get_rental_payment_instructions_pending_review(db: Session = Depends(get_db)):
-    """ZR-PAY-002 Section 9.1 step 7: the manual-review queue for
-    high-risk payment-instruction changes. Registered ahead of
-    /instructions/{party_id} so this literal path is matched first.
-    include_bank_details=True -- reviewing a destination change without
-    seeing the actual destination would make the review meaningless;
-    super_admin-only, same restricted-not-never posture as Section 17's
-    Permissions Matrix ('View payment destination... Staff: Restricted')."""
-    return [
-        _to_instruction_read(i, include_bank_details=True)
-        for i in rp_crud.list_rental_payment_instructions_pending_review(db)
-    ]
-
-
-@admin_router.post(
-    "/instructions/{instruction_id}/approve", response_model=RentalPaymentInstructionRead,
-    dependencies=[Depends(require_super_admin)],
-)
-def post_approve_rental_payment_instruction(
-    instruction_id: int, payload: RentalPaymentInstructionReviewRequest, request: Request,
-    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
-):
-    instruction = rp_crud.get_rental_payment_instruction_or_404(db, instruction_id)
-    return _to_instruction_read(rp_crud.approve_pending_review_instruction(
-        db, admin, instruction, reason=payload.reason, correlation_id=get_correlation_id(request),
-    ), include_bank_details=True)
-
-
-@admin_router.post(
-    "/instructions/{instruction_id}/reject", response_model=RentalPaymentInstructionRead,
-    dependencies=[Depends(require_super_admin)],
-)
-def post_reject_rental_payment_instruction(
-    instruction_id: int, payload: RentalPaymentInstructionReviewRequest, request: Request,
-    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db),
-):
-    instruction = rp_crud.get_rental_payment_instruction_or_404(db, instruction_id)
-    return _to_instruction_read(rp_crud.reject_pending_review_instruction(
-        db, admin, instruction, reason=payload.reason, correlation_id=get_correlation_id(request),
-    ), include_bank_details=True)
 
 
 @admin_router.get("/instructions/{party_id}", response_model=list[RentalPaymentInstructionRead], dependencies=[Depends(require_super_admin)])

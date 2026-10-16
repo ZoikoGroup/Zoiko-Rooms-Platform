@@ -33,6 +33,8 @@ STORED_FILE_CATEGORIES = {
     "payout_statement": "payout_statement_document_dir",
     "service_fee_invoice": "service_fee_invoice_document_dir",
     "rent_invoice": "rent_invoice_document_dir",
+    "support_attachment": "support_upload_dir",
+    "avatar": "avatar_upload_dir",
 }
 
 

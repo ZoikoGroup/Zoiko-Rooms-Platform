@@ -19,6 +19,9 @@ class RentalPaymentReturnRead(CamelModel):
     deductions_amount: float
     deductions_reason: str
     payment_method_category: str
+    payment_method_subtype: str = ""
+    payment_method_description: str = ""
+    payment_method_label: str = ""
     external_reference: str
     returned_date: date
     note: str
@@ -33,9 +36,13 @@ class RentalPaymentReturnCreate(CamelModel):
     deductions_amount: float = Field(default=0, ge=0, le=MAX_MONEY_AMOUNT)
     deductions_reason: str = ""
     payment_method_category: str
+    payment_method_subtype: str = ""
+    payment_method_description: str = ""
     external_reference: str = ""
     returned_date: date
     note: str = ""
+    # Resend with true after the person confirms a possible-duplicate warning.
+    confirm_not_duplicate: bool = False
 
 
 class RentalPaymentReturnDisputeRequest(CamelModel):
@@ -56,3 +63,5 @@ class RentalPaymentReturnCandidateRead(CamelModel):
     settled: float
     remaining: float
     ended_on: date | None
+    # Resolves which payment methods the return form offers.
+    country_code: str = ""

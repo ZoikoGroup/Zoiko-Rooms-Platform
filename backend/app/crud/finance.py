@@ -25,7 +25,7 @@ from app.crud.guest import get_user_for_guest
 from app.crud.market_policy import DEFAULT_JURISDICTION, resolve_market_policy, to_policy_snapshot
 from app.models.market_policy import SUPPORTED_FUNDS_FLOW_PROFILES
 from app.crud import notification as notif_crud
-from app.crud.party import assert_provider_access, get_or_create_default_party
+from app.crud.party import assert_provider_access, assert_provider_access_any, get_or_create_default_party
 from app.crud.habitability_incident import has_open_severe_incident_for_room
 from app.crud.payout_beneficiary import get_verified_payout_beneficiary
 from app.crud.user import get_user_by_party_id
@@ -79,7 +79,6 @@ from app.schemas.finance import (
     DepositClaimItemRead,
     DepositClaimItemRespond,
     DepositClaimRead,
-    DepositClaimResolve,
     DepositInstrumentRead,
     DepositRecordRead,
     DepositRelease,
@@ -959,7 +958,20 @@ def to_deposit_record_read(record: DepositRecord) -> DepositRecordRead:
         claimed_amount=_deposit_committed_amount(record),
         disputed_amount=_deposit_disputed_amount(record),
         currency=record.obligation.currency,
+        **_deposit_tenancy_fields(record),
     )
+
+
+def _deposit_tenancy_fields(record: DepositRecord) -> dict:
+    from app.crud.deposit_party_flow import claim_window_ends_at, deposit_occupancy
+
+    occupancy = deposit_occupancy(record)
+    listing = occupancy.listing if occupancy is not None else None
+    return {
+        "occupancy_id": occupancy.id if occupancy is not None else None,
+        "claim_window_ends_at": claim_window_ends_at(record),
+        "room_label": (listing.name or "") if listing is not None else "",
+    }
 
 
 def to_deposit_claim_item_read(item: DepositClaimItem) -> DepositClaimItemRead:
@@ -983,11 +995,18 @@ def to_deposit_claim_read(claim: DepositClaim) -> DepositClaimRead:
         deposit_record_id=claim.deposit_record_id,
         status=claim.status,
         submitted_by_admin_id=claim.submitted_by_admin_id,
+        submitted_by_user_id=claim.submitted_by_user_id,
         submitted_at=claim.submitted_at,
+        response_due_at=claim.response_due_at,
         renter_responded_at=claim.renter_responded_at,
+        negotiation_ends_at=claim.negotiation_ends_at,
+        referred_at=claim.referred_at,
         resolved_by_admin_id=claim.resolved_by_admin_id,
+        resolved_by_user_id=claim.resolved_by_user_id,
         resolved_at=claim.resolved_at,
+        scheme_reference=claim.scheme_reference,
         resolution_notes=claim.resolution_notes,
+        currency=claim.deposit_record.obligation.currency,
         items=[to_deposit_claim_item_read(i) for i in claim.items],
     )
 
@@ -1010,8 +1029,11 @@ def _obligation_party_id(obligation: Obligation) -> int | None:
     return room.property.owner_party_id if room else None
 
 
-def _assert_deposit_record_access(db: Session, admin: AdminUser, record: DepositRecord) -> None:
-    assert_provider_access(db, admin, _deposit_record_party_id(record), roles=("provider_finance", "provider_owner_admin"))
+def _assert_deposit_record_access(db: Session, actor: AdminUser | UserAccount, record: DepositRecord) -> None:
+    if isinstance(actor, UserAccount):
+        assert_provider_access_any(db, actor, _deposit_record_party_id(record))
+        return
+    assert_provider_access(db, actor, _deposit_record_party_id(record), roles=("provider_finance", "provider_owner_admin"))
 
 
 def _deposit_record_guest_id(record: DepositRecord) -> str | None:
@@ -1173,11 +1195,21 @@ def forfeit_deposit(db: Session, record: DepositRecord, admin: AdminUser) -> Dep
     return record
 
 
-def submit_deposit_claim(db: Session, record: DepositRecord, admin: AdminUser, data: DepositClaimCreate) -> DepositClaim:
-    _assert_deposit_record_access(db, admin, record)
+def submit_deposit_claim(
+    db: Session, record: DepositRecord, actor: AdminUser | UserAccount, data: DepositClaimCreate,
+) -> DepositClaim:
+    from app.crud.deposit_party_flow import claim_window_ends_at, renter_response_due
+
+    _assert_deposit_record_access(db, actor, record)
 
     if record.status in ("RELEASED", "FORFEITED"):
         raise HTTPException(status.HTTP_409_CONFLICT, "This deposit has already been closed out")
+    window = claim_window_ends_at(record)
+    if window is not None and window <= datetime.now(timezone.utc):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "The window to claim against this deposit has closed -- the unclaimed balance goes back to the renter",
+        )
     if not data.items:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "A claim needs at least one line item")
 
@@ -1195,7 +1227,12 @@ def submit_deposit_claim(db: Session, record: DepositRecord, admin: AdminUser, d
         if item.amount_requested <= 0:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "amount_requested must be positive")
 
-    claim = DepositClaim(deposit_record_id=record.id, submitted_by_admin_id=admin.id)
+    claim = DepositClaim(
+        deposit_record_id=record.id,
+        submitted_by_admin_id=actor.id if isinstance(actor, AdminUser) else None,
+        submitted_by_user_id=actor.id if isinstance(actor, UserAccount) else None,
+        response_due_at=renter_response_due(record),
+    )
     db.add(claim)
     db.flush()
     for item in data.items:
@@ -1216,7 +1253,11 @@ def submit_deposit_claim(db: Session, record: DepositRecord, admin: AdminUser, d
         notif_crud.notify_user_by_guest(
             db, guest,
             title="A deposit claim was submitted",
-            message=f"Your host submitted a claim of {record.obligation.currency} {requested_total:.2f} against your deposit. Review and respond.",
+            message=(
+                f"Your host submitted a claim of {record.obligation.currency} {requested_total:.2f} against your deposit. "
+                f"Answer each item by {claim.response_due_at.date().isoformat()} -- anything you don't answer by then "
+                "counts as accepted."
+            ),
             notification_type="deposit_claim.submitted",
             related_entity_type="deposit_claim", related_entity_id=str(claim.id),
         )
@@ -1239,12 +1280,12 @@ def get_deposit_claim_item_or_404(db: Session, item_id: int) -> DepositClaimItem
     return item
 
 
-def list_deposit_claims_for_record(db: Session, admin: AdminUser, record: DepositRecord) -> list[DepositClaim]:
+def list_deposit_claims_for_record(db: Session, admin: AdminUser | UserAccount, record: DepositRecord) -> list[DepositClaim]:
     _assert_deposit_record_access(db, admin, record)
     return list(record.claims)
 
 
-def assert_deposit_record_access(db: Session, admin: AdminUser, record: DepositRecord) -> None:
+def assert_deposit_record_access(db: Session, admin: AdminUser | UserAccount, record: DepositRecord) -> None:
     _assert_deposit_record_access(db, admin, record)
 
 
@@ -1253,7 +1294,7 @@ def deposit_record_guest_id(record: DepositRecord) -> str | None:
 
 
 def attach_deposit_claim_item_evidence(
-    db: Session, item: DepositClaimItem, admin: AdminUser,
+    db: Session, item: DepositClaimItem, admin: AdminUser | UserAccount,
     stored_filename: str, original_filename: str, content_type: str,
 ) -> DepositClaimItem:
     record = item.claim.deposit_record
@@ -1280,6 +1321,8 @@ def respond_to_deposit_claim_item(
 
     if item.tenant_response:
         raise HTTPException(status.HTTP_409_CONFLICT, "You have already responded to this claim item")
+    if item.claim.status != "RENTER_RESPONSE_PENDING":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This claim is no longer waiting for your answer")
     if data.response not in ("ACCEPT", "PARTIAL_ACCEPT", "DISPUTE"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid response")
 
@@ -1290,85 +1333,19 @@ def respond_to_deposit_claim_item(
         if data.accepted_amount is None or data.accepted_amount <= 0 or data.accepted_amount > float(item.amount_requested):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "accepted_amount must be between 0 and the requested amount")
         item.final_amount = data.accepted_amount
-    # DISPUTE: final_amount stays None until an admin resolves the claim.
+    # DISPUTE: final_amount stays None until the host lowers it or the
+    # deposit scheme decides it (crud/deposit_party_flow.py).
 
     claim = item.claim
     claim.renter_responded_at = datetime.now(timezone.utc)
     db.flush()
 
-    if any(i.tenant_response == "" for i in claim.items):
-        claim.status = "RENTER_RESPONSE_PENDING"
-    elif any(i.tenant_response == "DISPUTE" and i.final_amount is None for i in claim.items):
-        claim.status = "DISPUTED"
-    else:
-        claim.status = "AGREED"
+    from app.crud.deposit_party_flow import after_renter_answers
 
-    _recompute_deposit_record_status(record)
+    after_renter_answers(db, claim)
     db.commit()
     db.refresh(item)
-
-    if data.response == "DISPUTE":
-        party_id = _deposit_record_party_id(record)
-        notif_crud.notify_user_by_party(
-            db, party_id,
-            title="A deposit claim was disputed",
-            message=f"The renter disputed a {item.category_code} claim item. Zoiko will review before any further release.",
-            notification_type="deposit_claim.disputed",
-            related_entity_type="deposit_claim", related_entity_id=str(claim.id),
-        )
-        db.commit()
-
     return item
-
-
-def resolve_deposit_claim(db: Session, claim: DepositClaim, admin: AdminUser, data: DepositClaimResolve) -> DepositClaim:
-    """India-scope MVP simplification of ZR-ENG-CLR-002 Rule 7/Section 10: no
-    external ADR/tribunal integration exists yet, so an Admin resolves disputed
-    line items directly. This is not the doc's end-state -- Section 10.3 requires
-    a market pack to explicitly authorize Zoiko as dispute resolver before this
-    is legally appropriate in a real jurisdiction."""
-    record = claim.deposit_record
-    _assert_deposit_record_access(db, admin, record)
-
-    if claim.status != "DISPUTED":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Only a disputed claim can be resolved")
-
-    items_by_id = {item.id: item for item in claim.items}
-    for entry in data.item_final_amounts:
-        item = items_by_id.get(entry.item_id)
-        if not item:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Claim item {entry.item_id} not found on this claim")
-        if item.final_amount is not None:
-            continue  # already settled (e.g. renter accepted it) -- resolution can't override that
-        if entry.final_amount < 0 or entry.final_amount > float(item.amount_requested):
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "final_amount must be between 0 and the requested amount")
-        item.final_amount = entry.final_amount
-
-    if any(item.final_amount is None for item in claim.items):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Every disputed item needs a final_amount to resolve this claim")
-
-    claim.status = "RESOLVED"
-    claim.resolved_by_admin_id = admin.id
-    claim.resolved_at = datetime.now(timezone.utc)
-    claim.resolution_notes = data.notes
-
-    _recompute_deposit_record_status(record)
-    db.commit()
-    db.refresh(claim)
-
-    guest_id = _deposit_record_guest_id(record)
-    guest = db.get(Guest, guest_id) if guest_id else None
-    if guest:
-        notif_crud.notify_user_by_guest(
-            db, guest,
-            title="Your deposit dispute was resolved",
-            message=data.notes or "Zoiko has resolved your disputed deposit claim.",
-            notification_type="deposit_claim.resolved",
-            related_entity_type="deposit_claim", related_entity_id=str(claim.id),
-        )
-        db.commit()
-
-    return claim
 
 
 def list_deposit_claims_for_guest(db: Session, guest_id: str) -> list[DepositClaim]:
@@ -2027,7 +2004,7 @@ def get_refund_or_404(db: Session, refund_id: int) -> RefundRequest:
     return refund
 
 
-def request_refund(db: Session, data: RefundRequestCreate, admin: AdminUser) -> RefundRequest:
+def request_refund(db: Session, data: RefundRequestCreate, admin: AdminUser | None) -> RefundRequest:
     """AC-14: get-or-create by idempotency key, same pattern as
     create_payment_intent -- a retried request never creates a second
     RefundRequest. A reused key must describe the *same* request
@@ -2050,7 +2027,7 @@ def request_refund(db: Session, data: RefundRequestCreate, admin: AdminUser) -> 
     obligation = db.get(Obligation, data.obligation_id)
     if not payment or not obligation:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment or obligation not found")
-    if admin.role != "super_admin" and obligation.id not in _owned_obligation_ids(db, admin):
+    if admin is not None and admin.role != "super_admin" and obligation.id not in _owned_obligation_ids(db, admin):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
 
     refund = RefundRequest(
@@ -2058,7 +2035,7 @@ def request_refund(db: Session, data: RefundRequestCreate, admin: AdminUser) -> 
         obligation_id=data.obligation_id,
         amount=data.amount,
         reason=data.reason,
-        requested_by_admin_id=admin.id,
+        requested_by_admin_id=admin.id if admin is not None else None,
         idempotency_key=data.idempotency_key,
     )
     db.add(refund)
@@ -2067,18 +2044,18 @@ def request_refund(db: Session, data: RefundRequestCreate, admin: AdminUser) -> 
     return refund
 
 
-def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser, data: RefundDecide) -> RefundRequest:
+def decide_refund(db: Session, refund: RefundRequest, admin: AdminUser | None, data: RefundDecide) -> RefundRequest:
     """Approving is completing -- there's no separate money-movement step in a
     simulated system. Completing a refund creates a reversing PaymentAllocation and
     recomputes the obligation's status, so the refund actually affects the ledger."""
-    if admin.role != "super_admin" and refund.obligation_id not in _owned_obligation_ids(db, admin):
+    if admin is not None and admin.role != "super_admin" and refund.obligation_id not in _owned_obligation_ids(db, admin):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to manage this provider's records")
     if refund.status != "REQUESTED":
         raise HTTPException(status.HTTP_409_CONFLICT, "Refund has already been decided")
 
     if not data.approve:
         refund.status = "REJECTED"
-        refund.decided_by_admin_id = admin.id
+        refund.decided_by_admin_id = admin.id if admin is not None else None
         refund.decided_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(refund)

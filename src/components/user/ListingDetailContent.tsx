@@ -118,9 +118,11 @@ export function ListingDetailContent({
               )}
             </p>
           </div>
-          <Button disabled={applied || !identityVerified} onClick={onApplyClick}>
-            {applied ? "Applied" : "Apply for this room"}
-          </Button>
+          {(applied || identityVerified) && (
+            <Button disabled={applied} onClick={onApplyClick}>
+              {applied ? "Applied" : "Apply for this room"}
+            </Button>
+          )}
         </div>
       </Card>
     </div>

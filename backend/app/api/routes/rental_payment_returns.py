@@ -95,5 +95,8 @@ def post_record_return(
         db, _own_party(db, user), occupancy, kind=payload.kind, amount=payload.amount,
         deductions_amount=payload.deductions_amount, deductions_reason=payload.deductions_reason,
         payment_method_category=payload.payment_method_category, external_reference=payload.external_reference,
+        payment_method_subtype=payload.payment_method_subtype,
+        payment_method_description=payload.payment_method_description,
+        confirm_not_duplicate=payload.confirm_not_duplicate,
         returned_date=payload.returned_date, note=payload.note, correlation_id=get_correlation_id(request),
     )

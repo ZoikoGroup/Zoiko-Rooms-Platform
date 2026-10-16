@@ -359,6 +359,87 @@ def remind_hosts_of_unconfirmed_payments(db: Session, *, now: datetime | None = 
     return reminded
 
 
+def apply_dispute_deadlines(db: Session) -> int:
+    """Host<->renter dispute claims: unanswered ones accepted, unsettled ones
+    referred to the outside body (crud/dispute_party_flow.py)."""
+    from app.crud.dispute_party_flow import apply_dispute_deadlines as _apply
+
+    return _apply(db)
+
+
+def seed_help_centre(db: Session) -> int:
+    """Puts the original Help centre articles into the knowledge base if
+    they're missing (services/help_centre.py); a no-op once they're there."""
+    from app.services.help_centre import seed_help_centre as seed
+
+    return seed(db)
+
+
+def close_inactive_support_tickets(db: Session) -> int:
+    """Support tickets waiting on the user, or resolved, that have gone quiet
+    are closed (services/support_assistant.py)."""
+    from app.services.support_assistant import close_inactive_tickets
+
+    return close_inactive_tickets(db)
+
+
+def apply_deposit_deadlines(db: Session) -> int:
+    """Deposit claims: unanswered items accepted, stalled disputes referred to
+    the deposit scheme, and deposits whose claim window has closed settled
+    (crud/deposit_party_flow.py)."""
+    from app.crud.deposit_party_flow import apply_deposit_deadlines as run
+
+    return run(db)
+
+
+def activate_due_payment_instructions(db: Session) -> int:
+    """Payment-detail changes whose cooling-off window has passed take
+    effect (crud/rental_payment.py)."""
+    from app.crud.rental_payment import activate_due_instructions
+
+    return activate_due_instructions(db)
+
+
+def redecide_legacy_property_reviews(db: Session) -> int:
+    """Property checks still in the retired review queue, decided by the
+    current rules (services/property_location_service.py)."""
+    from app.services.property_location_service import redecide_legacy_reviews
+
+    return redecide_legacy_reviews(db)
+
+
+def apply_habitability_deadlines(db: Session) -> int:
+    """Habitability issues: unanswered fixes confirmed, serious overdue ones
+    credited (crud/habitability_incident.py)."""
+    from app.crud.habitability_incident import apply_habitability_deadlines as _apply
+
+    return _apply(db)
+
+
+def apply_host_refund_deadlines(db: Session) -> int:
+    """Refunds a host owes: deemed confirmed / overdue (crud/tenancy_settlement.py)."""
+    from app.crud.tenancy_settlement import apply_host_refund_deadlines as _apply
+
+    return _apply(db)
+
+
+def end_due_occupancies(db: Session) -> int:
+    """Tenancies whose end date has arrived and whose room is handed back
+    (crud/occupancy_lifecycle.py)."""
+    from app.crud.occupancy_lifecycle import end_due_occupancies as _end
+
+    return _end(db)
+
+
+def apply_termination_response_deadlines(db: Session) -> int:
+    """Termination proposals past their response deadline: accepted on
+    silence for a ground, lapsed for a mutual surrender
+    (crud/termination_responses.py)."""
+    from app.crud.termination_responses import apply_due_responses
+
+    return apply_due_responses(db)
+
+
 JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("expire_overdue_bookings", expire_overdue_bookings),
     ("generate_due_rent", generate_due_rent),
@@ -384,6 +465,16 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("sync_internalised_external_leads", sync_internalised_external_leads),
     ("remind_hosts_to_reconfirm_availability", remind_hosts_to_reconfirm_availability),
     ("purge_stale_external_opportunities", purge_stale_external_opportunities),
+    ("apply_termination_response_deadlines", apply_termination_response_deadlines),
+    ("end_due_occupancies", end_due_occupancies),
+    ("apply_host_refund_deadlines", apply_host_refund_deadlines),
+    ("apply_habitability_deadlines", apply_habitability_deadlines),
+    ("redecide_legacy_property_reviews", redecide_legacy_property_reviews),
+    ("activate_due_payment_instructions", activate_due_payment_instructions),
+    ("apply_deposit_deadlines", apply_deposit_deadlines),
+    ("close_inactive_support_tickets", close_inactive_support_tickets),
+    ("seed_help_centre", seed_help_centre),
+    ("apply_dispute_deadlines", apply_dispute_deadlines),
 )
 
 

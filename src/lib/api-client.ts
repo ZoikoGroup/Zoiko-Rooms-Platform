@@ -2,9 +2,13 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** A machine-readable `detail.code` when the backend sends one
+   *  (e.g. "POSSIBLE_DUPLICATE"). */
+  code?: string;
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -54,7 +58,9 @@ export async function apiClientFetch<T>(path: string, init?: RequestInit): Promi
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, extractDetailMessage(body.detail) ?? `Request to ${path} failed with ${res.status}`);
+    const code =
+      body.detail && typeof body.detail === "object" && typeof body.detail.code === "string" ? body.detail.code : undefined;
+    throw new ApiError(res.status, extractDetailMessage(body.detail) ?? `Request to ${path} failed with ${res.status}`, code);
   }
 
   if (res.status === 204) return undefined as T;
