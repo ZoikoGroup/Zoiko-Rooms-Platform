@@ -306,7 +306,44 @@ _PERIOD_WORDS = {
     "MONTH": r"p\s?/\s?m|p\.?c\.?m\.?|per\s+(?:calendar\s+)?month|/\s?mo(?:nth)?|a\s+month|monthly|onwards\s*/\s*month",
 }
 _BEDROOMS = re.compile(r"\b(?:bedrooms?\s*[:\-]?\s*(\d{1,2})|(\d{1,2})\s*-?\s*bed(?:room)?s?)\b", re.IGNORECASE)
+_BEDROOM_RANGE = re.compile(r"\b(\d)\s*[-–]\s*(\d)\s*-?\s*bed(?:room)?s?\b", re.IGNORECASE)
 _STUDIO = re.compile(r"\bstudio\b", re.IGNORECASE)
+# "Starting at $1,051", "rent from £850", "from ₹9,396": the lowest advertised
+# rent, with no period stated. Recorded as MONTH_FROM and shown as "from".
+_FROM_WORDS = r"(?:starting\s+(?:at|from)|starts?\s+(?:at|from)|(?:base\s+)?rents?\s+(?:starts?\s+)?(?:at|from)|from)"
+# Zoiko Rooms only lists rooms to live in. Search hits that are anything else
+# are dropped: sales, offices, shops and other commercial space, work studios,
+# studio flats, or editorial pages. Matched against title + snippet text,
+# where "office" alone is too common ("near your office") to count.
+_NON_RENTAL_TEXT = re.compile(
+    r"\bfor\s+sale\b|\b(?:flex|serviced|shared)\s+offices?\b|\boffices?\s+(?:space|suites?|to\s+let|for\s+rent)\b"
+    r"|\bcommercial\s+(?:propert(?:y|ies)|space|units?)\b|\bco-?working\b|\bwarehouses?\b|\bgodowns?\b"
+    r"|\bindustrial\s+units?\b|\bretail\s+(?:space|units?|shops?)\b|\bshowrooms?\b"
+    r"|\bshops?\s+(?:for\s+rent|to\s+(?:let|rent))\b|\b(?:shop|salon|restaurant|kiosk)\s+space\b"
+    r"|\b(?:photo(?:graphy)?|dance|yoga|recording|music|art|film|podcast|fitness|pilates|tattoo)\s+studios?\b"
+    r"|\bstudio\s+(?:flats?|apartments?|apts?|units?|homes?)\b|\bstudios?\s+(?:for\s+rent|to\s+(?:let|rent))\b",
+    re.IGNORECASE,
+)
+_NON_RENTAL_PATH = re.compile(
+    r"/(?:blog|news|insights?|for-sale|properties-for-sale|sales?|commercial|rent-office|offices?|shops?"
+    r"|retail|studios?|studio-(?:flats?|apartments?))(?:/|-|$)",
+    re.IGNORECASE,
+)
+# A provider's own property-type label ("Retail", "Studio", "Office") that is
+# not a room to live in. Labels are short, so single words are safe here.
+_NOT_A_HOME_LABEL = re.compile(
+    r"\b(?:studios?|shops?|retail|showrooms?|salons?|restaurants?|caf[eé]s?|kiosks?|offices?|commercial"
+    r"|co-?working|warehouses?|godowns?|industrial|land|parking|garages?|storage|hotel)\b",
+    re.IGNORECASE,
+)
+
+
+def is_home_to_live_in(room_type: str | None, bedrooms: int | None = None) -> bool:
+    """False for studios (flats or work studios), shops and other commercial
+    space; True otherwise, including when the type is unknown."""
+    if bedrooms is not None and bedrooms == 0:
+        return False  # 0 bedrooms = studio
+    return not (room_type and _NOT_A_HOME_LABEL.search(room_type))
 # Plausible monthly rent bounds (whole units) per market; anything outside is
 # treated as not-a-rent (sale price, deposit, typo).
 _MONTHLY_BOUNDS = {"GB": (150, 20000), "US": (300, 25000), "IN": (2000, 500000)}
@@ -336,20 +373,53 @@ def extract_listing_facts(snippet: str, market: str) -> dict[str, Any]:
         if low <= monthly <= high:
             facts.update(price_minor=amount * 100, currency=currency, price_period=period)
             break
-    if _STUDIO.search(snippet):
+    if "price_minor" not in facts:
+        # No period stated, but an explicit "starting at / from" rent: kept as a
+        # monthly lower bound only when it is a plausible monthly rent.
+        match = re.search(
+            rf"{_FROM_WORDS}\s*(?:{symbol})\s?(\d{{1,3}}(?:,\d{{2,3}})+|\d{{2,6}})(?:\.\d{{2}})?",
+            snippet,
+            re.IGNORECASE,
+        )
+        if match:
+            amount = int(match.group(1).replace(",", ""))
+            low, high = _MONTHLY_BOUNDS[market]
+            if low <= amount <= high:
+                facts.update(price_minor=amount * 100, currency=currency, price_period="MONTH_FROM")
+    # Bedrooms win over "studio" when both appear ("studio, 1-2 bedrooms"):
+    # the listing then has rooms to live in. Studio-only stays "Studio" and
+    # is dropped by _web_hit.
+    beds_range = _BEDROOM_RANGE.search(snippet)
+    beds = _BEDROOMS.search(snippet)
+    if beds_range and 0 < int(beds_range.group(1)) < int(beds_range.group(2)) < 10:
+        facts["room_type"] = f"{beds_range.group(1)}-{beds_range.group(2)} bedrooms"
+    elif beds and 0 < int(beds.group(1) or beds.group(2)) < 10:
+        n = int(beds.group(1) or beds.group(2))
+        facts["room_type"] = f"{n} bedroom" + ("s" if n > 1 else "")
+    elif _STUDIO.search(snippet):
         facts["room_type"] = "Studio"
-    else:
-        beds = _BEDROOMS.search(snippet)
-        if beds:
-            n = int(beds.group(1) or beds.group(2))
-            if 0 < n < 10:
-                facts["room_type"] = f"{n} bedroom" + ("s" if n > 1 else "")
     return facts
 
 
 def _host_matches(host: str, domain: str) -> bool:
     host = host.lower().rstrip(".")
     return host == domain or host.endswith("." + domain)
+
+
+def _web_hit(url: str, text: str, domains: list[str], market: str) -> WebHit | None:
+    """A search result as a WebHit when it is on an approved domain and looks
+    like a home to rent; None otherwise. `text` (title + snippet) is only
+    scanned here and then discarded."""
+    if not url.startswith(("http://", "https://")):
+        return None
+    parsed = httpx.URL(url)
+    domain = next((d for d in domains if parsed.host and _host_matches(parsed.host, d)), None)
+    if not domain or _NON_RENTAL_PATH.search(parsed.path) or _NON_RENTAL_TEXT.search(text):
+        return None
+    facts = extract_listing_facts(text, market)
+    if not is_home_to_live_in(facts.get("room_type")):
+        return None
+    return WebHit(domain=domain, url=url, **facts)
 
 
 class BraveWebSearch:
@@ -380,12 +450,11 @@ class BraveWebSearch:
         results = ((res.json() or {}).get("web") or {}).get("results") or []
         hits: list[WebHit] = []
         for item in results:
-            url = str((item or {}).get("url") or "")
-            host = httpx.URL(url).host if url.startswith(("http://", "https://")) else ""
-            domain = next((d for d in domains if host and _host_matches(host, d)), None)
-            if domain:
-                snippet = str((item or {}).get("description") or "")
-                hits.append(WebHit(domain=domain, url=url, **extract_listing_facts(snippet, market)))
+            item = item or {}
+            text = f"{item.get('title') or ''} {item.get('description') or ''}"
+            hit = _web_hit(str(item.get("url") or ""), text, domains, market)
+            if hit:
+                hits.append(hit)
         return hits[:limit]
 
 
@@ -411,7 +480,11 @@ class ParallelWebSearch:
         res = client.post(
             self.url,
             json={
-                "objective": f"Rooms or flats currently advertised to rent in {city}, {country}.",
+                "objective": (
+                    f"Rooms to live in currently advertised to rent in {city}, {country}: private or shared "
+                    "rooms in flats or houses, PGs and co-living. Not studio flats, shops, offices or other "
+                    "commercial space."
+                ),
                 "search_queries": [f"room to rent {city}", f"{city} rooms to let"],
                 "mode": "fast",
                 "max_chars_total": 4000,
@@ -429,32 +502,76 @@ class ParallelWebSearch:
         results = (res.json() or {}).get("results") or []
         hits: list[WebHit] = []
         for item in results:
-            url = str((item or {}).get("url") or "")
-            host = httpx.URL(url).host if url.startswith(("http://", "https://")) else ""
-            domain = next((d for d in domains if host and _host_matches(host, d)), None)
-            if domain:
-                snippet = " ".join(str(x) for x in ((item or {}).get("excerpts") or []))
-                hits.append(WebHit(domain=domain, url=url, **extract_listing_facts(snippet, market)))
+            item = item or {}
+            text = " ".join([str(item.get("title") or ""), *(str(x) for x in (item.get("excerpts") or []))])
+            hit = _web_hit(str(item.get("url") or ""), text, domains, market)
+            if hit:
+                hits.append(hit)
         return hits[:limit]
 
 
-WEB_SEARCH_PROVIDERS = {"parallel": ParallelWebSearch(), "brave": BraveWebSearch()}
+class TinyFishWebSearch:
+    """TinyFish Search API. It has no domain-filter parameter, so the query
+    carries site: operators and every result is still checked against the
+    approved domains. Same contract as the others: only the search API is
+    called; only result URLs and the facts extract_listing_facts parses out
+    (rent, bedrooms) are kept -- titles and snippets are discarded."""
+
+    source_id = "tinyfish_web"
+
+    @property
+    def url(self) -> str:
+        return settings.tinyfish_search_api_url
+
+    def configured(self) -> bool:
+        return bool(settings.tinyfish_api_key)
+
+    def search(
+        self, client: httpx.Client, *, city: str, market: str, domains: list[str], limit: int
+    ) -> list[WebHit]:
+        sites = " OR ".join(f"site:{d}" for d in domains)
+        res = client.get(
+            self.url,
+            params={"query": f"rooms to rent {city} {sites}", "location": market},
+            headers={"X-API-Key": settings.tinyfish_api_key, "Accept": "application/json"},
+        )
+        res.raise_for_status()
+        results = (res.json() or {}).get("results") or []
+        hits: list[WebHit] = []
+        for item in results:
+            item = item or {}
+            text = f"{item.get('title') or ''} {item.get('snippet') or ''}"
+            hit = _web_hit(str(item.get("url") or ""), text, domains, market)
+            if hit:
+                hits.append(hit)
+        return hits[:limit]
 
 
-def web_search_provider() -> BraveWebSearch | ParallelWebSearch | None:
-    """The configured internet-search provider: WEB_SEARCH_PROVIDER if set,
-    otherwise the first one with an API key (Parallel, then Brave)."""
-    chosen = (settings.web_search_provider or "").strip().lower()
-    if chosen:
-        provider = WEB_SEARCH_PROVIDERS.get(chosen)
-        return provider if provider and provider.configured() else None
-    return next((p for p in WEB_SEARCH_PROVIDERS.values() if p.configured()), None)
+WEB_SEARCH_PROVIDERS = {"tinyfish": TinyFishWebSearch(), "parallel": ParallelWebSearch(), "brave": BraveWebSearch()}
+WebSearchProvider = BraveWebSearch | ParallelWebSearch | TinyFishWebSearch
+
+
+def web_search_providers() -> list[WebSearchProvider]:
+    """Every internet-search provider with an API key, in the order to try
+    them: WEB_SEARCH_PROVIDER first when set, then TinyFish, Parallel, Brave.
+    The later ones are fallbacks for when an earlier one fails or finds nothing."""
+    configured = [p for p in WEB_SEARCH_PROVIDERS.values() if p.configured()]
+    chosen = WEB_SEARCH_PROVIDERS.get((settings.web_search_provider or "").strip().lower())
+    if chosen in configured:
+        configured.remove(chosen)
+        configured.insert(0, chosen)
+    return configured
+
+
+def web_search_provider() -> WebSearchProvider | None:
+    """The first provider web_search_providers() would try."""
+    return next(iter(web_search_providers()), None)
 
 _web_cache: dict[tuple[str, str, str, tuple[str, ...]], tuple[float, list[WebHit]]] = {}
 
 
 def fetch_web_hits(
-    provider: BraveWebSearch | ParallelWebSearch,
+    provider: WebSearchProvider,
     *,
     city: str,
     market: str,

@@ -160,3 +160,17 @@ class TestEnvelopeAndAttribution:
         )
         rows = db_session.query(AuditEvent).filter(AuditEvent.correlation_id == "c-attr").all()
         assert rows and all(f"actor=user:{user.id}" in r.reason for r in rows)
+
+
+def test_source_priority_partner_feed_then_licensed_api_then_rest():
+    from app.services.search_orchestrator import _source_priority
+
+    rules = [
+        {"source_id": "web_site", "acquisition_mode": "PUBLIC_FETCH"},
+        {"source_id": "rentcast", "acquisition_mode": "LICENSED_API"},
+        {"source_id": "partner_b", "acquisition_mode": "PARTNER_FEED"},
+        {"source_id": "partner_a", "acquisition_mode": "PARTNER_FEED"},
+    ]
+    assert [r["source_id"] for r in sorted(rules, key=_source_priority)] == [
+        "partner_a", "partner_b", "rentcast", "web_site",
+    ]

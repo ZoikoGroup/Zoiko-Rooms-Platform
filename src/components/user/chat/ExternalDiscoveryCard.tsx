@@ -95,7 +95,7 @@ export function ExternalDiscoveryCard({
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-300">
           {price && (
             <span className="font-semibold text-primary-700 dark:text-primary-300">
-              Advertised price: {price} per month
+              {card.rentIsFrom ? "Advertised from" : "Advertised price:"} {price} per month
             </span>
           )}
           {card.roomType && <span>{card.roomType}</span>}
