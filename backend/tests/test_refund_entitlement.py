@@ -597,9 +597,21 @@ class TestPlatformFeeReversal:
         assert entry is None
 
 
+def _court_liability(db: Session, case_id: int, amount: float, reason: str) -> None:
+    """A court/tribunal liability amount, as recorded on the case when a
+    party records an outside order (crud/termination_responses.py) -- set
+    directly here since these tests are about the refund maths."""
+    from app.models.termination_case import TerminationCase
+
+    case = db.get(TerminationCase, case_id)
+    case.tribunal_liability_amount = amount
+    case.tribunal_liability_reason = reason
+    db.commit()
+
+
 class TestTribunalLiability:
-    """ZR-ENG-CLR-006 Section 11.1 TRIBUNAL_OR_COURT_DETERMINED: a Super
-    Admin's own entry (never a computed formula) becomes the calculation's
+    """ZR-ENG-CLR-006 Section 11.1 TRIBUNAL_OR_COURT_DETERMINED: the amount an
+    outside order sets (never a computed formula) becomes the calculation's
     NOTICE_LIABILITY line, reducing net_refund below gross_refundable, and
     is what execute_refund_entitlement actually pays out less of."""
 
@@ -623,32 +635,10 @@ class TestTribunalLiability:
         case_id = r.json()["id"]
         return admin, admin_cookies, occupancy, future_obligation, case_id
 
-    def test_setting_liability_requires_super_admin_and_a_reason(self, client, db_session: Session):
-        _admin, admin_cookies, _occupancy, _obligation, case_id = self._open_case_with_unearned_rent(client, db_session, suffix="set1")
-
-        r = client.post(
-            f"/api/occupancy/termination-cases/{case_id}/tribunal-liability",
-            json={"amount": 200.0, "reason": ""}, cookies=admin_cookies,
-        )
-        assert r.status_code == 400, r.text
-
-        regular_admin = _make_admin(db_session, email="tribunal-regular@test.com", role="admin")
-        r = client.post(
-            f"/api/occupancy/termination-cases/{case_id}/tribunal-liability",
-            json={"amount": 200.0, "reason": "trying anyway"}, cookies=auth_admin_cookie(regular_admin),
-        )
-        assert r.status_code == 403, r.text
-
     def test_liability_reduces_net_refund_but_not_gross_refundable(self, client, db_session: Session):
         admin, admin_cookies, _occupancy, _obligation, case_id = self._open_case_with_unearned_rent(client, db_session, suffix="set2")
 
-        r = client.post(
-            f"/api/occupancy/termination-cases/{case_id}/tribunal-liability",
-            json={"amount": 300.0, "reason": "Tribunal ordered a 300 liability for early vacancy"},
-            cookies=admin_cookies,
-        )
-        assert r.status_code == 200, r.text
-        assert float(r.json()["tribunalLiabilityAmount"]) == 300.0
+        _court_liability(db_session, case_id, 300.0, "Tribunal ordered a 300 liability for early vacancy")
 
         r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
         assert r.status_code == 200, r.text
@@ -660,11 +650,7 @@ class TestTribunalLiability:
 
     def test_execute_pays_out_only_the_net_amount(self, client, db_session: Session):
         admin, admin_cookies, _occupancy, future_obligation, case_id = self._open_case_with_unearned_rent(client, db_session, suffix="set3")
-        client.post(
-            f"/api/occupancy/termination-cases/{case_id}/tribunal-liability",
-            json={"amount": 300.0, "reason": "Tribunal ordered liability"},
-            cookies=admin_cookies,
-        )
+        _court_liability(db_session, case_id, 300.0, "Tribunal ordered liability")
         r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
         entitlement_id = r.json()["id"]
 
@@ -681,11 +667,7 @@ class TestTribunalLiability:
 
     def test_liability_exceeding_gross_refundable_never_pays_a_negative_amount(self, client, db_session: Session):
         admin, admin_cookies, _occupancy, _obligation, case_id = self._open_case_with_unearned_rent(client, db_session, suffix="set4")
-        client.post(
-            f"/api/occupancy/termination-cases/{case_id}/tribunal-liability",
-            json={"amount": 5000.0, "reason": "Tribunal ordered a large liability"},
-            cookies=admin_cookies,
-        )
+        _court_liability(db_session, case_id, 5000.0, "Tribunal ordered a large liability")
 
         r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
         assert r.status_code == 200, r.text
@@ -698,18 +680,7 @@ class TestTribunalLiability:
         not just the generic domain-event outbox."""
         admin, admin_cookies, _occupancy, _obligation, case_id = self._open_case_with_unearned_rent(client, db_session, suffix="audit1")
 
-        r = client.post(
-            f"/api/occupancy/termination-cases/{case_id}/tribunal-liability",
-            json={"amount": 300.0, "reason": "Tribunal ordered a 300 liability"}, cookies=admin_cookies,
-        )
-        assert r.status_code == 200, r.text
-        audit = db_session.scalar(
-            select(AuditEvent).where(
-                AuditEvent.action == "termination_case.tribunal_liability", AuditEvent.resource_id == str(case_id),
-            )
-        )
-        assert audit is not None
-        assert audit.reason == "Tribunal ordered a 300 liability"
+        _court_liability(db_session, case_id, 300.0, "Tribunal ordered a 300 liability")
 
         r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
         assert r.status_code == 200, r.text
@@ -932,11 +903,7 @@ class TestLiabilityModels:
         self._set_liability_model(db_session, model="STATUTORY_BREAK_FEE", break_fee_multiple=0.5)
         admin, admin_cookies, _occupancy, case_id = self._open_case_with_schedule(client, db_session, suffix="sup1", monthly_rent=1000.0)
 
-        client.post(
-            f"/api/occupancy/termination-cases/{case_id}/tribunal-liability",
-            json={"amount": 100.0, "reason": "Tribunal determined a lower amount than the market pack's own formula"},
-            cookies=admin_cookies,
-        )
+        _court_liability(db_session, case_id, 100.0, "Tribunal determined a lower amount than the market pack's own formula")
         r = client.post(f"/api/occupancy/termination-cases/{case_id}/calculate-refund", cookies=admin_cookies)
         assert r.status_code == 200, r.text
         notice_line = next(item for item in r.json()["lineItems"] if item["type"] == "NOTICE_LIABILITY")

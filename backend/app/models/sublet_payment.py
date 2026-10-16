@@ -16,11 +16,16 @@ from sqlalchemy import JSON, DateTime, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.services.payment_method_catalog import PAYMENT_METHOD_CATEGORIES
 
 RENT_PAYEE_TYPES = ("LANDLORD_AGENT", "SUBLESSOR")
 DEPOSIT_ROUTES = ("NOT_REQUIRED", "PAY_TO_LANDLORD_OR_AGENT", "PAY_TO_SUBLESSOR", "PAY_TO_CUSTODIAN",
                   "PROHIBITED_OR_UNRESOLVED")
-DIRECT_PAYMENT_METHODS = ("BANK_TRANSFER", "UPI", "CASH")
+# ZR-PAY-METHODS-GLOBAL-001: the global canonical categories (the rail --
+# UPI, Pix, ... -- is the payer's choice when they record the payment).
+DIRECT_PAYMENT_METHODS = PAYMENT_METHOD_CATEGORIES
+# Paid in person or on paper -- no payee account details needed.
+IN_PERSON_PAYMENT_METHODS = ("CASH", "CHEQUE_CHECK", "BANK_DRAFT", "MONEY_ORDER")
 ARRANGEMENT_STATUSES = ("ACTIVE", "SUPERSEDED")
 
 
@@ -46,7 +51,7 @@ class SubletPaymentArrangement(Base):
     custodian_reference: Mapped[str] = mapped_column(String(200), default="")
     custodian_instructions: Mapped[str] = mapped_column(String(2000), default="")
 
-    accepted_methods: Mapped[list] = mapped_column(JSON, default=lambda: ["BANK_TRANSFER", "UPI"])
+    accepted_methods: Mapped[list] = mapped_column(JSON, default=lambda: ["BANK_TRANSFER", "INSTANT_BANK_PAYMENT"])
 
     rent_amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     deposit_amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0)

@@ -23,6 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.services.deposit_terminology import resolve_deposit_terminology
+from app.services.payment_method_catalog import PAYMENT_METHOD_CATEGORIES, country_for
 
 RENTAL_PAYMENT_OBLIGATION_TYPES = ("RENT", "DEPOSIT", "OTHER")
 
@@ -60,12 +61,25 @@ RENTAL_PAYMENT_STATUSES = (
 RENTAL_PAYMENT_PROVENANCE = (
     "TENANT_DECLARATION", "RECIPIENT_CONFIRMATION", "PROVIDER_CONFIRMATION", "ADMIN_CORRECTION", "SYSTEM_DERIVATION",
 )
-RENTAL_PAYMENT_METHOD_CATEGORIES = ("BANK_TRANSFER", "UPI", "CASH", "OTHER")
+# ZR-PAY-METHODS-GLOBAL-001: the global canonical categories -- the rail /
+# provider (UPI, Pix, M-Pesa, ...) is a separate subtype field, resolved per
+# country by services/payment_method_catalog.py.
+RENTAL_PAYMENT_METHOD_CATEGORIES = PAYMENT_METHOD_CATEGORIES
 # The direct methods a host may offer renters in new payment instructions
 # (Zoiko Rooms Payment Model: rent is paid straight to the host -- bank
 # transfer, UPI or cash). CARD/OTHER instructions saved before this stay
 # valid; they just can't be created any more.
-RENTAL_PAYMENT_INSTRUCTION_METHODS = ("BANK_TRANSFER", "UPI", "CASH")
+# ZR-PAY-METHODS-GLOBAL-001: canonical categories, with the rail/provider
+# (UPI, Pix, PayNow, M-Pesa, PayPal, ...) in method_subtype.
+RENTAL_PAYMENT_INSTRUCTION_METHODS = (
+    "BANK_TRANSFER", "INSTANT_BANK_PAYMENT", "DIGITAL_WALLET_P2P", "MOBILE_MONEY", "CASH",
+)
+# ZR-PAY-METHODS-GLOBAL-001 Section 10 "Overpayment -- do not silently
+# allocate; create review/allocation workflow": money received above what
+# was owed is held as an excess on the record (REVIEW_REQUIRED) until the
+# recipient applies it to another obligation or sends it back.
+RENTAL_PAYMENT_EXCESS_STATUSES = ("", "REVIEW_REQUIRED", "RESOLVED")
+RENTAL_PAYMENT_EXCESS_ACTIONS = ("APPLY_TO_OBLIGATION", "RETURN_TO_PAYER")
 RENTAL_PAYMENT_DISCREPANCY_REASONS = ("NOT_ARRIVED", "AMOUNT_DIFFERENT", "REFERENCE_MISMATCH", "RETURNED_OR_REVERSED", "OTHER")
 RENTAL_PAYMENT_DISPUTE_STATUSES = ("OPEN", "RESOLVED")
 # ZR-PAY-002 Section 9.1: same create-then-confirm shape as
@@ -77,7 +91,12 @@ RENTAL_PAYMENT_DISPUTE_STATUSES = ("OPEN", "RESOLVED")
 # changes can be routed to manual review before becoming active' -- a
 # strong-auth-verified change still doesn't reach ACTIVE when it was flagged
 # high-risk at submission; an admin must approve or reject it first.
-RENTAL_PAYMENT_INSTRUCTION_STATUSES = ("PENDING_VERIFICATION", "PENDING_REVIEW", "ACTIVE", "SUPERSEDED", "REJECTED")
+# COOLING_OFF replaces admin review for a high-risk change: it activates on
+# its own once the cooling-off window passes, unless the host cancels it
+# (CANCELLED). PENDING_REVIEW / REJECTED remain only for older rows.
+RENTAL_PAYMENT_INSTRUCTION_STATUSES = (
+    "PENDING_VERIFICATION", "COOLING_OFF", "PENDING_REVIEW", "ACTIVE", "SUPERSEDED", "REJECTED", "CANCELLED",
+)
 # ZR-PAY-002 Section 10/13: 'legal hold and deletion exceptions.' Same
 # ACTIVE/RELEASED shape as models/dispute_legal_hold.py:DisputeLegalHold,
 # scoped to EvidenceArtifact instead of DisputeEvidenceItem -- see
@@ -180,6 +199,14 @@ class RentalPaymentObligation(Base):
         return room.property.jurisdiction_code if room and room.property else None
 
     @property
+    def country_code(self) -> str:
+        """The ISO country payment methods resolve from (property country,
+        else derived from its jurisdiction); "" when unknown."""
+        room = self.room
+        prop = room.property if room else None
+        return country_for(prop.country_code, prop.jurisdiction_code) if prop else ""
+
+    @property
     def display_label(self) -> str:
         """ZR-PAY-002 Section 10: the jurisdiction-resolved term to show for
         this obligation -- 'rent' universally, but DEPOSIT resolves to
@@ -246,8 +273,24 @@ class RentalPaymentRecord(Base):
     declared_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     declared_currency: Mapped[str] = mapped_column(String(3), nullable=False)
     declared_date: Mapped[date] = mapped_column(nullable=False)
-    payment_method_category: Mapped[str] = mapped_column(String(20), default="OTHER")
+    payment_method_category: Mapped[str] = mapped_column(String(32), default="OTHER")
+    # ZR-PAY-METHODS-GLOBAL-001 Section 6.1: the rail/provider, kept apart
+    # from the category; "" when the category has none.
+    payment_method_subtype: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    # Required for OTHER (and an "Other" rail) -- how the money was paid.
+    payment_method_description: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    # Label and catalog version in force when recorded (Section 7 rule 8), so
+    # history reads the same after the configuration changes.
+    payment_method_label: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    payment_method_config_version: Mapped[str] = mapped_column(String(20), default="", server_default="")
     external_reference: Mapped[str] = mapped_column(String(255), default="")
+    # Optional free-text note from whoever recorded it (rent period, ...).
+    note: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    # Money paid above what was owed, never counted toward this obligation
+    # (confirmed_amount holds only the part applied here). Resolved through
+    # RentalPaymentExcessAllocation rows, never by editing this record.
+    excess_amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0, server_default="0")
+    excess_status: Mapped[str] = mapped_column(String(20), default="", server_default="")
     declared_by_guest_id: Mapped[str] = mapped_column(ForeignKey("guests.id", ondelete="CASCADE"), nullable=False)
     confirmed_by_party_id: Mapped[int | None] = mapped_column(ForeignKey("parties.id"), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -269,6 +312,49 @@ class RentalPaymentRecord(Base):
     confirmed_by: Mapped["Party | None"] = relationship()
     disputes: Mapped[list["RentalPaymentDispute"]] = relationship(back_populates="record")
     corrections: Mapped[list["RentalPaymentCorrection"]] = relationship(back_populates="record")
+    excess_allocations: Mapped[list["RentalPaymentExcessAllocation"]] = relationship(
+        back_populates="record", foreign_keys="RentalPaymentExcessAllocation.record_id",
+        order_by="RentalPaymentExcessAllocation.id",
+    )
+
+    @property
+    def excess_remaining(self) -> float:
+        allocated = sum(float(a.amount) for a in self.excess_allocations)
+        return max(round(float(self.excess_amount or 0) - allocated, 2), 0.0)
+
+
+class RentalPaymentExcessAllocation(Base):
+    """One decision about an overpayment's excess, append-only: either
+    applied to another open obligation of the same renter (creating a
+    confirmed record there, target_record_id) or sent back to the payer
+    directly (with the method and reference used). Made by the recipient
+    who received the money -- never applied automatically."""
+
+    __tablename__ = "rental_payment_excess_allocations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    record_id: Mapped[int] = mapped_column(
+        ForeignKey("rental_payment_records.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    action: Mapped[str] = mapped_column(String(30), nullable=False)
+    amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    target_obligation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("rental_payment_obligations.id", ondelete="SET NULL"), nullable=True,
+    )
+    target_record_id: Mapped[int | None] = mapped_column(
+        ForeignKey("rental_payment_records.id", ondelete="SET NULL"), nullable=True,
+    )
+    returned_date: Mapped[date | None] = mapped_column(nullable=True)
+    payment_method_category: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    payment_method_subtype: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    payment_method_label: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    external_reference: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    note: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    actor_party_id: Mapped[int] = mapped_column(ForeignKey("parties.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    record: Mapped["RentalPaymentRecord"] = relationship(back_populates="excess_allocations", foreign_keys=[record_id])
 
 
 class RentalPaymentDispute(Base):
@@ -397,7 +483,10 @@ class RentalPaymentInstruction(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     party_id: Mapped[int] = mapped_column(ForeignKey("parties.id", ondelete="CASCADE"), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(20), default="PENDING_VERIFICATION")
-    method: Mapped[str] = mapped_column(String(20), default="BANK_TRANSFER")
+    method: Mapped[str] = mapped_column(String(32), default="BANK_TRANSFER")
+    # The rail/provider for INSTANT_BANK_PAYMENT / DIGITAL_WALLET_P2P /
+    # MOBILE_MONEY (e.g. UPI); "" otherwise.
+    method_subtype: Mapped[str] = mapped_column(String(40), default="", server_default="")
     recipient_name: Mapped[str] = mapped_column(String(200), nullable=False)
     # ZR-PAY-LINK-003 Wireframe D "Country / region" -- resolves which
     # structured field set (services/bank_field_schemas.py) governed
@@ -440,6 +529,8 @@ class RentalPaymentInstruction(Base):
     reviewed_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     review_reason: Mapped[str] = mapped_column(String(2000), default="")
+    # COOLING_OFF: when the change takes effect if the host doesn't cancel it.
+    activates_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     party: Mapped["Party"] = relationship()

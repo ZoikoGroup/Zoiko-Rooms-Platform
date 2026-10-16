@@ -28,7 +28,23 @@ class UserAccount(Base):
     # app/api/deps.py:get_current_user, which rejects any token issued before this
     # timestamp so a reset immediately invalidates sessions from other devices.
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # "Sign out of other sessions" (and the authenticated password change)
+    # stamp this, truncated to the second; get_current_user rejects any token
+    # issued in an earlier second. The caller's own session gets a fresh token.
+    sessions_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Profile photo, in stored_files (category "avatar"). avatar_updated_at
+    # doubles as a cache-buster for the image URL.
+    avatar_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Self-service account closure: is_active goes false; records are kept for
+    # their legal retention periods, not deleted.
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closure_reason: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     party: Mapped["Party"] = relationship(back_populates="user_accounts")
+
+    @property
+    def has_avatar(self) -> bool:
+        return bool(self.avatar_ref)

@@ -13,7 +13,8 @@ import {
   updateSubletPaymentArrangement,
 } from "@/lib/sublet-payments";
 
-const METHODS: DirectPaymentMethod[] = ["BANK_TRANSFER", "UPI", "CASH"];
+// The global canonical categories (ZR-PAY-METHODS-GLOBAL-001), in order.
+const METHODS = Object.keys(methodLabel) as DirectPaymentMethod[];
 
 /**
  * ZR-SUBLET-PAY-003 on an approved sublet: who receives the rent and the
@@ -75,7 +76,7 @@ export function SubletPaymentsPanel({ subletId }: { subletId: number }) {
         </div>
         <div>
           <dt className="text-xs text-slate-400">Accepted methods</dt>
-          <dd className="font-semibold">{a.acceptedMethods.map((m) => methodLabel[m]).join(", ")}</dd>
+          <dd className="font-semibold">{a.acceptedMethods.map((m) => methodLabel[m] ?? m).join(", ")}</dd>
           <dd className="text-xs text-slate-500">Zoiko Rooms platform fee: {formatMoney(a.terms.platformFee, currency)}</dd>
         </div>
       </dl>
@@ -103,7 +104,7 @@ export function SubletPaymentsPanel({ subletId }: { subletId: number }) {
                 <span>
                   <span className="font-semibold capitalize">{item.purpose.toLowerCase().replace(/_/g, " ")}</span>{" "}
                   {item.kind === "OBLIGATION" ? `due ${item.dueDate ? formatDate(item.dueDate) : ""}` :
-                    item.kind === "PAYMENT" ? `paid ${item.paidOn ? formatDate(item.paidOn) : ""}${item.method ? ` by ${item.method.replace(/_/g, " ").toLowerCase()}` : ""}` :
+                    item.kind === "PAYMENT" ? `paid ${item.paidOn ? formatDate(item.paidOn) : ""}${item.methodLabel || item.method ? ` by ${item.methodLabel || item.method?.replace(/_/g, " ").toLowerCase()}` : ""}` :
                       "return"}
                   {item.externalReference ? ` · ref ${item.externalReference}` : ""}
                   <span className="block text-slate-400">{item.evidence}</span>
@@ -120,7 +121,7 @@ export function SubletPaymentsPanel({ subletId }: { subletId: number }) {
         </details>
       )}
       <p className="flex items-center gap-1.5 text-[11px] text-slate-400">
-        <CheckCircle2 className="h-3 w-3" aria-hidden="true" /> Paid directly by bank transfer, UPI or cash. Zoiko Rooms does not receive or hold this money.
+        <CheckCircle2 className="h-3 w-3" aria-hidden="true" /> Paid directly to the payee, outside Zoiko Rooms. Zoiko Rooms does not receive or hold this money.
       </p>
     </div>
   );

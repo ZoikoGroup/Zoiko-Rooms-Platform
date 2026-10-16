@@ -35,7 +35,7 @@ class DisputeExternalProceedingRead(CamelModel):
     decision_date: date | None
     outcome_evidence_id: int | None
     outcome_summary: str
-    filed_by_admin_id: int
+    filed_by_admin_id: int | None = None
     decided_by_admin_id: int | None
     claim_ids: list[int] = []
     created_at: datetime

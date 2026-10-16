@@ -37,6 +37,22 @@ def _never_raises(fn):
     return wrapper
 
 
+def _recipient_zone(db: Session, recipient_key: str):
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    if recipient_key.startswith("user:"):
+        from app.crud.user_settings import get_preferences
+        from app.models.user_account import UserAccount
+
+        user = db.get(UserAccount, int(recipient_key.split(":", 1)[1]))
+        if user is not None:
+            try:
+                return ZoneInfo(get_preferences(db, user).get("timeZone") or "UTC")
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
+    return timezone.utc
+
+
 def _is_suppressed_by_preference(db: Session, recipient_key: str, *, category: str, priority: str) -> bool:
     """Section 11 gap: a hard category opt-out always suppresses (never
     overridden by priority -- an explicit "don't notify me about X" choice);
@@ -50,7 +66,10 @@ def _is_suppressed_by_preference(db: Session, recipient_key: str, *, category: s
     if category in pref.opted_out_categories:
         return True
     if pref.quiet_hours_enabled and priority != "HIGH":
-        now_minute = datetime.now(timezone.utc).hour * 60 + datetime.now(timezone.utc).minute
+        # Quiet hours are in the user's own time zone (Settings > Preferences);
+        # admins and users without one use UTC.
+        local_now = datetime.now(timezone.utc).astimezone(_recipient_zone(db, recipient_key))
+        now_minute = local_now.hour * 60 + local_now.minute
         start, end = pref.quiet_hours_start_minute, pref.quiet_hours_end_minute
         in_window = (start <= now_minute < end) if start <= end else (now_minute >= start or now_minute < end)
         if in_window:

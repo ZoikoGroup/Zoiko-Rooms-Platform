@@ -649,6 +649,32 @@ def archive_listing(db: Session, listing: Listing) -> Listing:
     return listing
 
 
+# States a host may archive straight from. REVIEW (a decision is pending) and
+# SUSPENDED (an enforcement action the host must not be able to bury) are left
+# out, as is ARCHIVED itself.
+HOST_ARCHIVABLE_STATES = (
+    "DRAFT", "REJECTED", "CHANGES_REQUESTED", "APPROVED", "PUBLISHED", "PAUSED", "QUARANTINED", "WITHDRAWN",
+)
+
+
+def host_archive_listing(db: Session, listing: Listing) -> Listing:
+    """Host-initiated archive: withdraw-then-archive as one step, so a host can
+    retire a live, paused or never-submitted listing directly. Same
+    commitment rule as archive_listing, checked before any state change so a
+    refused archive leaves the listing exactly as it was."""
+    _guard_listing_transition(listing, "archived", HOST_ARCHIVABLE_STATES)
+    if listing.room_id is not None and _has_unresolved_commitments(db, listing.room_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This listing's room has an active offer or agreement and cannot be archived yet",
+        )
+    listing.state = "ARCHIVED"
+    listing.paused_at = None
+    db.commit()
+    db.refresh(listing)
+    return listing
+
+
 def check_publish_eligibility(db: Session, listing: Listing) -> list[str]:
     """Informational compliance signals for the admin review screen -- NOT a hard
     publish gate (see publish_listing). Returns a list of human-readable warnings;

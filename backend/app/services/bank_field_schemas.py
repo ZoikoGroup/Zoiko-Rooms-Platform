@@ -53,6 +53,9 @@ _IN_IFSC = re.compile(r"^[A-Za-z]{4}0[A-Za-z0-9]{6}$")
 _IN_ACCOUNT_NUMBER = re.compile(r"^\d{9,18}$")
 # A UPI ID (virtual payment address): handle@provider, e.g. name@okhdfcbank.
 _UPI_ID = re.compile(r"^[A-Za-z0-9.\-_]{2,256}@[A-Za-z][A-Za-z0-9]{1,63}$")
+# A rail alias (PayID, Pix key, PayNow/DuitNow/PromptPay ID, Interac email,
+# ...) or a wallet / mobile-money handle (email, phone or username).
+_PAYMENT_ALIAS = re.compile(r"^.{3,128}$")
 _GENERIC_IDENTIFIER = re.compile(r"^.{4,64}$")
 
 _GB_SCHEMA = BankFieldSchema(
@@ -84,6 +87,25 @@ UPI_SCHEMA = BankFieldSchema(
     fields=(BankField("upi_id", "UPI ID", _UPI_ID, "e.g. name@okhdfcbank"),),
     primary_field_key="upi_id",
 )
+INSTANT_ALIAS_SCHEMA = BankFieldSchema(
+    fields=(BankField(
+        "payment_alias", "Payment ID / alias", _PAYMENT_ALIAS,
+        "e.g. PayID, Pix key, PayNow ID, or the phone/email registered for instant payments",
+    ),),
+    primary_field_key="payment_alias",
+)
+WALLET_HANDLE_SCHEMA = BankFieldSchema(
+    fields=(BankField(
+        "account_handle", "Wallet / app account", _PAYMENT_ALIAS, "The email, phone number or username to pay",
+    ),),
+    primary_field_key="account_handle",
+)
+MOBILE_MONEY_SCHEMA = BankFieldSchema(
+    fields=(BankField(
+        "account_handle", "Mobile money number / account", _PAYMENT_ALIAS, "The number registered with the service",
+    ),),
+    primary_field_key="account_handle",
+)
 # Cash is paid in person -- there are no account details to collect; the
 # host describes where/when in the instruction's additional_instructions.
 CASH_SCHEMA = BankFieldSchema(fields=(), primary_field_key="")
@@ -108,15 +130,23 @@ BANK_FIELD_SCHEMAS: dict[str, BankFieldSchema] = {
 }
 
 
-def resolve_bank_field_schema(country_code: str, method: str = "BANK_TRANSFER") -> BankFieldSchema:
+def resolve_bank_field_schema(country_code: str, method: str = "BANK_TRANSFER", subtype: str = "") -> BankFieldSchema:
     """Country-specific structured fields (sort code, IBAN, routing number)
     only ever make sense for BANK_TRANSFER -- a CASH/CARD/OTHER instruction
     has no bank routing details at all, forcing a UK sort code onto a cash
     payment would be nonsensical, not just unhelpful. Every non-bank-
     transfer method always gets the generic single-field fallback,
     regardless of country_code."""
-    if method == "UPI":
+    # ZR-PAY-METHODS-GLOBAL-001: methods are canonical categories; UPI is the
+    # INSTANT_BANK_PAYMENT rail (the bare "UPI" value is the legacy form).
+    if method == "UPI" or (method == "INSTANT_BANK_PAYMENT" and subtype == "UPI"):
         return UPI_SCHEMA
+    if method == "INSTANT_BANK_PAYMENT":
+        return INSTANT_ALIAS_SCHEMA
+    if method == "DIGITAL_WALLET_P2P":
+        return WALLET_HANDLE_SCHEMA
+    if method == "MOBILE_MONEY":
+        return MOBILE_MONEY_SCHEMA
     if method == "CASH":
         return CASH_SCHEMA
     if method != "BANK_TRANSFER":
@@ -124,12 +154,14 @@ def resolve_bank_field_schema(country_code: str, method: str = "BANK_TRANSFER") 
     return BANK_FIELD_SCHEMAS.get(country_code.strip().upper(), _FALLBACK_SCHEMA)
 
 
-def validate_bank_details(country_code: str, bank_details: dict[str, str], method: str = "BANK_TRANSFER") -> None:
+def validate_bank_details(
+    country_code: str, bank_details: dict[str, str], method: str = "BANK_TRANSFER", subtype: str = "",
+) -> None:
     """Raises ValueError (caller converts to HTTPException 400) on a missing
     or malformed field. Extra keys not in the schema are ignored rather
     than rejected -- lets the frontend submit a superset without this
     validator needing to change in lockstep."""
-    schema = resolve_bank_field_schema(country_code, method)
+    schema = resolve_bank_field_schema(country_code, method, subtype)
     for field in schema.fields:
         value = (bank_details.get(field.key) or "").strip()
         if not value:

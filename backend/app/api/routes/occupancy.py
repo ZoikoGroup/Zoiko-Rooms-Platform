@@ -30,12 +30,7 @@ from app.schemas.activation_gate import (
     HandoverEventRead, OccupancyTimelineRead,
 )
 from app.schemas.finance import ObligationRead
-from app.schemas.habitability import (
-    HabitabilityCreditApply,
-    HabitabilityIncidentCreate,
-    HabitabilityIncidentRead,
-    HabitabilityIncidentResolve,
-)
+from app.schemas.habitability import HabitabilityIncidentCreate, HabitabilityIncidentRead
 from app.schemas.occupancy import (
     ConditionReportItemRead,
     OccupancyCoTenantCreate,
@@ -55,16 +50,12 @@ from app.schemas.leasing import (
 )
 from app.schemas.sublet_document import SubletDocumentRead
 from app.schemas.termination import (
-    AdjudicatedEffectiveDateSet,
     MitigationRecordCreate,
     MitigationRecordRead,
     RefundEntitlementRead,
     TerminationCaseCreate,
-    TerminationCaseDecision,
     TerminationCaseRead,
-    TerminationCaseTribunalLiability,
     TerminationDecisionRead,
-    TerminationNoticeServiceRecord,
 )
 
 router = APIRouter(prefix="/api/occupancy", tags=["occupancy"], dependencies=[Depends(get_current_admin)])
@@ -425,97 +416,6 @@ def decline_mutual_surrender(
     return updated
 
 
-@router.post("/termination-cases/{case_id}/decision", response_model=TerminationCaseRead, dependencies=[Depends(require_super_admin)])
-def post_decide_termination_case(
-    case_id: int,
-    payload: TerminationCaseDecision,
-    request: Request,
-    admin: AdminUser = Depends(require_super_admin),
-    db: Session = Depends(get_db),
-):
-    """ZR-ENG-CLR-006 Section 20.1: the only way a PENDING_REVIEW case (a
-    cause this build can't auto-resolve -- AC-35) moves forward."""
-    case = termination_crud.get_termination_case_or_404(db, case_id)
-    updated = termination_crud.decide_termination_case(db, case, admin, payload)
-    # AC-29: a Super Admin's decide/reject reason, in the same audit trail
-    # every other privileged override in this build already uses.
-    log_audit_event(
-        db, admin, "termination_case.decision", "termination_case", str(case_id), get_correlation_id(request),
-        reason=payload.reason, after_state=updated.status,
-    )
-    db.commit()
-    return updated
-
-
-@router.post(
-    "/termination-cases/{case_id}/tribunal-liability", response_model=TerminationCaseRead,
-    dependencies=[Depends(require_super_admin)],
-)
-def post_set_tribunal_liability(
-    case_id: int,
-    payload: TerminationCaseTribunalLiability,
-    request: Request,
-    admin: AdminUser = Depends(require_super_admin),
-    db: Session = Depends(get_db),
-):
-    """ZR-ENG-CLR-006 Section 11.1 TRIBUNAL_OR_COURT_DETERMINED: sets the
-    provisional liability amount; recalculate the refund entitlement
-    afterward (a new version -- AC-24) to actually apply it."""
-    case = termination_crud.get_termination_case_or_404(db, case_id)
-    updated = termination_crud.set_tribunal_liability(db, case, admin, payload)
-    log_audit_event(
-        db, admin, "termination_case.tribunal_liability", "termination_case", str(case_id), get_correlation_id(request),
-        reason=payload.reason,
-    )
-    db.commit()
-    return updated
-
-
-@router.post("/termination-cases/{case_id}/notice-service", response_model=TerminationCaseRead)
-def post_record_notice_service(
-    case_id: int,
-    payload: TerminationNoticeServiceRecord,
-    request: Request,
-    admin: AdminUser = Depends(get_current_admin),
-    db: Session = Depends(get_db),
-):
-    """Section 11 gap: records real-world delivery proof for a non-PORTAL
-    notice_method -- see models/termination_case.py's own field docstring
-    for why this build can't confirm it automatically."""
-    case = termination_crud.get_termination_case_or_404(db, case_id)
-    updated = termination_crud.record_notice_service(db, case, admin, payload)
-    log_audit_event(
-        db, admin, "termination_case.notice_service_recorded", "termination_case", str(case_id), get_correlation_id(request),
-        reason=payload.proof_ref,
-    )
-    db.commit()
-    return updated
-
-
-@router.post(
-    "/termination-cases/{case_id}/adjudicated-effective-date", response_model=TerminationCaseRead,
-    dependencies=[Depends(require_super_admin)],
-)
-def post_set_adjudicated_effective_date(
-    case_id: int,
-    payload: AdjudicatedEffectiveDateSet,
-    request: Request,
-    admin: AdminUser = Depends(require_super_admin),
-    db: Session = Depends(get_db),
-):
-    """ZR-ENG-CLR-006 Section 10 adjudicated_effective_date/Section 20.1:
-    a court/tribunal/authority decision, entered by a Super Admin, that
-    takes precedence over whatever date this build already resolved."""
-    case = termination_crud.get_termination_case_or_404(db, case_id)
-    updated = termination_crud.set_adjudicated_effective_date(db, case, admin, payload)
-    log_audit_event(
-        db, admin, "termination_case.adjudicated_effective_date", "termination_case", str(case_id), get_correlation_id(request),
-        reason=payload.reason,
-    )
-    db.commit()
-    return updated
-
-
 @router.post("/termination-cases/{case_id}/mitigation", response_model=MitigationRecordRead, status_code=status.HTTP_201_CREATED)
 def post_record_mitigation(
     case_id: int,
@@ -759,33 +659,6 @@ def list_habitability_incidents(admin: AdminUser = Depends(get_current_admin), d
 def list_occupancy_habitability_incidents(occupancy_id: int, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
     occupancy = crud.get_occupancy_or_404(db, occupancy_id)
     return habitability_crud.list_habitability_incidents_for_occupancy(db, occupancy)
-
-
-@router.post("/habitability-incidents/{incident_id}/resolve", response_model=HabitabilityIncidentRead)
-def resolve_habitability_incident(
-    incident_id: int,
-    payload: HabitabilityIncidentResolve = HabitabilityIncidentResolve(),
-    admin: AdminUser = Depends(get_current_admin),
-    db: Session = Depends(get_db),
-):
-    """ZR-ENG-CLR-006 Section 9.1: 'Property reopens only after habitability/
-    compliance clearance.' Restores Room.status to active only when no other
-    open H2/H3 incident remains for the room."""
-    incident = habitability_crud.get_habitability_incident_or_404(db, incident_id)
-    return habitability_crud.resolve_habitability_incident(db, incident, admin, payload)
-
-
-@router.post("/habitability-incidents/{incident_id}/apply-credit", response_model=HabitabilityIncidentRead)
-def apply_habitability_credit(
-    incident_id: int,
-    payload: HabitabilityCreditApply,
-    admin: AdminUser = Depends(get_current_admin),
-    db: Session = Depends(get_db),
-):
-    """ZR-ENG-CLR-006 Section 9.1 H1: 'possible rent adjustment/credit' --
-    an admin-applied amount, never a computed abatement formula."""
-    incident = habitability_crud.get_habitability_incident_or_404(db, incident_id)
-    return habitability_crud.apply_habitability_credit(db, incident, admin, payload)
 
 
 @router.post(

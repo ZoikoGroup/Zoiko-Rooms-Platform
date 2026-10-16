@@ -13,7 +13,7 @@ policy_snapshot only ever captures the one dimension this build resolves
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Numeric, String
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -166,10 +166,18 @@ SENSITIVE_CAUSE_CODES = ("RENTER_STATUTORY_RIGHT",)
 # with the date and reason they set -- AC-29) or REJECTED_PATHWAY (declined,
 # with a reason -- the pathway itself, e.g. an alleged statutory right, was
 # determined not to apply).
+# AWAITING_RESPONSE / CONTESTED replace manual review for every ground the
+# platform can't date on its own (and for any joint tenancy): the other
+# side(s) accept, counter or contest by a deadline; silence counts as
+# acceptance for a ground (not for a mutual surrender); a contested case is
+# settled by an outside order (court/tribunal) either party records.
+# PENDING_REVIEW remains only for cases opened before this existed.
 TERMINATION_CASE_STATUSES = (
     "OPENED", "SURRENDER_PROPOSED", "SURRENDER_DECLINED", "PENDING_REVIEW", "REJECTED_PATHWAY",
-    "EFFECTIVE_DATE_SET", "TERMINATED", "WITHDRAWN",
+    "EFFECTIVE_DATE_SET", "TERMINATED", "WITHDRAWN", "AWAITING_RESPONSE", "CONTESTED",
 )
+TERMINATION_RESPONSES = ("ACCEPT", "COUNTER", "CONTEST")
+EXTERNAL_DECISION_OUTCOMES = ("ENDS_ON_DATE", "TENANCY_CONTINUES")
 
 
 class TerminationCase(Base):
@@ -186,6 +194,9 @@ class TerminationCase(Base):
     agreement_id: Mapped[int] = mapped_column(ForeignKey("agreements.id", ondelete="CASCADE"), nullable=False)
     initiator_guest_id: Mapped[str | None] = mapped_column(ForeignKey("guests.id", ondelete="SET NULL"), nullable=True)
     initiator_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    # A host-initiated case opened by the self-service host rather than an
+    # admin acting for the provider. At most one initiator column is set.
+    initiator_host_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
     cause_code: Mapped[str] = mapped_column(String(40), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="OPENED")
     notes: Mapped[str] = mapped_column(String(2000), default="")
@@ -228,6 +239,12 @@ class TerminationCase(Base):
     # build.
     notice_service_proof_ref: Mapped[str] = mapped_column(String(500), default="")
     notice_service_recorded_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    # Off-portal delivery proof is attached by whoever served the notice
+    # (the host or the renter), and the other side acknowledges receipt --
+    # no admin step. The portal copy is always delivered at submission, so
+    # notice_served_at is set then for every method.
+    notice_service_recorded_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
+    notice_acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # ZR-ENG-CLR-006 AC-02/Section 6's own CONTROL: "A refund calculation must
     # always be reproducible from the policy_snapshot_id, not from whatever
     # policy happens to be current when an auditor later opens the case."
@@ -259,10 +276,34 @@ class TerminationCase(Base):
     # above).
     adjudicated_effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     adjudicated_effective_date_reason: Mapped[str] = mapped_column(String(2000), default="")
+    # --- Party response rounds (AWAITING_RESPONSE) ---
+    # Who made the current proposal: "HOST", or the guest id of a tenant.
+    # Everyone else on the tenancy (host + every tenant) must respond.
+    proposer: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    response_round: Mapped[int] = mapped_column(Integer, default=1)
+    response_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # True for a ground (no reply by the deadline = accepted); False for a
+    # mutual surrender, which needs everyone's actual agreement.
+    deemed_on_silence: Mapped[bool] = mapped_column(Boolean, default=True)
+    external_outcome: Mapped[str] = mapped_column(String(30), default="")
+    external_order_ref: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     occupancy: Mapped["Occupancy"] = relationship()
     agreement: Mapped["Agreement"] = relationship()
+    responses: Mapped[list["TerminationCaseResponse"]] = relationship(
+        back_populates="termination_case", cascade="all, delete-orphan", order_by="TerminationCaseResponse.id",
+    )
+
+    @property
+    def pending_responders(self) -> list[str]:
+        """Who still has to answer the current proposal (read schemas)."""
+        from sqlalchemy.orm import object_session
+
+        from app.crud.termination_responses import pending_responders
+
+        db = object_session(self)
+        return pending_responders(db, self) if db is not None else []
     mitigation_records: Mapped[list["MitigationRecord"]] = relationship(back_populates="termination_case")
     decisions: Mapped[list["TerminationDecision"]] = relationship(
         back_populates="termination_case", order_by="TerminationDecision.decision_at",
@@ -336,8 +377,31 @@ class TerminationDecision(Base):
     decision_basis: Mapped[str] = mapped_column(String(40), nullable=False)
     authority: Mapped[str] = mapped_column(String(20), nullable=False)
     approved_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
+    approved_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
     decision_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     external_order_ref: Mapped[str] = mapped_column(String(100), default="")
     reason: Mapped[str] = mapped_column(String(500), default="")
 
     termination_case: Mapped["TerminationCase"] = relationship(back_populates="decisions")
+
+
+class TerminationCaseResponse(Base):
+    """One party's answer in one response round of a termination case:
+    ACCEPT the proposed date, COUNTER with another date (which starts a new
+    round), or CONTEST. responder is "HOST" or a tenant's guest id."""
+
+    __tablename__ = "termination_case_responses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    termination_case_id: Mapped[int] = mapped_column(
+        ForeignKey("termination_cases.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    response_round: Mapped[int] = mapped_column(Integer, nullable=False)
+    responder: Mapped[str] = mapped_column(String(20), nullable=False)
+    responder_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True)
+    response: Mapped[str] = mapped_column(String(10), nullable=False)
+    proposed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    note: Mapped[str] = mapped_column(String(2000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    termination_case: Mapped[TerminationCase] = relationship(back_populates="responses")

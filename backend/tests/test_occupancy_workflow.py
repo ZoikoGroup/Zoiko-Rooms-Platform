@@ -543,18 +543,29 @@ class TestPhase2BActivationGate:
         assert "RENTER_IDENTITY_VERIFICATION_REQUIRED" in r.json()["reasonCodes"]
         assert any(code.startswith("MARKETPLACE_") for code in r.json()["reasonCodes"])
 
-    def test_open_occupancy_dispute_requires_manual_review(self, client, db_session: Session):
+    def test_open_dispute_makes_move_in_wait_until_both_parties_agree_to_proceed(self, client, db_session: Session):
+        """No admin review: an open dispute holds move-in (WAITING_FOR_GATE,
+        re-checked every time) until it closes, or until host and renter
+        both agree to proceed."""
+        from app.crud.occupancy import record_handover_event
+
         agreement, _host, renter, _listing_id, admin_cookies = _build_signed_agreement(client, db_session, "gate-dispute")
         occupancy = self._record_all_handover_evidence(client, db_session, agreement, renter, admin_cookies)
-        db_session.add(DisputeCase(occupancy_id=occupancy.id, category="OTHER", status="OPEN"))
+        db_session.add(DisputeCase(occupancy_id=occupancy.id, category="OTHER", status="SUBMITTED"))
         db_session.commit()
 
         r = client.post(f"/api/occupancy/{occupancy.id}/activation-gate/evaluate", cookies=admin_cookies)
-
         assert r.status_code == 200, r.text
-        assert r.json()["outcome"] == "MANUAL_REVIEW"
-        assert "OPEN_OCCUPANCY_DISPUTE_REQUIRES_REVIEW" in r.json()["reasonCodes"]
-        assert occupancy.status == "PENDING_MOVE_IN"
+        assert r.json()["outcome"] == "WAITING_FOR_GATE"
+        assert "OPEN_OCCUPANCY_DISPUTE" in r.json()["reasonCodes"]
+
+        r = client.post(f"/api/users/rentals/occupancies/{occupancy.id}/proceed-despite-dispute", cookies=auth_user_cookie(renter))
+        assert r.status_code == 200, r.text
+        record_handover_event(db_session, occupancy, event_type="HOST_PROCEED_DESPITE_DISPUTE", actor_kind="provider_user")
+        db_session.commit()
+
+        r = client.post(f"/api/occupancy/{occupancy.id}/activation-gate/evaluate", cookies=admin_cookies)
+        assert "OPEN_OCCUPANCY_DISPUTE" not in r.json()["reasonCodes"]
 
 
 class TestEndOccupancy:

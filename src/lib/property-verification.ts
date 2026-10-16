@@ -158,13 +158,6 @@ export function confirmPropertyLocation(session: PropertyVerificationSession,
   });
 }
 
-export function answerPropertyDuplicate(session: PropertyVerificationSession,
-                                        answer: "NOT_SAME_PROPERTY" | "SAME_PROPERTY", note: string) {
-  return apiClientFetch<PropertyVerificationSession>(`${BASE}/${session.id}/duplicate-answer`, {
-    method: "POST", headers: versioned(session), body: JSON.stringify({ answer, note }),
-  });
-}
-
 export function setPropertyUnit(session: PropertyVerificationSession,
                                 body: { propertyKind: PropertyKind; buildingName: string; unit: string; floor: string }) {
   return apiClientFetch<PropertyVerificationSession>(`${BASE}/${session.id}/unit`, {

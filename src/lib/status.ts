@@ -175,6 +175,7 @@ export const depositStatusTone = {
   RELEASED: "success",
   FORFEITED: "danger",
   PARTIALLY_RELEASED: "warning",
+  FROZEN: "warning",
 } as const;
 
 export const depositStatusLabel = {
@@ -182,6 +183,7 @@ export const depositStatusLabel = {
   RELEASED: "Released",
   FORFEITED: "Forfeited",
   PARTIALLY_RELEASED: "Partially released",
+  FROZEN: "On hold (claim open)",
 } as const;
 
 export const payoutStatusTone = {
@@ -266,6 +268,9 @@ export const subletRequestStatusTone = {
   expired: "neutral",
   superseded: "neutral",
   cancelled_by_authority: "danger",
+  awaiting_co_tenant: "warning",
+  declined_by_co_tenant: "neutral",
+  ended: "neutral",
 } as const;
 
 export const subletRequestStatusLabel = {
@@ -282,6 +287,9 @@ export const subletRequestStatusLabel = {
   expired: "Expired",
   superseded: "Superseded",
   cancelled_by_authority: "Cancelled by Authority",
+  awaiting_co_tenant: "Awaiting Co-tenant",
+  declined_by_co_tenant: "Declined by Co-tenant",
+  ended: "Ended",
 } as const;
 
 // ZR-SUB-003 Section 5.3 FAIRNESS CONTROL: a decline must carry a
@@ -301,7 +309,7 @@ export const subletArrangementTypeLabel = {
   ASSIGNMENT_FULL: "Full handover — I move out, they take over completely",
   REPLACEMENT_OCCUPANT: "Replace me as occupant — I move out, they take over completely",
   SUBLEASE_PARTIAL: "Sublease part of the room — I stay on, they get their own agreement",
-  ADD_CO_TENANT: "Add a co-tenant — we'd both hold our own tenancy",
+  ADD_CO_TENANT: "Add a co-tenant — we share the room, they pay me and I stay the tenant",
   LODGER_OR_LICENSEE: "Take on a lodger/licensee — they live here without full tenancy rights",
   ADDITIONAL_OCCUPANT: "Just let them live here — no separate tenancy or agreement",
 } as const;
@@ -311,7 +319,7 @@ export const subletArrangementTypeAdminLabel = {
   ASSIGNMENT_FULL: "Full handover (tenant moves out, replacement takes over)",
   REPLACEMENT_OCCUPANT: "Occupant replacement (tenant moves out, replacement takes over)",
   SUBLEASE_PARTIAL: "Partial sublease (tenant stays, new occupant gets own agreement)",
-  ADD_CO_TENANT: "Add co-tenant (both hold their own tenancy)",
+  ADD_CO_TENANT: "Add co-tenant (shares the room, pays the renter; renter stays the tenant)",
   LODGER_OR_LICENSEE: "Lodger/licensee (no full tenancy rights)",
   ADDITIONAL_OCCUPANT: "Additional occupant only (no tenancy or agreement)",
 } as const;
@@ -613,10 +621,12 @@ export const rentalPaymentStatusLabel = {
 
 export const rentalPaymentInstructionStatusTone = {
   PENDING_VERIFICATION: "warning",
+  COOLING_OFF: "warning",
   PENDING_REVIEW: "warning",
   ACTIVE: "success",
   SUPERSEDED: "neutral",
   REJECTED: "danger",
+  CANCELLED: "neutral",
 } as const;
 
 // -- Section 10 gap: ZR-ENG-CLR-010 general-purpose Dispute Resolution

@@ -44,7 +44,7 @@ export function DirectPaymentNotice({ compact = false }: { compact?: boolean }) 
     <span className={`text-xs text-slate-500 dark:text-slate-400 ${compact ? "" : "block"}`}>
       Your rent is paid directly to your host/property owner using the payment method agreed with them —{" "}
       <Link href="/account/rent-payments" className="font-semibold text-primary-700 dark:text-primary-300">
-        view payment instructions
+        view payment method
       </Link>
       . Zoiko does not collect or process your rent payment.
     </span>

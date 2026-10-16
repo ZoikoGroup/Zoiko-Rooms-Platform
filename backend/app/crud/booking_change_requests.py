@@ -28,7 +28,8 @@ from app.crud.audit import log_audit_event
 from app.crud.guest import get_guest_for_user
 from app.crud.market_policy import resolve_market_policy
 from app.crud.occupancy import _add_months
-from app.crud.party import assert_provider_access, party_id_for_listing
+from app.crud.party import assert_provider_access, assert_provider_access_any, party_id_for_listing
+from app.crud.provider_actor import ProviderActor, admin_id, admin_or_none, audit_reason, user_id
 from app.models.admin_user import AdminUser
 from app.models.booking_change_request import BookingChangeRequest
 from app.models.leasing import Agreement, Offer
@@ -64,6 +65,7 @@ def to_booking_change_request_read(bcr: BookingChangeRequest) -> BookingChangeRe
         reason=bcr.reason,
         decision_note=bcr.decision_note,
         decided_by_admin_id=bcr.decided_by_admin_id,
+        decided_by_user_id=bcr.decided_by_user_id,
         decided_at=bcr.decided_at,
         resulting_amendment_id=bcr.resulting_amendment_id,
         created_at=bcr.created_at,
@@ -98,7 +100,7 @@ def _change_label(change_type: str) -> str:
 
 
 def _record_terminal_failure(
-    db: Session, bcr: BookingChangeRequest, to_status: str, admin: AdminUser | None, note: str,
+    db: Session, bcr: BookingChangeRequest, to_status: str, admin: ProviderActor | None, note: str,
 ) -> None:
     """Shared CONFLICT/FAILED landing for a granted-but-then-failed approval:
     records the reason on the BCR, logs it to the same AuditEvent trail every
@@ -115,8 +117,9 @@ def _record_terminal_failure(
     db.refresh(bcr)
 
     log_audit_event(
-        db, admin, f"booking_change.{to_status.lower()}", "booking_change_request", str(bcr.id),
-        reason=note, before_state="AWAITING_HOST", after_state=to_status,
+        db, admin_or_none(admin) if admin is not None else None, f"booking_change.{to_status.lower()}",
+        "booking_change_request", str(bcr.id),
+        reason=audit_reason(admin, note) if admin is not None else note, before_state="AWAITING_HOST", after_state=to_status,
     )
     change_label = _change_label(bcr.change_type)
     notif_crud.notify_user_by_guest(
@@ -648,7 +651,7 @@ def request_deposit_change(
     return bcr
 
 
-def approve_deposit_change(db: Session, bcr: BookingChangeRequest, admin: AdminUser, decision_note: str = "") -> BookingChangeRequest:
+def approve_deposit_change(db: Session, bcr: BookingChangeRequest, admin: ProviderActor, decision_note: str = "") -> BookingChangeRequest:
     """Only ever reached via approve_change_request's dispatch, which has
     already done the AWAITING_HOST/proposal-hash/access checks -- same
     convention as _approve_premises_change. Distinct from the amendment-
@@ -657,7 +660,8 @@ def approve_deposit_change(db: Session, bcr: BookingChangeRequest, admin: AdminU
     money), so this jumps straight to EFFECTIVE and tells the admin to go
     execute the real change through the Deposit Records screen."""
     transition(bcr, "EFFECTIVE")
-    bcr.decided_by_admin_id = admin.id
+    bcr.decided_by_admin_id = admin_id(admin)
+    bcr.decided_by_user_id = user_id(admin)
     bcr.decided_at = datetime.now(timezone.utc)
     bcr.decision_note = decision_note
     db.commit()
@@ -815,7 +819,7 @@ def _complete_premises_change_if_applicable(db: Session, new_agreement: Agreemen
     db.commit()
 
 
-def _approve_premises_change(db: Session, bcr: BookingChangeRequest, admin: AdminUser, decision_note: str) -> BookingChangeRequest:
+def _approve_premises_change(db: Session, bcr: BookingChangeRequest, admin: ProviderActor, decision_note: str) -> BookingChangeRequest:
     """No amendment engine involved -- a different room/property is a
     different subject matter (Section 14), so this opens a genuinely fresh
     Application (auto-approved, since the admin decision already happened
@@ -826,7 +830,7 @@ def _approve_premises_change(db: Session, bcr: BookingChangeRequest, admin: Admi
     _complete_premises_change_if_applicable) -- AWAITING_AGREEMENT_ACTION here
     only means 'the host agreed to let this renter apply', not that anything
     has moved."""
-    from app.crud.leasing import decide_application, submit_application
+    from app.crud.leasing import decide_application, decide_application_as_host, submit_application
     from app.models.listing import Listing
     from app.schemas.leasing import ApplicationCreate, ApplicationDecide
 
@@ -851,10 +855,14 @@ def _approve_premises_change(db: Session, bcr: BookingChangeRequest, admin: Admi
             listing_id=target_listing.id, guest_id=bcr.requested_by_guest_id,
             message=f"Room/property change migration from listing {agreement.offer.listing_id} (request #{bcr.id})",
         ))
-        decide_application(db, application, admin, ApplicationDecide(
+        migration_decision = ApplicationDecide(
             decision="APPROVED", reason_code="PREMISES_CHANGE_MIGRATION",
             note=decision_note or "Pre-approved: renter's existing tenancy is being migrated to this listing.",
-        ))
+        )
+        if isinstance(admin, UserAccount):
+            decide_application_as_host(db, application, admin, migration_decision)
+        else:
+            decide_application(db, application, admin, migration_decision)
     except HTTPException as exc:
         # Section 24 edge case: e.g. the target listing became ineligible
         # between the renter's request and this approval.
@@ -865,7 +873,8 @@ def _approve_premises_change(db: Session, bcr: BookingChangeRequest, admin: Admi
         raise
 
     transition(bcr, "AWAITING_AGREEMENT_ACTION")
-    bcr.decided_by_admin_id = admin.id
+    bcr.decided_by_admin_id = admin_id(admin)
+    bcr.decided_by_user_id = user_id(admin)
     bcr.decided_at = datetime.now(timezone.utc)
     bcr.decision_note = decision_note
     bcr.resulting_application_id = application.id
@@ -916,7 +925,7 @@ def _proposed_terms_and_default_reason(bcr: BookingChangeRequest) -> tuple[dict,
 
 
 def _run_amendment_engine_or_record_failure(
-    db: Session, bcr: BookingChangeRequest, admin: AdminUser, proposed_terms: dict, default_reason: str,
+    db: Session, bcr: BookingChangeRequest, admin: ProviderActor, proposed_terms: dict, default_reason: str,
 ):
     """Runs the same 4-call amendment-engine sequence used by every
     amendment-path change type; on failure records CONFLICT/FAILED via
@@ -935,9 +944,9 @@ def _run_amendment_engine_or_record_failure(
         raise
 
 
-def approve_change_request(db: Session, bcr: BookingChangeRequest, admin: AdminUser, decision_note: str = "") -> BookingChangeRequest:
+def approve_change_request(db: Session, bcr: BookingChangeRequest, admin: ProviderActor, decision_note: str = "") -> BookingChangeRequest:
     agreement = bcr.agreement
-    assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(agreement.offer.listing))
     bcr = _expire_if_overdue(db, bcr)
     if bcr.status != "AWAITING_HOST":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Only an AWAITING_HOST request can be approved (current status: {bcr.status})")
@@ -954,7 +963,8 @@ def approve_change_request(db: Session, bcr: BookingChangeRequest, admin: AdminU
     amendment = _run_amendment_engine_or_record_failure(db, bcr, admin, proposed_terms, default_reason)
 
     transition(bcr, "AWAITING_AGREEMENT_ACTION")
-    bcr.decided_by_admin_id = admin.id
+    bcr.decided_by_admin_id = admin_id(admin)
+    bcr.decided_by_user_id = user_id(admin)
     bcr.decided_at = datetime.now(timezone.utc)
     bcr.decision_note = decision_note
     bcr.resulting_amendment_id = amendment.id
@@ -978,15 +988,16 @@ def approve_change_request(db: Session, bcr: BookingChangeRequest, admin: AdminU
     return bcr
 
 
-def decline_change_request(db: Session, bcr: BookingChangeRequest, admin: AdminUser, decision_note: str = "") -> BookingChangeRequest:
+def decline_change_request(db: Session, bcr: BookingChangeRequest, admin: ProviderActor, decision_note: str = "") -> BookingChangeRequest:
     agreement = bcr.agreement
-    assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(agreement.offer.listing))
     bcr = _expire_if_overdue(db, bcr)
     if bcr.status != "AWAITING_HOST":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Only an AWAITING_HOST request can be declined (current status: {bcr.status})")
 
     transition(bcr, "REJECTED")
-    bcr.decided_by_admin_id = admin.id
+    bcr.decided_by_admin_id = admin_id(admin)
+    bcr.decided_by_user_id = user_id(admin)
     bcr.decided_at = datetime.now(timezone.utc)
     bcr.decision_note = decision_note
     _release_premises_change_hold(db, bcr, reason="premises_change_request_declined")
@@ -1006,7 +1017,7 @@ def decline_change_request(db: Session, bcr: BookingChangeRequest, admin: AdminU
 
 
 def propose_alternative_terms(
-    db: Session, bcr: BookingChangeRequest, admin: AdminUser, *,
+    db: Session, bcr: BookingChangeRequest, admin: ProviderActor, *,
     proposed_start_date: date | None = None, additional_term_months: int | None = None,
     proposed_monthly_rent: float | None = None, decision_note: str = "",
 ) -> BookingChangeRequest:
@@ -1024,7 +1035,7 @@ def propose_alternative_terms(
     at AWAITING_RENTER rather than AWAITING_AGREEMENT_ACTION for the same
     reason: nothing is agreed until the renter consents to *these* terms."""
     agreement = bcr.agreement
-    assert_provider_access(db, admin, party_id_for_listing(agreement.offer.listing))
+    assert_provider_access_any(db, admin, party_id_for_listing(agreement.offer.listing))
     bcr = _expire_if_overdue(db, bcr)
     if bcr.status != "AWAITING_HOST":
         raise HTTPException(status.HTTP_409_CONFLICT, f"Only an AWAITING_HOST request can get an alternative proposal (current status: {bcr.status})")
@@ -1070,7 +1081,8 @@ def propose_alternative_terms(
 
     bcr.proposal_hash = compute_proposal_hash(bcr)
     bcr.decision_note = decision_note
-    bcr.decided_by_admin_id = admin.id
+    bcr.decided_by_admin_id = admin_id(admin)
+    bcr.decided_by_user_id = user_id(admin)
     bcr.expires_at = datetime.now(timezone.utc) + REQUEST_EXPIRY
     transition(bcr, "AWAITING_RENTER")
     db.commit()
@@ -1240,6 +1252,27 @@ def list_change_requests_for_guest(db: Session, user: UserAccount) -> list[Booki
     query = (
         select(BookingChangeRequest)
         .where(BookingChangeRequest.requested_by_guest_id == guest.id)
+        .order_by(BookingChangeRequest.created_at.desc())
+    )
+    return list(db.scalars(query))
+
+
+def list_change_requests_for_host(db: Session, user: UserAccount) -> list[BookingChangeRequest]:
+    """Change requests on agreements for rooms the host's party owns."""
+    from app.models.listing import Listing
+    from app.models.property import Property
+    from app.models.room import Room
+
+    if not user.party_id:
+        return []
+    query = (
+        select(BookingChangeRequest)
+        .join(Agreement, Agreement.id == BookingChangeRequest.agreement_id)
+        .join(Offer, Offer.id == Agreement.offer_id)
+        .join(Listing, Listing.id == Offer.listing_id)
+        .join(Room, Room.id == Listing.room_id)
+        .join(Property, Property.id == Room.property_id)
+        .where(Property.owner_party_id == user.party_id)
         .order_by(BookingChangeRequest.created_at.desc())
     )
     return list(db.scalars(query))

@@ -190,6 +190,7 @@ class TestA7ListingFeeHardGateOnPublication:
         assert r.status_code == 200, r.text
         assert r.json()["state"] == "PUBLISHED"
 
+    @pytest.mark.automatic_publication
     def test_auto_approve_and_publish_blocked_when_fee_unpaid(self, client, db_session: Session):
         """The publication.requires_approval=False auto-publish path (ZR-ENG-
         CLR-001 Section 14) must not bypass the same Listing Fee gate."""
@@ -477,8 +478,8 @@ class TestA5InstructionChangeStepUpAndRiskControls:
         # Step-up auth (the mailed code) is still required and still checked.
         confirmed = rp_crud.confirm_rental_payment_instruction(db_session, instruction, code)
         # But a step-up-verified, high-risk change does not become the
-        # active instruction on its own -- it waits for a restricted admin.
-        assert confirmed.status == "PENDING_REVIEW"
+        # active instruction straight away -- it waits out the cooling-off window.
+        assert confirmed.status == "COOLING_OFF" and confirmed.activates_at is not None
         assert rp_crud.get_active_rental_payment_instruction(db_session, recipient.id) is None
         assert confirmed.verified_at is not None
 

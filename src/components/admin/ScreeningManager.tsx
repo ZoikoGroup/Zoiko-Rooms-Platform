@@ -35,11 +35,6 @@ export function ScreeningManager() {
   const [hostPolicyCriteria, setHostPolicyCriteria] = useState("");
   const [opening, setOpening] = useState(false);
 
-  const [decideTarget, setDecideTarget] = useState<ScreeningCheck | null>(null);
-  const [decisionStatus, setDecisionStatus] = useState<"PASS" | "FAIL" | "INCONCLUSIVE">("PASS");
-  const [decisionReason, setDecisionReason] = useState("");
-  const [providerResultSummary, setProviderResultSummary] = useState("");
-  const [deciding, setDeciding] = useState(false);
 
   const [disputeTarget, setDisputeTarget] = useState<ScreeningCheck | null>(null);
   const [disputeReason, setDisputeReason] = useState("");
@@ -99,33 +94,6 @@ export function ScreeningManager() {
       showToast("Failed to open screening check");
     } finally {
       setOpening(false);
-    }
-  }
-
-  function openDecideModal(check: ScreeningCheck) {
-    setDecideTarget(check);
-    setDecisionStatus("PASS");
-    setDecisionReason("");
-    setProviderResultSummary("");
-  }
-
-  async function submitDecide() {
-    if (!decideTarget || !partyId) return;
-    setDeciding(true);
-    try {
-      await apiClientFetch(`/api/verification/screening-checks/${decideTarget.id}/decide`, {
-        method: "POST",
-        body: JSON.stringify({
-          decisionStatus, decisionReason: decisionReason.trim(), providerResultSummary: providerResultSummary.trim(),
-        }),
-      });
-      showToast("Decision recorded.");
-      setDecideTarget(null);
-      await loadForParty(partyId);
-    } catch {
-      showToast("Failed to record decision");
-    } finally {
-      setDeciding(false);
     }
   }
 
@@ -207,11 +175,6 @@ export function ScreeningManager() {
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge tone={screeningDecisionStatusTone[check.decisionStatus] ?? "neutral"}>{check.decisionStatus.replace(/_/g, " ")}</Badge>
-                  {!SCREENING_TERMINAL_STATUSES.includes(check.decisionStatus) && (
-                    <Button size="sm" variant="primary" onClick={() => openDecideModal(check)}>
-                      Decide
-                    </Button>
-                  )}
                   {SCREENING_TERMINAL_STATUSES.includes(check.decisionStatus) && (
                     <Button size="sm" variant="outline" onClick={() => openDisputeModal(check)}>
                       Dispute
@@ -280,53 +243,6 @@ export function ScreeningManager() {
         </div>
       </Modal>
 
-      <Modal open={Boolean(decideTarget)} onClose={() => setDecideTarget(null)} title="Decide screening check">
-        <div className="space-y-3.5">
-          <div>
-            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Decision</label>
-            <select
-              value={decisionStatus}
-              onChange={(e) => setDecisionStatus(e.target.value as typeof decisionStatus)}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            >
-              <option value="PASS">Pass</option>
-              <option value="FAIL">Fail</option>
-              <option value="INCONCLUSIVE">Inconclusive</option>
-            </select>
-            {decisionStatus === "FAIL" && (
-              <p className="mt-1 text-xs text-amber-600">
-                A FAIL decision automatically notifies the applicant of their dispute rights.
-              </p>
-            )}
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Provider result summary</label>
-            <input
-              value={providerResultSummary}
-              onChange={(e) => setProviderResultSummary(e.target.value)}
-              placeholder="e.g. Score: 82/100 — this is a signal, not the decision"
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold text-slate-500 dark:text-slate-400">Decision reason</label>
-            <textarea
-              value={decisionReason}
-              onChange={(e) => setDecisionReason(e.target.value)}
-              rows={2}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="ghost" onClick={() => setDecideTarget(null)}>
-              Cancel
-            </Button>
-            <Button variant="primary" loading={deciding} onClick={submitDecide}>
-              Record decision
-            </Button>
-          </div>
-        </div>
-      </Modal>
 
       <Modal open={Boolean(disputeTarget)} onClose={() => setDisputeTarget(null)} title="Record a dispute">
         <div className="space-y-3.5">

@@ -37,6 +37,9 @@ import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { ApiError } from "@/lib/api-client";
 import {
+  HabitabilityIncident,
+  HabitabilitySeverity,
+  HostRefund,
   AutopayMandate,
   BookingChangeRequest,
   ConditionRating,
@@ -85,6 +88,17 @@ import {
   lookupSubletRenter,
   previewOwnTermination,
   requestOwnTermination,
+  renterTermination,
+  listMyRefunds,
+  listMyHabitabilityIssues,
+  reportHabitabilityIssue,
+  confirmHabitabilityFixed,
+  rejectHabitabilityFix,
+  confirmRefundReceived,
+  reportRefundNotReceived,
+  renterProceedDespiteDispute,
+  acceptOwnMutualSurrender,
+  declineOwnMutualSurrender,
   submitPremisesChangeRequest,
   submitSubletRequest,
   tenantAgreementPdfUrl,
@@ -93,6 +107,7 @@ import {
 } from "@/lib/user-api";
 import { DisputeCasesSection } from "@/components/user/DisputeCasePanel";
 import { useToast } from "@/components/user/ui";
+import { DepositClaimsSection } from "@/components/user/DepositClaimsSection";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
 import { InstructionsModalView } from "@/components/user/RentalPaymentsManager";
 import { Modal } from "@/components/ui/Modal";
@@ -146,6 +161,13 @@ interface RentalCardItem {
 const ENDING_SOON_DAYS = 30;
 const PAID_OBLIGATION_STATUSES = new Set(["PAYER_RECORDED", "RECIPIENT_CONFIRMATION_PENDING", "CONFIRMED", "PARTIALLY_PAID"]);
 
+const ISSUE_SEVERITY: Record<HabitabilitySeverity, string> = {
+  H0: "Minor — annoying but livable",
+  H1: "Affects normal use",
+  H2: "Serious — part of the room unusable",
+  H3: "Unsafe or unlivable",
+};
+
 export function RentalsManager() {
   const router = useRouter();
   // Captured once per mount so render stays pure (sublet nights-remaining check).
@@ -163,6 +185,10 @@ export function RentalsManager() {
   // Dispute cases the renter is a party to -- including ones the host opened
   // (e.g. a payment the host says never arrived).
   const [disputeCases, setDisputeCases] = useState<DisputeCaseRead[]>([]);
+  const [refunds, setRefunds] = useState<HostRefund[]>([]);
+  const [issues, setIssues] = useState<HabitabilityIncident[]>([]);
+  const [issueSeverity, setIssueSeverity] = useState<HabitabilitySeverity>("H1");
+  const [issueText, setIssueText] = useState("");
   const [publicListings, setPublicListings] = useState<PublicListing[]>([]);
   const [subletRequests, setSubletRequests] = useState<SubletRequest[]>([]);
 
@@ -175,6 +201,8 @@ export function RentalsManager() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [locFilter, setLocFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("all");
+  // Captured once so the date filters below stay pure during render.
+  const [now] = useState(() => Date.now());
   const [subletFilter, setSubletFilter] = useState("all");
   const [sortFilter, setSortFilter] = useState<"action" | "start" | "end">("action");
   const [viewTab, setViewTab] = useState<"current" | "history">("current");
@@ -226,6 +254,15 @@ export function RentalsManager() {
   const [earlyEndDate, setEarlyEndDate] = useState("");
   const [earlyEndReason, setEarlyEndReason] = useState("");
   const [earlyEndSubmitting, setEarlyEndSubmitting] = useState(false);
+  // "endOfTerm" = leaving when the term ends (move-out notice);
+  // "notice" = end early with the notice the rules require;
+  // "agree" = propose a date the host (and any co-tenant) must agree to.
+  const [earlyEndPath, setEarlyEndPath] = useState<"endOfTerm" | "notice" | "agree">("notice");
+  const [caseBusy, setCaseBusy] = useState(false);
+  const [counterDate, setCounterDate] = useState("");
+  const [orderRef, setOrderRef] = useState("");
+  const [orderOutcome, setOrderOutcome] = useState<"ENDS_ON_DATE" | "TENANCY_CONTINUES">("ENDS_ON_DATE");
+  const [orderDate, setOrderDate] = useState("");
 
   // Pre-move-in Cancellation state
   const [cancelReason, setCancelReason] = useState("");
@@ -291,6 +328,7 @@ export function RentalsManager() {
       setPublicListings(publicListingsData);
       setSubletRequests(subletRequestsData);
       renterDisputes.listCases().then(setDisputeCases).catch(() => {});
+      listMyRefunds().then(setRefunds).catch(() => {});
 
       const active = occupanciesData.filter((o) => o.agreementId);
       await Promise.all(
@@ -304,7 +342,8 @@ export function RentalsManager() {
 
           try {
             const cases = await listOwnTerminationCases(occupancy.id);
-            const openCase = cases.find((c) => !["TERMINATED", "WITHDRAWN", "REJECTED_PATHWAY"].includes(c.status)) ?? cases[0];
+            const openCase =
+              cases.find((c) => !["TERMINATED", "WITHDRAWN", "REJECTED_PATHWAY", "SURRENDER_DECLINED"].includes(c.status)) ?? cases[0];
             if (openCase) {
               setTerminationCases((prev) => ({ ...prev, [occupancy.id]: openCase }));
             }
@@ -547,12 +586,12 @@ export function RentalsManager() {
       // 4. Dates dropdown
       if (dateFilter === "starts") {
         if (!x.start) return false;
-        const diffDays = (new Date(x.start).getTime() - Date.now()) / 86400000;
+        const diffDays = (new Date(x.start).getTime() - now) / 86400000;
         if (!(diffDays >= 0 && diffDays <= 30)) return false;
       }
       if (dateFilter === "ends") {
         if (!x.end) return false;
-        const diffDays = (new Date(x.end).getTime() - Date.now()) / 86400000;
+        const diffDays = (new Date(x.end).getTime() - now) / 86400000;
         if (!(diffDays >= 0 && diffDays <= 90)) return false;
       }
 
@@ -577,7 +616,7 @@ export function RentalsManager() {
       // Default: Action required first, then start date
       return (a.action ? 0 : 1) - (b.action ? 0 : 1) || (a.start || "").localeCompare(b.start || "");
     });
-  }, [viewTab, currentRentals, historyRentals, activeCard, statusFilter, locFilter, dateFilter, subletFilter, searchQuery, sortFilter]);
+  }, [viewTab, currentRentals, historyRentals, activeCard, statusFilter, locFilter, dateFilter, subletFilter, searchQuery, sortFilter, now]);
 
   const hasActiveFilters = Boolean(
     searchQuery ||
@@ -619,8 +658,9 @@ export function RentalsManager() {
 
   const openEarlyEndModal = (occ: UserOccupancy) => {
     setModalOccupancy(occ);
-    setEarlyEndDate(occ.expectedEndDate || "");
+    setEarlyEndDate("");
     setEarlyEndReason("");
+    setEarlyEndPath("notice");
     setActiveModal("early");
   };
 
@@ -691,8 +731,31 @@ export function RentalsManager() {
     if (!modalOccupancy) return;
     setEarlyEndSubmitting(true);
     try {
-      await giveMoveOutNotice(modalOccupancy.id, earlyEndReason.trim() || "Early end requested by tenant");
-      showToast("Early-end / move-out notice registered with your host.");
+      if (earlyEndPath === "endOfTerm") {
+        await giveMoveOutNotice(modalOccupancy.id, earlyEndReason.trim() || "Leaving at the end of the term");
+        showToast("Your host knows you're leaving at the end of the term.");
+      } else if (earlyEndPath === "notice") {
+        const c = await requestOwnTermination(modalOccupancy.id, {
+          causeCode: "RENTER_ORDINARY_EARLY_EXIT",
+          notes: earlyEndReason.trim(),
+        });
+        showToast(
+          c.status === "EFFECTIVE_DATE_SET" && c.effectiveTerminationDate
+            ? `Notice given. Your tenancy ends on ${c.effectiveTerminationDate}.`
+            : "Notice given. Everyone on the tenancy has been asked to confirm the date.",
+        );
+      } else {
+        if (!earlyEndDate) {
+          showToast("Pick the date you'd like to leave.", "error");
+          return;
+        }
+        await requestOwnTermination(modalOccupancy.id, {
+          causeCode: "MUTUAL_SURRENDER",
+          notes: earlyEndReason.trim(),
+          proposedEffectiveDate: earlyEndDate,
+        });
+        showToast("Date proposed. Your host has been asked to agree.");
+      }
       setActiveModal(null);
       await load();
     } catch (err) {
@@ -795,6 +858,17 @@ export function RentalsManager() {
       setCancelSubmitting(false);
     }
   };
+
+  useEffect(() => {
+    if (!selectedOccupancy) return;
+    let active = true;
+    listMyHabitabilityIssues(selectedOccupancy.id)
+      .then((list) => active && setIssues(list))
+      .catch(() => active && setIssues([]));
+    return () => {
+      active = false;
+    };
+  }, [selectedOccupancy]);
 
   const selectedItem = useMemo(() => {
     if (!selectedOccupancy) return null;
@@ -1043,7 +1117,7 @@ export function RentalsManager() {
               <label className="text-[11.5px] font-bold text-[#3A4866]">Sort</label>
               <select
                 value={sortFilter}
-                onChange={(e) => setSortFilter(e.target.value as any)}
+                onChange={(e) => setSortFilter(e.target.value as typeof sortFilter)}
                 className="h-[46px] px-3 rounded-2xl border border-[#D5DDEA] bg-white text-xs font-semibold text-[#0B1B3F] outline-none focus:border-[#0E2F73]"
               >
                 <option value="action">Action required first</option>
@@ -1524,6 +1598,33 @@ export function RentalsManager() {
                 {/* TAB: Move-in */}
                 {drawerTab === "movein" && (
                   <div className="space-y-4">
+                    {selectedItem.occupancy.status === "PENDING_MOVE_IN" &&
+                      disputeCases.some((c) => c.occupancyId === selectedItem.occupancy.id && c.status !== "RESOLVED" && c.status !== "CLOSED") && (
+                        <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3.5 text-xs text-amber-900">
+                          <p>
+                            A dispute on this rental is open, so move-in waits until it&apos;s resolved — or goes ahead now if you and
+                            your host both agree.
+                          </p>
+                          <button
+                            type="button"
+                            disabled={caseBusy}
+                            onClick={async () => {
+                              setCaseBusy(true);
+                              try {
+                                await renterProceedDespiteDispute(selectedItem.occupancy.id);
+                                showToast("Recorded. Move-in can go ahead once your host agrees too.");
+                              } catch (err) {
+                                showToast(errorMessage(err, "Could not record your agreement."), "error");
+                              } finally {
+                                setCaseBusy(false);
+                              }
+                            }}
+                            className="px-3 py-1.5 rounded-lg border border-amber-400 text-xs font-bold disabled:opacity-50"
+                          >
+                            Agree to move in anyway
+                          </button>
+                        </div>
+                      )}
                     <div className="p-3.5 rounded-xl bg-[#EEF3FF] text-[#1D3F8F] text-xs font-medium flex items-start gap-2.5">
                       <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
                       <span>
@@ -1737,6 +1838,67 @@ export function RentalsManager() {
                 {/* TAB: Payments */}
                 {drawerTab === "payments" && (
                   <div className="space-y-4">
+                    {refunds
+                      .filter((rf) => rf.occupancyId === selectedItem.occupancy.id && rf.status !== "CONFIRMED")
+                      .map((rf) => (
+                        <div key={rf.id} className="space-y-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-xs text-emerald-950">
+                          <strong className="block text-sm">
+                            Your host owes you {rf.currency} {rf.amount.toFixed(2)}
+                          </strong>
+                          <p>
+                            {rf.reason}. Due by {new Date(rf.dueBy).toLocaleDateString()}
+                            {rf.status === "OVERDUE" ? " — overdue." : "."}
+                          </p>
+                          {rf.status === "MARKED_PAID" && (
+                            <>
+                              <p>
+                                Your host says it&apos;s paid{rf.paymentReference ? ` (ref ${rf.paymentReference})` : ""}. If you
+                                don&apos;t answer within a week, it&apos;s treated as received.
+                              </p>
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  disabled={caseBusy}
+                                  onClick={async () => {
+                                    setCaseBusy(true);
+                                    try {
+                                      const updated = await confirmRefundReceived(rf.id);
+                                      setRefunds((prev) => prev.map((x) => (x.id === rf.id ? updated : x)));
+                                      showToast("Thanks — refund confirmed.");
+                                    } catch (err) {
+                                      showToast(errorMessage(err, "Could not confirm."), "error");
+                                    } finally {
+                                      setCaseBusy(false);
+                                    }
+                                  }}
+                                  className="px-3 py-1.5 rounded-lg bg-[#05603A] text-white font-bold disabled:opacity-50"
+                                >
+                                  I received it
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={caseBusy}
+                                  onClick={async () => {
+                                    setCaseBusy(true);
+                                    try {
+                                      const updated = await reportRefundNotReceived(rf.id, "");
+                                      setRefunds((prev) => prev.map((x) => (x.id === rf.id ? updated : x)));
+                                      showToast("Your host has been told it hasn't arrived.");
+                                    } catch (err) {
+                                      showToast(errorMessage(err, "Could not send."), "error");
+                                    } finally {
+                                      setCaseBusy(false);
+                                    }
+                                  }}
+                                  className="px-3 py-1.5 rounded-lg border border-emerald-400 font-bold disabled:opacity-50"
+                                >
+                                  It hasn&apos;t arrived
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      ))}
                     <div className="grid grid-cols-2 gap-2.5">
                       <div className="p-3.5 border border-[#E1E7F1] rounded-2xl flex flex-col gap-1">
                         <span className="text-[11px] font-bold uppercase tracking-wider text-[#5B6886]">
@@ -1774,7 +1936,7 @@ export function RentalsManager() {
                         onClick={() => openPaymentInstructionsModal(selectedItem.occupancy)}
                         className="px-4 py-2.5 rounded-xl bg-[#0E2F73] hover:bg-[#0B2560] text-white text-xs font-bold transition-colors"
                       >
-                        View payment instructions
+                        View payment method
                       </button>
                       <Link
                         href="/account/payments"
@@ -1849,6 +2011,174 @@ export function RentalsManager() {
                 {/* TAB: Notices & Requests */}
                 {drawerTab === "notices" && (
                   <div className="space-y-4">
+                    {selectedItem.occupancy.status === "ACTIVE" && (
+                      <div className="space-y-3 rounded-2xl border border-[#E1E7F1] p-4 text-xs text-[#0B1B3F]">
+                        <strong className="block text-sm">Problem with the room?</strong>
+                        {issues.filter((i) => i.status !== "RESOLVED").map((i) => (
+                          <div key={i.id} className="space-y-2 rounded-xl bg-[#FFF7F7] p-3">
+                            <p>
+                              <strong>{ISSUE_SEVERITY[i.severity]}</strong> · {i.description || "No details"} ·{" "}
+                              {i.status === "OPEN" ? "reported" : i.status === "ACKNOWLEDGED" ? "host is working on it" : "host says it's fixed"}
+                              {i.fixDueAt ? ` · fix due ${new Date(i.fixDueAt).toLocaleDateString()}` : ""}
+                            </p>
+                            {i.creditedAmount > 0 && <p>Rent reduced by {i.creditedAmount.toFixed(2)} because it wasn&apos;t fixed in time.</p>}
+                            {i.status === "FIX_REPORTED" && (
+                              <div className="flex gap-2">
+                                <button type="button" disabled={caseBusy} className="px-3 py-1.5 rounded-lg bg-[#05603A] text-white font-bold disabled:opacity-50"
+                                  onClick={async () => {
+                                    setCaseBusy(true);
+                                    try {
+                                      const u = await confirmHabitabilityFixed(i.id);
+                                      setIssues((prev) => prev.map((x) => (x.id === i.id ? u : x)));
+                                      showToast("Thanks — marked as fixed.");
+                                    } catch (err) {
+                                      showToast(errorMessage(err, "Could not confirm."), "error");
+                                    } finally {
+                                      setCaseBusy(false);
+                                    }
+                                  }}>It&apos;s fixed</button>
+                                <button type="button" disabled={caseBusy} className="px-3 py-1.5 rounded-lg border border-slate-300 font-bold disabled:opacity-50"
+                                  onClick={async () => {
+                                    setCaseBusy(true);
+                                    try {
+                                      const u = await rejectHabitabilityFix(i.id, "");
+                                      setIssues((prev) => prev.map((x) => (x.id === i.id ? u : x)));
+                                      showToast("Your host has been told it isn't fixed.");
+                                    } catch (err) {
+                                      showToast(errorMessage(err, "Could not send."), "error");
+                                    } finally {
+                                      setCaseBusy(false);
+                                    }
+                                  }}>Not fixed</button>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                        <select value={issueSeverity} onChange={(e) => setIssueSeverity(e.target.value as HabitabilitySeverity)}
+                          className="h-10 w-full rounded-xl border border-slate-300 px-3" aria-label="How serious is it">
+                          {(Object.keys(ISSUE_SEVERITY) as HabitabilitySeverity[]).map((k) => (
+                            <option key={k} value={k}>{ISSUE_SEVERITY[k]}</option>
+                          ))}
+                        </select>
+                        <textarea rows={2} value={issueText} onChange={(e) => setIssueText(e.target.value)} placeholder="What's wrong?"
+                          className="w-full rounded-xl border border-slate-300 p-3" />
+                        <button type="button" disabled={caseBusy || !issueText.trim()} className="px-3 py-1.5 rounded-lg bg-[#0E2F73] text-white font-bold disabled:opacity-50"
+                          onClick={async () => {
+                            setCaseBusy(true);
+                            try {
+                              const created = await reportHabitabilityIssue(selectedItem.occupancy.id, issueSeverity, issueText.trim());
+                              setIssues((prev) => [created, ...prev]);
+                              setIssueText("");
+                              showToast("Reported. Your host has been told and has a deadline to fix it.");
+                            } catch (err) {
+                              showToast(errorMessage(err, "Could not report the problem."), "error");
+                            } finally {
+                              setCaseBusy(false);
+                            }
+                          }}>Report problem</button>
+                      </div>
+                    )}
+                    {(() => {
+                      const tc = terminationCases[selectedItem.occupancy.id];
+                      if (!tc || ["TERMINATED", "WITHDRAWN", "REJECTED_PATHWAY", "SURRENDER_DECLINED"].includes(tc.status)) return null;
+                      const me = selectedItem.occupancy.guestId ?? "";
+                      const mineToAnswer = tc.status === "AWAITING_RESPONSE" && (tc.pendingResponders ?? []).includes(me);
+                      const iOpened = tc.initiatorGuestId === me;
+                      const due = tc.responseDueAt ? new Date(tc.responseDueAt).toLocaleDateString() : null;
+                      const act = async (fn: () => Promise<unknown>, msg: string) => {
+                        setCaseBusy(true);
+                        try {
+                          await fn();
+                          showToast(msg);
+                          setCounterDate("");
+                          setOrderRef("");
+                          setOrderDate("");
+                          await load();
+                        } catch (err) {
+                          showToast(errorMessage(err, "That didn't work. Please try again."), "error");
+                        } finally {
+                          setCaseBusy(false);
+                        }
+                      };
+                      const btn = "px-3 py-1.5 rounded-lg text-xs font-bold disabled:opacity-50";
+                      return (
+                        <div className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50/60 p-4 text-xs text-[#0B1B3F]">
+                          <strong className="block text-sm">
+                            {iOpened ? "Your request to end the tenancy" : "Request to end your tenancy"}
+                          </strong>
+                          <p>
+                            {tc.status === "EFFECTIVE_DATE_SET" && tc.effectiveTerminationDate
+                              ? `Ends on ${tc.effectiveTerminationDate}. Move out by then and confirm it here so your tenancy closes.`
+                              : tc.status === "CONTESTED"
+                                ? "Contested. The tenancy continues unless a court or tribunal orders otherwise."
+                                : tc.earliestEffectiveDate
+                                  ? `Proposed end date: ${tc.earliestEffectiveDate}${due ? ` · answers due ${due}` : ""}.`
+                                  : "Waiting for a response."}
+                          </p>
+
+                          {mineToAnswer && (
+                            <div className="space-y-2">
+                              <p>
+                                {tc.deemedOnSilence ? "If you don't answer by the deadline, the date is accepted." : "Nothing changes unless you agree."}
+                              </p>
+                              <input
+                                type="date"
+                                value={counterDate}
+                                min={new Date().toISOString().slice(0, 10)}
+                                onChange={(e) => setCounterDate(e.target.value)}
+                                className="h-10 w-full rounded-xl border border-slate-300 px-3"
+                                aria-label="Propose a different date"
+                              />
+                              <div className="flex flex-wrap gap-2">
+                                <button type="button" disabled={caseBusy} className={`${btn} bg-[#0E2F73] text-white`}
+                                  onClick={() => act(() => renterTermination.respond(tc.id, { response: "ACCEPT" }), "Accepted.")}>Accept date</button>
+                                <button type="button" disabled={caseBusy || !counterDate} className={`${btn} border border-slate-300`}
+                                  onClick={() => act(() => renterTermination.respond(tc.id, { response: "COUNTER", proposedDate: counterDate }), "Your date was sent.")}>Propose this date</button>
+                                <button type="button" disabled={caseBusy} className={`${btn} border border-rose-300 text-rose-700`}
+                                  onClick={() => act(() => renterTermination.respond(tc.id, { response: "CONTEST" }), "Contested.")}>Contest</button>
+                              </div>
+                            </div>
+                          )}
+
+                          {tc.status === "SURRENDER_PROPOSED" && !iOpened && (
+                            <div className="flex gap-2">
+                              <button type="button" disabled={caseBusy} className={`${btn} bg-[#0E2F73] text-white`}
+                                onClick={() => act(() => acceptOwnMutualSurrender(tc.id), "Accepted. The end date is set.")}>Agree</button>
+                              <button type="button" disabled={caseBusy} className={`${btn} border border-slate-300`}
+                                onClick={() => act(() => declineOwnMutualSurrender(tc.id), "Declined. Your tenancy continues.")}>Decline</button>
+                            </div>
+                          )}
+
+                          {tc.status === "CONTESTED" && (
+                            <div className="space-y-2">
+                              <select value={orderOutcome} onChange={(e) => setOrderOutcome(e.target.value as typeof orderOutcome)} className="h-10 w-full rounded-xl border border-slate-300 px-3">
+                                <option value="ENDS_ON_DATE">A court/tribunal order ends the tenancy</option>
+                                <option value="TENANCY_CONTINUES">A court/tribunal order says it continues</option>
+                              </select>
+                              <input value={orderRef} onChange={(e) => setOrderRef(e.target.value)} placeholder="Order reference" className="h-10 w-full rounded-xl border border-slate-300 px-3" />
+                              {orderOutcome === "ENDS_ON_DATE" && (
+                                <input type="date" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} className="h-10 w-full rounded-xl border border-slate-300 px-3" aria-label="End date in the order" />
+                              )}
+                              <button type="button" disabled={caseBusy || !orderRef.trim() || (orderOutcome === "ENDS_ON_DATE" && !orderDate)} className={`${btn} bg-[#0E2F73] text-white`}
+                                onClick={() => act(() => renterTermination.recordExternalDecision(tc.id, {
+                                  outcome: orderOutcome, orderRef: orderRef.trim(), effectiveDate: orderOutcome === "ENDS_ON_DATE" ? orderDate : undefined,
+                                }), "Order recorded.")}>Record order</button>
+                            </div>
+                          )}
+
+                          <div className="flex flex-wrap gap-2">
+                            {iOpened && ["AWAITING_RESPONSE", "CONTESTED", "SURRENDER_PROPOSED", "EFFECTIVE_DATE_SET", "OPENED"].includes(tc.status) && (
+                              <button type="button" disabled={caseBusy} className={`${btn} border border-slate-300`}
+                                onClick={() => act(() => withdrawOwnTerminationCase(tc.id), "Withdrawn.")}>Withdraw</button>
+                            )}
+                            {!iOpened && !tc.noticeAcknowledgedAt && (
+                              <button type="button" disabled={caseBusy} className={`${btn} border border-slate-300`}
+                                onClick={() => act(() => renterTermination.acknowledge(tc.id), "Thanks — your host can see you received it.")}>I received this notice</button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     <div className="border border-[#E1E7F1] rounded-2xl divide-y divide-[#EEF1F7]">
                       <div className="p-4 flex items-center justify-between gap-3">
                         <div>
@@ -1859,10 +2189,10 @@ export function RentalsManager() {
                         </div>
                         <button
                           type="button"
-                          onClick={() => showToast("No renewal offered yet. You'll be notified if your host issues one.")}
+                          onClick={() => setDrawerTab("agreement")}
                           className="px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-bold text-[#0E2F73] hover:border-[#0E2F73]"
                         >
-                          Review
+                          View agreement
                         </button>
                       </div>
 
@@ -1981,7 +2311,7 @@ export function RentalsManager() {
               {/* Drawer Footer */}
               <div className="p-6 border-t border-[#EEF1F7] flex items-center justify-between gap-3 bg-[#F7F9FD]">
                 <Link
-                  href="/account/messages"
+                  href="/account/applications"
                   className="w-full inline-flex items-center justify-center gap-2 h-11 rounded-xl border border-[#0E2F73] text-[#0E2F73] hover:bg-[#0E2F73] hover:text-white text-xs sm:text-sm font-bold transition-colors"
                 >
                   <MessageSquare className="w-4 h-4" /> Message Host / Manager
@@ -2039,7 +2369,7 @@ export function RentalsManager() {
               </div>
 
               <p className="text-xs text-[#B42318] font-medium bg-[#FFF5F5] p-3 rounded-xl border border-[#F3C2C2]">
-                Never send rent using details from chat messages or external emails. Only use recipient instructions confirmed on this portal.
+                Never send rent using details from chat messages or external emails. Only use recipient payment methods confirmed on this portal.
               </p>
 
               <div className="flex justify-end gap-2.5 pt-2">
@@ -2078,7 +2408,7 @@ export function RentalsManager() {
             }}
           />
         ) : (
-          <Modal open onClose={() => setActiveModal(null)} title="Payment instructions">
+          <Modal open onClose={() => setActiveModal(null)} title="Payment method">
             <p className="text-sm text-slate-600">Nothing is due on this rental right now.</p>
           </Modal>
         );
@@ -2092,21 +2422,39 @@ export function RentalsManager() {
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
             <div className="absolute inset-0 bg-[#081638]/45 backdrop-blur-[2px]" onClick={() => setActiveModal(null)} />
             <div className="relative w-full max-w-lg bg-white rounded-[24px] p-6 shadow-2xl space-y-4 z-10">
-              <h2 className="text-xl font-extrabold text-[#0E2F73]">Request early end</h2>
-              <p className="text-xs text-[#5B6886]">
-                Your agreement is a fixed term ending {modalItem.to}. Ending early requires host agreement under #{modalItem.agr}.
-              </p>
+              <h2 className="text-xl font-extrabold text-[#0E2F73]">End your tenancy</h2>
+              <p className="text-xs text-[#5B6886]">Your agreement (#{modalItem.agr}) runs until {modalItem.to}.</p>
 
               <div className="space-y-3 text-xs">
-                <div>
-                  <label className="font-bold text-[#3A4866] block mb-1">Proposed end date</label>
-                  <input
-                    type="date"
-                    value={earlyEndDate}
-                    onChange={(e) => setEarlyEndDate(e.target.value)}
-                    className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm"
-                  />
-                </div>
+                <fieldset className="space-y-2">
+                  {(
+                    [
+                      ["notice", "Give notice", "Ends on the earliest date your market's notice rules allow."],
+                      ["agree", "Agree a date with my host", "Your host (and any co-tenant) must agree to the date."],
+                      ["endOfTerm", "I'm leaving when the term ends", `Lets your host know you'll move out on ${modalItem.to}.`],
+                    ] as const
+                  ).map(([value, title, help]) => (
+                    <label key={value} className="flex cursor-pointer items-start gap-2 rounded-xl border border-slate-200 p-2.5">
+                      <input type="radio" name="early-end-path" checked={earlyEndPath === value} onChange={() => setEarlyEndPath(value)} className="mt-0.5" />
+                      <span>
+                        <span className="block font-bold text-[#0B1B3F]">{title}</span>
+                        <span className="text-[#5B6886]">{help}</span>
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+                {earlyEndPath === "agree" && (
+                  <div>
+                    <label className="font-bold text-[#3A4866] block mb-1">Proposed end date</label>
+                    <input
+                      type="date"
+                      value={earlyEndDate}
+                      min={new Date().toISOString().slice(0, 10)}
+                      onChange={(e) => setEarlyEndDate(e.target.value)}
+                      className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm"
+                    />
+                  </div>
+                )}
                 <div>
                   <label className="font-bold text-[#3A4866] block mb-1">Reason for request</label>
                   <textarea
@@ -2166,7 +2514,7 @@ export function RentalsManager() {
                     <label className="font-bold text-[#3A4866] block mb-1">Arrangement Type</label>
                     <select
                       value={arrangementType}
-                      onChange={(e) => setArrangementType(e.target.value as any)}
+                      onChange={(e) => setArrangementType(e.target.value as SubletArrangementType)}
                       className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm"
                     >
                       <option value="ASSIGNMENT_FULL">Full Assignment (Swap renter)</option>
@@ -2374,7 +2722,7 @@ export function RentalsManager() {
                   <label className="font-bold text-[#3A4866] block mb-1">Rating</label>
                   <select
                     value={conditionRating}
-                    onChange={(e) => setConditionRating(e.target.value as any)}
+                    onChange={(e) => setConditionRating(e.target.value as ConditionRating | "")}
                     className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm"
                   >
                     <option value="">Select rating (optional)</option>
@@ -2477,6 +2825,7 @@ export function RentalsManager() {
           </div>,
           document.body
         )}
+      <DepositClaimsSection side="renter" showToast={showToast} />
     </div>
   );
 }

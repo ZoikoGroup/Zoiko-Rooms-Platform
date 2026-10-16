@@ -9,10 +9,10 @@ import { getHostedRoomPaymentConnection } from "@/lib/user-api";
 // What each payment-connection state means for the host, and what to do next.
 const STATES: Record<string, { label: string; tone: "success" | "warning" | "danger" | "neutral"; next?: string }> = {
   ACTIVE: { label: "Ready to receive rent", tone: "success" },
-  RECIPIENT_SETUP_REQUIRED: { label: "Add payment instructions", tone: "warning", next: "Add your bank, UPI or cash details so renters know how to pay you." },
-  PENDING_VERIFICATION: { label: "Payment setup pending", tone: "warning", next: "Confirm the emailed code for your payment instructions, or wait for your room authority to be verified." },
+  RECIPIENT_SETUP_REQUIRED: { label: "Add payment method", tone: "warning", next: "Add your bank, UPI or cash details so renters know how to pay you." },
+  PENDING_VERIFICATION: { label: "Payment setup pending", tone: "warning", next: "Confirm the emailed code for your payment method, or wait for your room authority to be verified." },
   DRAFT: { label: "Room authority not verified", tone: "neutral", next: "Renters can pay you once Zoiko verifies your authority for this room." },
-  SUSPENDED: { label: "Payments suspended", tone: "danger", next: "Your room authority or payment instructions need attention -- contact support." },
+  SUSPENDED: { label: "Payments suspended", tone: "danger", next: "Your room authority or payment method needs attention -- contact support." },
 };
 
 /** Whether a host's room can take rent yet -- the room's verified listing

@@ -402,7 +402,7 @@ def generate_next_rent_obligation(db: Session, occupancy: Occupancy, admin: Admi
 
 
 def end_occupancy(
-    db: Session, occupancy: Occupancy, admin: AdminUser, correlation_id: str = "",
+    db: Session, occupancy: Occupancy, admin: AdminUser | None, correlation_id: str = "",
     *, notice_given_at: datetime | None = None, liability_end_date: date | None = None,
     termination_effective_date: date | None = None, move_out_date: date | None = None, basis: str = "OTHER",
     termination_case_id: int | None = None, override_reason: str = "", already_adjudicated: bool = False,
@@ -450,7 +450,14 @@ def end_occupancy(
     from app.models.termination_case import TerminationCase
     from app.models.termination_record import TerminationRecord
 
-    assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
+    # admin=None is the system ending a tenancy on its own (crud/
+    # occupancy_lifecycle.py), only ever once the date has arrived and the
+    # move-out handshake is done -- it always passes a termination case or
+    # already_adjudicated, so the early-ending guard below never needs an admin.
+    if admin is not None:
+        assert_provider_access(db, admin, party_id_for_listing(occupancy.listing))
+    elif termination_case_id is None and not already_adjudicated:
+        raise HTTPException(status.HTTP_409_CONFLICT, "A system ending needs a termination case or a reached end date")
 
     case = None
     if termination_case_id is not None:
@@ -503,7 +510,7 @@ def end_occupancy(
             termination_case_id=case.id if case else None,
             notice_given_at=notice_given_at, liability_end_date=occupancy.liability_end_date,
             termination_effective_date=occupancy.termination_effective_date,
-            physical_move_out_date=resolved_move_out_date, created_by_admin_id=admin.id,
+            physical_move_out_date=resolved_move_out_date, created_by_admin_id=admin.id if admin is not None else None,
         ))
     if case is not None:
         case.status = "TERMINATED"

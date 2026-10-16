@@ -1,15 +1,18 @@
 /**
- * ZR-SUBLET-PAY-003 -- sublet payments made directly by bank transfer, UPI or
- * cash. Zoiko Rooms never receives, holds or forwards this money and charges
+ * ZR-SUBLET-PAY-003 -- sublet payments made directly (bank transfer, instant
+ * bank payment, cash, ...). Zoiko Rooms never receives, holds or forwards this money and charges
  * no fee on it (Listing Fee only). Payee, deposit route, accepted methods and
  * every readiness state come from the server.
  */
 
 import { ApiError, apiClientFetch } from "@/lib/api-client";
+import type { PaymentMethodCategory } from "@/lib/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-export type DirectPaymentMethod = "BANK_TRANSFER" | "UPI" | "CASH";
+/** Accepted methods are the global canonical categories
+ *  (ZR-PAY-METHODS-GLOBAL-001); the rail is chosen when paying. */
+export type DirectPaymentMethod = PaymentMethodCategory;
 export type RentPayeeType = "LANDLORD_AGENT" | "SUBLESSOR";
 export type DepositRoute =
   | "NOT_REQUIRED" | "PAY_TO_LANDLORD_OR_AGENT" | "PAY_TO_SUBLESSOR" | "PAY_TO_CUSTODIAN" | "PROHIBITED_OR_UNRESOLVED";
@@ -72,6 +75,8 @@ export interface SubletTransactionItem {
   paidOn?: string;
   confirmedAt?: string | null;
   method?: string;
+  /** Display label for the recorded method (category · rail). */
+  methodLabel?: string;
   payeeType?: string;
   payeeName?: string;
   reference?: string;
@@ -103,8 +108,11 @@ export interface HowToPay {
   acceptedMethods: DirectPaymentMethod[];
   paymentReference: string;
   method: string;
+  /** The rail/provider the payee's details are for (e.g. UPI). */
+  methodSubtype: string;
+  methodLabel: string;
   countryCode: string;
-  /** The payee's bank account fields or UPI ID -- only once the agreement is
+  /** The payee's bank account fields, UPI ID / alias or wallet account -- only once the agreement is
    *  accepted and payment isn't blocked. */
   details: Record<string, string> | null;
   custodian: { name: string; reference: string; instructions: string } | null;
@@ -115,7 +123,19 @@ export interface HowToPay {
 }
 
 export const methodLabel: Record<DirectPaymentMethod, string> = {
-  BANK_TRANSFER: "Bank transfer", UPI: "UPI", CASH: "Cash",
+  BANK_TRANSFER: "Bank transfer",
+  INSTANT_BANK_PAYMENT: "Instant bank payment",
+  BANK_DEBIT: "Direct debit",
+  STANDING_ORDER: "Standing order",
+  PAYMENT_CARD: "Payment card",
+  DIGITAL_WALLET_P2P: "Digital wallet / payment app",
+  MOBILE_MONEY: "Mobile money",
+  REMITTANCE_SERVICE: "Money transfer service",
+  CASH: "Cash",
+  CHEQUE_CHECK: "Cheque",
+  BANK_DRAFT: "Bank draft",
+  MONEY_ORDER: "Money order",
+  OTHER: "Other",
 };
 
 export const depositRouteLabel: Record<DepositRoute, string> = {

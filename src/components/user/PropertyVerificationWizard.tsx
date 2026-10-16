@@ -18,7 +18,7 @@ import {
   AddressSuggestion, EvidenceType, GeoPoint, PropertyKind, PropertyPolicy, PropertyVerificationSession, StructuredAddress,
   confidenceLabel, confirmPropertyAddress, confirmPropertyLocation, evidenceTypeLabel, getPropertyPolicy,
   getPropertyVerificationForProperty, propertyEvidenceUrl, propertyStateLabel, propertyStateTone, removePropertyEvidence,
-  answerPropertyDuplicate, geocodePlace, restartPropertyVerification, reverseLocation, retrieveAddress, setPropertyAddress, setPropertyUnit,
+  geocodePlace, restartPropertyVerification, reverseLocation, retrieveAddress, setPropertyAddress, setPropertyUnit,
   startPropertyVerification,
   submitPropertyVerification, suggestAddresses, uploadPropertyEvidence,
 } from "@/lib/property-verification";
@@ -212,8 +212,11 @@ export function PropertyVerificationWizard({ propertyId, propertyLabel, onClose,
                          onAdjust={(p, reason) => run(() => confirmPropertyLocation(session, { action: "adjust", ...p, reason }), 4)} />
       ) : session && step === 4 ? (
         <UnitDetails session={session} policy={policy} busy={busy} onBack={() => setStep(3)}
-                     onSubmit={(body) => run(() => setPropertyUnit(session, body), 5)}
-                     onAnswerDuplicate={(answer, note) => run(() => answerPropertyDuplicate(session, answer, note))} />
+                     onSubmit={async (body) => {
+                       // An address that's already registered stays on this step with the message.
+                       const updated = await run(() => setPropertyUnit(session, body));
+                       if (updated && !updated.possibleDuplicate) setStep(5);
+                     }} />
       ) : session && step === 5 ? (
         <Evidence session={session} policy={policy} busy={busy} onBack={() => setStep(4)} onNext={() => setStep(6)}
                   onUpload={(type, file) => run(() => uploadPropertyEvidence(session, type, file))}
@@ -225,7 +228,10 @@ export function PropertyVerificationWizard({ propertyId, propertyLabel, onClose,
                   if (updated?.state === "ACTION_REQUIRED") {
                     submitKey.current = newKey();
                     const codes = updated.reasonCodes;
-                    setStep(codes.some((c) => c.startsWith("UNIT")) ? 4 : codes.some((c) => c.startsWith("EVIDENCE")) ? 5 : 1);
+                    setStep(
+                      codes.some((c) => c.startsWith("UNIT") || c.startsWith("PROPERTY_ALREADY")) ? 4
+                        : codes.some((c) => c.startsWith("EVIDENCE")) ? 5 : 1,
+                    );
                   }
                 }} />
       ) : null}
@@ -919,13 +925,11 @@ function DocumentReading({ reading }: { reading: PropertyVerificationSession["ev
 
 // -- Screen 4 --------------------------------------------------------------------
 
-function UnitDetails({ session, policy, busy, onBack, onSubmit, onAnswerDuplicate }: {
+function UnitDetails({ session, policy, busy, onBack, onSubmit }: {
   session: PropertyVerificationSession; policy: PropertyPolicy | null; busy: boolean; onBack: () => void;
   onSubmit: (body: { propertyKind: PropertyKind; buildingName: string; unit: string; floor: string }) => void;
-  onAnswerDuplicate: (answer: "NOT_SAME_PROPERTY" | "SAME_PROPERTY", note: string) => void;
 }) {
-  const [dupAnswer, setDupAnswer] = useState<"" | "NOT_SAME_PROPERTY" | "SAME_PROPERTY">(session.duplicateHostAnswer);
-  const [dupNote, setDupNote] = useState(session.duplicateHostNote);
+  const ownDuplicate = session.reasonCodes.includes("PROPERTY_ALREADY_YOURS");
   const [kind, setKind] = useState<PropertyKind>((session.propertyKind || "HOUSE") as PropertyKind);
   const [building, setBuilding] = useState(session.buildingName);
   const [unit, setUnit] = useState(session.unit);
@@ -946,24 +950,10 @@ function UnitDetails({ session, policy, busy, onBack, onSubmit, onAnswerDuplicat
       </Field>
       <Field label="Floor (optional)"><input className={inputClass} dir="auto" value={floor} onChange={(e) => setFloor(e.target.value)} /></Field>
       {session.possibleDuplicate && (
-        <Info title="Existing Zoiko property match found" tone="warn">
-          This address and unit look like a property already on Zoiko Rooms. Tell us whether it&apos;s the same property --
-          our team reviews it either way.
-          <fieldset className="mt-2 space-y-1.5">
-            <legend className="sr-only">Is this the same property?</legend>
-            <label className="flex items-center gap-2"><input type="radio" checked={dupAnswer === "NOT_SAME_PROPERTY"}
-              onChange={() => setDupAnswer("NOT_SAME_PROPERTY")} /> No -- it&apos;s a different property or unit</label>
-            <label className="flex items-center gap-2"><input type="radio" checked={dupAnswer === "SAME_PROPERTY"}
-              onChange={() => setDupAnswer("SAME_PROPERTY")} /> Yes -- review the potential duplicate</label>
-            {dupAnswer === "NOT_SAME_PROPERTY" && (
-              <input className={inputClass} dir="auto" placeholder="How is it different? e.g. a different flat number"
-                     value={dupNote} onChange={(e) => setDupNote(e.target.value)} maxLength={500} />
-            )}
-            <Button size="sm" variant="outline" disabled={busy || !dupAnswer || (dupAnswer === "NOT_SAME_PROPERTY" && !dupNote.trim())}
-                    onClick={() => dupAnswer && onAnswerDuplicate(dupAnswer, dupNote)}>
-              {session.duplicateHostAnswer ? "Update answer" : "Save answer"}
-            </Button>
-          </fieldset>
+        <Info title={ownDuplicate ? "You've already added this property" : "This property is already registered"} tone="warn">
+          {ownDuplicate
+            ? "Use your existing property instead of adding it again."
+            : "This address and unit are already registered on Zoiko Rooms, so it can't be added again. If yours is a different flat or unit at this address, enter its unit number above and continue."}
         </Info>
       )}
       <Actions>

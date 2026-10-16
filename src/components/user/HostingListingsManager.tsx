@@ -62,8 +62,10 @@ import {
   resolveListingFeeCheckoutSession,
   submitHostedListingForReview,
   updateHostedListing,
+  pauseHostedListing,
+  resumeHostedListing,
+  archiveHostedListing,
 } from "@/lib/user-api";
-import { apiClientFetch } from "@/lib/api-client";
 import { ListARoomWizard, submitOutcomeMessage } from "@/components/user/ListARoomWizard";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Field, Toast, inputClass, useToast } from "@/components/user/ui";
@@ -125,6 +127,11 @@ interface ListingFormState {
   contactPhone: string;
   contactEmail: string;
   agreementDetails: ListingAgreementDetails;
+}
+
+// HostedListing has no typed createdAt; read it defensively when the API sends one.
+function listingCreatedAt(listing: HostedListing): string | undefined {
+  return (listing as HostedListing & { createdAt?: string }).createdAt;
 }
 
 function toFormState(listing: HostedListing): ListingFormState {
@@ -204,7 +211,7 @@ export function HostingListingsManager() {
   const [authorityRecordRoomId, setAuthorityRecordRoomId] = useState<number | null>(null);
 
   // Slide-out Inspection Drawer state
-  const [selectedListingForDrawer, setSelectedListingForDrawer] = useState<any | null>(null);
+  const [selectedListingForDrawer, setSelectedListingForDrawer] = useState<(typeof mappedListings)[number] | null>(null);
   const [drawerTab, setDrawerTab] = useState<
     "overview" | "content" | "availability" | "verification" | "applications" | "activity"
   >("overview");
@@ -338,7 +345,7 @@ export function HostingListingsManager() {
 
   // Mapped Listings with Derived Figma Attributes
   const mappedListings = useMemo(() => {
-    return listings.map((l, idx) => {
+    return listings.filter((l) => l.state !== "ARCHIVED").map((l, idx) => {
       const room = l.roomId !== null ? roomById.get(l.roomId) : undefined;
       const property = l.roomId !== null ? propertyByRoomId.get(l.roomId) : undefined;
       const propVerif = property ? propertyStatus[property.id] : undefined;
@@ -377,13 +384,13 @@ export function HostingListingsManager() {
       if (l.state === "PUBLISHED") {
         listingStatus = "LIVE";
         listingStatusLabel = "Live";
-        listingStatusSubtext = (l as any).createdAt
-          ? `Published ${formatDate((l as any).createdAt)}`
+        listingStatusSubtext = listingCreatedAt(l)
+          ? `Published ${formatDate(listingCreatedAt(l)!)}`
           : "Live on marketplace";
         listingStatusTone = "live";
-      } else if (l.state === "PAUSED" || l.state === "ARCHIVED" || l.state === "WITHDRAWN" || l.state === "SUSPENDED") {
+      } else if (l.state === "PAUSED" || l.state === "WITHDRAWN" || l.state === "SUSPENDED") {
         listingStatus = "PAUSED";
-        listingStatusLabel = "Paused";
+        listingStatusLabel = l.state === "SUSPENDED" ? "Suspended" : l.state === "WITHDRAWN" ? "Withdrawn" : "Paused";
         listingStatusSubtext = currentOcc ? "Paused — occupied" : "Not publicly visible";
         listingStatusTone = "paused";
       } else if (isAuthorityExpired || isPropertyBlocked) {
@@ -486,7 +493,7 @@ export function HostingListingsManager() {
       } else if (listingStatusTone === "fee") {
         actionLabel = "Pay Listing Fee";
         actionStyle = "primary_navy";
-      } else if (listingStatusTone === "paused") {
+      } else if (listingStatusTone === "paused" && l.state === "PAUSED") {
         actionLabel = "Resume Listing";
         actionStyle = "primary_navy";
       } else if (listingStatusTone === "draft") {
@@ -855,7 +862,15 @@ export function HostingListingsManager() {
     } else if (l.actionLabel === "Fix Listing") {
       setSelectedListingForDrawer(null);
       setForm(toFormState(l.rawListing));
-    } else if (l.actionLabel === "Resume Listing" || l.actionLabel === "Submit for Review") {
+    } else if (l.actionLabel === "Resume Listing") {
+      setSelectedListingForDrawer(null);
+      resumeHostedListing(l.id)
+        .then(() => {
+          showToast(`Listing ${l.title} is live again.`);
+          load();
+        })
+        .catch((err) => showToast(errorMessage(err, "Could not resume listing"), "error"));
+    } else if (l.actionLabel === "Submit for Review") {
       setSelectedListingForDrawer(null);
       submitHostedListingForReview(l.id)
         .then((updated) => {
@@ -1908,11 +1923,11 @@ export function HostingListingsManager() {
                               onClick={async () => {
                                 setOpenMenuListingId(null);
                                 try {
-                                  await apiClientFetch(`/api/users/hosting/listings/${l.id}/pause`, { method: "POST" });
+                                  await pauseHostedListing(l.id);
                                   showToast(`Listing #${l.id} paused.`);
                                   load();
-                                } catch {
-                                  showToast(`Pause requested for listing #${l.id}.`);
+                                } catch (err) {
+                                  showToast(errorMessage(err, "Could not pause listing"), "error");
                                 }
                               }}
                               className="w-full text-left px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
@@ -1922,14 +1937,14 @@ export function HostingListingsManager() {
                             </button>
                           )}
 
-                          {l.listingStatus === "PAUSED" && (
+                          {l.rawListing.state === "PAUSED" && (
                             <button
                               type="button"
                               onClick={async () => {
                                 setOpenMenuListingId(null);
                                 try {
-                                  await submitHostedListingForReview(l.id);
-                                  showToast(`Listing #${l.id} submitted to resume.`);
+                                  await resumeHostedListing(l.id);
+                                  showToast(`Listing #${l.id} is live again.`);
                                   load();
                                 } catch (err) {
                                   showToast(errorMessage(err, "Could not resume listing"), "error");
@@ -1947,11 +1962,11 @@ export function HostingListingsManager() {
                             onClick={async () => {
                               setOpenMenuListingId(null);
                               try {
-                                await apiClientFetch(`/api/users/hosting/listings/${l.id}/archive`, { method: "POST" });
+                                await archiveHostedListing(l.id);
                                 showToast(`Listing #${l.id} archived.`);
                                 load();
-                              } catch {
-                                showToast(`Archive requested for listing #${l.id}.`);
+                              } catch (err) {
+                                showToast(errorMessage(err, "Could not archive listing"), "error");
                               }
                             }}
                             className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#B42318] hover:bg-red-50 dark:hover:bg-red-950/20 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2 mt-1 cursor-pointer"
@@ -2037,7 +2052,7 @@ export function HostingListingsManager() {
                   <button
                     key={tab.id}
                     type="button"
-                    onClick={() => setDrawerTab(tab.id as any)}
+                    onClick={() => setDrawerTab(tab.id as typeof drawerTab)}
                     className={`h-10 px-3.5 text-xs font-bold transition whitespace-nowrap cursor-pointer border-b-2 ${
                       drawerTab === tab.id
                         ? "border-[#0E2F73] text-[#0E2F73] dark:border-sky-400 dark:text-white font-extrabold"
@@ -2395,8 +2410,8 @@ export function HostingListingsManager() {
                     <li className="mb-4 ml-4">
                       <div className="absolute -left-1.5 mt-1.5 size-3 rounded-full border border-white bg-[#0E2F73]" />
                       <time className="text-[10px] font-normal leading-none text-slate-400">
-                        {(selectedListingForDrawer.rawListing as any).createdAt
-                          ? formatDate((selectedListingForDrawer.rawListing as any).createdAt)
+                        {listingCreatedAt(selectedListingForDrawer.rawListing)
+                          ? formatDate(listingCreatedAt(selectedListingForDrawer.rawListing)!)
                           : "Recently"}
                       </time>
                       <h4 className="font-extrabold text-[#0E2F73] dark:text-white mt-0.5">
@@ -2409,8 +2424,8 @@ export function HostingListingsManager() {
                       <li className="mb-4 ml-4">
                         <div className="absolute -left-1.5 mt-1.5 size-3 rounded-full border border-white bg-[#0E2F73]" />
                         <time className="text-[10px] font-normal leading-none text-slate-400">
-                          {(selectedListingForDrawer.rawListing as any).createdAt
-                            ? formatDate((selectedListingForDrawer.rawListing as any).createdAt)
+                          {listingCreatedAt(selectedListingForDrawer.rawListing)
+                            ? formatDate(listingCreatedAt(selectedListingForDrawer.rawListing)!)
                             : "Recently"}
                         </time>
                         <h4 className="font-extrabold text-[#0E2F73] dark:text-white mt-0.5">
@@ -2424,8 +2439,8 @@ export function HostingListingsManager() {
                       <li className="ml-4">
                         <div className="absolute -left-1.5 mt-1.5 size-3 rounded-full border border-white bg-[#05603A]" />
                         <time className="text-[10px] font-normal leading-none text-slate-400">
-                          {(selectedListingForDrawer.rawListing as any).createdAt
-                            ? formatDate((selectedListingForDrawer.rawListing as any).createdAt)
+                          {listingCreatedAt(selectedListingForDrawer.rawListing)
+                            ? formatDate(listingCreatedAt(selectedListingForDrawer.rawListing)!)
                             : "Recently"}
                         </time>
                         <h4 className="font-extrabold text-[#05603A] mt-0.5">Published</h4>

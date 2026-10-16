@@ -1,3 +1,4 @@
+import { clearDisplayPreferences } from "@/lib/display-preferences";
 import { apiClientFetch } from "@/lib/api-client";
 import { broadcastSessionChange } from "@/lib/session-guard";
 import { UserProfile } from "@/lib/types";
@@ -38,6 +39,7 @@ export function userRegister(
 
 export async function userLogout(): Promise<void> {
   await apiClientFetch("/api/users/logout", { method: "POST" });
+  clearDisplayPreferences();
   broadcastSessionChange("user", null);
 }
 

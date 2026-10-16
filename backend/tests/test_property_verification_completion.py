@@ -20,7 +20,7 @@ from app.models.domain_event import DomainEvent
 from app.models.listing import Listing
 from app.models.property_location import PropertyLocationEvidence, PropertyLocationVerification
 from app.services import property_location_service as svc
-from tests.conftest import stored_refs, _make_admin, auth_admin_cookie, auth_user_cookie
+from tests.conftest import stored_refs, _make_admin, auth_user_cookie
 from tests.test_property_location_verification import (  # noqa: F401 -- fixtures
     BASE, Flow, _host, _pdf, provider, uploads,
 )
@@ -40,32 +40,41 @@ def _events(db_session, verification_id):
 
 
 def _reused_case(client, db_session, host):
-    """Two hosts upload the same document -> the second goes to review."""
+    """Two hosts upload the same document -> the second goes to review. The
+    second case's address match is cleared here so only the reused document
+    is in play (an exact address match on its own is now a host action:
+    PROPERTY_ALREADY_REGISTERED)."""
     user, prop, _room = host
     Flow(client, user, prop).happy_path(evidence=DOC)
     other = _host(db_session, "complete-other@test.com")
     flow = Flow(client, other[0], other[1])
     body = flow.happy_path(evidence=DOC)
-    assert "POSSIBLE_DUPLICATE" in body["reasonCodes"]  # same address: the host answers first
-    flow._send("POST", f"/{body['id']}/duplicate-answer",
-               json={"answer": "NOT_SAME_PROPERTY", "note": "Different flat in the same building"})
+    assert "PROPERTY_ALREADY_REGISTERED" in body["reasonCodes"]
+    v = db_session.get(PropertyLocationVerification, body["id"])
+    v.duplicate_of_property_id = None
+    v.reason_codes = [c for c in (v.reason_codes or []) if c not in svc.DUPLICATE_CODES]
+    db_session.commit()
+    flow.body["version"] = v.version
     return flow.submit().json()
 
 
-class TestRiskSignalsGoToReview:
-    def test_reused_evidence_is_reviewed_not_host_cleared(self, client, db_session, host, provider, uploads):
-        body = _reused_case(client, db_session, host)
-        assert body["state"] == "MANUAL_REVIEW", body["reasonCodes"]
-        assert "EVIDENCE_REUSED" in body["reasonCodes"]
-        assert "PROPERTY_MANUAL_REVIEW_STARTED" in _events(db_session, body["id"])
+class TestRiskSignalsGoBackToTheHost:
+    """Fraud / duplicate signals are host actions with a rule for passing --
+    never a wait for a reviewer."""
 
-    def test_a_not_the_same_property_answer_is_checked_by_a_reviewer(self, client, db_session, host, provider, uploads):
+    def test_reused_evidence_must_be_replaced(self, client, db_session, host, provider, uploads):
+        body = _reused_case(client, db_session, host)
+        assert body["state"] == "ACTION_REQUIRED", body["reasonCodes"]
+        assert "EVIDENCE_REUSED" in body["reasonCodes"]
+        assert "PROPERTY_MANUAL_REVIEW_STARTED" not in _events(db_session, body["id"])
+
+    def test_an_already_registered_address_goes_back_to_the_host_not_a_reviewer(self, client, db_session, host, provider, uploads):
         user, prop, _room = host
         body = Flow(client, user, prop).happy_path(evidence=DOC)
         v = db_session.get(PropertyLocationVerification, body["id"])
         v.duplicate_of_property_id, v.duplicate_host_answer = 999, "NOT_SAME_PROPERTY"
         state, _existence, codes = svc.decide(v, svc.get_pack(db_session, "IN"))
-        assert state == "MANUAL_REVIEW" and "DUPLICATE_REVIEW" in codes
+        assert state == "ACTION_REQUIRED" and "PROPERTY_ALREADY_REGISTERED" in codes
 
     def test_document_problems_stay_with_the_host_even_with_a_risk_signal(self, client, db_session, host, provider, uploads):
         user, prop, _room = host
@@ -75,42 +84,31 @@ class TestRiskSignalsGoToReview:
         state, _existence, codes = svc.decide(v, svc.get_pack(db_session, "IN"))
         assert state == "ACTION_REQUIRED" and "EVIDENCE_MISMATCH" in codes and "NEARBY_PROPERTY_CONFLICT" in codes
 
-    def test_edited_document_and_failed_scan_are_reviewed(self, client, db_session, host, provider, uploads):
+    def test_an_edited_document_must_be_replaced_with_the_original(self, client, db_session, host, provider, uploads):
         user, prop, _room = host
         body = Flow(client, user, prop).happy_path(evidence=DOC)
         v = db_session.get(PropertyLocationVerification, body["id"])
         v.evidence[0].tamper_signal = True
         state, _existence, codes = svc.decide(v, svc.get_pack(db_session, "IN"))
-        assert state == "MANUAL_REVIEW" and "EVIDENCE_REVIEW" in codes
+        assert state == "ACTION_REQUIRED" and "EVIDENCE_REVIEW" in codes
 
-    def test_previously_rejected_property_is_reviewed(self, client, db_session, host, provider, uploads):
+    def test_previously_rejected_property_needs_a_second_document(self, client, db_session, host, provider, uploads):
         user, prop, _room = host
         db_session.add(PropertyLocationVerification(property_id=prop.id, party_id=user.party_id, country_code="IN",
                                                     state="REJECTED"))
         db_session.commit()
         body = Flow(client, user, prop).happy_path(evidence=DOC)
-        assert body["state"] == "MANUAL_REVIEW" and "PREVIOUSLY_REJECTED" in body["reasonCodes"]
+        assert body["state"] == "ACTION_REQUIRED" and "PREVIOUSLY_REJECTED" in body["reasonCodes"]
 
-
-class TestReviewerAssignmentAndFourEyes:
-    def test_case_is_locked_to_its_reviewer_and_high_risk_needs_two(self, client, db_session, host, provider, uploads):
-        body = _reused_case(client, db_session, host)
-        vid = body["id"]
-        evidence_id = db_session.get(PropertyLocationVerification, vid).evidence[0].id
-        a1 = _make_admin(db_session, email="complete-r1@test.com", role="super_admin")
-        a2 = _make_admin(db_session, email="complete-r2@test.com", role="super_admin")
-        doc = f"/api/property-verifications/{vid}/evidence/{evidence_id}/document"
-        assert client.post(f"/api/property-verifications/{vid}/assign", json={},
-                           cookies=auth_admin_cookie(a1)).status_code == 200
-        assert client.get(doc, cookies=auth_admin_cookie(a2)).status_code == 403
-        approve = {"decision": "APPROVE", "reasonCode": "REVIEW_EVIDENCE_CORROBORATED"}
-        url = f"/api/property-verifications/{vid}/review"
-        assert client.post(url, json=approve, cookies=auth_admin_cookie(a2)).status_code == 403
-        first = client.post(url, json=approve, cookies=auth_admin_cookie(a1)).json()
-        assert first["state"] == "MANUAL_REVIEW"  # reused evidence: a second reviewer must approve
-        assert client.post(url, json=approve, cookies=auth_admin_cookie(a1)).status_code == 409
-        assert client.post(url, json=approve, cookies=auth_admin_cookie(a2)).json()["state"] == "VERIFIED"
-        assert "PROPERTY_REVIEW_ASSIGNED" in _events(db_session, vid)
+    def test_legacy_review_cases_are_decided_by_the_rules(self, client, db_session, host, provider, uploads):
+        user, prop, _room = host
+        body = Flow(client, user, prop).happy_path(evidence=DOC)
+        v = db_session.get(PropertyLocationVerification, body["id"])
+        v.state = "MANUAL_REVIEW"
+        db_session.commit()
+        assert svc.redecide_legacy_reviews(db_session) == 1
+        db_session.refresh(v)
+        assert v.state in ("VERIFIED", "ACTION_REQUIRED")
 
 
 class TestEvidenceHandling:

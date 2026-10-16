@@ -17,6 +17,12 @@ from app.api.routes import (
     bookings,
     chatbot,
     disputes,
+    rental_messages,
+    support_tickets,
+    help_articles,
+    host_deposits,
+    host_tenancy,
+    user_account_settings,
     external_search,
     finance,
     guests,
@@ -42,6 +48,7 @@ from app.api.routes import (
     public_assistant,
     provider_portal,
     public_room_search,
+    payment_methods,
     rental_payment_returns,
     rental_payments,
     reviews,
@@ -162,6 +169,7 @@ app.include_router(listings.router)
 app.include_router(listing_fees.router)
 app.include_router(listing_fees.admin_router)
 app.include_router(listing_fees.webhook_router)
+app.include_router(payment_methods.router)
 app.include_router(rental_payment_returns.router)
 app.include_router(rental_payments.router)
 app.include_router(rental_payments.recipient_router)
@@ -203,6 +211,14 @@ app.include_router(occupancy.router)
 app.include_router(finance.router)
 app.include_router(finance.webhook_router)
 app.include_router(disputes.renter_router)
+app.include_router(rental_messages.renter_router)
+app.include_router(rental_messages.host_router)
+app.include_router(support_tickets.router)
+app.include_router(support_tickets.admin_router)
+app.include_router(host_tenancy.router)
+app.include_router(host_deposits.router)
+app.include_router(help_articles.router)
+app.include_router(user_account_settings.router)
 app.include_router(disputes.host_router)
 app.include_router(disputes.admin_router)
 app.include_router(chatbot.router)

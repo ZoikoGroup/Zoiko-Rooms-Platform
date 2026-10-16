@@ -608,7 +608,7 @@ export interface AutopayMandate {
   revokedAt: string | null;
 }
 
-export type DepositStatus = "HELD" | "RELEASED" | "FORFEITED" | "PARTIALLY_RELEASED";
+export type DepositStatus = "HELD" | "RELEASED" | "FORFEITED" | "PARTIALLY_RELEASED" | "FROZEN";
 
 export interface DepositRecord {
   id: number;
@@ -910,7 +910,86 @@ export type RentalPaymentProvenance =
   | "ADMIN_CORRECTION"
   | "SYSTEM_DERIVATION";
 
-export type RentalPaymentMethodCategory = "BANK_TRANSFER" | "UPI" | "CASH" | "OTHER";
+/** ZR-PAY-METHODS-GLOBAL-001 Section 2/6.2: the global canonical payment
+ *  categories. The rail/provider (UPI, Pix, M-Pesa, ...) is a separate
+ *  subtype -- never a top-level value. */
+export type PaymentMethodCategory =
+  | "BANK_TRANSFER"
+  | "INSTANT_BANK_PAYMENT"
+  | "BANK_DEBIT"
+  | "STANDING_ORDER"
+  | "PAYMENT_CARD"
+  | "DIGITAL_WALLET_P2P"
+  | "MOBILE_MONEY"
+  | "REMITTANCE_SERVICE"
+  | "CASH"
+  | "CHEQUE_CHECK"
+  | "BANK_DRAFT"
+  | "MONEY_ORDER"
+  | "OTHER";
+
+export type PaymentMethodContext = "rent_record" | "deposit_record" | "return_record";
+export type PaymentReferencePolicy = "OPTIONAL" | "RECOMMENDED" | "REQUIRED";
+
+/** Section 5: reference/evidence semantics for one category (+ rail) choice. */
+export interface PaymentMethodFieldRules {
+  referenceLabel: string;
+  referenceHelper: string;
+  referencePolicy: PaymentReferencePolicy;
+  evidencePolicy: "OPTIONAL" | "CONDITIONAL" | "REQUIRED";
+  evidenceHelper: string;
+  requiresDescription: boolean;
+}
+
+export interface PaymentMethodSubtypeOption extends PaymentMethodFieldRules {
+  code: string;
+  label: string;
+  /** Where the rail is used ("UK", "EU/EEA", ...); "" when global. */
+  region: string;
+}
+
+export interface PaymentMethodCategoryOption extends PaymentMethodFieldRules {
+  code: PaymentMethodCategory;
+  label: string;
+  description: string;
+  /** The conditional second control's label; "" = no second control. */
+  subtypeLabel: string;
+  subtypeRequired: boolean;
+  subtypes: PaymentMethodSubtypeOption[];
+}
+
+/** GET /api/users/payment-methods -- server-resolved for one country/context. */
+export interface PaymentMethodCatalog {
+  version: string;
+  countryCode: string;
+  context: PaymentMethodContext;
+  categories: PaymentMethodCategoryOption[];
+}
+
+/** Where a payee asks to be paid (payment instructions): canonical
+ *  categories, with the rail/provider (e.g. UPI) in methodSubtype. */
+export type RentalPaymentInstructionMethod =
+  | "BANK_TRANSFER"
+  | "INSTANT_BANK_PAYMENT"
+  | "DIGITAL_WALLET_P2P"
+  | "MOBILE_MONEY"
+  | "CASH";
+
+/** One decision about an overpayment's excess (Section 10). */
+export interface RentalPaymentExcessAllocation {
+  id: number;
+  recordId: number;
+  action: "APPLY_TO_OBLIGATION" | "RETURN_TO_PAYER";
+  amount: number;
+  currency: string;
+  targetObligationId: number | null;
+  targetRecordId: number | null;
+  returnedDate: string | null;
+  paymentMethodLabel: string;
+  externalReference: string;
+  note: string;
+  createdAt: string;
+}
 
 export interface RentalPaymentRecord {
   id: number;
@@ -920,8 +999,23 @@ export interface RentalPaymentRecord {
   declaredAmount: number;
   declaredCurrency: string;
   declaredDate: string;
-  paymentMethodCategory: RentalPaymentMethodCategory;
+  paymentMethodCategory: PaymentMethodCategory;
+  /** The rail/provider code; "" when none was given. */
+  paymentMethodSubtype: string;
+  /** How it was paid, for "Other". */
+  paymentMethodDescription: string;
+  /** Label snapshot from when it was recorded -- always display this. */
+  paymentMethodLabel: string;
+  paymentMethodConfigVersion: string;
   externalReference: string;
+  /** Optional note from whoever recorded it. */
+  note: string;
+  /** Paid above what was owed -- held until the recipient applies or
+   *  returns it (excessStatus REVIEW_REQUIRED -> RESOLVED). */
+  excessAmount: number;
+  excessRemaining: number;
+  excessStatus: "" | "REVIEW_REQUIRED" | "RESOLVED";
+  excessAllocations: RentalPaymentExcessAllocation[];
   declaredByGuestId: string;
   confirmedByPartyId: number | null;
   /** Null until a confirmation exists. Less than declaredAmount means
@@ -969,6 +1063,8 @@ export interface RentalPaymentObligation {
    *  word for deposit ("tenancy deposit" / "bond" / "security deposit" / ...).
    *  Always use this over obligationType for user-facing copy. */
   displayLabel: string;
+  /** ISO country the payment-method list resolves from ("" = unknown). */
+  countryCode: string;
   waivedReason: string;
   waivedAt: string | null;
   createdAt: string;
@@ -1066,7 +1162,6 @@ export interface RentRecords {
 }
 
 export type RentalPaymentReturnKind = "DEPOSIT_RETURN" | "CANCELLATION_RETURN";
-export type RentalPaymentReturnMethod = "BANK_TRANSFER" | "UPI" | "CASH" | "OTHER";
 
 /** Money the host sent back to the renter directly (deposit at move-out, or
  *  payments on a cancelled booking) -- Zoiko only records it. */
@@ -1081,7 +1176,10 @@ export interface RentalPaymentReturn {
   currency: string;
   deductionsAmount: number;
   deductionsReason: string;
-  paymentMethodCategory: RentalPaymentReturnMethod;
+  paymentMethodCategory: PaymentMethodCategory;
+  paymentMethodSubtype: string;
+  paymentMethodDescription: string;
+  paymentMethodLabel: string;
   externalReference: string;
   returnedDate: string;
   note: string;
@@ -1100,6 +1198,8 @@ export interface RentalPaymentReturnCandidate {
   settled: number;
   remaining: number;
   endedOn: string | null;
+  /** Resolves which payment methods the return form offers. */
+  countryCode: string;
 }
 
 export type RentalPaymentDisputeOutcome = "PAYMENT_STANDS" | "PAYMENT_NOT_RECEIVED" | "CLOSE_ONLY";
@@ -1111,6 +1211,7 @@ export interface RentalPaymentDisputeAdmin extends RentalPaymentDispute {
   declaredCurrency: string;
   declaredDate: string;
   paymentMethodCategory: string;
+  paymentMethodLabel: string;
   externalReference: string;
   obligationId: number;
   obligationLabel: string;
@@ -1134,13 +1235,22 @@ export interface RentalPaymentCorrection {
   createdAt: string;
 }
 
-export type RentalPaymentInstructionStatus = "PENDING_VERIFICATION" | "PENDING_REVIEW" | "ACTIVE" | "SUPERSEDED" | "REJECTED";
+export type RentalPaymentInstructionStatus =
+  | "PENDING_VERIFICATION"
+  | "COOLING_OFF"
+  | "PENDING_REVIEW"
+  | "ACTIVE"
+  | "SUPERSEDED"
+  | "REJECTED"
+  | "CANCELLED";
 
 export interface RentalPaymentInstruction {
   id: number;
   partyId: number;
   status: RentalPaymentInstructionStatus;
-  method: RentalPaymentMethodCategory;
+  method: RentalPaymentInstructionMethod;
+  methodSubtype: string;
+  methodLabel: string;
   recipientName: string;
   countryCode: string;
   accountIdentifierMasked: string;
@@ -1158,6 +1268,8 @@ export interface RentalPaymentInstruction {
   highRiskReason: string;
   reviewedAt: string | null;
   reviewReason: string;
+  /** COOLING_OFF: when the change takes effect unless the host cancels it. */
+  activatesAt?: string | null;
 }
 
 export interface EvidenceArtifact {
@@ -1196,6 +1308,8 @@ export interface UserProfile {
   emailVerified: boolean;
   isActive: boolean;
   createdAt: string;
+  hasAvatar?: boolean;
+  avatarUpdatedAt?: string | null;
 }
 
 export type DocumentCategory = "identity" | "address" | "other";
@@ -1274,9 +1388,33 @@ export interface UserApplication {
   agreementStatus: string | null;
 }
 
+/** Host <-> renter messaging, one thread per application. */
+export interface RentalMessage {
+  id: number;
+  senderRole: "RENTER" | "HOST";
+  body: string;
+  createdAt: string;
+  readAt: string | null;
+  mine: boolean;
+}
+
+export interface RentalConversation {
+  applicationId: number;
+  /** The renter side of the thread -- a subtenant has their own thread. */
+  guestId: string;
+  listingId: string;
+  listingName: string;
+  counterpartName: string;
+  lastMessageAt: string | null;
+  lastMessagePreview: string;
+  unreadCount: number;
+}
+
 export interface UserOccupancy {
   id: number;
   listingId: string;
+  /** The tenant's own guest id (how termination cases name them). */
+  guestId?: string;
   listingName?: string;
   roomId: number;
   propertyAddress?: string;
@@ -1327,6 +1465,8 @@ export type TerminationCauseCode =
   | "LEGAL_OR_REGULATORY_ORDER"
   | "OTHER_COUNSEL_APPROVED";
 
+export type TerminationResponse = "ACCEPT" | "COUNTER" | "CONTEST";
+
 export type TerminationCaseStatus =
   | "OPENED"
   | "SURRENDER_PROPOSED"
@@ -1335,7 +1475,9 @@ export type TerminationCaseStatus =
   | "REJECTED_PATHWAY"
   | "EFFECTIVE_DATE_SET"
   | "TERMINATED"
-  | "WITHDRAWN";
+  | "WITHDRAWN"
+  | "AWAITING_RESPONSE"
+  | "CONTESTED";
 
 export interface TerminationCase {
   id: number;
@@ -1343,6 +1485,18 @@ export interface TerminationCase {
   agreementId: number;
   initiatorGuestId: string | null;
   initiatorAdminId: number | null;
+  initiatorHostUserId?: number | null;
+  /** AWAITING_RESPONSE: "HOST" or a tenant's guest id made the current proposal. */
+  proposer?: string | null;
+  responseRound?: number;
+  responseDueAt?: string | null;
+  deemedOnSilence?: boolean;
+  pendingResponders?: string[];
+  responses?: Array<{ responseRound: number; responder: string; response: TerminationResponse; proposedDate: string | null; note: string; createdAt: string }>;
+  externalOutcome?: string;
+  externalOrderRef?: string;
+  noticeAcknowledgedAt?: string | null;
+  noticeServiceRecordedByUserId?: number | null;
   causeCode: TerminationCauseCode;
   status: TerminationCaseStatus;
   notes: string;
@@ -1467,7 +1621,7 @@ export type DisputePartyRole = "RENTER" | "HOST" | "REPRESENTATIVE";
 export type DisputePartyRepresentationType = "SELF" | "PROPERTY_MANAGER" | "LEGAL_COUNSEL" | "OTHER_AUTHORIZED";
 
 export type DisputeExternalProceedingAuthorityType = string;
-export type DisputeExternalProceedingStatus = "FILED" | "ACCEPTED" | "PENDING" | "DISMISSED" | "WITHDRAWN";
+export type DisputeExternalProceedingStatus = "FILED" | "ACCEPTED" | "PENDING" | "DISMISSED" | "WITHDRAWN" | "DECIDED";
 export type DisputeExternalProceedingFinalityState = "FINAL" | "UNDER_REVIEW";
 export type DisputeExternalProceedingOutcome = "UPHELD" | "PARTLY_UPHELD" | "NOT_UPHELD" | "SETTLED";
 
@@ -1670,7 +1824,7 @@ export interface DisputeExternalProceedingRead {
   decisionDate: string | null;
   outcomeEvidenceId: number | null;
   outcomeSummary: string;
-  filedByAdminId: number;
+  filedByAdminId: number | null;
   decidedByAdminId: number | null;
   claimIds: number[];
   createdAt: string;
@@ -1768,6 +1922,7 @@ export interface BookingChangeRequest {
   reason: string;
   decisionNote: string;
   decidedByAdminId: number | null;
+  decidedByUserId?: number | null;
   decidedAt: string | null;
   resultingAmendmentId: number | null;
   createdAt: string;
@@ -1792,7 +1947,12 @@ export type SubletRequestStatus =
   | "withdrawn"
   | "expired"
   | "superseded"
-  | "cancelled_by_authority";
+  | "cancelled_by_authority"
+  // ADD_CO_TENANT: waiting for the named co-tenant to agree; they declined; an
+  // approved shared room that has since ended.
+  | "awaiting_co_tenant"
+  | "declined_by_co_tenant"
+  | "ended";
 
 export type SubletDeclineReasonCode =
   | "PROPERTY_UNSUITABLE_FOR_ARRANGEMENT"
@@ -1855,6 +2015,14 @@ export interface SubletRequest {
   cancelledByAuthorityAt: string | null;
   cancelledByAuthorityAdminId: number | null;
   cancelledByAuthorityReason: string;
+  // ADD_CO_TENANT shared room -- the co-tenant's answer, whether the room is
+  // shared right now, and both people's live identity status.
+  coTenantRespondedAt: string | null;
+  endedAt: string | null;
+  endReason: string;
+  sharedRoomActive: boolean;
+  currentTenantIdentityVerified: boolean;
+  proposedRenterIdentityVerified: boolean;
   // Only set for SUBLEASE_PARTIAL/ADD_CO_TENANT/LODGER_OR_LICENSEE -- the
   // co-tenant's own new agreement. When sublet.signatureMode is
   // E_SIGNATURE for this jurisdiction, it's left unsigned until both
@@ -1928,7 +2096,7 @@ export interface PublicListingsPage {
 // /api/users/notifications (user) -- each endpoint only ever returns the
 // authenticated caller's own rows). ---
 
-export type NotificationCategory = "PAYMENTS" | "LEASING" | "OCCUPANCY" | "DISPUTES_AND_SAFETY";
+export type NotificationCategory = "PAYMENTS" | "LEASING" | "OCCUPANCY" | "DISPUTES_AND_SAFETY" | "ACCOUNT";
 export type NotificationPriority = "NORMAL" | "HIGH";
 
 export interface AppNotification {
@@ -2084,7 +2252,8 @@ export interface AgreementAmendment {
   reason: string;
   proposedTerms: Record<string, unknown>;
   proposedGuarantor: { legalName?: string; contactEmail?: string };
-  requestedByAdminId: number;
+  requestedByAdminId: number | null;
+  requestedByUserId: number | null;
   createdAt: string;
   classifiedAt: string | null;
   termsProposedAt: string | null;
@@ -2244,4 +2413,248 @@ export interface RentalTransactionRecord {
   authorityToList: RenterVerificationStatusItem | null;
   identityVerification: RenterVerificationStatusItem | null;
   timeline: RentalTransactionTimelineEntry[];
+}
+
+// --- Help & Support tickets (/api/users/support) ---
+
+export type SupportTicketStatus = "SUBMITTED" | "IN_REVIEW" | "ACTION_REQUIRED" | "RESOLVED" | "CLOSED";
+export type SupportLinkedType = "occupancy" | "application" | "property";
+
+export interface SupportAttachment {
+  id: number;
+  messageId: number | null;
+  originalFilename: string;
+  contentType: string;
+  size: number;
+  createdAt: string;
+}
+
+export interface SupportTicketMessage {
+  id: number;
+  sender: "USER" | "SUPPORT" | "ASSISTANT";
+  body: string;
+  createdAt: string;
+  attachments: SupportAttachment[];
+}
+
+export interface SupportTicket {
+  ref: string;
+  category: string;
+  issue: string;
+  linkedType: SupportLinkedType | null;
+  linkedId: number | null;
+  linkedLabel: string;
+  description: string;
+  timeSensitive: boolean;
+  replyChannel: "both" | "app";
+  status: SupportTicketStatus;
+  actionRequest: string | null;
+  resolution: string | null;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+  messages: SupportTicketMessage[];
+  attachments: SupportAttachment[];
+}
+
+export interface SupportTicketInput {
+  category: string;
+  issue: string;
+  description: string;
+  linkedType?: SupportLinkedType | null;
+  linkedId?: number | null;
+  linkedLabel?: string;
+  timeSensitive: boolean;
+  replyChannel: "both" | "app";
+  files: File[];
+}
+
+// --- Host Rental Records (/api/users/hosting/rental-records) ---
+
+export type HostRentalStatus =
+  | "pending"
+  | "upcoming"
+  | "active"
+  | "notice"
+  | "ending"
+  | "ended"
+  | "cancelled"
+  | "terminated";
+
+export type HostRentalNextAction =
+  | "SIGN_AGREEMENT"
+  | "AWAITING_RENTER_SIGNATURE"
+  | "PREPARE_MOVE_IN"
+  | "REVIEW_NOTICE"
+  | "RESPOND_SURRENDER"
+  | "RESPOND_END_DATE"
+  | "CONFIRM_MOVE_OUT"
+  | "REVIEW_PAYMENTS"
+  | "NONE";
+
+export interface HostRentalRecord {
+  ref: string;
+  occupancyId: number | null;
+  applicationId: number;
+  offerId: number;
+  agreementId: number | null;
+  listingId: string;
+  listingName: string;
+  propertyId: number | null;
+  propertyAddress: string;
+  roomId: number | null;
+  roomType: string;
+  hasEnsuite: boolean;
+  renters: string[];
+  status: HostRentalStatus;
+  occupancyStatus: string | null;
+  offerStatus: string;
+  agreementStatus: string | null;
+  agreementVersion: number | null;
+  hostSignedAt: string | null;
+  renterSignedAt: string | null;
+  monthlyRent: number | null;
+  depositAmount: number | null;
+  currency: string;
+  termMonths: number | null;
+  cadence: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  moveOutDate: string | null;
+  nextAction: HostRentalNextAction;
+  payments: {
+    currency: string;
+    paidCount: number;
+    openCount: number;
+    overdueCount: number;
+    overdueAmount: number;
+    disputedCount: number;
+    nextDueDate: string | null;
+    nextDueAmount: number | null;
+    nextDueStatus: string | null;
+  } | null;
+  notice: {
+    kind: "MOVE_OUT_NOTICE" | "TERMINATION_CASE";
+    initiatedBy: "RENTER" | "HOST";
+    givenAt: string;
+    effectiveDate: string | null;
+    status: string;
+    terminationCaseId: number | null;
+    causeCode: string | null;
+    pendingResponders: string[];
+    responseDueAt: string | null;
+  } | null;
+  sublet: { id: number; status: string; createdAt: string } | null;
+  updatedAt: string;
+}
+
+// --- Account settings (/api/users/preferences etc.) ---
+
+export interface UserPreferences {
+  language: "en-US" | "en-GB" | "hi-IN" | "te-IN";
+  region: "GB" | "US" | "IN";
+  currencyDisplay: "LISTING" | "GBP" | "USD" | "INR";
+  timeZone: string;
+  timeFormat: "12h" | "24h";
+  density: "comfortable" | "compact";
+  motion: "system" | "reduce";
+  defaultWorkspace: "renter" | "host";
+  personalizedRecommendations: boolean;
+  optionalAnalytics: boolean;
+}
+
+export interface AccountClosureCheck {
+  canClose: boolean;
+  blockers: Array<{ code: string; label: string; count: number }>;
+}
+
+// --- Refunds a host owes after a tenancy ends (/refunds) ---
+
+export interface HostRefund {
+  id: number;
+  occupancyId: number;
+  terminationCaseId: number | null;
+  amount: number;
+  currency: string;
+  reason: string;
+  dueBy: string;
+  status: "DUE" | "MARKED_PAID" | "CONFIRMED" | "OVERDUE" | "NOT_RECEIVED";
+  paymentReference: string;
+  markedPaidAt: string | null;
+  confirmedAt: string | null;
+  deemedConfirmed: boolean;
+  notReceivedNote: string;
+  createdAt: string;
+}
+
+// --- Habitability issues (room unsafe or unfit) ---
+
+export type HabitabilitySeverity = "H0" | "H1" | "H2" | "H3";
+
+export interface HabitabilityIncident {
+  id: number;
+  roomId: number;
+  occupancyId: number;
+  severity: HabitabilitySeverity;
+  description: string;
+  status: "OPEN" | "ACKNOWLEDGED" | "FIX_REPORTED" | "RESOLVED";
+  openedAt: string;
+  resolvedAt: string | null;
+  resolutionNotes: string;
+  creditedAmount: number;
+  creditReason: string;
+  acknowledgedAt: string | null;
+  fixDueAt: string | null;
+  fixReportedAt: string | null;
+  fixRejectedCount: number;
+  resolutionBasis: string;
+}
+
+// --- Deposits and deposit claims (settled between host and renter) ---------
+
+export type DepositClaimStatus = "RENTER_RESPONSE_PENDING" | "AGREED" | "DISPUTED" | "REFERRED" | "RESOLVED";
+export type DepositItemResponse = "" | "ACCEPT" | "PARTIAL_ACCEPT" | "DISPUTE" | "DEEMED_ACCEPTED";
+
+export interface DepositRecord {
+  id: number;
+  obligationId: number;
+  heldAmount: number;
+  releasedAmount: number;
+  releasedAt: string | null;
+  notes: string;
+  claimedAmount: number;
+  disputedAmount: number;
+  currency: string;
+  occupancyId: number | null;
+  claimWindowEndsAt: string | null;
+  roomLabel: string;
+}
+
+export interface DepositClaimItem {
+  id: number;
+  claimId: number;
+  categoryCode: string;
+  amountRequested: number;
+  description: string;
+  hasEvidence: boolean;
+  evidenceOriginalName: string;
+  tenantResponse: DepositItemResponse;
+  finalAmount: number | null;
+  createdAt: string;
+}
+
+export interface DepositClaim {
+  id: number;
+  depositRecordId: number;
+  status: DepositClaimStatus;
+  submittedAt: string;
+  responseDueAt: string | null;
+  renterRespondedAt: string | null;
+  negotiationEndsAt: string | null;
+  referredAt: string | null;
+  resolvedAt: string | null;
+  schemeReference: string;
+  resolutionNotes: string;
+  currency: string;
+  items: DepositClaimItem[];
 }

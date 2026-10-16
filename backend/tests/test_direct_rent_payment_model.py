@@ -84,7 +84,8 @@ class TestHostMarksRentReceived:
         for obligation in (obligations["DEPOSIT"], obligations["RENT"]):
             rp_crud.record_receipt_as_recipient(
                 db_session, recipient, obligation, amount=None, received_date=date.today(),
-                payment_method_category="UPI", external_reference="UTR123456",
+                payment_method_category="BANK_TRANSFER", payment_method_subtype="FASTER_PAYMENTS",
+                external_reference="FP123456",
             )
             db_session.refresh(obligation)
             assert obligation.status == "CONFIRMED"
@@ -99,7 +100,9 @@ class TestHostMarksRentReceived:
         record = db_session.scalar(select(RentalPaymentRecord).where(RentalPaymentRecord.obligation_id == obligations["RENT"].id))
         assert record.provenance == "RECIPIENT_CONFIRMATION"
         assert record.confirmed_by_party_id == recipient.id
-        assert record.payment_method_category == "UPI"
+        assert record.payment_method_category == "BANK_TRANSFER"
+        assert record.payment_method_subtype == "FASTER_PAYMENTS"
+        assert record.payment_method_label == "Bank Transfer · Faster Payments"
 
     def test_a_part_payment_leaves_the_rest_due(self, client, db_session: Session):
         _user, _agreement_id, obligations, recipient = self._setup(client, db_session, "dm-mark2")
@@ -161,7 +164,7 @@ class TestHostMarksRentReceived:
         host_cookies = auth_user_cookie(_host_user_for(db_session, recipient.id))
         r = client.post(
             f"/api/users/rental-payments/recipient/obligations/{rent.id}/record-receipt",
-            json={"receivedDate": date.today().isoformat(), "paymentMethodCategory": "UPI", "externalReference": "UTR1"},
+            json={"receivedDate": date.today().isoformat(), "paymentMethodCategory": "BANK_TRANSFER", "externalReference": "REF1"},
             cookies=host_cookies,
         )
         assert r.status_code == 201, r.text
