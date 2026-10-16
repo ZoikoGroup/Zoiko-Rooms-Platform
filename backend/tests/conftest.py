@@ -71,7 +71,8 @@ def _isolate_from_real_provider_credentials(monkeypatch):
     monkeypatch.setattr(settings, "location_fallback_enabled", True)
     monkeypatch.setattr(settings, "location_fallback_providers", "mapbox,here")
     # External listing/search APIs (ZR-AI-SEARCH-001): never call them for real.
-    for key in ("rentcast_api_key", "domain_api_key", "brave_search_api_key", "parallel_api_key", "web_search_provider"):
+    for key in ("rentcast_api_key", "domain_api_key", "brave_search_api_key", "parallel_api_key",
+                "tinyfish_api_key", "web_search_provider"):
         monkeypatch.setattr(settings, key, "")
 
 

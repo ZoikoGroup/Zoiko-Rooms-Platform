@@ -299,7 +299,12 @@ class Settings(BaseSettings):
     # rule as Brave. Free plan: monthly credits.
     parallel_api_key: str = ""
     parallel_search_api_url: str = "https://api.parallel.ai/v1/search"
-    # "parallel" | "brave"; empty = the first provider with a key (Parallel, then Brave).
+    # TinyFish Search API (source_id "tinyfish_web"), same approved-sites-only
+    # rule. Free up to 12,000 searches a day.
+    tinyfish_api_key: str = ""
+    tinyfish_search_api_url: str = "https://api.search.tinyfish.ai"
+    # "parallel" | "tinyfish" | "brave"; empty = the first provider with a key
+    # (Parallel, TinyFish, then Brave).
     web_search_provider: str = ""
     external_listing_timeout_seconds: float = 8.0
     # Partner feed pulls (services/feed_sync.py): UK BLM, US RESO Web API, or
@@ -426,7 +431,7 @@ class Settings(BaseSettings):
         return []
 
     @field_validator("veriff_api_key", "veriff_shared_secret", "google_maps_api_key", "mapbox_access_token",
-                     "here_api_key", "public_search_service_token", "parallel_api_key",
+                     "here_api_key", "public_search_service_token", "parallel_api_key", "tinyfish_api_key",
                      "brave_search_api_key", "rentcast_api_key", "domain_api_key", mode="before")
     @classmethod
     def _strip_secret(cls, value):

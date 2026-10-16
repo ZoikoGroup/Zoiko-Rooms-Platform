@@ -47,8 +47,9 @@ from app.services.external_providers import (
     ListingProvider,
     fetch_candidates,
     fetch_web_hits,
+    is_home_to_live_in,
     normalize_country,
-    web_search_provider,
+    web_search_providers,
 )
 from app.services.external_search_crypto import encrypt_optional
 from app.services.feature_flags import is_enabled
@@ -473,7 +474,9 @@ class SearchOrchestrator:
         private: list[ExternalCandidate | ExternalOpportunity | None] = []
         registered_internally = 0
 
-        for rule in registry.all_active():
+        # Source priority: contracted partner feeds (A) before licensed APIs (B);
+        # approved public websites (C) run last, below.
+        for rule in sorted(registry.all_active(), key=_source_priority):
             sid = str(rule.get("source_id"))
             if len(cards) >= limit or not registry.is_fallback_allowed(sid):
                 continue
@@ -482,9 +485,14 @@ class SearchOrchestrator:
             displayable = registry.is_displayable(sid)
             provider = PROVIDERS.get(sid)
             if provider is not None:
-                candidates = _drop_internalised(
-                    db, self._fetch_provider(db, provider, rule, query, limit, correlation_id)
-                )
+                candidates = [
+                    c
+                    for c in _drop_internalised(
+                        db, self._fetch_provider(db, provider, rule, query, limit, correlation_id)
+                    )
+                    # Rooms to live in only: no studios, shops or commercial space.
+                    if is_home_to_live_in(c.room_type, c.bedrooms)
+                ]
                 if not displayable:
                     # Section 15.4: rights allow acquisition but not masked
                     # display -> keep as an internal opportunity only.
@@ -574,24 +582,14 @@ class SearchOrchestrator:
     def _search_approved_websites(
         db: Session, query: SearchQuery, limit: int, correlation_id: str
     ) -> list[tuple[ExternalCandidate, dict[str, Any]]]:
-        """Last step of the waterfall: web search (Brave) restricted to
-        websites that are themselves ACTIVE, approved PUBLIC_FETCH registry
-        sources for this market. Only the search API is called; result pages
-        are never fetched, and each hit takes its rights from its website's
-        own registry row."""
-        provider = web_search_provider()
-        web_rule = registry.get(provider.source_id) if provider else None
+        """Last step of the waterfall: web search restricted to websites that
+        are themselves ACTIVE, approved PUBLIC_FETCH registry sources for this
+        market. Each approved search provider is tried in turn until one
+        returns hits. Only the search API is called; result pages are never
+        fetched, and each hit takes its rights from its website's own
+        registry row."""
         market = normalize_country(query.country)
-        if (
-            limit <= 0
-            or provider is None
-            or not query.city
-            or not market
-            or not web_rule
-            or not registry.is_fallback_allowed(provider.source_id)
-            or not _in_territory(web_rule, query)
-            or not public_fetch_allowed(db, market)
-        ):
+        if limit <= 0 or not query.city or not market or not public_fetch_allowed(db, market):
             return []
         sites = {
             r["site_domain"]: r
@@ -603,28 +601,40 @@ class SearchOrchestrator:
         }
         if not sites:
             return []
-        try:
-            broker.fetch_url_allowed(
-                db, source_id=provider.source_id, url=provider.url, correlation_id=correlation_id
+        hits: list = []
+        for provider in web_search_providers():
+            # Each provider needs its own approved registry row for this market.
+            web_rule = registry.get(provider.source_id)
+            if (
+                not web_rule
+                or not registry.is_fallback_allowed(provider.source_id)
+                or not _in_territory(web_rule, query)
+            ):
+                continue
+            try:
+                broker.fetch_url_allowed(
+                    db, source_id=provider.source_id, url=provider.url, correlation_id=correlation_id
+                )
+            except BrokerAccessError:
+                continue
+            hits = fetch_web_hits(
+                provider,
+                city=query.city,
+                market=market,
+                domains=sorted(sites),
+                limit=limit,
+                ttl_seconds=int(web_rule.get("cache_ttl_seconds") or 0),
             )
-        except BrokerAccessError:
-            return []
-        hits = fetch_web_hits(
-            provider,
-            city=query.city,
-            market=market,
-            domains=sorted(sites),
-            limit=limit,
-            ttl_seconds=int(web_rule.get("cache_ttl_seconds") or 0),
-        )
-        log_external_search_event(
-            db,
-            action="search_external.web_results",
-            resource_type="external_fetch",
-            resource_id=provider.source_id,
-            correlation_id=correlation_id,
-            reason=f"hits={len(hits)} sites={len(sites)}",
-        )
+            log_external_search_event(
+                db,
+                action="search_external.web_results",
+                resource_type="external_fetch",
+                resource_id=provider.source_id,
+                correlation_id=correlation_id,
+                reason=f"hits={len(hits)} sites={len(sites)}",
+            )
+            if hits:
+                break
         out = []
         for hit in hits:
             rule = sites[hit.domain]
@@ -762,6 +772,15 @@ def _verified_room_ids(db: Session, room_ids: set[int]) -> set[int]:
 
 WEB_SEARCH_SOURCE_IDS = frozenset(p.source_id for p in WEB_SEARCH_PROVIDERS.values())
 
+_ACQUISITION_PRIORITY = {"PARTNER_FEED": 0, "LICENSED_API": 1}
+
+
+def _source_priority(rule: dict[str, Any]) -> tuple[int, str]:
+    """Sort key: partner feeds, then licensed APIs, then anything else;
+    source_id keeps the order stable within a category."""
+    mode = str(rule.get("acquisition_mode") or "").upper()
+    return _ACQUISITION_PRIORITY.get(mode, 2), str(rule.get("source_id"))
+
 
 def _in_territory(rule: dict[str, Any], query: SearchQuery) -> bool:
     """A source serves only the markets in its registry territories; no
@@ -803,6 +822,8 @@ def _partner_listings(
             continue
         if query.min_price is not None and monthly is not None and monthly < query.min_price:
             continue
+        if not is_home_to_live_in(opp.room_type):
+            continue  # rooms to live in only: no studios, shops or commercial space
         out.append(opp)
         if len(out) >= limit:
             break
@@ -854,6 +875,7 @@ def _card_from_candidate(cand: ExternalCandidate, rule: dict[str, Any], query: S
         location_region=cand.region if "approx_location" in permitted else None,
         location_country=query.country,
         rent_monthly=cand.rent_monthly if "advertised_price" in permitted else None,
+        rent_is_from="advertised_price" in permitted and bool(cand.rent_monthly) and cand.price_period == "MONTH_FROM",
         currency=cand.currency if "advertised_price" in permitted and cand.rent_monthly else None,
         room_type=cand.room_type if "room_type" in permitted else None,
     )

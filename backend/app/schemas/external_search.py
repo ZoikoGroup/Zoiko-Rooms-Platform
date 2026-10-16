@@ -44,6 +44,9 @@ class ExternalCard(BaseModel):
     location_region: str | None = Field(default=None, max_length=120)
     location_country: str | None = Field(default=None, max_length=80)
     rent_monthly: int | None = Field(default=None, ge=0)
+    # True when rent_monthly is the lowest advertised rent ("starting at"),
+    # not the rent of one specific room.
+    rent_is_from: bool = Field(default=False)
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     deposit: int | None = Field(default=None, ge=0)
     availability_text: str | None = Field(default=None, max_length=120)
