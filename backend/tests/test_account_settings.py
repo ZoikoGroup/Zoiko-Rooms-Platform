@@ -29,6 +29,24 @@ class TestPreferences:
         # Product-news emails were removed from Settings.
         assert client.put("/api/users/preferences", json={"marketingEmails": True}, cookies=cookies).status_code == 422
 
+    def test_english_only_and_no_analytics_setting(self, client, db_session: Session):
+        from app.models.user_settings import UserPreference
+
+        user = _make_user(db_session, email="set-lang@test.com")
+        # Saved before Hindi / Telugu and the analytics toggle were removed.
+        db_session.add(UserPreference(user_id=user.id, data={"language": "te-IN", "optionalAnalytics": True}))
+        db_session.commit()
+        cookies = auth_user_cookie(user)
+
+        prefs = client.get("/api/users/preferences", cookies=cookies).json()
+        assert prefs["language"] == "en-GB" and "optionalAnalytics" not in prefs
+        assert client.put("/api/users/preferences", json={"language": "hi-IN"}, cookies=cookies).status_code == 422
+        assert client.put("/api/users/preferences", json={"optionalAnalytics": True}, cookies=cookies).status_code == 422
+        # Prices always show in the listing's own currency.
+        assert "currencyDisplay" not in prefs
+        assert client.put("/api/users/preferences", json={"currencyDisplay": "USD"}, cookies=cookies).status_code == 422
+        assert client.put("/api/users/preferences", json={"language": "en-US"}, cookies=cookies).json()["language"] == "en-US"
+
 
 class TestAvatar:
     def test_upload_read_replace_delete(self, client, db_session: Session):

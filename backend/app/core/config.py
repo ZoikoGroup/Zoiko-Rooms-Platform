@@ -135,6 +135,11 @@ class Settings(BaseSettings):
     property_location_upload_dir: str = "secure_uploads/property_location"
     # ZR-AUTHORITY-002 authority evidence (encrypted at rest, never publicly mounted).
     authority_upload_dir: str = "secure_uploads/authority"
+    # Property / authority verification: a name, address line or postal code on
+    # a document counts as matching the entered details at this confidence or
+    # above (services/match_confidence.py) -- tolerant of small OCR / typing
+    # differences, never of a different person or house number.
+    document_match_threshold: float = 0.75
     # Optional ClamAV daemon (clamd, TCP INSTREAM) for evidence uploads
     # (core/upload_scan.py). Unset = structural checks only, scan_status
     # NOT_SCANNED; a configured scanner that can't answer marks ERROR and the

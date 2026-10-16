@@ -40,7 +40,7 @@ from app.core.config import settings
 from app.crud.events import emit_event
 from app.models.admin_user import AdminUser
 from app.models.authority_verification import (
-    ACTIVE_STATES, CONFIRMATION_KINDS, RELATIONSHIP_TYPES, ROUTE_FOR_RELATIONSHIP, SCOPE_CODES,
+    ACTIVE_STATES, CONFIRMATION_KINDS, ENTITY_RELATIONSHIPS, RELATIONSHIP_TYPES, ROUTE_FOR_RELATIONSHIP, SCOPE_CODES,
     AuthorityConfirmation, AuthorityEvidence, AuthorityRegulatoryPack, AuthorityVerification, Organization,
 )
 from app.models.property import Property
@@ -77,6 +77,15 @@ REASONS: dict[str, tuple[str, str]] = {
     "SUBLET_PERMISSION_MISSING": ("Your tenancy alone may not permit subletting. Add the landlord's permission.", "Add consent"),
     "AUTHORITY_DATES_INVALID": ("The authority dates aren't current. Add a current mandate or permission.", "Add evidence"),
     "EVIDENCE_EXPIRED": ("A document has expired. Upload a current one.", "Replace evidence"),
+    # ZR-HAV-001 (Section 2 "Never treat as ownership proof", HAV-11/12/15).
+    "NOT_OWNERSHIP_PROOF": ("A utility bill, council or property tax bill, insurance policy or similar doesn't prove ownership. Upload your title register, deed or other ownership document.", "Replace evidence"),
+    "RESIDENCE_PROOF_MISSING": ("As you live in this home, add a document showing you live at this address -- for example a council tax or utility bill, bank statement or driving licence in your name.", "Add evidence"),
+    "RESIDENCE_NOT_MATCHED": ("Your proof of residence must show your name and this property's address.", "Replace evidence"),
+    "LANDLORD_REGISTRATION_MISSING": ("Private landlords here must be registered by law. Add your landlord registration -- it must show your name.", "Add evidence"),
+    "AGENT_LICENCE_MISSING": ("Letting agents here need a licence, registration or redress-scheme membership by law. Add yours -- it must show your or your firm's name.", "Add evidence"),
+    "REGISTRATION_NOT_MATCHED": ("The registration or licence doesn't show your name (or your firm's). Upload the one issued to you.", "Replace evidence"),
+    "HMO_LICENCE_MISSING": ("With this many people the property may be a house in multiple occupation (HMO), which needs a council licence. Add the HMO licence for this address.", "Add evidence"),
+    "LICENCE_NOT_MATCHED": ("The licence must show this property's address. Upload the licence issued for this property.", "Replace evidence"),
     # Waiting on something outside the host's evidence: checked again automatically.
     "EVIDENCE_UNREADABLE": ("We couldn't read your documents yet. We'll check them again automatically -- you can leave this page.", "View status"),
     "SCAN_INCOMPLETE": ("Your files are still being security-scanned. We'll finish the check automatically -- you can leave this page.", "View status"),
@@ -123,12 +132,20 @@ def describe(codes: list[str]) -> dict:
 
 # -- Authority Regulatory Packs (Section 4) ----------------------------------------
 
-def _req(requirement_id, evidence_class, title, purpose, documents, *, required=True, owner_confirmation=False):
+# ZR-HAV-001 Section 11 "avoid false legal claims": every requirement says
+# whether it's Zoiko Rooms policy or the law, and at which step it applies.
+REQUIREMENT_BASES = ("ZOIKO_POLICY", "LEGAL")
+REQUIREMENT_TIMINGS = ("BEFORE_PUBLICATION", "BEFORE_BOOKING", "BEFORE_OCCUPANCY", "ON_TRIGGER")
+
+
+def _req(requirement_id, evidence_class, title, purpose, documents, *, required=True, owner_confirmation=False,
+         basis="ZOIKO_POLICY", timing="BEFORE_PUBLICATION", trigger=""):
     docs = [{"label": label, "keywords": list(keywords)} for label, keywords in documents]
     return {"requirement_id": requirement_id, "evidence_class": evidence_class, "title": title, "purpose": purpose,
             "documents": docs, "accepted_examples": [d["label"] for d in docs],
             "keywords": _union(d["keywords"] for d in docs),
-            "required": required, "owner_confirmation": owner_confirmation}
+            "required": required, "owner_confirmation": owner_confirmation,
+            "basis": basis, "timing": timing, "trigger": trigger}
 
 
 def _union(keyword_lists) -> list[str]:
@@ -150,7 +167,6 @@ DOCUMENT_CATALOG: dict[str, dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] 
             ("Sale deed", ("sale deed", "conveyance deed", "deed of sale", "title deed")),
             ("Gift / partition / settlement deed", ("gift deed", "partition deed", "settlement deed", "release deed")),
             ("Encumbrance certificate", ("encumbrance certificate", "encumbrance")),
-            ("Property tax receipt", ("property tax", "house tax", "municipal tax")),
             ("Khata / Patta / mutation record", ("khata", "patta", "mutation", "pahani", "record of rights",
                                                  "adangal", "jamabandi", "7 12 extract")),
             ("Allotment / possession letter", ("allotment letter", "possession letter")),
@@ -193,6 +209,7 @@ DOCUMENT_CATALOG: dict[str, dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] 
                                                                  "proprietorship register", "registered proprietor")),
             ("Transfer deed (TR1)", ("transfer deed", "tr1", "transfer of whole")),
             ("Conveyance (unregistered land)", ("conveyance",)),
+            ("Registered lease (leasehold title)", ("leasehold", "registered lease")),
         ),
         "OWNER_ENTITY_AUTHORITY": (
             ("Board resolution", ("board resolution",)),
@@ -227,7 +244,7 @@ DOCUMENT_CATALOG: dict[str, dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] 
     "US": {
         "OWNER_PROPERTY_RIGHT": (
             ("Recorded deed (grant / warranty / quitclaim)", ("grant deed", "warranty deed", "quitclaim deed", "deed")),
-            ("County assessor / property tax record", ("assessor", "parcel number", "property tax", "tax bill")),
+            ("County land record / title search", ("recorder", "register of deeds", "title search", "land record")),
             ("Title insurance policy", ("title insurance",)),
         ),
         "OWNER_ENTITY_AUTHORITY": (
@@ -256,11 +273,98 @@ DOCUMENT_CATALOG: dict[str, dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] 
                                                         "sub-tenant")),
         ),
     },
+    "GB-ENG": {
+        "AGENT_LICENCE": (
+            ("Property redress scheme membership", ("property ombudsman", "property redress scheme", "redress scheme")),
+        ),
+    },
+    "GB-WLS": {
+        "LANDLORD_REGISTRATION": (("Rent Smart Wales landlord registration", ("rent smart wales",)),),
+        "AGENT_LICENCE": (("Rent Smart Wales licence", ("rent smart wales",)),),
+        "TENANT_OCCUPATION_RIGHT": (
+            ("Occupation contract", ("occupation contract",)),
+            ("Tenancy agreement / lease", ("tenancy agreement", "lease")),
+        ),
+    },
+    "GB-SCT": {
+        "OWNER_PROPERTY_RIGHT": (
+            ("Registers of Scotland title sheet", ("registers of scotland", "land register of scotland", "title sheet")),
+            ("Disposition (Register of Sasines)", ("disposition", "register of sasines")),
+        ),
+        "LANDLORD_REGISTRATION": (
+            ("Scottish Landlord Register registration", ("scottish landlord register", "landlord registration")),
+        ),
+        "AGENT_LICENCE": (
+            ("Scottish Letting Agent Register entry", ("letting agent register", "letting agent registration")),
+        ),
+        "TENANT_OCCUPATION_RIGHT": (
+            ("Private residential tenancy agreement", ("private residential tenancy", "tenancy agreement")),
+            ("Lease", ("lease",)),
+        ),
+    },
+    "GB-NIR": {
+        "OWNER_PROPERTY_RIGHT": (
+            ("Land Registry of Northern Ireland folio", ("land and property services", "land registry", "folio")),
+            ("Registry of Deeds record / conveyance", ("registry of deeds", "conveyance", "assignment")),
+        ),
+        "LANDLORD_REGISTRATION": (
+            ("Northern Ireland landlord registration", ("landlord registration scheme", "landlord registration")),
+        ),
+    },
+    "US-NY": {
+        "AGENT_LICENCE": (
+            ("New York real estate broker / salesperson license", ("real estate broker", "real estate salesperson",
+                                                                     "department of state")),
+        ),
+    },
+    "US-CA": {
+        "AGENT_LICENCE": (
+            ("California DRE license", ("department of real estate", "real estate broker", "real estate salesperson")),
+        ),
+    },
+    "IE": {
+        "OWNER_PROPERTY_RIGHT": (
+            ("Land Registry folio (Tailte Eireann)", ("folio", "land registry", "property registration authority",
+                                                      "tailte eireann")),
+            ("Registry of Deeds memorial / deed", ("registry of deeds", "deed")),
+        ),
+    },
+    "CA-ON": {
+        "OWNER_PROPERTY_RIGHT": (
+            ("Ontario parcel register / transfer", ("parcel register", "land registry office", "transfer")),
+            ("Deed", ("deed",)),
+        ),
+    },
+    "CA-BC": {
+        "OWNER_PROPERTY_RIGHT": (("BC land title search", ("land title", "title search", "ltsa")),),
+    },
+    "AU-NSW": {
+        "OWNER_PROPERTY_RIGHT": (
+            ("Certificate of title / folio search", ("certificate of title", "folio identifier", "nsw land registry")),
+        ),
+        "AGENT_LICENCE": (
+            ("NSW real estate licence / certificate of registration", ("fair trading", "real estate licence",
+                                                                        "certificate of registration")),
+        ),
+    },
     "*": {
+        "OWNER_OCCUPIER_RESIDENCE": (
+            ("Council / property tax bill", ("council tax", "property tax")),
+            ("Utility bill", ("electricity", "gas bill", "water bill", "utility", "energy")),
+            ("Bank statement", ("bank statement", "statement of account")),
+            ("Driving licence / ID card showing the address", ("driving licence", "driving license",
+                                                                "driver license", "identity card")),
+        ),
+        "LANDLORD_REGISTRATION": (("Landlord registration", ("landlord registration",)),),
+        "AGENT_LICENCE": (("Agent licence / registration", ("licence", "license", "registration")),),
+        "HMO_LICENCE": (
+            ("HMO licence", ("hmo licence", "hmo license", "house in multiple occupation")),
+            ("Selective / additional licence", ("selective licence", "additional licence", "selective license",
+                                                "additional license")),
+        ),
         "OWNER_PROPERTY_RIGHT": (
             ("Title / land registry extract", ("land registry", "title", "proprietor")),
             ("Deed", ("deed",)),
-            ("Property tax record", ("property tax",)),
             ("Court, estate or trust record", ("ownership", "estate", "court")),
         ),
         "OWNER_ENTITY_AUTHORITY": (
@@ -294,19 +398,55 @@ DOCUMENT_CATALOG: dict[str, dict[str, tuple[tuple[str, tuple[str, ...]], ...]]] 
 }
 
 
+NON_PROOF_DOCUMENTS = [
+    {"label": "Utility bill", "keywords": ["electricity bill", "gas bill", "water bill", "energy bill", "utility bill",
+                                           "broadband", "meter reading"]},
+    {"label": "Council / property tax bill", "keywords": ["council tax", "property tax", "tax bill", "assessor",
+                                                          "house tax", "municipal tax"]},
+    {"label": "Insurance policy", "keywords": ["insurance policy", "home insurance", "buildings insurance",
+                                               "contents insurance", "policy schedule"]},
+    {"label": "Payment receipt", "keywords": ["payment receipt", "receipt no"]},
+]
+
+
+def pack_chain(code: str) -> list[str]:
+    """Most specific first: a nation / state pack, then its country, then "*"."""
+    code = (code or "").upper()
+    chain = [code] if code else []
+    if "-" in code:
+        chain.append(code.split("-", 1)[0])
+    return [c for c in dict.fromkeys(chain + ["*"])]
+
+
 def default_documents(country: str, requirement_id: str) -> list[dict]:
-    table = DOCUMENT_CATALOG.get((country or "").upper()) or DOCUMENT_CATALOG["*"]
-    entries = table.get(requirement_id) or DOCUMENT_CATALOG["*"].get(requirement_id, ())
-    return [{"label": label, "keywords": list(keywords)} for label, keywords in entries]
+    for code in pack_chain(country):
+        entries = (DOCUMENT_CATALOG.get(code) or {}).get(requirement_id)
+        if entries:
+            return [{"label": label, "keywords": list(keywords)} for label, keywords in entries]
+    return []
 
 
 def default_keywords(country: str, requirement_id: str) -> list[str]:
     return _union(d["keywords"] for d in default_documents(country, requirement_id))
 
 
-def requirement_documents(req: dict, country: str) -> list[dict]:
+# ZR-HAV-001 Section 2: never ownership proof, whatever a pack lists (older or
+# edited packs may still carry e.g. a property tax receipt).
+_NON_PROOF_KEYWORDS = {k for d in NON_PROOF_DOCUMENTS for k in d["keywords"]}
+# Executor / administrator / trustee documents vs a company's own.
+_ESTATE_WORDS = ("probate", "administration", "trust", "testamentary", "succession", "executor", "estate")
+
+
+def requirement_documents(req: dict, country: str, relationship_type: str = "") -> list[dict]:
     """The pack's own document list, else the country defaults."""
-    return req.get("documents") or default_documents(country, req["requirement_id"])
+    docs = req.get("documents") or default_documents(country, req["requirement_id"])
+    if req.get("evidence_class") == "PROPERTY_RIGHT":
+        docs = [d for d in docs if not set(d.get("keywords") or []) & _NON_PROOF_KEYWORDS]
+    # An executor / trustee sees the estate documents only; a representative
+    # may act for a company, trust or estate, so keeps the full list.
+    if req["requirement_id"] == "OWNER_ENTITY_AUTHORITY" and relationship_type == "ESTATE_TRUSTEE":
+        docs = [d for d in docs if any(w in d["label"].lower() for w in _ESTATE_WORDS)] or docs
+    return docs
 
 
 def detect_document(text: str, documents: list[dict], tolerant: bool = False) -> str | None:
@@ -332,6 +472,14 @@ def _routes(country: str) -> dict:
             _req("CO_OWNER_CONSENT", "SUBLET_PERMISSION", "Co-owner consent",
                  "Where required, your co-owner(s) agree to the listing.", docs("CO_OWNER_CONSENT"),
                  required=False, owner_confirmation=True),
+            _req("OWNER_OCCUPIER_RESIDENCE", "RESIDENCE", "Proof you live at this property",
+                 "You're renting a room in your own home, so we check you live here. It must show your name and "
+                 "this address. (A utility bill shows where you live -- it never proves ownership.)",
+                 docs("OWNER_OCCUPIER_RESIDENCE"), required=False),
+            _req("LANDLORD_REGISTRATION", "REGISTRATION", "Landlord registration",
+                 "Private landlords here must be registered by law. It must show your name.",
+                 docs("LANDLORD_REGISTRATION"), required=False, basis="LEGAL"),
+            _HMO(docs),
         ],
         "AGENT": [
             _req("AGENT_MANDATE", "MANDATE", "Owner / principal mandate for this property",
@@ -340,6 +488,10 @@ def _routes(country: str) -> dict:
             _req("AGENT_ORGANIZATION_LINK", "ORGANIZATION_LINK", "Your role at the organization",
                  "Needed only when you act through a company. A company registration is not a property mandate.",
                  docs("AGENT_ORGANIZATION_LINK"), required=False),
+            _req("AGENT_LICENCE", "REGISTRATION", "Agent licence or registration",
+                 "Letting agents and property managers here need this by law. It must show your or your firm's name.",
+                 docs("AGENT_LICENCE"), required=False, basis="LEGAL"),
+            _HMO(docs),
         ],
         "SUBLET": [
             _req("TENANT_OCCUPATION_RIGHT", "OCCUPATION_RIGHT", "Current right to occupy",
@@ -348,15 +500,67 @@ def _routes(country: str) -> dict:
             _req("TENANT_SUBLET_PERMISSION", "SUBLET_PERMISSION", "Permission to sublet",
                  "Your tenancy alone may not permit subletting. Shows the landlord or authorized agent allows it.",
                  docs("TENANT_SUBLET_PERMISSION"), owner_confirmation=True),
+            _req("LANDLORD_REGISTRATION", "REGISTRATION", "Landlord registration",
+                 "As a room operator you let rooms as a landlord, which must be registered here by law.",
+                 docs("LANDLORD_REGISTRATION"), required=False, basis="LEGAL"),
+            _HMO(docs),
         ],
     }
 
 
+def _HMO(docs) -> dict:
+    return _req("HMO_LICENCE", "LICENCE", "HMO / property licence",
+                "With this many people sharing, the property may be a house in multiple occupation (HMO) that needs "
+                "a council licence before it's let. It must show this property's address.",
+                docs("HMO_LICENCE"), required=False, basis="LEGAL", timing="ON_TRIGGER", trigger="HMO_OCCUPANCY")
+
+
+_UK_TERMS = {"tenant": "tenant", "mandate": "letting / management agreement", "landlord": "landlord"}
 _SEED_PACKS = (
     {"country_code": "*", "country_name": "Other countries", "sublet_consent_required": True,
      "terminology": {"tenant": "tenant", "mandate": "agency agreement"}},
+    # "GB" stays as the fallback for cases started before the nation packs.
     {"country_code": "GB", "country_name": "United Kingdom", "sublet_consent_required": True,
-     "terminology": {"tenant": "tenant", "mandate": "letting / management agreement", "landlord": "landlord"}},
+     "terminology": _UK_TERMS, "rules": {"agent_licence_required": True, "hmo_occupant_threshold": 5}},
+    # ZR-HAV-001 Section 4: four legally distinct UK systems.
+    {"country_code": "GB-ENG", "country_name": "United Kingdom -- England", "sublet_consent_required": True,
+     "terminology": _UK_TERMS,
+     # The private rented sector database is phased in -- not a hard requirement yet (Section 4).
+     "rules": {"agent_licence_required": True, "hmo_occupant_threshold": 5, "prs_database_required": False,
+               "legal_refs": ["https://www.gov.uk/redress-scheme-estate-agencies",
+                              "https://www.gov.uk/find-licences/house-in-multiple-occupation-licence"]}},
+    {"country_code": "GB-WLS", "country_name": "United Kingdom -- Wales", "sublet_consent_required": True,
+     "terminology": {**_UK_TERMS, "tenant": "contract-holder"},
+     "rules": {"landlord_registration_required": True, "agent_licence_required": True, "hmo_occupant_threshold": 5,
+               "legal_refs": ["https://rentsmart.gov.wales/en/landlord/landlord-registration/"]}},
+    {"country_code": "GB-SCT", "country_name": "United Kingdom -- Scotland", "sublet_consent_required": True,
+     "terminology": _UK_TERMS,
+     "rules": {"landlord_registration_required": True, "agent_licence_required": True, "hmo_occupant_threshold": 3,
+               "legal_refs": ["https://www.gov.scot/policies/private-renting/regulation/",
+                              "https://lettingagentregistration.gov.scot/who-should-register"]}},
+    {"country_code": "GB-NIR", "country_name": "United Kingdom -- Northern Ireland", "sublet_consent_required": True,
+     "terminology": _UK_TERMS,
+     "rules": {"landlord_registration_required": True, "hmo_occupant_threshold": 3,
+               "legal_refs": ["https://www.nidirect.gov.uk/articles/landlord-registration-process"]}},
+    # ZR-HAV-001 Section 5: state overlays on the US baseline.
+    {"country_code": "US-NY", "country_name": "United States -- New York", "sublet_consent_required": True,
+     "co_owner_consent_required": False, "terminology": {"tenant": "tenant", "mandate": "listing / management agreement"},
+     "rules": {"agent_licence_required": True,
+               "legal_refs": ["https://dos.ny.gov/real-estate-broker-frequently-asked-questions"]}},
+    {"country_code": "US-CA", "country_name": "United States -- California", "sublet_consent_required": True,
+     "co_owner_consent_required": False, "terminology": {"tenant": "tenant", "mandate": "listing / management agreement"},
+     "rules": {"agent_licence_required": True}},
+    # ZR-HAV-001 Section 6 expansion packs -- usable only once the market itself is opened.
+    {"country_code": "IE", "country_name": "Ireland", "sublet_consent_required": True,
+     "terminology": {"tenant": "tenant", "mandate": "letting agreement"}, "rules": {}},
+    {"country_code": "CA-ON", "country_name": "Canada -- Ontario", "sublet_consent_required": True,
+     "terminology": {"tenant": "tenant", "mandate": "listing / management agreement"}, "rules": {}},
+    {"country_code": "CA-BC", "country_name": "Canada -- British Columbia", "sublet_consent_required": True,
+     "terminology": {"tenant": "tenant", "mandate": "listing / management agreement"}, "rules": {}},
+    {"country_code": "AU-NSW", "country_name": "Australia -- New South Wales", "sublet_consent_required": True,
+     "terminology": {"tenant": "tenant", "mandate": "managing agency agreement"},
+     "rules": {"agent_licence_required": True,
+               "legal_refs": ["https://www.nsw.gov.au/housing-and-construction/landlords/managing-a-rental-property"]}},
     {"country_code": "IN", "country_name": "India", "sublet_consent_required": True,
      "terminology": {"tenant": "tenant / licensee", "mandate": "authority letter / power of attorney"}},
     {"country_code": "US", "country_name": "United States", "sublet_consent_required": True,
@@ -365,19 +569,50 @@ _SEED_PACKS = (
 
 
 def ensure_default_packs(db: Session) -> None:
-    existing = set(db.scalars(select(AuthorityRegulatoryPack.country_code)))
+    """Seeds missing packs, and gives an existing pack any requirement added
+    since it was created (as a new version, keeping its edited wording)."""
+    active = {p.country_code: p for p in db.scalars(select(AuthorityRegulatoryPack).where(
+        AuthorityRegulatoryPack.active.is_(True)))}
+    known = set(db.scalars(select(AuthorityRegulatoryPack.country_code)))
     for seed in _SEED_PACKS:
-        if seed["country_code"] not in existing:
-            db.add(AuthorityRegulatoryPack(version=1, active=True, requirements=_routes(seed["country_code"]), **seed))
+        code = seed["country_code"]
+        if code not in known:
+            db.add(AuthorityRegulatoryPack(version=1, active=True, requirements=_routes(code), **seed))
+            continue
+        pack = active.get(code)
+        if pack is None:
+            continue
+        defaults = _routes(code)
+        current = pack.requirements or {}
+        stale = any([r["requirement_id"] for r in current.get(route, [])] != [r["requirement_id"] for r in reqs]
+                    for route, reqs in defaults.items())
+        # Rules are filled in only when never set -- an edited (even empty) set is kept.
+        if not stale and (pack.rules is not None or not seed.get("rules")):
+            continue
+        merged = {}
+        for route, reqs in defaults.items():
+            mine = {r["requirement_id"]: r for r in current.get(route, [])}
+            merged[route] = [{**r, **mine.get(r["requirement_id"], {}),
+                              "basis": r["basis"], "timing": r["timing"], "trigger": r["trigger"]} for r in reqs]
+        fields = ("country_name", "terminology", "sublet_consent_required", "co_owner_consent_required",
+                  "parallel_identity_intake", "default_validity_days", "expiring_soon_days",
+                  "evidence_retention_days", "listing_control")
+        pack.active = False
+        db.add(AuthorityRegulatoryPack(country_code=code, version=pack.version + 1, active=True, requirements=merged,
+                                       rules=pack.rules if pack.rules is not None else (seed.get("rules") or {}),
+                                       **{f: getattr(pack, f) for f in fields}))
     db.flush()
 
 
 def get_pack(db: Session, country_code: str) -> AuthorityRegulatoryPack:
+    """The nation / state pack, else the country's, else the "*" pack."""
     ensure_default_packs(db)
-    pack = db.scalar(select(AuthorityRegulatoryPack).where(
-        AuthorityRegulatoryPack.country_code == (country_code or "").upper(), AuthorityRegulatoryPack.active.is_(True)))
-    return pack or db.scalar(select(AuthorityRegulatoryPack).where(
-        AuthorityRegulatoryPack.country_code == "*", AuthorityRegulatoryPack.active.is_(True)))
+    for code in pack_chain(country_code):
+        pack = db.scalar(select(AuthorityRegulatoryPack).where(
+            AuthorityRegulatoryPack.country_code == code, AuthorityRegulatoryPack.active.is_(True)))
+        if pack is not None:
+            return pack
+    return None
 
 
 def pack_requirements_view(pack: AuthorityRegulatoryPack) -> dict:
@@ -435,7 +670,7 @@ def _validated_requirements(new: dict, current: dict, country: str) -> dict:
 def update_pack(db: Session, pack: AuthorityRegulatoryPack, changes: dict) -> AuthorityRegulatoryPack:
     editable = ("country_name", "requirements", "terminology", "sublet_consent_required", "co_owner_consent_required",
                 "parallel_identity_intake", "default_validity_days", "expiring_soon_days", "evidence_retention_days",
-                "listing_control")
+                "listing_control", "rules")
     unknown = set(changes) - set(editable)
     if unknown:
         raise ValueError(f"Not editable: {sorted(unknown)}")
@@ -561,6 +796,36 @@ def country_for(prop: Property) -> str:
     return prop.country_code or country_for_jurisdiction(prop.jurisdiction_code)
 
 
+_UK_NATIONS = {"england": "GB-ENG", "wales": "GB-WLS", "cymru": "GB-WLS", "scotland": "GB-SCT",
+               "northern ireland": "GB-NIR"}
+_US_STATES = {"new york": "NY", "california": "CA"}
+
+
+def pack_code_for(prop: Property) -> str:
+    """ZR-HAV-001 Sections 4-6: the jurisdiction pack a property falls under --
+    a UK nation (never English rules UK-wide), a US state / Canadian province /
+    Australian state where one is known, else the country."""
+    country = country_for(prop)
+    jurisdiction = (prop.jurisdiction_code or "").upper()
+    area = _norm(prop.administrative_area)
+    if country == "GB":
+        if area in _UK_NATIONS:
+            return _UK_NATIONS[area]
+        if jurisdiction in ("GB-ENG", "GB-WLS", "GB-SCT", "GB-NIR"):
+            return jurisdiction
+        if (prop.postal_code or "").strip().upper().startswith("BT"):
+            return "GB-NIR"
+        return "GB-ENG" if jurisdiction == "ENGLAND" else "GB"
+    if country in ("US", "CA", "AU"):
+        if jurisdiction.startswith(f"{country}-"):
+            return jurisdiction
+        state = _US_STATES.get(area, "") if country == "US" else ""
+        if not state and re.fullmatch(r"[a-z]{2,3}", area or ""):
+            state = area.upper()
+        return f"{country}-{state}" if state else country
+    return country
+
+
 def get_owned_property(db: Session, user: UserAccount, property_id: int) -> Property:
     prop = db.get(Property, property_id)
     if prop is None:
@@ -632,12 +897,34 @@ def requirements(db: Session, v: AuthorityVerification) -> list[dict]:
     """Server-defined requirements for this route and jurisdiction, with each
     requirement's current status (Section 15.3)."""
     pack = get_pack(db, v.country_code)
+    rules = pack.rules or {}
     out = []
     for req in (pack.requirements or {}).get(route_for(v), []):
         rid = req["requirement_id"]
         required = req["required"]
+        req = {"basis": "ZOIKO_POLICY", "timing": "BEFORE_PUBLICATION", "trigger": "", **req}
+        # ZR-HAV-001 Section 11 "reduce overcollection": a conditional or legal
+        # requirement is shown only where it applies to this role and place.
+        if rid == "OWNER_OCCUPIER_RESIDENCE":
+            if v.relationship_type != "RESIDENT_OWNER":
+                continue
+            required = True
+        if rid == "LANDLORD_REGISTRATION":
+            # Lodgers in the owner's own home and agents (licensed separately) are out of scope.
+            if not rules.get("landlord_registration_required") or v.relationship_type in (
+                    "RESIDENT_OWNER", "TENANT_SUBLETTER"):
+                continue
+            required = True
+        if rid == "AGENT_LICENCE":
+            if not rules.get("agent_licence_required"):
+                continue
+            required = True
+        if rid == "HMO_LICENCE":
+            if not hmo_triggered(db, v, rules):
+                continue
+            required = True
         if rid == "OWNER_ENTITY_AUTHORITY":
-            required = v.relationship_type == "REPRESENTATIVE"
+            required = v.relationship_type in ENTITY_RELATIONSHIPS
         if rid == "CO_OWNER_CONSENT":
             required = v.relationship_type == "CO_OWNER" and pack.co_owner_consent_required
         if rid == "AGENT_ORGANIZATION_LINK":
@@ -658,11 +945,24 @@ def requirements(db: Session, v: AuthorityVerification) -> list[dict]:
             req_status = "MISSING"
         sources = [{"code": a.code, "source_type": a.source_type, "label": a.label}
                    for a in sources_for(v.country_code, req["evidence_class"])]
-        documents = requirement_documents(req, pack.country_code)
+        documents = requirement_documents(req, pack.country_code, v.relationship_type)
         out.append({**req, "documents": documents, "accepted_examples": [d["label"] for d in documents],
                     "keywords": _union(d["keywords"] for d in documents), "required": required, "status": req_status, "sources": sources,
                     "evidence_ids": [e.id for e in items], "confirmation_pending": pending, "confirmed": confirmed})
     return out
+
+
+def hmo_triggered(db: Session, v: AuthorityVerification, rules: dict) -> bool:
+    """HAV-11 "required only on trigger": the property's rooms together can
+    house at least the pack's HMO occupant threshold."""
+    threshold = rules.get("hmo_occupant_threshold")
+    if not threshold:
+        return False
+    prop = db.get(Property, v.property_id)
+    capacity = sum(int(r.max_occupants or 1) for r in (prop.rooms if prop else []))
+    if v.relationship_type == "RESIDENT_OWNER":
+        capacity += 1  # the resident owner's household lives there too
+    return capacity >= int(threshold)
 
 
 def allowed_actions(db: Session, v: AuthorityVerification) -> list[str]:
@@ -692,7 +992,7 @@ def start(db: Session, user: UserAccount, property_id: int, *, relationship_type
     relationship_type = (relationship_type or "").upper()
     if relationship_type not in RELATIONSHIP_TYPES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"relationshipType must be one of {RELATIONSHIP_TYPES}")
-    country = country_for(prop)
+    country = pack_code_for(prop)
     pack = get_pack(db, country)
     if not pack.parallel_identity_intake and not _identity_verified(db, user.party_id):
         raise HTTPException(status.HTTP_409_CONFLICT, REASONS["IDENTITY_REQUIRED"][0])
@@ -713,7 +1013,7 @@ def start(db: Session, user: UserAccount, property_id: int, *, relationship_type
         property_id=prop.id, party_id=user.party_id, account_user_id=user.id, relationship_type=relationship_type,
         room_scope_ids=scope_rooms, country_code=country, pack_version=pack.version, state="COLLECTING",
         idempotency_key=idempotency_key,
-        scope_codes=["SUBLET", "ADVERTISE"] if relationship_type == "TENANT_SUBLETTER" else ["ADVERTISE", "RENT"],
+        scope_codes=["SUBLET", "ADVERTISE"] if ROUTE_FOR_RELATIONSHIP[relationship_type] == "SUBLET" else ["ADVERTISE", "RENT"],
     )
     db.add(v)
     db.flush()
@@ -751,7 +1051,7 @@ def set_details(db: Session, user: UserAccount, v: AuthorityVerification, *, act
     if acting_capacity is not None:
         if acting_capacity not in ("PERSONAL", "ORGANIZATION"):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "actingCapacity must be PERSONAL or ORGANIZATION")
-        if route_for(v) != "AGENT" and acting_capacity == "ORGANIZATION" and v.relationship_type != "REPRESENTATIVE":
+        if route_for(v) != "AGENT" and acting_capacity == "ORGANIZATION" and v.relationship_type not in ENTITY_RELATIONSHIPS:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only agents and entity representatives act through an organization")
         v.acting_capacity = acting_capacity
     if organization_id is not None:
@@ -905,16 +1205,16 @@ def _property_in_text(text: str, prop: Property, tolerant: bool = False) -> bool
     receipt for "2-599 MADUPALLY, MADHIRA ... 507203")."""
     from app.services.property_document_analysis import identity_matches
 
+    from app.services.match_confidence import accepted, phrase_confidence, postal_confidence
+
     body = _norm(text)
     if not body:
         return False
-    postal = (prop.postal_code or "").replace(" ", "").lower()
-    if postal and postal not in body.replace(" ", ""):
+    # 75%+ confidence: one misread postcode character or address word is tolerated.
+    if prop.postal_code and not accepted(postal_confidence(text, prop.postal_code)):
         return False
-    words = set(body.split())
     line1 = _norm(prop.address_line_1 or prop.address)
-    tokens = [t for t in line1.split() if len(t) > 1 or t.isdigit()]
-    if tokens and sum(1 for t in tokens if _has(words, t, tolerant)) / len(tokens) >= 0.75:
+    if line1 and accepted(phrase_confidence(text, line1)):
         return True
     address = {"address_line_1": prop.address_line_1 or prop.address, "address_line_2": prop.address_line_2 or "",
                "locality": prop.locality or prop.city or "", "postal_code": prop.postal_code or "",
@@ -927,6 +1227,11 @@ def _name_in_text(text: str, name: str, tolerant: bool = False) -> bool:
     another part the way documents often write it ("ANIL KUMAR" ->
     "ANILKUMAR"), in any order. A joined word counts only when it's made
     entirely of the name's own parts, so "RAO" isn't found in "RAOBERT"."""
+    from app.services.match_confidence import accepted, name_confidence
+
+    # Every word at 75%+ confidence is enough: an OCR slip or an initial doesn't block it.
+    if accepted(name_confidence(text, name)):
+        return True
     parts = [p for p in _norm(name).split() if len(p) > 1]
     words = set(_norm(text).split())
 
@@ -1342,7 +1647,7 @@ def _match_model(db: Session, v: AuthorityVerification) -> dict:
 
     property_match = tri([e.property_matched for e in primary] + ([True] if confirmed else []))
     principal_on_title = None
-    if v.relationship_type == "REPRESENTATIVE":
+    if v.relationship_type in ENTITY_RELATIONSHIPS:
         # Entity chain: the title names the company / trust / estate (the
         # principal); the entity-authority document names that principal
         # and the verified person acting for it.
@@ -1400,6 +1705,9 @@ def _analyze(db: Session, v: AuthorityVerification, e: AuthorityEvidence, conten
     # Which listed document this is (Section 4), identified from its own text.
     e.detected_document = (detect_document(text, documents, tolerant) or "")[:120] if readable else ""
     e.type_matched = bool(e.detected_document) if readable and documents else None
+    e.non_proof_document = ""
+    if readable and not e.detected_document and e.evidence_type == "PROPERTY_RIGHT":
+        e.non_proof_document = (detect_document(text, NON_PROOF_DOCUMENTS, tolerant) or "")[:120]
     e.not_official = readable and _not_official(text)
     e.property_matched = _property_in_text(text, db.get(Property, v.property_id), tolerant) if readable else None
     e.name_matched = _name_in_text(text, my_name, tolerant) if readable and my_name else None
@@ -1429,7 +1737,7 @@ def _refresh_principal_matches(db: Session, v: AuthorityVerification) -> None:
     if not principal:
         return
     types = ("MANDATE", "SUBLET_PERMISSION")
-    if v.relationship_type == "REPRESENTATIVE":
+    if v.relationship_type in ENTITY_RELATIONSHIPS:
         types += ("PROPERTY_RIGHT", "ORGANIZATION_LINK")
     for e in v.evidence:
         # Not yet matched, or matched against a name the host has since corrected.
@@ -1500,6 +1808,49 @@ def _organization_confirmed(db: Session, v: AuthorityVerification) -> bool:
     return False
 
 
+# Conditional / legal requirements and the code shown when one is missing.
+_MISSING_CODE = {
+    "OWNER_OCCUPIER_RESIDENCE": "RESIDENCE_PROOF_MISSING",
+    "LANDLORD_REGISTRATION": "LANDLORD_REGISTRATION_MISSING",
+    "AGENT_LICENCE": "AGENT_LICENCE_MISSING",
+    "HMO_LICENCE": "HMO_LICENCE_MISSING",
+}
+
+
+def _supporting_mismatches(db: Session, v: AuthorityVerification, reqs: list[dict]) -> list[str]:
+    """Registrations name the person (or their firm), a licence names the
+    property, proof of residence names both -- read from the documents."""
+    codes = []
+    org_core = _organization_core_name(v.organization.name) if v.organization else ""
+    for r in reqs:
+        cls, rid = r["evidence_class"], r["requirement_id"]
+        if cls not in ("REGISTRATION", "LICENCE", "RESIDENCE") or not r["required"] or r["status"] != "READY":
+            continue
+        uploads = [e for e in v.evidence if e.requirement_id == rid and e.processing_status == "READY"
+                   and e.source_type == "UPLOAD" and e.readable and e.type_matched is not False]
+        if not uploads:
+            continue  # unreadable / wrong document is reported on its own
+        if cls == "REGISTRATION":
+            ok = any(e.name_matched or (org_core and _upload_names(e, org_core)) for e in uploads)
+            if not ok and all(e.name_matched is not None for e in uploads):
+                codes.append("REGISTRATION_NOT_MATCHED")
+        elif cls == "LICENCE":
+            if not any(e.property_matched for e in uploads) and all(e.property_matched is not None for e in uploads):
+                codes.append("LICENCE_NOT_MATCHED")
+        elif not any(e.name_matched and e.property_matched for e in uploads) and all(
+                e.name_matched is not None and e.property_matched is not None for e in uploads):
+            codes.append("RESIDENCE_NOT_MATCHED")
+    return codes
+
+
+def _upload_names(e: AuthorityEvidence, name: str) -> bool:
+    content = read_evidence(e)
+    if content is None:
+        return False
+    text, source, _confidence = document_text(content, e.content_type)
+    return _name_in_text(text, name, source == "OCR")
+
+
 def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
     """-> (state, assurance level, reason codes). Fully automatic: approves
     a complete, matching, current, uncontested chain read from the
@@ -1515,11 +1866,16 @@ def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
     route = route_for(v)
     action, waiting = [], []
     reqs = requirements(db, v)
-    if any(r["required"] and r["status"] != "READY" for r in reqs):
+    core = [r for r in reqs if r["requirement_id"] not in _MISSING_CODE]
+    if any(r["required"] and r["status"] != "READY" for r in core):
         action.append("SUBLET_PERMISSION_MISSING" if route == "SUBLET" and any(
             r["requirement_id"] == "TENANT_SUBLET_PERMISSION" and r["status"] != "READY" for r in reqs) else
             "CO_OWNER_CONSENT_MISSING" if any(r["requirement_id"] == "CO_OWNER_CONSENT" and r["status"] != "READY"
                                              and r["required"] for r in reqs) else "REQUIREMENT_MISSING")
+    for r in reqs:
+        if r["requirement_id"] in _MISSING_CODE and r["required"] and r["status"] != "READY":
+            action.append(_MISSING_CODE[r["requirement_id"]])
+    action += _supporting_mismatches(db, v, reqs)
     if not m["scope_match"]:
         action.append("SCOPE_INSUFFICIENT")
     if not m["validity_result"]:
@@ -1533,7 +1889,13 @@ def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
     # verified person. A poor read or the wrong document is the host's to fix.
     if m["unclear_documents"]:
         action.append("EVIDENCE_UNCLEAR")
-    if _wrong_document_types(v, reqs):
+    wrong = _wrong_document_types(v, reqs)
+    if "OWNER_PROPERTY_RIGHT" in wrong and any(
+            e.non_proof_document for e in v.evidence
+            if e.requirement_id == "OWNER_PROPERTY_RIGHT" and e.processing_status == "READY"):
+        action.append("NOT_OWNERSHIP_PROOF")
+        wrong.remove("OWNER_PROPERTY_RIGHT")
+    if wrong:
         action.append("DOCUMENT_TYPE_UNRECOGNIZED")
     if any(e.not_official for e in v.evidence if e.processing_status == "READY" and e.source_type == "UPLOAD"):
         action.append("DOCUMENT_NOT_OFFICIAL")
@@ -1550,9 +1912,9 @@ def decide(db: Session, v: AuthorityVerification) -> tuple[str, str, list[str]]:
     readable = not m["unclear_documents"] and not m["ocr_unavailable"]
     # Acting for someone else (agent, tenant, representative): that someone
     # can't be the host -- an owner uses the Owner route.
-    if (route != "OWNER" or v.relationship_type == "REPRESENTATIVE") and _principal_is_host(db, v):
+    if (route != "OWNER" or v.relationship_type in ENTITY_RELATIONSHIPS) and _principal_is_host(db, v):
         action.append("PRINCIPAL_IS_YOU")
-    if v.relationship_type == "REPRESENTATIVE" and readable:
+    if v.relationship_type in ENTITY_RELATIONSHIPS and readable:
         # Entity chain (company / trust / estate), checked from the documents.
         if not principal_name(v):
             action.append("PRINCIPAL_NAME_NEEDED")
@@ -1620,6 +1982,41 @@ def _apply_decision(db: Session, v: AuthorityVerification, *, actor=None, correl
     return state
 
 
+HOST_DECLARATION_VERSION = "ZR-HAV-DECL-1.0"
+HOST_DECLARATION_ITEMS = (
+    ("ACCURACY", "The information and documents I've provided are accurate, current and have not been revoked."),
+    ("CAPACITY", "I'm acting in the capacity I selected, and I'm entitled to act for anyone I've named."),
+    ("LISTING_RIGHT", "I have the right to advertise and let the rooms in this listing."),
+    ("LOCAL_RULES", "The property and this arrangement follow the registration, licensing, building and occupancy "
+                    "rules that apply here."),
+    ("CHANGES", "I'll tell Zoiko Rooms promptly if my authority, a registration or licence, or the property changes."),
+    ("ANTI_FRAUD", "I understand that false or misleading information can lead to my listings being removed and "
+                   "being reported to the authorities."),
+    ("PRIVACY", "I've read how Zoiko Rooms uses the personal data in these documents."),
+)
+
+
+def declaration_view(v: AuthorityVerification) -> dict:
+    return {"version": HOST_DECLARATION_VERSION,
+            "items": [{"code": code, "text": text} for code, text in HOST_DECLARATION_ITEMS],
+            "signedVersion": v.declaration_version or None, "signedAt": v.attested_at,
+            "hash": v.declaration_hash or None}
+
+
+def _sign_declaration(v: AuthorityVerification, signed_at: datetime) -> None:
+    """HAV-17: the exact declaration text agreed to, bound to this case, the
+    evidence on file and the time by a SHA-256 hash."""
+    import json
+
+    v.declaration_version = HOST_DECLARATION_VERSION
+    v.declaration_items = [code for code, _text in HOST_DECLARATION_ITEMS]
+    payload = {"version": HOST_DECLARATION_VERSION, "items": list(HOST_DECLARATION_ITEMS), "verification": v.id,
+               "party": v.party_id, "property": v.property_id, "relationship": v.relationship_type,
+               "evidence": sorted(e.id for e in v.evidence if e.processing_status == "READY"),
+               "signedAt": signed_at.isoformat()}
+    v.declaration_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
 def submit(db: Session, user: UserAccount, v: AuthorityVerification, *, attested: bool,
            idempotency_key: str | None = None, expected_version: int | None = None,
            correlation_id: str = "") -> AuthorityVerification:
@@ -1634,6 +2031,7 @@ def submit(db: Session, user: UserAccount, v: AuthorityVerification, *, attested
         raise HTTPException(status.HTTP_400_BAD_REQUEST, REASONS["REQUIREMENT_MISSING"][0])
     _set_state(db, v, "SUBMITTED")
     v.attested_at = v.submitted_at = _now()
+    _sign_declaration(v, v.attested_at)
     v.submit_idempotency_key = idempotency_key
     _apply_decision(db, v, actor=user, correlation_id=correlation_id)
     _touch(v)

@@ -22,19 +22,32 @@ AUTHORITY_STATES = (
 )
 ACTIVE_STATES = ("COLLECTING", "SUBMITTED", "MANUAL_REVIEW", "ACTION_REQUIRED", "VERIFIED")
 # Section 12.1 relationship_type.
-RELATIONSHIP_TYPES = ("OWNER", "CO_OWNER", "REPRESENTATIVE", "AGENT", "PROPERTY_MANAGER", "TENANT_SUBLETTER")
+# ZR-HAV-001 Section 8 "Host capacity": LEASEHOLD_OWNER (owns a lease of the
+# dwelling), RESIDENT_OWNER (homeowner renting a room in their own home --
+# owner bundle + owner-occupier proof, HAV-15), ESTATE_TRUSTEE (executor,
+# administrator or trustee -- HAV-14) and MASTER_LESSEE (room operator holding
+# the head lease -- HAV-06 + 07). There is no "manual review" capacity: every
+# case is decided automatically.
+RELATIONSHIP_TYPES = ("OWNER", "CO_OWNER", "LEASEHOLD_OWNER", "RESIDENT_OWNER", "REPRESENTATIVE", "ESTATE_TRUSTEE",
+                      "AGENT", "PROPERTY_MANAGER", "TENANT_SUBLETTER", "MASTER_LESSEE")
 # Which route (evidence chain) each relationship follows.
 ROUTE_FOR_RELATIONSHIP = {
-    "OWNER": "OWNER", "CO_OWNER": "OWNER", "REPRESENTATIVE": "OWNER",
-    "AGENT": "AGENT", "PROPERTY_MANAGER": "AGENT", "TENANT_SUBLETTER": "SUBLET",
+    "OWNER": "OWNER", "CO_OWNER": "OWNER", "LEASEHOLD_OWNER": "OWNER", "RESIDENT_OWNER": "OWNER",
+    "REPRESENTATIVE": "OWNER", "ESTATE_TRUSTEE": "OWNER",
+    "AGENT": "AGENT", "PROPERTY_MANAGER": "AGENT", "TENANT_SUBLETTER": "SUBLET", "MASTER_LESSEE": "SUBLET",
 }
+# Acting for a company, trust or estate that holds the property right: the
+# entity-authority chain applies.
+ENTITY_RELATIONSHIPS = ("REPRESENTATIVE", "ESTATE_TRUSTEE")
 # Section 2.3 assurance levels.
 ASSURANCE_LEVELS = ("AV-0", "AV-1", "AV-2", "AV-X")
 # Section 12.1 authority_scope_codes.
 SCOPE_CODES = ("ADVERTISE", "RENT", "MANAGE", "SUBLET", "COLLECT_RENT")
 # Section 4.1 evidence classes.
 EVIDENCE_CLASSES = ("PROPERTY_RIGHT", "MANDATE", "OCCUPATION_RIGHT", "SUBLET_PERMISSION", "ORGANIZATION_LINK",
-                    "SOURCE_ASSERTION")
+                    "SOURCE_ASSERTION",
+                    # ZR-HAV-001 HAV-11/12 (legal registration / licence) and HAV-15 (owner-occupier).
+                    "REGISTRATION", "LICENCE", "RESIDENCE")
 SOURCE_TYPES = ("UPLOAD", "REGISTRY", "OWNER_CONFIRMATION", "CONNECTOR")
 EVIDENCE_PROCESSING = ("PROCESSING", "READY", "NEEDS_REPLACEMENT", "REPLACED")
 CONFIRMATION_KINDS = ("MANDATE", "SUBLET_PERMISSION", "CO_OWNER_CONSENT")
@@ -67,6 +80,9 @@ class AuthorityRegulatoryPack(Base):
     evidence_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # What happens to live listings when authority expires / is revoked.
     listing_control: Mapped[str] = mapped_column(String(20), default="SUSPEND", nullable=False)  # SUSPEND | NONE
+    # ZR-HAV-001 jurisdiction rules: landlord_registration_required,
+    # agent_licence_required, hmo_occupant_threshold, labels and legal refs.
+    rules: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -130,6 +146,11 @@ class AuthorityVerification(Base):
     review_reason_codes: Mapped[list] = mapped_column(JSON, default=list)
 
     attested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ZR-HAV-001 HAV-17 signed Host Declaration: versioned text, the items
+    # agreed to, and a hash binding them to this case and time.
+    declaration_version: Mapped[str] = mapped_column(String(40), default="")
+    declaration_items: Mapped[list] = mapped_column(JSON, default=list)
+    declaration_hash: Mapped[str] = mapped_column(String(64), default="")
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -196,6 +217,9 @@ class AuthorityEvidence(Base):
     type_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Which of the requirement's listed documents it was recognised as.
     detected_document: Mapped[str] = mapped_column(String(120), default="")
+    # A document that is never ownership proof (utility bill, council / property
+    # tax bill, insurance policy) recognised on a property-right upload.
+    non_proof_document: Mapped[str] = mapped_column(String(120), default="")
     # The document says it's a sample / specimen / not an official document.
     not_official: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     property_matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

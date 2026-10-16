@@ -36,6 +36,10 @@ HOST_CAPACITY_LABELS: dict[str, str] = {
     "REPRESENTATIVE": "Authorized Representative of the Owner",
     "PROPERTY_MANAGER": "Property Manager",
     "TENANT_SUBLETTER": "Tenant (Sublessor)",
+    "LEASEHOLD_OWNER": "Leasehold Owner",
+    "RESIDENT_OWNER": "Resident Homeowner",
+    "ESTATE_TRUSTEE": "Executor / Administrator / Trustee",
+    "MASTER_LESSEE": "Room Operator (Master Lessee)",
 }
 
 CADENCE_LABELS: dict[str, str] = {

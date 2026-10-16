@@ -18,7 +18,7 @@ import { formatDate } from "@/lib/utils";
 import {
   AuthorityRequirement, AuthorityVerification, Organization, RelationshipType, ScopeCode, authorityEvidenceUrl,
   authorityStateLabel, checkAuthoritySource, authorityStateTone, createOrganization, listOrganizations, listPropertyAuthority,
-  relationshipHint, relationshipLabel, removeAuthorityEvidence, renewAuthorityVerification, requestOwnerConfirmation,
+  ENTITY_RELATIONSHIPS, relationshipHint, relationshipLabel, requirementTimingLabel, removeAuthorityEvidence, renewAuthorityVerification, requestOwnerConfirmation,
   revokeAuthorityVerification, scopeLabel, setAuthorityDetails, startAuthorityVerification,
   submitAuthorityVerification, uploadAuthorityEvidence,
 } from "@/lib/authority-verification";
@@ -33,7 +33,10 @@ import {
  */
 
 type Step = 0 | 1 | 2 | 3;
-const RELATIONSHIPS: RelationshipType[] = ["OWNER", "CO_OWNER", "REPRESENTATIVE", "AGENT", "PROPERTY_MANAGER", "TENANT_SUBLETTER"];
+const RELATIONSHIPS: RelationshipType[] = [
+  "OWNER", "CO_OWNER", "LEASEHOLD_OWNER", "RESIDENT_OWNER", "REPRESENTATIVE", "ESTATE_TRUSTEE",
+  "AGENT", "PROPERTY_MANAGER", "TENANT_SUBLETTER", "MASTER_LESSEE",
+];
 // A REJECTED case (from before review was automated) is corrected like ACTION_REQUIRED.
 const OPEN = ["COLLECTING", "ACTION_REQUIRED", "REJECTED"];
 const SCOPES: ScopeCode[] = ["ADVERTISE", "RENT", "MANAGE", "SUBLET", "COLLECT_RENT"];
@@ -225,7 +228,7 @@ function ActionRequired({ v, onShowRequirements }: { v: AuthorityVerification; o
 }
 
 function needsDetails(v: AuthorityVerification) {
-  return v.route !== "OWNER" || v.relationshipType === "REPRESENTATIVE";
+  return v.route !== "OWNER" || ENTITY_RELATIONSHIPS.includes(v.relationshipType);
 }
 
 function Stepper({ step, showDetails }: { step: Step; showDetails: boolean }) {
@@ -305,7 +308,7 @@ function DetailsStep({ v, busy, onSave }: {
   const [expiresAt, setExpiresAt] = useState(v.expiresAt?.slice(0, 10) ?? "");
   const [restrictions, setRestrictions] = useState(v.restrictions);
   const [orgError, setOrgError] = useState("");
-  const canUseOrg = v.route === "AGENT" || v.relationshipType === "REPRESENTATIVE";
+  const canUseOrg = v.route === "AGENT" || ENTITY_RELATIONSHIPS.includes(v.relationshipType);
 
   useEffect(() => { if (canUseOrg) listOrganizations().then(setOrgs).catch(() => setOrgs([])); }, [canUseOrg]);
 
@@ -331,7 +334,7 @@ function DetailsStep({ v, busy, onSave }: {
     });
   }
 
-  const principalLabel = v.route === "SUBLET" ? "Landlord's full name" : v.relationshipType === "REPRESENTATIVE"
+  const principalLabel = v.route === "SUBLET" ? "Landlord's full name" : ENTITY_RELATIONSHIPS.includes(v.relationshipType)
     ? "Owning company, trust or estate" : "Owner / principal's full name";
 
   return (
@@ -491,6 +494,12 @@ function RequirementCard({ v, req, busy, run }: {
         <div>
           <h3 id={`req-${req.requirement_id}`} className="text-sm font-bold text-slate-800 dark:text-slate-100">{req.title}</h3>
           <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{req.purpose}</p>
+          {(req.basis === "LEGAL" || (req.timing && req.timing !== "BEFORE_PUBLICATION")) && (
+            <p className="mt-1 flex flex-wrap gap-1.5 text-[11px]">
+              {req.basis === "LEGAL" && <Badge tone="accent">Required by law here</Badge>}
+              {req.timing && <span className="text-slate-500 dark:text-slate-400">{requirementTimingLabel[req.timing]}</span>}
+            </p>
+          )}
         </div>
         <Badge tone={tone}>{statusText}</Badge>
       </div>
@@ -672,9 +681,20 @@ function ReviewStep({ v, busy, onBack, onSubmit }: {
         <div><dt className="text-xs text-slate-400">Evidence</dt><dd className="font-semibold">{v.evidence.length} item(s)</dd></div>
       </dl>
       <MatchTable v={v} />
+      {v.declaration && (
+        <div className="rounded-xl border border-slate-200 p-4 text-sm dark:border-slate-700">
+          <p className="font-semibold text-slate-800 dark:text-slate-100">Host declaration</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600 dark:text-slate-300">
+            {v.declaration.items.map((item) => <li key={item.code}>{item.text}</li>)}
+          </ul>
+          <p className="mt-2 text-[11px] text-slate-400">Version {v.declaration.version}</p>
+        </div>
+      )}
       <label className="flex items-start gap-2 text-sm">
         <input type="checkbox" className="mt-1" checked={attested} onChange={(e) => setAttested(e.target.checked)} />
-        <span>I confirm this evidence is current, has not been revoked, and I am authorized to submit it.</span>
+        <span>{v.declaration
+          ? "I agree to the host declaration above, and confirm this evidence is current and has not been revoked."
+          : "I confirm this evidence is current, has not been revoked, and I am authorized to submit it."}</span>
       </label>
       <StepBar
         back={<Button variant="ghost" onClick={onBack}><ArrowLeft className="h-4 w-4" aria-hidden="true" /> Back</Button>}

@@ -17,7 +17,10 @@ export type AuthorityState =
   | "NOT_STARTED" | "COLLECTING" | "SUBMITTED" | "MANUAL_REVIEW" | "ACTION_REQUIRED" | "VERIFIED"
   | "EXPIRING_SOON" | "EXPIRED" | "REVOKED" | "REJECTED" | "SUPERSEDED";
 export type RelationshipType =
-  | "OWNER" | "CO_OWNER" | "REPRESENTATIVE" | "AGENT" | "PROPERTY_MANAGER" | "TENANT_SUBLETTER";
+  | "OWNER" | "CO_OWNER" | "LEASEHOLD_OWNER" | "RESIDENT_OWNER" | "REPRESENTATIVE" | "ESTATE_TRUSTEE"
+  | "AGENT" | "PROPERTY_MANAGER" | "TENANT_SUBLETTER" | "MASTER_LESSEE";
+/** Acting for a company, trust or estate that holds the property right. */
+export const ENTITY_RELATIONSHIPS: RelationshipType[] = ["REPRESENTATIVE", "ESTATE_TRUSTEE"];
 export type AuthorityRoute = "OWNER" | "AGENT" | "SUBLET";
 export type ScopeCode = "ADVERTISE" | "RENT" | "MANAGE" | "SUBLET" | "COLLECT_RENT";
 export type AllowedAction =
@@ -42,6 +45,20 @@ export interface AuthorityRequirement {
   confirmed: boolean;
   /** Trusted registry / connected sources the server offers for this requirement. */
   sources: { code: string; source_type: "REGISTRY" | "CONNECTOR"; label: string }[];
+  /** ZR-HAV-001: required by law here, or Zoiko Rooms policy. */
+  basis?: "LEGAL" | "ZOIKO_POLICY";
+  /** When it applies; ON_TRIGGER = only because of this property (e.g. HMO occupancy). */
+  timing?: "BEFORE_PUBLICATION" | "BEFORE_BOOKING" | "BEFORE_OCCUPANCY" | "ON_TRIGGER";
+  trigger?: string;
+}
+
+/** ZR-HAV-001 HAV-17 versioned Host Declaration. */
+export interface HostDeclaration {
+  version: string;
+  items: { code: string; text: string }[];
+  signedVersion: string | null;
+  signedAt: string | null;
+  hash: string | null;
 }
 
 export interface AuthorityDocumentRule {
@@ -66,6 +83,8 @@ export interface AuthorityEvidence {
   detectedDocument: string | null;
   /** false = readable, but not one of the listed documents. */
   recognised: boolean | null;
+  /** Set when the upload is a document that never proves ownership (utility bill, tax bill...). */
+  notOwnershipProof?: string | null;
   available: boolean;
   createdAt: string;
 }
@@ -114,6 +133,7 @@ export interface AuthorityVerification {
   reasonCodes: string[];
   reason: { message: string; cta: string };
   requirements: AuthorityRequirement[];
+  declaration?: HostDeclaration;
   /** Section 4.3 outcomes shown on the review screen: true = match,
    *  false = doesn't match, null = not checked yet. */
   matchResults: Record<string, boolean | null>;
@@ -142,19 +162,34 @@ export interface PublicationEligibility {
 export const relationshipLabel: Record<RelationshipType, string> = {
   OWNER: "I own this property",
   CO_OWNER: "I co-own this property",
+  LEASEHOLD_OWNER: "I own the lease of this property (leasehold)",
+  RESIDENT_OWNER: "I live here and rent out a room in my home",
   REPRESENTATIVE: "I represent the owning company, trust or estate",
+  ESTATE_TRUSTEE: "I'm the executor, administrator or trustee",
   AGENT: "I am the owner's agent",
   PROPERTY_MANAGER: "I manage this property for the owner",
   TENANT_SUBLETTER: "I rent this property and want to sublet",
+  MASTER_LESSEE: "I hold the head lease and let the rooms (room operator)",
 };
 
 export const relationshipHint: Record<RelationshipType, string> = {
   OWNER: "You'll upload a document showing you own the property.",
   CO_OWNER: "You'll upload ownership evidence. Some countries also need your co-owner's consent.",
+  LEASEHOLD_OWNER: "You'll upload your registered lease or leasehold title.",
+  RESIDENT_OWNER: "You'll upload ownership evidence and a document showing you live at the property.",
   REPRESENTATIVE: "You'll upload ownership evidence and proof you can act for the owning entity.",
+  ESTATE_TRUSTEE: "You'll upload ownership evidence and the grant of probate, letters of administration or trust deed.",
   AGENT: "You'll provide the owner's mandate. We may ask the owner to confirm.",
   PROPERTY_MANAGER: "You'll provide the management agreement. We may ask the owner to confirm.",
   TENANT_SUBLETTER: "You'll provide your tenancy and your landlord's permission to sublet.",
+  MASTER_LESSEE: "You'll provide the head lease and the owner's permission to let the rooms.",
+};
+
+export const requirementTimingLabel: Record<string, string> = {
+  BEFORE_PUBLICATION: "Needed before your listing goes live",
+  BEFORE_BOOKING: "Needed before you accept a booking",
+  BEFORE_OCCUPANCY: "Needed before anyone moves in",
+  ON_TRIGGER: "Needed because of this property",
 };
 
 export const scopeLabel: Record<ScopeCode, string> = {
@@ -271,10 +306,14 @@ export function listMyAuthority() {
 export const relationshipShort: Record<RelationshipType, string> = {
   OWNER: "Owner",
   CO_OWNER: "Co-owner",
+  LEASEHOLD_OWNER: "Leasehold owner",
+  RESIDENT_OWNER: "Resident homeowner",
   REPRESENTATIVE: "Owner (entity)",
+  ESTATE_TRUSTEE: "Executor / trustee",
   AGENT: "Agent",
   PROPERTY_MANAGER: "Property manager",
   TENANT_SUBLETTER: "Tenant / subletter",
+  MASTER_LESSEE: "Room operator",
 };
 
 /** Section 10.1-10.2: healthy authority is quiet; only these states surface. */
