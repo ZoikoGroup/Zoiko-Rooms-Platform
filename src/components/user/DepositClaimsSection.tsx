@@ -5,7 +5,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
-import { Card, EmptyState, Field, SectionHeading, inputClass } from "@/components/user/ui";
+import { Card, EmptyState, Field, SectionHeading, inputClass, selectClass } from "@/components/user/ui";
 import type { ToastTone } from "@/components/user/ui";
 import type { DepositClaim, DepositClaimItem, DepositRecord } from "@/lib/types";
 import {
@@ -278,7 +278,7 @@ function NewClaimForm({
       </p>
       {rows.map((row, index) => (
         <div key={index} className="grid gap-2 sm:grid-cols-[1fr_8rem_auto]">
-          <select className={inputClass} value={row.categoryCode} onChange={(e) => update(index, { categoryCode: e.target.value })}>
+          <select className={selectClass} value={row.categoryCode} onChange={(e) => update(index, { categoryCode: e.target.value })}>
             {DEPOSIT_CLAIM_CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
           </select>
           <input

@@ -35,6 +35,7 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
+import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 import { ApiError } from "@/lib/api-client";
 import {
   HabitabilityIncident,
@@ -1024,107 +1025,99 @@ export function RentalsManager() {
       )}
 
       {/* 4. Search and Filters Bar */}
-      <section className="bg-white border border-[#E1E7F1] rounded-[20px] p-3.5 shadow-sm">
+      <section className="bg-white border border-[#E1E7F1] rounded-3xl p-3.5 sm:p-4 shadow-sm">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 items-end">
           <div className="flex gap-2">
-            <div className="flex-1 flex items-center gap-2.5 h-[46px] px-3.5 bg-[#F4F6FB] border border-[#D5DDEA] rounded-2xl focus-within:border-[#0E2F73]">
+            <div className="flex-1 flex items-center gap-2.5 h-11 px-4 bg-[#F4F6FB] border border-[#D5DDEA] rounded-full focus-within:border-[#0E2F73]">
               <Search className="w-4 h-4 text-[#4A5878] flex-shrink-0" />
               <input
                 type="search"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search property, room, Rental ID or agreement"
-                className="w-full bg-transparent text-sm text-[#0B1B3F] placeholder-[#4A5878] outline-none"
+                className="w-full bg-transparent text-xs text-[#0B1B3F] placeholder-[#4A5878] outline-none"
               />
             </div>
             <button
               type="button"
               onClick={() => setMobileFilterOpen(!mobileFilterOpen)}
-              className="lg:hidden flex items-center gap-2 px-3.5 h-[46px] rounded-2xl border border-[#D5DDEA] bg-white text-sm font-bold text-[#0E2F73]"
+              className="lg:hidden flex items-center gap-2 px-4 h-11 rounded-full border border-[#D5DDEA] bg-white text-xs font-bold text-[#0E2F73]"
             >
               Filters
             </button>
           </div>
 
           <div
-            className={`grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-2.5 items-end ${
+            className={`grid grid-cols-1 min-[480px]:grid-cols-2 sm:grid-cols-3 xl:flex xl:items-end gap-2.5 items-end ${
               mobileFilterOpen ? "grid" : "hidden lg:grid"
             }`}
           >
             {/* Status */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11.5px] font-bold text-[#3A4866]">Status</label>
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="h-[46px] px-3 rounded-2xl border border-[#D5DDEA] bg-white text-xs font-semibold text-[#0B1B3F] outline-none focus:border-[#0E2F73]"
-              >
-                <option value="all">All statuses</option>
-                <option value="upcoming">Upcoming</option>
-                <option value="active">Active</option>
-                <option value="notice">Notice Given</option>
-                <option value="ending">Ending Soon</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Status"
+              value={statusFilter}
+              onChange={setStatusFilter}
+              options={[
+                { value: "all", label: "All statuses" },
+                { value: "upcoming", label: "Upcoming" },
+                { value: "active", label: "Active" },
+                { value: "notice", label: "Notice Given" },
+                { value: "ending", label: "Ending Soon" },
+              ]}
+              size="md"
+            />
 
             {/* Location */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11.5px] font-bold text-[#3A4866]">Location</label>
-              <select
-                value={locFilter}
-                onChange={(e) => setLocFilter(e.target.value)}
-                className="h-[46px] px-3 rounded-2xl border border-[#D5DDEA] bg-white text-xs font-semibold text-[#0B1B3F] outline-none focus:border-[#0E2F73]"
-              >
-                <option value="all">All locations</option>
-                {uniqueLocations.map((loc) => (
-                  <option key={loc} value={loc}>
-                    {loc}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Location"
+              value={locFilter}
+              onChange={setLocFilter}
+              options={[
+                { value: "all", label: "All locations" },
+                ...uniqueLocations.map((loc) => ({ value: loc, label: loc })),
+              ]}
+              size="md"
+            />
 
             {/* Start / End */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11.5px] font-bold text-[#3A4866]">Start / End</label>
-              <select
-                value={dateFilter}
-                onChange={(e) => setDateFilter(e.target.value)}
-                className="h-[46px] px-3 rounded-2xl border border-[#D5DDEA] bg-white text-xs font-semibold text-[#0B1B3F] outline-none focus:border-[#0E2F73]"
-              >
-                <option value="all">Any dates</option>
-                <option value="starts">Starting in 30 days</option>
-                <option value="ends">Ending in 90 days</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Start / End"
+              value={dateFilter}
+              onChange={setDateFilter}
+              options={[
+                { value: "all", label: "Any dates" },
+                { value: "starts", label: "Starting in 30 days" },
+                { value: "ends", label: "Ending in 90 days" },
+              ]}
+              size="md"
+            />
 
             {/* Sublet */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11.5px] font-bold text-[#3A4866]">Sublet</label>
-              <select
-                value={subletFilter}
-                onChange={(e) => setSubletFilter(e.target.value)}
-                className="h-[46px] px-3 rounded-2xl border border-[#D5DDEA] bg-white text-xs font-semibold text-[#0B1B3F] outline-none focus:border-[#0E2F73]"
-              >
-                <option value="all">Any</option>
-                <option value="yes">Has sublet activity</option>
-                <option value="no">No sublet</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Sublet"
+              value={subletFilter}
+              onChange={setSubletFilter}
+              options={[
+                { value: "all", label: "Any" },
+                { value: "yes", label: "Has sublet activity" },
+                { value: "no", label: "No sublet" },
+              ]}
+              size="md"
+            />
 
             {/* Sort */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11.5px] font-bold text-[#3A4866]">Sort</label>
-              <select
-                value={sortFilter}
-                onChange={(e) => setSortFilter(e.target.value as typeof sortFilter)}
-                className="h-[46px] px-3 rounded-2xl border border-[#D5DDEA] bg-white text-xs font-semibold text-[#0B1B3F] outline-none focus:border-[#0E2F73]"
-              >
-                <option value="action">Action required first</option>
-                <option value="start">Start date</option>
-                <option value="end">End date</option>
-              </select>
-            </div>
+            <RoundedFilterDropdown
+              label="Sort"
+              value={sortFilter}
+              onChange={(val) => setSortFilter(val as typeof sortFilter)}
+              options={[
+                { value: "action", label: "Action required first" },
+                { value: "start", label: "Start date" },
+                { value: "end", label: "End date" },
+              ]}
+              align="right"
+              size="md"
+            />
           </div>
         </div>
       </section>
@@ -1939,7 +1932,7 @@ export function RentalsManager() {
                         View payment method
                       </button>
                       <Link
-                        href="/account/payments"
+                        href={`/account/rent-payments?occupancyId=${selectedItem.occupancy.id}&rental=${encodeURIComponent(selectedItem.p)}`}
                         className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-300 hover:border-[#0E2F73] text-[#0E2F73] text-xs font-bold transition-colors"
                       >
                         Open Payments <ArrowRight className="w-3.5 h-3.5" />
@@ -2055,7 +2048,7 @@ export function RentalsManager() {
                           </div>
                         ))}
                         <select value={issueSeverity} onChange={(e) => setIssueSeverity(e.target.value as HabitabilitySeverity)}
-                          className="h-10 w-full rounded-xl border border-slate-300 px-3" aria-label="How serious is it">
+                          className="h-10 w-full rounded-full border border-slate-300 px-4 cursor-pointer dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100" aria-label="How serious is it">
                           {(Object.keys(ISSUE_SEVERITY) as HabitabilitySeverity[]).map((k) => (
                             <option key={k} value={k}>{ISSUE_SEVERITY[k]}</option>
                           ))}
@@ -2151,7 +2144,7 @@ export function RentalsManager() {
 
                           {tc.status === "CONTESTED" && (
                             <div className="space-y-2">
-                              <select value={orderOutcome} onChange={(e) => setOrderOutcome(e.target.value as typeof orderOutcome)} className="h-10 w-full rounded-xl border border-slate-300 px-3">
+                              <select value={orderOutcome} onChange={(e) => setOrderOutcome(e.target.value as typeof orderOutcome)} className="h-10 w-full rounded-full border border-slate-300 px-4 cursor-pointer dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100">
                                 <option value="ENDS_ON_DATE">A court/tribunal order ends the tenancy</option>
                                 <option value="TENANCY_CONTINUES">A court/tribunal order says it continues</option>
                               </select>
@@ -2515,7 +2508,7 @@ export function RentalsManager() {
                     <select
                       value={arrangementType}
                       onChange={(e) => setArrangementType(e.target.value as SubletArrangementType)}
-                      className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm"
+                      className="w-full h-11 px-4 border border-slate-300 rounded-full cursor-pointer text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                     >
                       <option value="ASSIGNMENT_FULL">Full Assignment (Swap renter)</option>
                       <option value="REPLACEMENT_OCCUPANT">Replacement Occupant</option>
@@ -2723,7 +2716,7 @@ export function RentalsManager() {
                   <select
                     value={conditionRating}
                     onChange={(e) => setConditionRating(e.target.value as ConditionRating | "")}
-                    className="w-full h-11 px-3 border border-slate-300 rounded-xl text-sm"
+                    className="w-full h-11 px-4 border border-slate-300 rounded-full cursor-pointer text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                   >
                     <option value="">Select rating (optional)</option>
                     <option value="GOOD">Good</option>

@@ -50,7 +50,7 @@ export function ListingDetailContent({
           )}
         </div>
 
-        <div className="shrink-0 text-right">
+        <div className="shrink-0 text-left lg:text-right">
           <p className="font-heading text-2xl font-extrabold text-primary-900 dark:text-white">
             {formatCurrency(listing.pricePerNight, listing.currency)}
             <span className="text-sm font-medium text-slate-400"> / night</span>

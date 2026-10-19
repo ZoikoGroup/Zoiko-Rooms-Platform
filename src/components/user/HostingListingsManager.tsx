@@ -68,7 +68,7 @@ import {
 } from "@/lib/user-api";
 import { ListARoomWizard, submitOutcomeMessage } from "@/components/user/ListARoomWizard";
 import { useUserSession } from "@/components/user/UserSessionContext";
-import { Field, Toast, inputClass, useToast } from "@/components/user/ui";
+import { Field, Toast, inputClass, selectClass, useToast } from "@/components/user/ui";
 import { HostMoveInSteps } from "@/components/user/HostMoveInSteps";
 import {
   ListingAgreementDetailsFields,
@@ -1907,7 +1907,7 @@ export function HostingListingsManager() {
 
                           {l.listingStatus === "LIVE" && (
                             <Link
-                              href={`/listings/${l.rawListing.slug || l.id}`}
+                              href={`/listings/${l.id}`}
                               target="_blank"
                               onClick={() => setOpenMenuListingId(null)}
                               className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2"
@@ -2454,13 +2454,15 @@ export function HostingListingsManager() {
 
             {/* Sticky Drawer Footer Action Buttons */}
             <div className="sticky bottom-0 p-5 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2.5 flex-wrap">
-              <button
-                type="button"
-                onClick={() => handleActionClick(selectedListingForDrawer)}
-                className="h-10 px-5 rounded-full bg-[#0E2F73] hover:bg-[#0a2358] text-white text-xs font-bold font-heading shadow-md transition cursor-pointer"
-              >
-                {selectedListingForDrawer.actionLabel}
-              </button>
+              {selectedListingForDrawer.actionLabel !== "View Listing" && (
+                <button
+                  type="button"
+                  onClick={() => handleActionClick(selectedListingForDrawer)}
+                  className="h-10 px-5 rounded-full bg-[#0E2F73] hover:bg-[#0a2358] text-white text-xs font-bold font-heading shadow-md transition cursor-pointer"
+                >
+                  {selectedListingForDrawer.actionLabel}
+                </button>
+              )}
 
               {selectedListingForDrawer.rawListing.state === "APPROVED" &&
                 selectedListingForDrawer.actionLabel !== "Pay Listing Fee" && (
@@ -2475,7 +2477,7 @@ export function HostingListingsManager() {
 
               {selectedListingForDrawer.listingStatus === "LIVE" && (
                 <Link
-                  href={`/listings/${selectedListingForDrawer.rawListing.slug || selectedListingForDrawer.id}`}
+                  href={`/listings/${selectedListingForDrawer.id}`}
                   target="_blank"
                   className="h-10 px-4 rounded-full border border-slate-300 dark:border-slate-700 hover:bg-slate-50 text-xs font-bold text-[#0E2F73] dark:text-white flex items-center gap-1.5 shadow-2xs transition"
                 >
@@ -2547,7 +2549,7 @@ export function HostingListingsManager() {
               <select
                 value={form?.currency ?? "USD"}
                 onChange={(e) => setForm((f) => (f ? { ...f, currency: e.target.value } : f))}
-                className={inputClass}
+                className={selectClass}
               >
                 {SUPPORTED_CURRENCIES.map((c) => (
                   <option key={c} value={c}>

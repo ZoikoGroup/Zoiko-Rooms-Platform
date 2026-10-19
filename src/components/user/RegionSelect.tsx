@@ -1,7 +1,7 @@
 "use client";
 
 import { OpenJurisdiction } from "@/lib/types";
-import { Field, inputClass } from "@/components/user/ui";
+import { Field, selectClass } from "@/components/user/ui";
 
 /**
  * Region picker for a property. Only regions an admin has opened (active
@@ -43,7 +43,7 @@ export function RegionSelect({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={locked || options.length === 0}
-        className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-60`}
+        className={`${selectClass} disabled:cursor-not-allowed disabled:opacity-60`}
       >
         <option value="" disabled>
           Select a region

@@ -23,7 +23,7 @@ import { RegionSelect } from "@/components/user/RegionSelect";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { formatCurrency, resolveImageUrl } from "@/lib/utils";
-import { Field, inputClass } from "@/components/user/ui";
+import { Field, inputClass, selectClass } from "@/components/user/ui";
 import { useUserSession } from "@/components/user/UserSessionContext";
 
 const MAX_LISTING_IMAGES = 10;
@@ -582,7 +582,7 @@ export function ListARoomWizard({
                     <select
                       value={details.currency}
                       onChange={(e) => setDetails((d) => ({ ...d, currency: e.target.value }))}
-                      className={inputClass}
+                      className={selectClass}
                     >
                       {SUPPORTED_CURRENCIES.map((code) => (
                         <option key={code} value={code}>

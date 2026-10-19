@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Field, inputClass } from "@/components/user/ui";
+import { Field, inputClass, selectClass } from "@/components/user/ui";
 import { errorMessage } from "@/lib/user-api";
 import { formatDate } from "@/lib/utils";
 import {
@@ -354,7 +354,7 @@ function DetailsStep({ v, busy, onSave }: {
             <div className="space-y-2 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
               {orgs.length > 0 && (
                 <Field label="Organization">
-                  <select className={inputClass} value={orgId ?? ""} onChange={(e) => setOrgId(e.target.value ? Number(e.target.value) : null)}>
+                  <select className={selectClass} value={orgId ?? ""} onChange={(e) => setOrgId(e.target.value ? Number(e.target.value) : null)}>
                     <option value="">Add a new organization</option>
                     {orgs.map((o) => <option key={o.id} value={o.id}>{o.name}{o.status === "VERIFIED" ? " (verified)" : ""}</option>)}
                   </select>
@@ -613,7 +613,7 @@ function RequirementCard({ v, req, busy, run }: {
               if (ok) setSourceRef("");
             });
           }}>
-            <select className={inputClass} value={sourceCode} onChange={(e) => setSourceCode(e.target.value)}
+            <select className={selectClass} value={sourceCode} onChange={(e) => setSourceCode(e.target.value)}
                     aria-label="Record source">
               {req.sources.map((src) => <option key={src.code} value={src.code}>{src.label}</option>)}
             </select>

@@ -93,7 +93,7 @@ export function Modal({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className={`animate-scale-in relative w-full ${MAX_WIDTH_CLASS[size]} rounded-2xl bg-white p-6 shadow-2xl outline-none dark:bg-slate-900 dark:shadow-black/40`}
+        className={`animate-scale-in relative w-full ${MAX_WIDTH_CLASS[size]} rounded-2xl bg-white p-4 sm:p-6 shadow-2xl outline-none dark:bg-slate-900 dark:shadow-black/40`}
       >
         <div className="flex items-center justify-between">
           <h3 id={titleId} className="font-heading text-lg font-bold text-primary-900 dark:text-primary-100">{title}</h3>

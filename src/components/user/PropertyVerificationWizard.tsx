@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Field, inputClass } from "@/components/user/ui";
+import { Field, inputClass, selectClass } from "@/components/user/ui";
 import { errorMessage } from "@/lib/user-api";
 import { formatDate } from "@/lib/utils";
 import { browserMapProvider } from "@/lib/map-provider";
@@ -939,7 +939,7 @@ function UnitDetails({ session, policy, busy, onBack, onSubmit }: {
     <div className="space-y-4">
       <p className="text-sm text-slate-500 dark:text-slate-400">Add the minimum details needed to distinguish this property from others at the same address.</p>
       <Field label="Property type">
-        <select className={inputClass} value={kind} onChange={(e) => setKind(e.target.value as PropertyKind)}>
+        <select className={selectClass} value={kind} onChange={(e) => setKind(e.target.value as PropertyKind)}>
           <option value="HOUSE">House</option><option value="APARTMENT">Apartment / flat</option><option value="OTHER">Other</option>
         </select>
       </Field>
@@ -992,7 +992,7 @@ function Evidence({ session, policy, busy, onBack, onNext, onUpload, onRemove }:
       <div className="space-y-3 rounded-xl p-4 ring-1 ring-slate-200 dark:ring-slate-700">
         <p className="text-sm font-semibold text-primary-900 dark:text-white">Evidence needed</p>
         <Field label="Document type" hint="Accepted evidence depends on country and property type.">
-          <select className={inputClass} value={type} onChange={(e) => setType(e.target.value as EvidenceType)}>
+          <select className={selectClass} value={type} onChange={(e) => setType(e.target.value as EvidenceType)}>
             {types.map((t) => <option key={t} value={t}>{evidenceTypeLabel[t]}</option>)}
           </select>
         </Field>

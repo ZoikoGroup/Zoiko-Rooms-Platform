@@ -38,8 +38,9 @@ export function PaymentsHistory() {
   }
 
   return (
-    <Card className="!p-0">
-      <div className="overflow-x-auto">
+    <Card className="!p-0 overflow-hidden">
+      {/* Desktop Table View (sm+) */}
+      <div className="hidden sm:block overflow-x-auto">
         <table className="w-full min-w-[560px] text-left text-sm">
           <thead>
             <tr className="border-b border-slate-100 text-xs font-bold uppercase tracking-wide text-slate-400 dark:border-white/10">
@@ -54,7 +55,7 @@ export function PaymentsHistory() {
             {payments.map((payment) => (
               <tr
                 key={payment.id}
-                className="border-b border-slate-50 last:border-0 dark:border-white/5"
+                className="border-b border-slate-50 last:border-0 dark:border-white/5 hover:bg-slate-50/50 dark:hover:bg-slate-800/40 transition-colors"
               >
                 <td className="px-5 py-3 font-semibold text-slate-700 dark:text-slate-200">#{payment.id}</td>
                 <td className="px-5 py-3 text-slate-500 dark:text-slate-400">{formatDate(payment.createdAt)}</td>
@@ -75,6 +76,31 @@ export function PaymentsHistory() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      {/* Mobile Card View (sm:hidden) */}
+      <div className="sm:hidden divide-y divide-slate-100 dark:divide-slate-800">
+        {payments.map((payment) => (
+          <div key={payment.id} className="p-4 space-y-2.5">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <span className="text-xs font-bold font-mono text-slate-500 dark:text-slate-400">#{payment.id}</span>
+                <p className="text-xs text-slate-400">{formatDate(payment.createdAt)}</p>
+              </div>
+              <span className="text-base font-extrabold text-primary-900 dark:text-white">
+                {formatCurrency(payment.amount, payment.currency)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-50 dark:border-slate-800/60 text-xs">
+              <span className="text-slate-500 dark:text-slate-400 truncate max-w-[200px]">
+                {payment.allocations.length === 0
+                  ? "Unallocated"
+                  : payment.allocations.map((a) => `Obligation #${a.obligationId}`).join(", ")}
+              </span>
+              <Badge tone={simulatedPaymentStatusTone[payment.status] ?? "neutral"}>{payment.status}</Badge>
+            </div>
+          </div>
+        ))}
       </div>
 
       <Toast toast={toast} />

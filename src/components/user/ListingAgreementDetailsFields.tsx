@@ -6,7 +6,7 @@ import {
   UtilityKey,
   UtilityPayer,
 } from "@/lib/types";
-import { Field, inputClass } from "@/components/user/ui";
+import { Field, inputClass, selectClass } from "@/components/user/ui";
 
 /** Schedule B rows, in the order the agreement prints them. */
 const UTILITIES: { key: UtilityKey; label: string }[] = [
@@ -156,7 +156,7 @@ export function ListingAgreementDetailsFields({
                 aria-label={`${label}: who pays`}
                 value={allocation?.payer ?? ""}
                 onChange={(e) => setUtility(key, { payer: e.target.value as UtilityPayer | "" })}
-                className={inputClass}
+                className={selectClass}
               >
                 {PAYERS.map((p) => (
                   <option key={p.value} value={p.value}>

@@ -115,8 +115,8 @@ export function resolveNotificationHref(
   if (notificationType.startsWith("agreement.")) return "/account/applications";
   if (notificationType.startsWith("identity_verification.")) return "/account/identity";
   if (notificationType.startsWith("occupancy.")) return "/account/rentals";
-  if (notificationType.startsWith("deposit.")) return "/account/payments";
-  if (notificationType.startsWith("refund.")) return "/account/payments";
+  if (notificationType.startsWith("deposit.")) return "/account/rent-payments?tab=DEPOSITS";
+  if (notificationType.startsWith("refund.")) return "/account/rent-payments?tab=HISTORY";
   if (notificationType.startsWith("sublet_request.")) return "/account/sublets";
   // Payout/dispute have no renter-facing detail page today -- mark read only
   // rather than sending the renter somewhere that won't show them anything.

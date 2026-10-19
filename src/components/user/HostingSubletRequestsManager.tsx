@@ -1607,7 +1607,7 @@ export function HostingSubletRequestsManager({
                     value={declineReasonCode}
                     onChange={(e) => setDeclineReasonCode(e.target.value)}
                     aria-label="Select decline reason"
-                    className="w-full rounded-xl bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-xs outline-none ring-1 ring-slate-200 dark:ring-slate-700"
+                    className="w-full rounded-full cursor-pointer bg-slate-50 dark:bg-slate-800 px-4 py-2.5 text-xs outline-none ring-1 ring-slate-200 dark:ring-slate-700"
                   >
                     <option value="">Select a reason code...</option>
                     {Object.entries(subletDeclineReasonCodeLabel).map(([code, label]) => (
