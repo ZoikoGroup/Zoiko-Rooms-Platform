@@ -1932,7 +1932,7 @@ export function RentalsManager() {
                         View payment method
                       </button>
                       <Link
-                        href="/account/payments"
+                        href={`/account/rent-payments?occupancyId=${selectedItem.occupancy.id}&rental=${encodeURIComponent(selectedItem.p)}`}
                         className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-300 hover:border-[#0E2F73] text-[#0E2F73] text-xs font-bold transition-colors"
                       >
                         Open Payments <ArrowRight className="w-3.5 h-3.5" />

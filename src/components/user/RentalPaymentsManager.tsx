@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useId, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ArrowDownToLine,
@@ -120,6 +121,12 @@ export function RentalPaymentsManager() {
   const [occupancies, setOccupancies] = useState<UserOccupancy[]>([]);
   const [publicListings, setPublicListings] = useState<PublicListing[]>([]);
 
+  const searchParams = useSearchParams();
+  const deepLinkOccupancyId = searchParams?.get("occupancyId");
+  const deepLinkRental = searchParams?.get("rental");
+  const deepLinkTab = searchParams?.get("tab");
+  const [deepLinkHandled, setDeepLinkHandled] = useState(false);
+
   // Tab: "RENTAL_PAYMENTS" | "DEPOSITS" | "HISTORY"
   const [activeTab, setActiveTab] = useState<"RENTAL_PAYMENTS" | "DEPOSITS" | "HISTORY">("RENTAL_PAYMENTS");
 
@@ -196,6 +203,52 @@ export function RentalPaymentsManager() {
     [occupancies, publicListings]
   );
 
+  // Sync deep link tab if provided (?tab=RENTAL_PAYMENTS | DEPOSITS | HISTORY)
+  useEffect(() => {
+    if (deepLinkTab && ["RENTAL_PAYMENTS", "DEPOSITS", "HISTORY"].includes(deepLinkTab)) {
+      setActiveTab(deepLinkTab as "RENTAL_PAYMENTS" | "DEPOSITS" | "HISTORY");
+    }
+  }, [deepLinkTab]);
+
+  // Sync deep link rental/occupancy filter (?occupancyId=... &rental=...)
+  useEffect(() => {
+    if (deepLinkHandled || loading) return;
+    if (deepLinkOccupancyId || deepLinkRental) {
+      // 1. Try matching from obligations
+      for (const o of obligations) {
+        const info = getObligationPropertyInfo(o);
+        const matchOcc = deepLinkOccupancyId && String(o.occupancyId) === String(deepLinkOccupancyId);
+        const matchRental =
+          deepLinkRental &&
+          (info.propertyName.toLowerCase().includes(deepLinkRental.toLowerCase()) ||
+            deepLinkRental.toLowerCase().includes(info.propertyName.toLowerCase().split(" ·")[0]));
+        if (matchOcc || matchRental) {
+          setRentalFilter(info.propertyName);
+          setDeepLinkHandled(true);
+          return;
+        }
+      }
+      // 2. Try matching from occupancies list
+      if (deepLinkOccupancyId) {
+        const occ = occupancies.find((oc) => String(oc.id) === String(deepLinkOccupancyId));
+        if (occ) {
+          const propName = occ.propertyAddress
+            ? `${occ.propertyAddress.split(",")[0]} · Room #${occ.roomId || 1}`
+            : occ.listingName
+            ? `${occ.listingName} · Room #${occ.roomId || 1}`
+            : `Rental #${occ.id}`;
+          setRentalFilter(propName);
+          setDeepLinkHandled(true);
+          return;
+        }
+      }
+      if (deepLinkRental) {
+        setRentalFilter(deepLinkRental);
+        setDeepLinkHandled(true);
+      }
+    }
+  }, [deepLinkHandled, loading, deepLinkOccupancyId, deepLinkRental, obligations, occupancies, getObligationPropertyInfo]);
+
   // Filter tabs
   const tabFilteredObligations = useMemo(() => {
     return obligations.filter((o) => {
@@ -233,7 +286,13 @@ export function RentalPaymentsManager() {
 
         // Rental filter
         if (rentalFilter !== "ALL") {
-          if (info.propertyName !== rentalFilter && info.rentalCode !== rentalFilter) {
+          const matchesProp = info.propertyName === rentalFilter || info.rentalCode === rentalFilter;
+          const matchesOcc = deepLinkOccupancyId && String(o.occupancyId) === String(deepLinkOccupancyId);
+          const matchesPartial =
+            rentalFilter &&
+            (info.propertyName.toLowerCase().includes(rentalFilter.toLowerCase()) ||
+              rentalFilter.toLowerCase().includes(info.propertyName.toLowerCase().split(" ·")[0]));
+          if (!matchesProp && !matchesOcc && !matchesPartial) {
             return false;
           }
         }
@@ -255,7 +314,7 @@ export function RentalPaymentsManager() {
         }
         return 0;
       });
-  }, [tabFilteredObligations, searchQuery, rentalFilter, sortOption, getObligationPropertyInfo]);
+  }, [tabFilteredObligations, searchQuery, rentalFilter, sortOption, getObligationPropertyInfo, deepLinkOccupancyId]);
 
   // Derived metrics / KPI cards
   const nextPayment = useMemo(() => {
@@ -297,8 +356,19 @@ export function RentalPaymentsManager() {
       const info = getObligationPropertyInfo(o);
       set.add(info.propertyName);
     });
+    occupancies.forEach((occ) => {
+      const propName = occ.propertyAddress
+        ? `${occ.propertyAddress.split(",")[0]} · Room #${occ.roomId || 1}`
+        : occ.listingName
+        ? `${occ.listingName} · Room #${occ.roomId || 1}`
+        : `Rental #${occ.id}`;
+      set.add(propName);
+    });
+    if (rentalFilter && rentalFilter !== "ALL" && !set.has(rentalFilter)) {
+      set.add(rentalFilter);
+    }
     return Array.from(set);
-  }, [obligations, getObligationPropertyInfo]);
+  }, [obligations, occupancies, getObligationPropertyInfo, rentalFilter]);
 
   const rentalOptions = useMemo(
     () => [

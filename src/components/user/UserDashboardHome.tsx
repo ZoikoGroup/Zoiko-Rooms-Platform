@@ -54,7 +54,7 @@ export function UserDashboardHome() {
     { href: "/account/rentals", label: "My Rentals", icon: DoorOpen, count: counts.rentals },
     { href: "/account/sublets", label: "Sublet Requests", icon: Repeat, count: counts.sublets },
     { href: "/account/host", label: "My Properties", icon: Building2, count: counts.properties },
-    { href: "/account/payments", label: "Payments", icon: CreditCard, count: counts.payments },
+    { href: "/account/rent-payments", label: "Rent & Deposit Payments", icon: CreditCard, count: counts.payments },
   ];
 
   return (
