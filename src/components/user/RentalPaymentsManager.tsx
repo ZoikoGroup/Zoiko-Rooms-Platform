@@ -1613,6 +1613,10 @@ export function SingleObligationPaymentCard({
   const [paying, setPaying] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);
 
+  if (Number(obligation.amount) <= 0) {
+    return null;
+  }
+
   return (
     <>
       <div className="flex flex-wrap items-center justify-between gap-3 p-4 bg-slate-50 dark:bg-slate-800 rounded-2xl border border-slate-200">

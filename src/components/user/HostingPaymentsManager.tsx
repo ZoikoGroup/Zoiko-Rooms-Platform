@@ -47,7 +47,6 @@ import {
   errorMessage,
   listHostedProperties,
   listMyRentalPaymentInstructions,
-  listMyRentalPaymentObligations,
   listRecipientRentalPaymentObligations,
   recordRentalPaymentReceiptAsRecipient,
   reportRentalPaymentDiscrepancyAsRecipient,
@@ -57,7 +56,6 @@ import { useUserSession } from "@/components/user/UserSessionContext";
 import { InstructionsManager } from "@/components/user/RecipientRentalPaymentsManager";
 import { paymentMethodDisplay } from "@/components/user/payment-methods/PaymentMethodFields";
 import { resolveBankFieldSchema } from "@/lib/bankFieldSchemas";
-import { InstructionsModalView } from "@/components/user/RentalPaymentsManager";
 
 /** Format short due date like "Nov 1", "Nov 15", "Oct 15" */
 function formatShortDueDate(dateStr?: string | null): string {
@@ -121,25 +119,17 @@ export function HostingPaymentsManager() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [recipientPage, myPage, instr, props] = await Promise.all([
+      const [recipientPage, instr, props] = await Promise.all([
         listRecipientRentalPaymentObligations(undefined, { limit: 100, offset: 0 }).catch(() => ({
-          items: [] as RentalPaymentObligation[],
-        })),
-        listMyRentalPaymentObligations(undefined, { limit: 100, offset: 0 }).catch(() => ({
           items: [] as RentalPaymentObligation[],
         })),
         listMyRentalPaymentInstructions().catch(() => [] as RentalPaymentInstruction[]),
         listHostedProperties().catch(() => [] as Property[]),
       ]);
 
-      // Combine obligations, deduplicating by ID
-      const allItemsMap = new Map<number, RentalPaymentObligation>();
-      (recipientPage.items || []).forEach((item) => allItemsMap.set(item.id, item));
-      (myPage.items || []).forEach((item) => allItemsMap.set(item.id, item));
-      const combined = Array.from(allItemsMap.values());
-
-      setObligations(combined);
-      setReceivableIds(new Set((recipientPage.items || []).map((item) => item.id)));
+      const items = recipientPage.items || [];
+      setObligations(items);
+      setReceivableIds(new Set(items.map((item) => item.id)));
       setInstructions(instr);
       setProperties(props);
     } catch (err) {
@@ -946,17 +936,7 @@ export function HostingPaymentsManager() {
       {/* ======================================================== */}
       {/* MODAL 1: Payment Instructions Modal                      */}
       {/* ======================================================== */}
-      {viewingInstructions && !receivableIds.has(viewingInstructions.id) && (
-        <InstructionsModalView
-          obligation={viewingInstructions}
-          onClose={() => setViewingInstructions(null)}
-          onRecordPayment={() => {
-            setViewingInstructions(null);
-            window.location.assign("/account/rent-payments");
-          }}
-        />
-      )}
-      {viewingInstructions && receivableIds.has(viewingInstructions.id) && (
+      {viewingInstructions && (
         <Modal
           open={Boolean(viewingInstructions)}
           onClose={() => setViewingInstructions(null)}
@@ -1057,6 +1037,18 @@ export function HostingPaymentsManager() {
         >
           <div className="space-y-4 text-xs">
             <div className="p-3.5 bg-slate-50 dark:bg-slate-800 rounded-xl space-y-2">
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 font-semibold">Status:</span>
+                {viewingRecord.record.status === "CONFIRMED" ? (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 font-bold text-xs">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Confirmed
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 font-bold text-xs">
+                    <Clock className="w-3.5 h-3.5 text-amber-600" /> Awaiting Confirmation
+                  </span>
+                )}
+              </div>
               <div className="flex justify-between">
                 <span className="text-slate-400 font-semibold">Tenant / Payer:</span>
                 <span className="font-bold text-slate-800 dark:text-slate-200">
@@ -1072,12 +1064,31 @@ export function HostingPaymentsManager() {
                   )}
                 </span>
               </div>
+              {viewingRecord.record.confirmedAmount && viewingRecord.record.status === "CONFIRMED" && (
+                <div className="flex justify-between">
+                  <span className="text-slate-400 font-semibold">Confirmed Amount:</span>
+                  <span className="font-bold text-emerald-700 dark:text-emerald-400">
+                    {formatCurrency(
+                      viewingRecord.record.confirmedAmount,
+                      viewingRecord.record.declaredCurrency
+                    )}
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span className="text-slate-400 font-semibold">Payment Date:</span>
                 <span className="font-bold text-slate-800 dark:text-slate-200">
                   {formatDate(viewingRecord.record.declaredDate)}
                 </span>
               </div>
+              {viewingRecord.record.confirmedAt && (
+                <div className="flex justify-between">
+                  <span className="text-slate-400 font-semibold">Confirmed On:</span>
+                  <span className="font-bold text-slate-800 dark:text-slate-200">
+                    {formatDate(viewingRecord.record.confirmedAt)}
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span className="text-slate-400 font-semibold">Method:</span>
                 <span className="font-bold text-slate-800 dark:text-slate-200">
@@ -1094,28 +1105,43 @@ export function HostingPaymentsManager() {
               )}
             </div>
 
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setDisputeModalRecord(viewingRecord.record);
-                  setDisputeReason("NOT_ARRIVED");
-                  setDisputeNotes("");
-                }}
-                className="px-4 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 font-bold transition cursor-pointer"
-              >
-                Report Discrepancy
-              </button>
+            {viewingRecord.record.status === "CONFIRMED" ? (
+              <div className="flex items-center justify-between gap-2 pt-2">
+                <span className="text-xs text-emerald-700 dark:text-emerald-300 font-semibold flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Payment receipt confirmed
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setViewingRecord(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold transition cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDisputeModalRecord(viewingRecord.record);
+                    setDisputeReason("NOT_ARRIVED");
+                    setDisputeNotes("");
+                  }}
+                  className="px-4 py-2 rounded-xl border border-red-200 text-red-600 hover:bg-red-50 font-bold transition cursor-pointer"
+                >
+                  Report Discrepancy
+                </button>
 
-              <button
-                type="button"
-                disabled={busyConfirmId === viewingRecord.record.id}
-                onClick={() => handleConfirmReceipt(viewingRecord.record.id)}
-                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold transition shadow-sm cursor-pointer"
-              >
-                {busyConfirmId === viewingRecord.record.id ? "Confirming..." : "Confirm Receipt"}
-              </button>
-            </div>
+                <button
+                  type="button"
+                  disabled={busyConfirmId === viewingRecord.record.id}
+                  onClick={() => handleConfirmReceipt(viewingRecord.record.id)}
+                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold transition shadow-sm cursor-pointer"
+                >
+                  {busyConfirmId === viewingRecord.record.id ? "Confirming..." : "Confirm Receipt"}
+                </button>
+              </div>
+            )}
           </div>
         </Modal>
       )}

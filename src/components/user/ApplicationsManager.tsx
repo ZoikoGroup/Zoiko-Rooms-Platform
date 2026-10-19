@@ -598,8 +598,12 @@ export function ApplicationsManager() {
       .catch(() => undefined);
     getOwnAgreementPaymentPreview(agreementId)
       .then((preview) => {
-        setPaymentPreview(preview);
-        preview.amountDueNow.forEach((o) => {
+        const filteredPreview = {
+          ...preview,
+          amountDueNow: (preview.amountDueNow || []).filter((o) => Number(o.amount) > 0),
+        };
+        setPaymentPreview(filteredPreview);
+        filteredPreview.amountDueNow.forEach((o) => {
           getObligationAvailableMethods(o.id)
             .then(({ methodClasses }) => {
               setObligationMethods((prev) => ({ ...prev, [o.id]: methodClasses }));
