@@ -5,13 +5,16 @@ import {
   AlertTriangle,
   Check,
   Clock,
+  Ellipsis,
   History,
   Loader2,
   Mail,
+  Maximize2,
   Mic,
+  Minimize2,
   Send,
+  Sparkles,
   Square,
-  SquarePen,
   Trash2,
   Volume2,
   VolumeX,
@@ -29,6 +32,9 @@ import {
 import { MarkdownMessage } from "@/components/admin/chat/MarkdownMessage";
 import { AssistantAvatar } from "@/components/chat/AssistantAvatar";
 import { ExternalDiscoveryCard } from "@/components/user/chat/ExternalDiscoveryCard";
+import { AssistantHome } from "@/components/user/chat/AssistantHome";
+import { AssistantStatus } from "@/components/user/chat/AssistantStatus";
+import { ChatHeaderMenu } from "@/components/user/chat/ChatHeaderMenu";
 import {
   DEFAULT_LEAD_SUMMARY,
   ExternalCard,
@@ -49,12 +55,18 @@ interface UserChatPanelProps {
   onUnread?: () => void;
 }
 
-const SUGGESTED_PROMPTS = [
-  "Find rooms in Mumbai",
-  "What's the status of my application?",
-  "Show my occupancy details",
-  "What payments do I owe?",
-];
+const HEADER_BUTTON =
+  "flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-700 dark:border-white/10 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-slate-200";
+
+const EXPANDED_KEY = "zoiko-user-chat-expanded";
+
+function readExpanded(): boolean {
+  try {
+    return window.localStorage.getItem(EXPANDED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 function relativeTime(iso: string): string {
   const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -109,6 +121,21 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
   const [handoffSuggested, setHandoffSuggested] = useState(false);
 
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const closeMenu = useCallback(() => setMenuOpen(false), []);
+  // Remembered per browser; this panel only renders client-side once opened.
+  const [expanded, setExpanded] = useState(() => typeof window !== "undefined" && readExpanded());
+  const toggleExpanded = () => {
+    setExpanded((value) => {
+      try {
+        window.localStorage.setItem(EXPANDED_KEY, value ? "0" : "1");
+      } catch {
+        // Storage unavailable (private mode, blocked): the toggle still works for this visit.
+      }
+      return !value;
+    });
+  };
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [connectedToast, setConnectedToast] = useState(false);
 
@@ -442,61 +469,71 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
       <aside
         aria-label="Ask Zoiko AI assistant"
         className={cn(
-          "animate-chat-panel-open fixed bottom-24 right-5 z-50 flex h-[85vh] w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-2xl border border-slate-200/60 bg-white shadow-2xl shadow-primary-900/20 dark:border-white/10 dark:bg-slate-900",
-          "sm:right-6 sm:max-w-[480px]"
+          "animate-chat-panel-open fixed inset-x-0 bottom-0 z-50 flex h-[100dvh] w-full flex-col overflow-hidden border border-slate-200/60 bg-white shadow-2xl shadow-primary-900/20 dark:border-white/10 dark:bg-slate-900",
+          "sm:inset-x-auto sm:bottom-24 sm:right-6 sm:w-[calc(100vw-3rem)] sm:rounded-2xl",
+          expanded ? "sm:h-[88vh] sm:max-w-[960px]" : "sm:h-[88vh] sm:max-w-[560px]"
         )}
+        data-expanded={expanded ? "true" : "false"}
       >
-        <header className="border-b border-slate-100 dark:border-white/10">
-          <div className="flex items-center justify-between px-4 py-3.5">
+        <header className="relative border-b border-slate-100 dark:border-white/10">
+          <div className="flex items-center justify-between gap-2 px-4 py-3">
             <div className="flex min-w-0 items-center gap-3">
-              <AssistantAvatar size="md" />
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/zoikorooms-icon-png.png" alt="" className="h-12 w-12 shrink-0 rounded-2xl" draggable={false} />
               <div className="min-w-0">
-                <p className="truncate text-sm font-bold text-slate-800 dark:text-slate-100">
-                  Ask Zoiko <span className="font-medium text-slate-400">· AI assistant</span>
-                </p>
-                <p className="truncate text-xs text-slate-400">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src="/logo.webp"
+                  alt="Zoiko Rooms"
+                  className="h-6 w-auto max-w-[180px] object-contain object-left"
+                  draggable={false}
+                />
+                <p className="truncate text-xs text-slate-500 dark:text-slate-400">
                   {isContinuing && activeTitle ? activeTitle : "Your rental & hosting helper"}
                 </p>
+                <AssistantStatus />
               </div>
             </div>
-            <div className="flex shrink-0 items-center gap-1">
+            <div className="flex shrink-0 items-center gap-1.5">
               <button
                 onClick={() => setHistoryOpen(true)}
                 aria-label="Conversation history"
                 title="History"
-                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+                className={HEADER_BUTTON}
               >
-                <History className="h-[18px] w-[18px]" />
+                <History className="h-5 w-5" />
               </button>
               <button
-                onClick={startNewChat}
-                aria-label="Start new chat"
-                title="New chat"
-                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+                onClick={toggleExpanded}
+                aria-label={expanded ? "Exit full view" : "Expand"}
+                title={expanded ? "Exit full view" : "Expand"}
+                className={cn(HEADER_BUTTON, "hidden sm:flex")}
               >
-                <SquarePen className="h-[18px] w-[18px]" />
+                {expanded ? <Minimize2 className="h-[18px] w-[18px]" /> : <Maximize2 className="h-[18px] w-[18px]" />}
               </button>
               <button
-                onClick={() => { setContactOpen(true); setContactSent(false); setContactError(null); }}
-                aria-label="Contact admin"
-                title="Contact Admin"
-                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
+                ref={menuButtonRef}
+                onClick={() => setMenuOpen((value) => !value)}
+                aria-label="More options"
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                title="More options"
+                className={HEADER_BUTTON}
               >
-                <Mail className="h-[18px] w-[18px]" />
+                <Ellipsis className="h-5 w-5" />
               </button>
-              <button
-                onClick={onClose}
-                aria-label="Close chat"
-                title="Close"
-                className="flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-white/10 dark:hover:text-slate-200"
-              >
-                <X className="h-[18px] w-[18px]" />
+              <button onClick={onClose} aria-label="Close chat" title="Close" className={cn(HEADER_BUTTON, "bg-slate-100 dark:bg-white/10")}>
+                <X className="h-5 w-5" />
               </button>
             </div>
           </div>
-          <div className="border-t border-slate-100 bg-slate-50/70 px-4 py-1.5 text-[11px] leading-snug text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400">
-            Provides information and helps you use Zoiko Rooms. It does not make platform decisions.
-          </div>
+          <ChatHeaderMenu
+            open={menuOpen}
+            onClose={closeMenu}
+            onNewChat={startNewChat}
+            onContact={() => { setContactOpen(true); setContactSent(false); setContactError(null); }}
+            triggerRef={menuButtonRef}
+          />
         </header>
 
         {isContinuing && (
@@ -508,24 +545,12 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
 
         <div ref={scrollRef} onScroll={handleScroll} className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
           {messages.length === 0 && !streamingText && (
-            <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
-              <AssistantAvatar size="lg" />
-              <p className="animate-chat-fade-slide max-w-[300px] text-sm leading-relaxed text-slate-400" style={{ animationDelay: "0.08s" }}>
+            <div className="flex flex-col gap-3">
+              <AssistantHome onAsk={(text) => sendMessage(text)} disabled={sending} />
+              <p className="text-center text-[11px] leading-relaxed text-slate-400 dark:text-slate-500">
                 Ask Zoiko is an AI assistant. It can provide information and help you use Zoiko Rooms. It does not make
                 eligibility, compliance, ranking, application, payment, agreement, or tenancy decisions.
               </p>
-              <div className="flex max-w-[320px] flex-wrap justify-center gap-2">
-                {SUGGESTED_PROMPTS.map((prompt, i) => (
-                  <button
-                    key={prompt}
-                    onClick={() => sendMessage(prompt)}
-                    className="animate-chat-chip rounded-full px-3.5 py-2 text-xs font-medium text-slate-600 ring-1 ring-slate-200 transition-colors hover:bg-slate-100 hover:text-slate-800 dark:text-slate-300 dark:ring-white/10 dark:hover:bg-white/10"
-                    style={{ animationDelay: `${0.15 + i * 0.06}s` }}
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
             </div>
           )}
 
@@ -647,25 +672,14 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
               e.preventDefault();
               sendMessage();
             }}
-            className="flex items-end gap-2"
+            className="flex items-end gap-1.5 rounded-[1.75rem] border border-slate-200 bg-slate-50 py-1.5 pl-2 pr-1.5 transition-shadow focus-within:ring-1 focus-within:ring-primary-600 dark:border-white/10 dark:bg-white/5"
           >
-            {speech.isSupported && (
-              <button
-                type="button"
-                onClick={toggleMic}
-                disabled={sending}
-                aria-label={speech.isListening ? "Stop listening" : "Start voice input"}
-                title={speech.isListening ? "Stop listening" : "Voice input"}
-                className={cn(
-                  "flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl transition-colors disabled:opacity-50",
-                  speech.isListening
-                    ? "bg-accent-600 text-white animate-pulse"
-                    : "bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:bg-white/10 dark:text-slate-400 dark:hover:bg-white/15 dark:hover:text-slate-200"
-                )}
-              >
-                <Mic className="h-5 w-5" />
-              </button>
-            )}
+            <span
+              aria-hidden="true"
+              className="mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-50 text-accent-600 dark:bg-accent-500/15 dark:text-accent-300"
+            >
+              <Sparkles className="h-[18px] w-[18px]" />
+            </span>
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -676,17 +690,35 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
                 }
               }}
               rows={1}
-              placeholder={speech.isListening ? "Listening…" : "Ask about rooms, applications, payments…"}
+              aria-label="Message Ask Zoiko"
+              placeholder={speech.isListening ? "Listening…" : "Ask me anything about rooms, listings, payments, or rules…"}
               disabled={sending}
-              className="max-h-32 flex-1 resize-none rounded-2xl bg-slate-100 px-4 py-3 text-sm text-slate-700 outline-none placeholder:text-slate-400 disabled:opacity-60 dark:bg-white/10 dark:text-slate-200"
+              className="max-h-32 min-w-0 flex-1 resize-none bg-transparent px-1 py-2.5 text-sm text-slate-700 outline-none placeholder:text-slate-400 disabled:opacity-60 dark:text-slate-200"
             />
+            {speech.isSupported && (
+              <button
+                type="button"
+                onClick={toggleMic}
+                disabled={sending}
+                aria-label={speech.isListening ? "Stop listening" : "Start voice input"}
+                title={speech.isListening ? "Stop listening" : "Voice input"}
+                className={cn(
+                  "mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-50",
+                  speech.isListening
+                    ? "bg-accent-600 text-white animate-pulse"
+                    : "text-slate-500 hover:bg-slate-200 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-white/15 dark:hover:text-slate-200"
+                )}
+              >
+                <Mic className="h-[18px] w-[18px]" />
+              </button>
+            )}
             {sending ? (
               <button
                 type="button"
                 onClick={() => abortRef.current?.abort()}
                 aria-label="Stop generating"
                 title="Stop generating"
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-slate-300 text-slate-700 transition-colors hover:bg-slate-400 dark:bg-white/20 dark:text-slate-100"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-slate-300 text-slate-700 transition-colors hover:bg-slate-400 dark:bg-white/20 dark:text-slate-100"
               >
                 <Square className="h-4 w-4 fill-current" />
               </button>
@@ -695,13 +727,15 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
                 type="submit"
                 disabled={!input.trim()}
                 aria-label="Send message"
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-accent-600 text-white transition-colors hover:bg-accent-700 disabled:opacity-50"
+                className="flex h-11 w-14 shrink-0 items-center justify-center rounded-full bg-accent-600 text-white transition-colors hover:bg-accent-700 disabled:opacity-50"
               >
                 <Send className="h-5 w-5" />
               </button>
             )}
           </form>
-          <p className="mt-3 text-center text-[10px] leading-relaxed text-slate-300 dark:text-slate-600">
+          <p className="mt-2.5 text-center text-[10px] leading-relaxed text-slate-400 dark:text-slate-500">
+            Provides information and helps you use Zoiko Rooms. It does not make platform decisions.
+            <br />
             Zoiko Rooms is a trading name of Zoiko Realty Group.
           </p>
         </footer>
