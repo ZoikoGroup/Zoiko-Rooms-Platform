@@ -107,6 +107,11 @@ class DisputeEvidenceItem(Base):
     uploaded_by_admin: Mapped["AdminUser"] = relationship()
     claim_links: Mapped[list["DisputeEvidenceClaimLink"]] = relationship(back_populates="evidence", cascade="all, delete-orphan")
 
+    @property
+    def has_file(self) -> bool:
+        """False for a text-only note -- there is nothing to download."""
+        return self.stored_filename is not None
+
 
 class DisputeEvidenceClaimLink(Base):
     """Section 23 evidence_item.claim_ids -- one evidence item can support

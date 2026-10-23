@@ -5,32 +5,17 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
-  ArrowDownToLine,
-  Building2,
   Calendar,
   Check,
-  CheckCircle2,
-  ChevronDown,
   Clock,
   Copy,
   CreditCard,
   Download,
-  ExternalLink,
-  Eye,
-  FileText,
-  Filter,
-  HelpCircle,
   Lock,
-  Plus,
-  Receipt,
-  Repeat,
   Search,
-  ShieldAlert,
   ShieldCheck,
-  Upload,
   X,
 } from "lucide-react";
-import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
@@ -39,7 +24,6 @@ import { Toast, useToast, inputClass } from "@/components/user/ui";
 import {
   RentalPaymentObligation,
   RentalPaymentRecord,
-  RentalPaymentInstruction,
   PaymentMethodCategory,
   RentalPaymentDiscrepancyReason,
   UserOccupancy,

@@ -137,6 +137,23 @@ def original_renter_party_id(db: Session, occupancy) -> int | None:
     return user.party_id if user is not None else None
 
 
+def sublet_requester_party_id(db: Session, sublet) -> int | None:
+    """The party of the renter who *asked* to sublet (the sublessor). Read
+    from the sublet's own requested_by_guest_id, captured at submission --
+    never from the occupancy, whose guest a full handover overwrites with the
+    incoming tenant (that made the new tenant look like the sublessor and
+    locked the real one out of the sublet's payment view)."""
+    from app.crud.guest import get_user_for_guest
+    from app.models.guest import Guest
+
+    if sublet.requested_by_guest_id:
+        guest = db.get(Guest, sublet.requested_by_guest_id)
+        user = get_user_for_guest(db, guest) if guest is not None else None
+        if user is not None:
+            return user.party_id
+    return original_renter_party_id(db, sublet.current_occupancy)
+
+
 def sublet_for_agreement(db: Session, agreement_id: int | None):
     """The sublet request whose approval created `agreement_id`, if any."""
     from app.models.sublet_request import SubletRequest
@@ -185,7 +202,7 @@ def sublet_payee_party_id(db: Session, agreement_id: int | None) -> int | None:
         or sublet.payee_model != "ORIGINAL_RENTER_PAYEE"
     ):
         return None
-    return original_renter_party_id(db, sublet.current_occupancy)
+    return sublet_requester_party_id(db, sublet)
 
 
 def _agreement_id_for_obligation(obligation: RentalPaymentObligation) -> int | None:

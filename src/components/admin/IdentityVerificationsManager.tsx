@@ -5,7 +5,6 @@ import { BarChart3, FileText, History, Lock, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
-import { apiClientFetch } from "@/lib/api-client";
 import { AdminProfile, getCurrentAdmin } from "@/lib/auth";
 import { documentTypeLabel } from "@/lib/identity-documents";
 import {
@@ -83,8 +82,6 @@ export function IdentityVerificationsManager() {
     setTimeout(() => setToast(""), 3200);
   }, []);
 
-  const isSuperAdmin = admin?.role === "super_admin";
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -105,8 +102,8 @@ export function IdentityVerificationsManager() {
   }, []);
 
   useEffect(() => {
-    if (isSuperAdmin) getIdentityMetrics(30).then(setMetrics).catch(() => setMetrics(null));
-  }, [isSuperAdmin, queue]);
+    getIdentityMetrics(30).then(setMetrics).catch(() => setMetrics(null));
+  }, [queue]);
 
   return (
     <section className="space-y-4 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
@@ -117,9 +114,9 @@ export function IdentityVerificationsManager() {
       </div>
 
       {metrics && <MetricsStrip metrics={metrics} />}
-      {isSuperAdmin && <ReadinessPanel showToast={showToast} />}
-      {isSuperAdmin && <PacksPanel showToast={showToast} />}
-      {isSuperAdmin && <ReasonMappingsPanel showToast={showToast} />}
+      <ReadinessPanel showToast={showToast} />
+      <PacksPanel showToast={showToast} />
+      <ReasonMappingsPanel showToast={showToast} />
 
       <div className="flex flex-wrap gap-2" role="tablist" aria-label="Filter identity verifications">
         {FILTERS.map((f) => (
@@ -232,18 +229,13 @@ function CaseModal({ id, admin, onClose, showToast }: {
 }) {
   const [record, setRecord] = useState<IdentityCase | null>(null);
   const [error, setError] = useState("");
-  const isSuperAdmin = admin?.role === "super_admin";
-
   useEffect(() => {
-    if (!isSuperAdmin) return; // break-glass view below
     getIdentityCase(id).then(setRecord).catch(() => setError("Could not load this case."));
-  }, [id, isSuperAdmin]);
+  }, [id]);
 
   return (
     <Modal open onClose={onClose} title={`Identity verification #${id}`} size="xl">
-      {!isSuperAdmin ? (
-        <BreakGlassView id={id} admin={admin} showToast={showToast} />
-      ) : error ? (
+      {error ? (
         <p className="text-sm text-accent-700" role="alert">{error}</p>
       ) : !record ? (
         <p className="text-sm text-slate-400" role="status">Loading case...</p>
@@ -768,59 +760,5 @@ function ReasonMappingsPanel({ showToast }: { showToast: (m: string) => void }) 
         </tbody>
       </table>
     </details>
-  );
-}
-
-/** Admins who aren't super admins can't open review cases. To look at one
- *  document they request time-limited, reason-coded break-glass access
- *  (ZR-ENG-CLR-012 AC-27); the grant and every view are audit-logged. */
-function BreakGlassView({ id, admin, showToast }: { id: number; admin: AdminProfile | null; showToast: (m: string) => void }) {
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [expiresAt, setExpiresAt] = useState<string | null>(null);
-
-  async function request() {
-    if (!reason.trim()) {
-      showToast("A reason is required for break-glass access");
-      return;
-    }
-    setBusy(true);
-    try {
-      const grant = await apiClientFetch<{ grantId: number; expiresAt: string }>(
-        `/api/identity-verifications/${id}/break-glass-access`,
-        { method: "POST", body: JSON.stringify({ reason: reason.trim() }) },
-      );
-      setExpiresAt(grant.expiresAt);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Could not grant break-glass access");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (expiresAt) {
-    return (
-      <div className="space-y-3">
-        <p className="flex items-center gap-2 text-sm text-amber-700 dark:text-amber-300">
-          <Lock className="h-4 w-4" aria-hidden="true" /> Break-glass access until {formatDate(expiresAt)} -- this view is logged.
-        </p>
-        <SecureEvidenceViewer id={id} contentType="" watermark={`${admin?.email ?? ""} · break-glass · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`} />
-        <p className="text-xs text-slate-500">Decisions on identity verifications are made by super admins.</p>
-      </div>
-    );
-  }
-  return (
-    <div className="space-y-3">
-      <p className="text-sm text-slate-600 dark:text-slate-300">
-        Identity documents aren&apos;t visible by default. If you need to see this one, request time-limited access with a
-        reason. The request and every view are recorded.
-      </p>
-      <label className="block text-sm">
-        <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Reason (required)</span>
-        <textarea className="w-full rounded-xl bg-white px-3 py-2 text-sm ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
-          rows={2} maxLength={500} value={reason} onChange={(e) => setReason(e.target.value)} />
-      </label>
-      <Button loading={busy} onClick={request}>Request break-glass access</Button>
-    </div>
   );
 }

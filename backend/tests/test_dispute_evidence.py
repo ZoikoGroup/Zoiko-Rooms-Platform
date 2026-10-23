@@ -278,3 +278,39 @@ class TestRedactionAndLegalHold:
         assert holds[0]["status"] == "RELEASED"
         assert holds[0]["releasedByAdminId"] == admin.id
         assert holds[0]["releasedAt"] is not None
+
+
+class TestEvidenceDownloadForBothSides:
+    """ZR-28: a real file downloads for the renter and the host alike; a
+    text-only note says it has no file, so the UI doesn't offer Download."""
+
+    def test_file_downloads_for_renter_and_host_and_notes_are_flagged(self, client, db_session: Session):
+        host, renter, occupancy = _make_occupancy_with_parties(db_session, host_email="zr28-host@test.com", renter_email="zr28-renter@test.com")
+        renter_cookies, host_cookies = auth_user_cookie(renter), auth_user_cookie(host)
+        r = client.post(
+            "/api/users/rentals/disputes",
+            json={"occupancyId": occupancy.id, "claim": {"claimCode": "DEDUCTION", "claimFamily": "DEPOSIT", "amount": 600}},
+            cookies=renter_cookies,
+        )
+        assert r.status_code == 201, r.text
+        case_id = r.json()["id"]
+
+        r = client.post(
+            f"/api/users/rentals/disputes/{case_id}/evidence",
+            files={"file": ("receipt.pdf", _PDF_BYTES, "application/pdf")}, cookies=renter_cookies,
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["hasFile"] is True
+        file_id = r.json()["id"]
+
+        r = client.post(f"/api/users/hosting/disputes/{case_id}/evidence", data={"note_text": "Inspected on move-out"}, cookies=host_cookies)
+        assert r.status_code == 201, r.text
+        assert r.json()["hasFile"] is False
+
+        for prefix, cookies in (("rentals", renter_cookies), ("hosting", host_cookies)):
+            listed = client.get(f"/api/users/{prefix}/disputes/{case_id}/evidence", cookies=cookies).json()
+            flags = {e["id"]: e["hasFile"] for e in listed}
+            assert flags[file_id] is True and False in flags.values()
+            r = client.get(f"/api/users/{prefix}/disputes/{case_id}/evidence/{file_id}/file", cookies=cookies)
+            assert r.status_code == 200, r.text
+            assert r.content == _PDF_BYTES

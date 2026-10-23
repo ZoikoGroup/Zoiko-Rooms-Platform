@@ -1,16 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, useRef, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
   Bed,
-  BedDouble,
   Building2,
   Calendar,
   Check,
   ChevronDown,
-  ChevronUp,
   Clock,
   DoorOpen,
   FileText,
@@ -20,12 +18,10 @@ import {
   LayoutGrid,
   MoreVertical,
   Plus,
-  RotateCcw,
   Search,
   ShieldCheck,
   X,
   ArrowRight,
-  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";

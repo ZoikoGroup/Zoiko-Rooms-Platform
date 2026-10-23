@@ -9,16 +9,14 @@ import { Modal } from "@/components/ui/Modal";
 import { StarRating } from "@/components/ui/StarRating";
 import { getCurrentAdmin } from "@/lib/auth";
 import { apiClientFetch, ApiError } from "@/lib/api-client";
-import { AdminRole, AdminUserSummary, Listing } from "@/lib/types";
+import { AdminUserSummary, Listing } from "@/lib/types";
 import { listingStateLabel, listingStateTone } from "@/lib/status";
 import { cn, formatCurrency, formatDate, resolveImageUrl } from "@/lib/utils";
 
-const emptyAdminForm = { email: "", password: "", fullName: "", phone: "", role: "admin" as AdminRole };
 
 export function TeamManager() {
   const [adminUsers, setAdminUsers] = useState<AdminUserSummary[]>([]);
   const [listings, setListings] = useState<Listing[]>([]);
-  const [adminForm, setAdminForm] = useState(emptyAdminForm);
   const [currentAdminId, setCurrentAdminId] = useState<number | null>(null);
   const [toast, setToast] = useState("");
   const [viewingAdmin, setViewingAdmin] = useState<AdminUserSummary | null>(null);
@@ -52,44 +50,6 @@ export function TeamManager() {
   function showToast(message: string) {
     setToast(message);
     setTimeout(() => setToast(""), 2200);
-  }
-
-  async function handleCreateAdmin(e: React.FormEvent) {
-    e.preventDefault();
-    if (!adminForm.email.trim() || !adminForm.password.trim() || !adminForm.fullName.trim()) {
-      showToast("Please fill in name, email and password");
-      return;
-    }
-    try {
-      const created = await apiClientFetch<AdminUserSummary>("/api/admin-users", {
-        method: "POST",
-        body: JSON.stringify({
-          email: adminForm.email.trim(),
-          password: adminForm.password,
-          fullName: adminForm.fullName.trim(),
-          phone: adminForm.phone.trim(),
-          role: adminForm.role,
-        }),
-      });
-      setAdminUsers((prev) => [...prev, created]);
-      setAdminForm(emptyAdminForm);
-      showToast(`${created.role === "super_admin" ? "Super admin" : "Admin"} account created`);
-    } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "Failed to create admin account");
-    }
-  }
-
-  async function handleChangeAdminRole(id: number, role: AdminRole) {
-    try {
-      const updated = await apiClientFetch<AdminUserSummary>(`/api/admin-users/${id}`, {
-        method: "PUT",
-        body: JSON.stringify({ role }),
-      });
-      setAdminUsers((prev) => prev.map((u) => (u.id === id ? updated : u)));
-      showToast("Role updated");
-    } catch (err) {
-      showToast(err instanceof ApiError ? err.message : "Failed to update role");
-    }
   }
 
   async function handleToggleAdminActive(id: number, isActive: boolean) {
@@ -233,15 +193,6 @@ export function TeamManager() {
                   {(listingsByOwner.get(u.id) ?? []).length} {(listingsByOwner.get(u.id) ?? []).length === 1 ? "room" : "rooms"}
                   <ChevronRight className="h-3.5 w-3.5" />
                 </button>
-                <select
-                  value={u.role}
-                  disabled={isSelf}
-                  onChange={(e) => handleChangeAdminRole(u.id, e.target.value as AdminRole)}
-                  className="rounded-lg bg-white px-2.5 py-1.5 text-xs font-semibold outline-none ring-1 ring-slate-200 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700"
-                >
-                  <option value="admin">Admin</option>
-                  <option value="super_admin">Super Admin</option>
-                </select>
                 <Switch checked={u.isActive} onChange={(v) => !isSelf && handleToggleAdminActive(u.id, v)} />
                 <button
                   onClick={() => !isSelf && openDeleteModal(u)}
@@ -257,59 +208,6 @@ export function TeamManager() {
         })}
       </div>
 
-      <form onSubmit={handleCreateAdmin} className="space-y-3 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
-        <h3 className="text-sm font-bold text-primary-900 dark:text-white">Add Team Member</h3>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Full Name
-            </label>
-            <input
-              value={adminForm.fullName}
-              onChange={(e) => setAdminForm((f) => ({ ...f, fullName: e.target.value }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Email
-            </label>
-            <input
-              type="email"
-              value={adminForm.email}
-              onChange={(e) => setAdminForm((f) => ({ ...f, email: e.target.value }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Password
-            </label>
-            <input
-              type="password"
-              value={adminForm.password}
-              onChange={(e) => setAdminForm((f) => ({ ...f, password: e.target.value }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-              Role
-            </label>
-            <select
-              value={adminForm.role}
-              onChange={(e) => setAdminForm((f) => ({ ...f, role: e.target.value as AdminRole }))}
-              className="w-full rounded-xl bg-slate-50 px-4 py-2.5 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
-            >
-              <option value="admin">Admin (lists rooms only)</option>
-              <option value="super_admin">Super Admin (full access)</option>
-            </select>
-          </div>
-        </div>
-        <Button type="submit">Create Account</Button>
-      </form>
 
       <Modal
         open={viewingAdmin !== null}

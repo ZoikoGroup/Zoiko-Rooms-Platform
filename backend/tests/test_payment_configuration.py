@@ -320,6 +320,7 @@ class TestQuote:
 class TestBillingEntityApi:
     def test_super_admin_can_register_an_entity(self, client, db_session: Session):
         admin = _make_admin(db_session, email="be1@test.com", role="super_admin")
+        _market(db_session, "England")
         db_session.commit()
         r = client.post(
             "/api/finance/listing-fees/billing-entities",
@@ -332,6 +333,68 @@ class TestBillingEntityApi:
         assert r.status_code == 201, r.text
         assert r.json()["code"] == "ZRG_INC"
         assert r.json()["supportedCurrencies"] == ["GBP"]
+
+
+class TestIndiaPriceBookActivation:
+    """ZR-16: an India price couldn't be activated because the billing
+    entity's markets were typed free-text and had to match the market code
+    exactly; nothing showed what was still missing."""
+
+    def _entity_via_api(self, client, cookies, markets):
+        return client.post(
+            "/api/finance/listing-fees/billing-entities",
+            json={
+                "code": "ZR_INDIA", "legalName": "Zoiko Rooms India Pvt Ltd", "effectiveFrom": "2026-01-01",
+                "supportedMarkets": markets, "supportedCurrencies": ["inr"],
+            },
+            cookies=cookies,
+        )
+
+    def test_entity_markets_are_saved_as_the_configured_code_and_unknown_ones_refused(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="zr16-a@test.com", role="super_admin")
+        _market(db_session, "IND")
+        db_session.commit()
+        cookies = auth_admin_cookie(admin)
+
+        r = self._entity_via_api(client, cookies, ["India"])
+        assert r.status_code == 400, r.text
+        assert "IND" in r.json()["detail"]
+
+        r = self._entity_via_api(client, cookies, [" ind "])
+        assert r.status_code == 201, r.text
+        assert r.json()["supportedMarkets"] == ["IND"]
+
+    def test_draft_lists_what_is_missing_then_activates_once_fixed(self, client, db_session: Session):
+        admin = _make_admin(db_session, email="zr16-b@test.com", role="super_admin")
+        _market(db_session, "IND")
+        db_session.commit()
+        cookies = auth_admin_cookie(admin)
+        entity_id = self._entity_via_api(client, cookies, ["IND"]).json()["id"]
+
+        price = listing_fee_crud.create_listing_fee_policy(db_session, admin, {
+            "jurisdiction_code": "IND", "effective_from": date(2026, 1, 1), "amount": 499, "currency": "INR",
+            "tax_rate": 0.18, "tax_behavior": "EXCLUSIVE", "tax_rule_reference": "", "billing_entity_id": None,
+        })
+        [row] = [p for p in client.get("/api/finance/listing-fees/policies", cookies=cookies).json() if p["id"] == price.id]
+        assert any("tax rule" in p for p in row["activationProblems"])
+        assert any("billing entity" in p.lower() for p in row["activationProblems"])
+        assert client.post(f"/api/finance/listing-fees/policies/{price.id}/approve", cookies=cookies).status_code == 409
+
+        r = client.put(
+            f"/api/finance/listing-fees/policies/{price.id}",
+            json={"taxRuleReference": "IN-GST-18-2026", "billingEntityId": entity_id}, cookies=cookies,
+        )
+        assert r.status_code == 200, r.text
+        [row] = [p for p in client.get("/api/finance/listing-fees/policies", cookies=cookies).json() if p["id"] == price.id]
+        assert row["activationProblems"] == []
+        r = client.post(f"/api/finance/listing-fees/policies/{price.id}/approve", cookies=cookies)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "ACTIVE"
+
+    def test_entity_market_match_ignores_case(self, db_session: Session):
+        entity = _entity(db_session, markets=("ind",), currencies=("inr",), code="ZR_CASE")
+        assert entity.supports("IND", "INR")
+        assert not entity.supports("UK", "INR")
 
 
 # ---------------------------------------------------------------- PAY-CFG-06/07: PAYMENT_RECEIPT authority

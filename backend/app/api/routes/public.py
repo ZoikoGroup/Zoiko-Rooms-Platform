@@ -84,7 +84,15 @@ def get_public_listing_reviews(listing_id: str, db: Session = Depends(get_db)):
     doesn't currently resolve to a real one still returns an empty list rather
     than leaking existence via a 404/200 split, since review content isn't
     sensitive the way full listing details are."""
-    return list_reviews_for_listing(db, listing_id)
+    return [_anonymise_reviewer(r) for r in list_reviews_for_listing(db, listing_id)]
+
+
+def _anonymise_reviewer(review: ReviewRead) -> ReviewRead:
+    """Anyone can read this endpoint, so the reviewer is shown as "First L." and
+    without the avatar (its URL is seeded with the renter's full name)."""
+    parts = review.guest_name.split()
+    shown = parts[0] if len(parts) < 2 else f"{parts[0]} {parts[-1][0].upper()}."
+    return review.model_copy(update={"guest_name": shown or "Renter", "guest_avatar": ""})
 
 
 @router.post("/applications", response_model=ApplicationRead, status_code=status.HTTP_201_CREATED)
@@ -126,9 +134,11 @@ def post_alert(payload: RoomAlertCreate, db: Session = Depends(get_db)):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "city is required")
 
     alert = create_alert(db, payload)
-    unsubscribe_url = f"{settings.public_api_url}/api/public/alerts/{alert.id}/unsubscribe?token={alert.unsubscribe_token}"
+    # The link people click opens the live website; the one-click header a mail app POSTs to stays on the API.
+    unsubscribe_url = f"{settings.email_site_url}/unsubscribe?alert={alert.id}&token={alert.unsubscribe_token}"
+    unsubscribe_post_url = f"{settings.public_api_url}/api/public/alerts/{alert.id}/unsubscribe?token={alert.unsubscribe_token}"
     send_alert_confirmation_email(
-        alert.email, alert.city, unsubscribe_url,
+        alert.email, alert.city, unsubscribe_url, unsubscribe_post_url=unsubscribe_post_url,
         min_price=payload.min_price, max_price=payload.max_price, room_type=payload.room_type,
     )
     return alert
@@ -148,7 +158,7 @@ def _alert_page(*, heading: str, message: str) -> str:
       <tr><td style="padding:32px;">
         <h1 style="margin:0 0 16px;color:#0f172a;font-size:20px;font-weight:800;">{heading}</h1>
         <p style="margin:0 0 24px;color:#334155;font-size:15px;line-height:1.5;">{message}</p>
-        <a href="{settings.frontend_url}/find-a-room" style="background:#0e2f73;color:#ffffff;text-decoration:none;
+        <a href="{settings.email_site_url}/find-a-room" style="background:#0e2f73;color:#ffffff;text-decoration:none;
            padding:12px 24px;border-radius:9999px;font-weight:600;font-size:14px;display:inline-block;">
           Browse rooms
         </a>
@@ -186,5 +196,4 @@ def post_alert_unsubscribe(alert_id: str, token: str, db: Session = Depends(get_
     clients POST "List-Unsubscribe=One-Click" to the List-Unsubscribe URL
     without user interaction. Idempotent -- an already-used token still
     answers 200 so the client doesn't retry or show an error."""
-    unsubscribe_alert(db, alert_id, token)
-    return {"unsubscribed": True}
+    return {"unsubscribed": unsubscribe_alert(db, alert_id, token)}

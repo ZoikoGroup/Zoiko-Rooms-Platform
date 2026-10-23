@@ -162,3 +162,25 @@ class TestHostTermination:
             json={"causeCode": "RENTER_ORDINARY_EARLY_EXIT"}, cookies=auth_user_cookie(host),
         )
         assert r.status_code == 400
+
+
+class TestSuperAdminAmendmentOverview:
+    def test_super_admin_sees_every_amendment_read_only(self, client, db_session: Session):
+        """ZR-44: the admin Leasing page lists amendments with their context;
+        host and renter decide them -- the admin only looks."""
+        from tests.conftest import _make_admin, auth_admin_cookie
+
+        agreement_id, host, _renter = _setup(client, db_session, "overview")
+        r = client.post(
+            f"/api/users/hosting/agreements/{agreement_id}/amendments", json={"monthlyRent": 777}, cookies=auth_user_cookie(host),
+        )
+        assert r.status_code in (200, 201), r.text
+
+        admin = _make_admin(db_session, email="amend-overview@test.com", role="super_admin")
+        db_session.commit()
+        r = client.get("/api/leasing/amendments", cookies=auth_admin_cookie(admin))
+        assert r.status_code == 200, r.text
+        [row] = [a for a in r.json() if a["agreementId"] == agreement_id]
+        assert row["listingName"] and row["renterName"]
+        assert row["agreementStatus"] == "AMENDMENT_PENDING"
+        assert row["proposedTerms"]

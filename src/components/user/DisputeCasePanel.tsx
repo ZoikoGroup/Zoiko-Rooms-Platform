@@ -556,14 +556,19 @@ function DisputeCaseDetail({
     }
   }
 
-  async function handleRequestDeletion(evidenceId: number) {
+  // Deleting your own evidence is immediate -- no admin review (only a legal
+  // hold blocks it). The row stays on the case as "Deleted" so the history
+  // isn't broken; the file and note are erased.
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  async function handleDeleteEvidence(evidenceId: number) {
     setEvidenceBusy(true);
     try {
       await client.requestEvidenceDeletion(caseId, evidenceId);
-      showToast("Deletion requested.");
+      showToast("Evidence deleted.");
+      setConfirmDeleteId(null);
       await loadAll();
     } catch (err) {
-      showToast(errorMessage(err, "Could not request deletion."), "error");
+      showToast(errorMessage(err, "Could not delete this evidence."), "error");
     } finally {
       setEvidenceBusy(false);
     }
@@ -974,30 +979,58 @@ function DisputeCaseDetail({
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Evidence</p>
             {evidence.length > 0 && (
               <div className="space-y-2">
-                {evidence.map((item) => (
+                {evidence.map((item) => {
+                  // Only the uploader can delete their own item.
+                  const mine = viewerRole === "RENTER" ? Boolean(item.uploadedByGuestId) : Boolean(item.uploadedByPartyId);
+                  if (item.deletedAt) {
+                    return (
+                      <div key={item.id} className="rounded-xl bg-slate-50 p-3 text-xs text-slate-400 dark:bg-slate-800/60">
+                        Evidence deleted on {formatDate(item.deletedAt)}.
+                      </div>
+                    );
+                  }
+                  return (
                   <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 p-3 text-xs text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
                     <div className="min-w-0">
-                      <p className="font-medium">{item.originalFilename || "No file"}</p>
+                      <p className="font-medium">{item.hasFile ? item.originalFilename || "File" : "Note"}</p>
                       <p className="text-slate-400">
-                        {(item.sizeBytes / 1024).toFixed(1)} KB · {formatDate(item.createdAt)} · {label(item.disclosureClass)}
+                        {item.hasFile && `${(item.sizeBytes / 1024).toFixed(1)} KB · `}
+                        {formatDate(item.createdAt)} · {label(item.disclosureClass)}
                       </p>
                       {item.noteText && <p className="mt-0.5">&ldquo;{item.noteText}&rdquo;</p>}
                     </div>
                     <div className="flex items-center gap-2">
                       <Badge tone={item.verificationStatus === "VERIFIED" ? "success" : "neutral"}>{label(item.verificationStatus)}</Badge>
-                      <a href={client.evidenceFileUrl(caseId, item.id)} target="_blank" rel="noreferrer">
-                        <Button size="sm" variant="outline">
-                          <Download className="h-3.5 w-3.5" /> Download
+                      {item.hasFile ? (
+                        <a href={client.evidenceFileUrl(caseId, item.id)} target="_blank" rel="noreferrer">
+                          <Button size="sm" variant="outline">
+                            <Download className="h-3.5 w-3.5" /> Download
+                          </Button>
+                        </a>
+                      ) : (
+                        <span className="text-slate-400">Note only</span>
+                      )}
+                      {mine && item.legalHold && <span className="text-slate-400">On legal hold — can&apos;t be deleted</span>}
+                      {mine && !item.legalHold && confirmDeleteId !== item.id && (
+                        <Button size="sm" variant="ghost" onClick={() => setConfirmDeleteId(item.id)}>
+                          Delete
                         </Button>
-                      </a>
-                      {!item.deletionRequestedAt && (
-                        <Button size="sm" variant="ghost" loading={evidenceBusy} onClick={() => handleRequestDeletion(item.id)}>
-                          Request deletion
-                        </Button>
+                      )}
+                      {mine && !item.legalHold && confirmDeleteId === item.id && (
+                        <>
+                          <span className="text-slate-500">Delete permanently?</span>
+                          <Button size="sm" variant="outline" loading={evidenceBusy} onClick={() => handleDeleteEvidence(item.id)}>
+                            Yes, delete
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={() => setConfirmDeleteId(null)}>
+                            Cancel
+                          </Button>
+                        </>
                       )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
             <div className="space-y-2 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">

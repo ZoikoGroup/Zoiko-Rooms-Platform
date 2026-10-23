@@ -11,7 +11,6 @@ from app.models.admin_user import AdminUser
 from app.models.listing_approval import CURRENT_POLICY_VERSION
 from app.schemas.listing import (
     ListingChangesRequestedRequest,
-    ListingCreate,
     ListingQuarantineRequest,
     ListingRead,
     ListingRejectRequest,
@@ -39,9 +38,9 @@ def list_listings(admin: AdminUser = Depends(get_current_admin), db: Session = D
     return crud.annotate_availability(db, crud.list_listings_for(db, admin))
 
 
-@router.post("", response_model=ListingRead, status_code=status.HTTP_201_CREATED)
-def create_listing(payload: ListingCreate, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    return crud.create_listing(db, payload, admin)
+# No create or duplicate route: super admins review and manage hosts'
+# listings but never create one (ZR-43). Hosts list rooms from their own
+# account (api/routes/user_hosting.py).
 
 
 @router.put("/{listing_id}", response_model=ListingRead)
@@ -61,13 +60,6 @@ def delete_listing(listing_id: str, admin: AdminUser = Depends(get_current_admin
     listing = _get_or_404(db, listing_id)
     _assert_owner_or_super_admin(listing, admin)
     crud.delete_listing(db, listing)
-
-
-@router.post("/{listing_id}/duplicate", response_model=ListingRead, status_code=status.HTTP_201_CREATED)
-def duplicate_listing(listing_id: str, admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db)):
-    listing = _get_or_404(db, listing_id)
-    _assert_owner_or_super_admin(listing, admin)
-    return crud.duplicate_listing(db, listing, admin)
 
 
 @router.get("/{listing_id}/publish-eligibility")

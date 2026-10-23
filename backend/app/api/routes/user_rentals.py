@@ -23,6 +23,8 @@ from app.crud import host_entry_visit as host_entry_visit_crud
 from app.crud import refund_entitlement as refund_entitlement_crud
 from app.crud import review as review_crud
 from app.crud import sublet as sublet_crud
+from app.crud.occupancy_lifecycle import move_out_confirm_days
+from app.crud.rental_message import sublet_held_through
 from app.crud import termination as termination_crud
 from app.crud.listing import assert_party_does_not_own_listing
 from app.crud.rental_transaction_record import build_rental_transaction_record
@@ -124,6 +126,7 @@ def _to_user_application_read(db: Session, application: Application) -> UserAppl
     property_address, property_city, host_name = _property_and_host(db, listing)
     offer = application.offer
     agreement = offer.agreement if offer else None
+    latest_decision = max(application.decisions, key=lambda d: d.id, default=None)
     return UserApplicationRead(
         id=application.id,
         listing_id=application.listing_id,
@@ -140,11 +143,15 @@ def _to_user_application_read(db: Session, application: Application) -> UserAppl
         offer_status=offer.status if offer else None,
         agreement_id=agreement.id if agreement else None,
         agreement_status=agreement.status if agreement else None,
+        decision=latest_decision.decision if latest_decision else None,
+        decision_note=latest_decision.note if latest_decision else "",
+        decided_at=latest_decision.decided_at if latest_decision else None,
     )
 
 
 def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyRead:
     listing = db.get(Listing, occupancy.listing_id)
+    sublet_from = sublet_held_through(db, occupancy)
     property_address, property_city, host_name = _property_and_host(db, listing)
     agreement = occupancy.offer.agreement if occupancy.offer else None
     terms = occupancy.offer.terms[-1] if occupancy.offer and occupancy.offer.terms else None
@@ -172,6 +179,11 @@ def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyR
         monthly_rent=float(terms.monthly_rent) if terms else None,
         room_has_space_for_co_tenant=not check_room_capacity(db, occupancy.room),
         application_id=occupancy.offer.application_id if occupancy.offer else None,
+        move_out_confirm_days=move_out_confirm_days(occupancy),
+        sublet_from_request_id=sublet_from.id if sublet_from else None,
+        sublet_from_renter_name=(
+            sublet_from.requested_by_guest.name if sublet_from and sublet_from.requested_by_guest else ""
+        ),
     )
 
 
@@ -1570,6 +1582,13 @@ def get_my_deposit_claim_item_evidence(item_id: int, user: UserAccount = Depends
         content=data, media_type=item.evidence_content_type or "application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{item.evidence_original_name or "evidence"}"'},
     )
+
+
+@router.get("/reviews", response_model=list[ReviewRead])
+def list_my_reviews(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The reviews this renter has written."""
+    guest = get_guest_for_user(db, user)
+    return review_crud.list_reviews_by_guest(db, guest.id) if guest else []
 
 
 @router.post("/reviews", response_model=ReviewRead, status_code=status.HTTP_201_CREATED)

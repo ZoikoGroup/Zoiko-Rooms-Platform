@@ -184,17 +184,19 @@ class TestHostPropertyRegion:
 
 
 class TestAdminPropertyRegion:
-    def test_admin_create_validates_region(self, client, db_session: Session):
+    def test_admin_cannot_create_properties_but_still_sees_open_regions(self, client, db_session: Session):
+        """ZR-43: super admins never create properties, rooms or listings --
+        those create routes don't exist on the admin API."""
         _open_market(db_session, "England")
         admin = _make_admin(db_session, email="region-admin@test.com", role="super_admin")
         db_session.commit()
         cookies = auth_admin_cookie(admin)
 
-        r = client.post("/api/properties", json={"address": "1 A St", "city": "Paris", "jurisdictionCode": "FR"}, cookies=cookies)
-        assert r.status_code == 400, r.text
-
         r = client.post("/api/properties", json={"address": "1 A St", "city": "London", "jurisdictionCode": "England"}, cookies=cookies)
-        assert r.status_code == 201, r.text
+        assert r.status_code == 405, r.text
+        assert client.post("/api/properties/1/rooms", json={"size": 100}, cookies=cookies).status_code == 405
+        assert client.post("/api/listings", json={}, cookies=cookies).status_code == 405
+        assert client.post("/api/listings/L-1/duplicate", cookies=cookies).status_code in (404, 405)
 
         r = client.get("/api/properties/jurisdictions", cookies=cookies)
         assert r.status_code == 200, r.text

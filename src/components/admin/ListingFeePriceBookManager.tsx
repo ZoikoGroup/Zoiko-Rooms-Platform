@@ -190,7 +190,11 @@ export function ListingFeePriceBookManager({ showToast }: { showToast: (message:
       companyRegistrationNumber: entity.companyRegistrationNumber,
       taxRegistrationType: entity.taxRegistrationType,
       taxRegistrationNumber: entity.taxRegistrationNumber,
-      supportedMarkets: entity.supportedMarkets.join(", "),
+      // Only configured markets, as their exact code -- an entity saved with a
+      // mistyped market ("India" for IND) can then be fixed by ticking IND (ZR-16).
+      supportedMarkets: markets
+        .filter((code) => entity.supportedMarkets.some((m) => m.trim().toUpperCase() === code.toUpperCase()))
+        .join(", "),
       supportedCurrencies: entity.supportedCurrencies.join(", "),
       effectiveFrom: entity.effectiveFrom.slice(0, 10),
       status: entity.status,
@@ -322,6 +326,13 @@ export function ListingFeePriceBookManager({ showToast }: { showToast: (message:
                     effective {formatDate(price.effectiveFrom)}
                     {price.effectiveTo ? ` – ${formatDate(price.effectiveTo)}` : " onward"} · {price.environment}
                   </p>
+                  {price.status === "DRAFT" && (price.activationProblems ?? []).length > 0 && (
+                    <ul className="mt-1 list-disc pl-4 text-xs text-amber-700 dark:text-amber-400">
+                      {(price.activationProblems ?? []).map((p) => (
+                        <li key={p}>{p}</li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   {price.status === "ACTIVE" && (!entity || !price.taxRuleReference.trim()) && (
@@ -337,6 +348,8 @@ export function ListingFeePriceBookManager({ showToast }: { showToast: (message:
                         size="sm"
                         variant="primary"
                         loading={busy === `approve:${price.id}`}
+                        disabled={(price.activationProblems ?? []).length > 0}
+                        title={(price.activationProblems ?? []).length > 0 ? "Fix the items listed first" : undefined}
                         onClick={() => priceAction(price, "approve")}
                       >
                         Approve
@@ -619,15 +632,38 @@ export function ListingFeePriceBookManager({ showToast }: { showToast: (message:
             </div>
           </div>
           <div>
-            <label className={labelClass}>
-              Supported markets <span className="font-normal normal-case text-slate-400">(comma-separated)</span>
-            </label>
-            <input
-              value={entityForm.supportedMarkets}
-              onChange={(e) => setEntityForm((f) => ({ ...f, supportedMarkets: e.target.value }))}
-              placeholder={markets.join(", ") || "England"}
-              className={inputClass}
-            />
+            <label className={labelClass}>Supported markets</label>
+            {markets.length === 0 ? (
+              <p className="text-xs text-slate-400">No markets configured yet -- create a market release first.</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {markets.map((code) => {
+                  const selected = splitList(entityForm.supportedMarkets).some((m) => m.toUpperCase() === code.toUpperCase());
+                  return (
+                    <label
+                      key={code}
+                      className={`flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold ring-1 ${
+                        selected
+                          ? "bg-primary-50 text-primary-800 ring-primary-300 dark:bg-primary-500/10 dark:text-primary-200"
+                          : "bg-white text-slate-600 ring-slate-200 dark:bg-slate-900 dark:text-slate-300 dark:ring-slate-700"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(e) =>
+                          setEntityForm((f) => {
+                            const rest = splitList(f.supportedMarkets).filter((m) => m.toUpperCase() !== code.toUpperCase());
+                            return { ...f, supportedMarkets: (e.target.checked ? [...rest, code] : rest).join(", ") };
+                          })
+                        }
+                      />
+                      {code}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
           </div>
           <div>
             <label className={labelClass}>

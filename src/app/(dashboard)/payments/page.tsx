@@ -1,3 +1,5 @@
+import { AutomationMetricsPanel } from "@/components/admin/AutomationMetricsPanel";
+import { ProviderStatusPanel } from "@/components/admin/ProviderStatusPanel";
 import { PaymentsOverview } from "@/components/admin/PaymentsOverview";
 import { requireSuperAdmin } from "@/lib/api";
 
@@ -14,6 +16,8 @@ export default async function AdminPaymentsPage() {
         </p>
       </div>
       <PaymentsOverview />
+      <AutomationMetricsPanel source="payments" />
+      <ProviderStatusPanel provider="payments" />
     </div>
   );
 }

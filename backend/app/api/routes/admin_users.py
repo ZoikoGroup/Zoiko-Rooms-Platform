@@ -12,7 +12,7 @@ from app.crud.admin_user import (
     update_admin_user,
 )
 from app.db.session import get_db
-from app.models.admin_user import DISPUTE_ADMIN_ROLES, PAYMENT_STAFF_ROLES, AdminUser
+from app.models.admin_user import ADMIN_ROLES, DISPUTE_ADMIN_ROLES, PAYMENT_STAFF_ROLES, AdminUser
 from app.schemas.admin_user import AdminUserCreate, AdminUserRead, AdminUserUpdate
 
 router = APIRouter(prefix="/api/admin-users", tags=["admin-users"], dependencies=[Depends(require_super_admin)])
@@ -34,8 +34,8 @@ def get_admin_users(db: Session = Depends(get_db)):
 def post_admin_user(payload: AdminUserCreate, db: Session = Depends(get_db)):
     if get_admin_by_email(db, payload.email):
         raise HTTPException(status.HTTP_409_CONFLICT, "An admin with this email already exists")
-    if payload.role not in ("admin", "super_admin"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Role must be 'admin' or 'super_admin'")
+    if payload.role not in ADMIN_ROLES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Role must be 'super_admin'")
     if payload.dispute_role is not None and payload.dispute_role not in DISPUTE_ADMIN_ROLES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"dispute_role must be one of {DISPUTE_ADMIN_ROLES}")
     if payload.payment_staff_role is not None and payload.payment_staff_role not in PAYMENT_STAFF_ROLES:
@@ -50,8 +50,8 @@ def put_admin_user(
     acting_admin: AdminUser = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ):
-    if payload.role is not None and payload.role not in ("admin", "super_admin"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Role must be 'admin' or 'super_admin'")
+    if payload.role is not None and payload.role not in ADMIN_ROLES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Role must be 'super_admin'")
     if payload.dispute_role is not None and payload.dispute_role not in DISPUTE_ADMIN_ROLES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"dispute_role must be one of {DISPUTE_ADMIN_ROLES}")
     if payload.payment_staff_role is not None and payload.payment_staff_role not in PAYMENT_STAFF_ROLES:

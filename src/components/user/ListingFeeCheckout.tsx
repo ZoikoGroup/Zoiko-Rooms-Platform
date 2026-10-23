@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, Download, Info, ShieldCheck, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
-import { Card, Toast, inputClass, selectClass, useToast } from "@/components/user/ui";
+import { Card, Toast, selectClass, useToast } from "@/components/user/ui";
 import { ListingFeeListingStatus, ListingFeePayment, ListingFeeQuote } from "@/lib/types";
 import { countryOptions } from "@/lib/countries";
 import { formatDate, formatMoney } from "@/lib/utils";

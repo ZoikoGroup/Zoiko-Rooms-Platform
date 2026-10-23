@@ -11,7 +11,7 @@ from app.models.dispute_evidence import DisputeEvidenceClaimLink, DisputeEvidenc
 from app.models.dispute_external_proceeding import DisputeExternalProceeding, DisputeExternalProceedingClaimLink
 from app.models.dispute_deadline import DisputeDeadline
 from app.models.dispute_message import DisputeCaseMessage
-from app.models.rental_message import RentalConversation, RentalMessage
+from app.models.rental_message import RentalConversation, RentalMessage, SubletMessage
 from app.models.support_ticket import SupportTicket, SupportTicketAttachment, SupportTicketMessage
 from app.models.user_settings import EmailChangeRequest, UserPreference
 from app.models.host_refund import HostRefund
@@ -225,6 +225,7 @@ __all__ = [
     "DisputeCaseMessage",
     "RentalConversation",
     "RentalMessage",
+    "SubletMessage",
     "SupportTicket",
     "SupportTicketMessage",
     "SupportTicketAttachment",

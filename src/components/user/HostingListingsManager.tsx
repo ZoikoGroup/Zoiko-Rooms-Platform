@@ -6,34 +6,24 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   Check,
-  ChevronDown,
   Clock,
   RotateCcw,
   DoorOpen,
   Download,
   Eye,
   FileText,
-  Filter,
-  Inbox,
-  Lock,
   Pause,
   PauseCircle,
   Pencil,
   PenLine,
   Plus,
-  PlusCircle,
   Search,
-  ShieldAlert,
   ShieldCheck,
-  Sparkles,
   X,
   ExternalLink,
   MoreVertical,
   Bed,
-  Building2,
   Calendar,
-  CheckCircle2,
-  XCircle,
   Minus,
   ArrowRight,
   Receipt,
@@ -70,10 +60,7 @@ import { ListARoomWizard, submitOutcomeMessage } from "@/components/user/ListARo
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { Field, Toast, inputClass, selectClass, useToast } from "@/components/user/ui";
 import { HostMoveInSteps } from "@/components/user/HostMoveInSteps";
-import {
-  ListingAgreementDetailsFields,
-  toAgreementDetailsForm,
-} from "@/components/user/ListingAgreementDetailsFields";
+import { toAgreementDetailsForm } from "@/components/user/ListingAgreementDetailsFields";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
 import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
@@ -85,11 +72,7 @@ import {
   getPropertyVerificationForProperty,
   getPropertyVerificationForRoom,
 } from "@/lib/property-verification";
-import {
-  AuthorityState,
-  isAuthorityException,
-  listPropertyAuthority,
-} from "@/lib/authority-verification";
+import { AuthorityState, listPropertyAuthority } from "@/lib/authority-verification";
 
 const MAX_LISTING_IMAGES = 10;
 const SUPPORTED_CURRENCIES = ["INR", "GBP", "USD", "EUR", "CAD", "AUD", "AED", "SGD", "NZD"];

@@ -8,7 +8,7 @@ class AdminUserCreate(CamelModel):
     password: str
     full_name: str = "New Admin"
     phone: str = ""
-    role: str = "admin"
+    role: str = "super_admin"
     # ZR-ENG-CLR-010 Section 12/20: optional dispute specialization -- see
     # models/admin_user.py's DISPUTE_ADMIN_ROLES. None (the default) means
     # not yet specialized, not "no dispute access".

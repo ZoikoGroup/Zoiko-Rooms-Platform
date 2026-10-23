@@ -75,7 +75,11 @@ class Application(Base):
     listing: Mapped["Listing"] = relationship()
     guest: Mapped["Guest"] = relationship(foreign_keys=[guest_id])
     named_occupant: Mapped["Guest"] = relationship(foreign_keys=[named_occupant_guest_id])
-    decisions: Mapped[list["ApplicationDecision"]] = relationship(back_populates="application", cascade="all, delete-orphan")
+    # Oldest first, so decisions[-1] is always the latest (ZR-38: unordered,
+    # the host's view flipped between states from one page load to the next).
+    decisions: Mapped[list["ApplicationDecision"]] = relationship(
+        back_populates="application", cascade="all, delete-orphan", order_by="ApplicationDecision.id",
+    )
     offer: Mapped["Offer"] = relationship(back_populates="application", uselist=False)
 
     @property

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { isApplicationOpen } from "@/lib/applications";
 import Link from "next/link";
 import { AlertTriangle, ArrowLeft } from "lucide-react";
 import { Loader } from "@/components/ui/Loader";
@@ -31,7 +32,7 @@ export function ListingDetailView({ listingId }: { listingId: string }) {
         listRentalApplications().catch(() => []),
       ]);
       setListing(found);
-      setApplied(applications.some((a) => a.listingId === listingId));
+      setApplied(applications.some((a) => a.listingId === listingId && isApplicationOpen(a)));
     } catch (err) {
       setLoadError(errorMessage(err, "This listing could not be found. It may have been withdrawn or unpublished."));
     } finally {

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import USER_COOKIE_NAME, get_current_user
 from app.core.config import settings
-from app.core.mailer import send_password_reset_email, send_welcome_email
+from app.core.mailer import send_password_reset_email, send_signup_email_confirmation_email, send_welcome_email
 from app.core.rate_limit import login_limiter
 from app.core.security import create_access_token, verify_password
 from app.crud import notification as notif_crud
@@ -53,6 +53,17 @@ def _set_user_cookie(response: Response, email: str) -> None:
     )
 
 
+def send_email_confirmation(db: Session, user: UserAccount) -> None:
+    """Emails the confirm-your-email link (signup, and resend from settings)."""
+    from app.crud.user_settings import create_email_confirmation_token
+
+    raw = create_email_confirmation_token(db, user)
+    link = f"{settings.email_site_url}/account/confirm-email?token={raw}&signup=1"
+    send_signup_email_confirmation_email(
+        user.email, link, settings.email_confirm_token_expire_minutes // 60, user.full_name,
+    )
+
+
 @router.post("/register", response_model=UserRegisterResponse, status_code=status.HTTP_201_CREATED)
 def register_user(payload: UserRegisterRequest, db: Session = Depends(get_db)):
     """Register a new user account."""
@@ -69,6 +80,7 @@ def register_user(payload: UserRegisterRequest, db: Session = Depends(get_db)):
         )
         db.commit()
         send_welcome_email(user.email, user.full_name)
+        send_email_confirmation(db, user)
         return UserRegisterResponse(message="Registration successful", user_id=user.id)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
@@ -141,7 +153,7 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
     user = get_user_by_email(db, payload.email)
     if user and user.is_active:
         raw_token = create_reset_token(db, user)
-        reset_link = f"{settings.frontend_url}/account/reset-password?token={raw_token}"
+        reset_link = f"{settings.email_site_url}/account/reset-password?token={raw_token}"
         send_password_reset_email(user.email, reset_link, settings.password_reset_token_expire_minutes, user.full_name)
     return ForgotPasswordResponse(message=GENERIC_FORGOT_PASSWORD_MESSAGE)
 

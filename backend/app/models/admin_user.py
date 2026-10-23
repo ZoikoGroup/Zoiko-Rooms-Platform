@@ -5,7 +5,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-ADMIN_ROLES = ("admin", "super_admin")
+# super_admin is the only role new accounts can get -- the limited "admin"
+# role is no longer issued (alembic 0054_super_admin_only).
+ADMIN_ROLES = ("super_admin",)
 ADMIN_APPROVAL_STATUSES = ("pending", "approved", "rejected")
 # ZR-ENG-CLR-010 Section 12/20: the named specialist roles the dispute spec
 # calls for (Support/Dispute Officer/Finance/Trust & Safety/Legal-Compliance).
@@ -49,7 +51,7 @@ class AdminUser(Base):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), default="Zoiko Admin")
     phone: Mapped[str] = mapped_column(String(50), default="")
-    role: Mapped[str] = mapped_column(String(20), default="admin")
+    role: Mapped[str] = mapped_column(String(20), default="super_admin", server_default="super_admin")
     # See DISPUTE_ADMIN_ROLES above -- null means "not yet specialized",
     # not "no dispute access".
     dispute_role: Mapped[str | None] = mapped_column(String(20), nullable=True)

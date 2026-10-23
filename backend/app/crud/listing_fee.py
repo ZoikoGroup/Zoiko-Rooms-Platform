@@ -127,7 +127,7 @@ def resolve_listing_fee_policy(db: Session, jurisdiction_code: str = DEFAULT_JUR
     )
     if not policy:
         raise HTTPException(status.HTTP_409_CONFLICT, LISTING_FEE_UNAVAILABLE_MESSAGE)
-    if settings.listing_fee_fail_closed and _price_activation_problems(db, policy, as_of=as_of):
+    if settings.listing_fee_fail_closed and price_activation_problems(db, policy, as_of=as_of):
         raise HTTPException(status.HTTP_409_CONFLICT, LISTING_FEE_UNAVAILABLE_MESSAGE)
     return policy
 
@@ -140,7 +140,7 @@ def listing_fee_available(db: Session, jurisdiction_code: str) -> bool:
     return True
 
 
-def _price_activation_problems(db: Session, policy: ListingFeePolicy, *, as_of: date | None = None) -> list[str]:
+def price_activation_problems(db: Session, policy: ListingFeePolicy, *, as_of: date | None = None) -> list[str]:
     """Everything a Price Book entry needs before it may be charged in
     production (ZR-PAY-CFG-001 Sections 2, 3, 7 and 9.1)."""
     from app.models.market_release import MarketRelease
@@ -277,7 +277,7 @@ def approve_listing_fee_policy(
     price can ever resolve."""
     if policy.status != "DRAFT":
         raise HTTPException(status.HTTP_409_CONFLICT, "Only a draft price can be approved")
-    problems = _price_activation_problems(db, policy)
+    problems = price_activation_problems(db, policy)
     if problems:
         raise HTTPException(status.HTTP_409_CONFLICT, {"message": "This price can't be activated yet", "reasons": problems})
 

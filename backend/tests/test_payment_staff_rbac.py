@@ -142,7 +142,7 @@ class TestAdminUsersRouteValidatesPaymentStaffRole:
         r = client.post(
             "/api/admin-users",
             json={
-                "email": "staff-rbac-created@test.com", "password": "password123", "role": "admin",
+                "email": "staff-rbac-created@test.com", "password": "password123", "role": "super_admin",
                 "paymentStaffRole": "NOT_A_REAL_ROLE",
             },
             cookies=auth_admin_cookie(super_admin),
@@ -154,7 +154,7 @@ class TestAdminUsersRouteValidatesPaymentStaffRole:
         r = client.post(
             "/api/admin-users",
             json={
-                "email": "staff-rbac-created2@test.com", "password": "password123", "role": "admin",
+                "email": "staff-rbac-created2@test.com", "password": "password123", "role": "super_admin",
                 "paymentStaffRole": "PAYMENT_SUPPORT",
             },
             cookies=auth_admin_cookie(super_admin),

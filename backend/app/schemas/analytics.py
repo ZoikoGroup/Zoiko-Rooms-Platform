@@ -7,6 +7,23 @@ class RevenueTrendPoint(CamelModel):
     bookings: int
 
 
+class RevenueSummary(CamelModel):
+    total_revenue: float
+    this_month_revenue: float
+    last_month_revenue: float
+    # This month vs last month, %; None when there's nothing to compare with.
+    change_pct: float | None
+    paid_events: int
+    # Every amount above is converted into this currency (services/fx.py).
+    currency: str = "USD"
+    # Currencies the revenue was actually paid in.
+    source_currencies: list[str] = []
+    # Paid in a currency with no configured rate -- left out of the totals.
+    unconverted_currencies: list[str] = []
+    # When the configured rates were taken ("" = the built-in approximate rates).
+    fx_rates_as_of: str = ""
+
+
 class BookingsByTypePoint(CamelModel):
     type: str
     value: int

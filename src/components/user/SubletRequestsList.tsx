@@ -19,6 +19,7 @@ import {
   errorMessage,
 } from "@/lib/user-api";
 import { SubletPaymentsPanel } from "@/components/user/SubletPaymentsPanel";
+import { SubletChatThread } from "@/components/user/RentalMessagesTab";
 import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 import { formatDate } from "@/lib/utils";
 
@@ -158,7 +159,7 @@ export function SubletRequestsList() {
 
   // Drawer
   const [selectedRequestId, setSelectedRequestId] = useState<number | null>(null);
-  const [drawerTab, setDrawerTab] = useState<"overview" | "info" | "subtenant" | "approval" | "documents" | "timeline">("overview");
+  const [drawerTab, setDrawerTab] = useState<"overview" | "info" | "subtenant" | "approval" | "documents" | "timeline" | "messages">("overview");
   const [drawerDocs, setDrawerDocs] = useState<SubletDocument[]>([]);
   const [loadingDocs, setLoadingDocs] = useState(false);
   const [uploadingDoc, setUploadingDoc] = useState(false);
@@ -405,7 +406,7 @@ export function SubletRequestsList() {
   ]);
 
   // Open drawer helper
-  function openDrawer(request: SubletRequest, tab: "overview" | "info" | "subtenant" | "approval" | "documents" | "timeline" = "overview") {
+  function openDrawer(request: SubletRequest, tab: "overview" | "info" | "subtenant" | "approval" | "documents" | "timeline" | "messages" = "overview") {
     setSelectedRequestId(request.id);
     setDrawerTab(tab);
     setInfoError("");
@@ -2348,6 +2349,7 @@ export function SubletRequestsList() {
                   ["approval", "Approval"],
                   ["documents", "Documents"],
                   ["timeline", "Timeline"],
+                  ["messages", "Messages"],
                 ].map(([key, label]) => (
                   <button
                     key={key}
@@ -2651,6 +2653,20 @@ export function SubletRequestsList() {
                       </>
                     ) : (
                       <p className="muted">Permission in principle — no subtenant named yet.</p>
+                    )}
+                  </div>
+                )}
+
+                {/* MESSAGES TAB -- renter <-> named subtenant */}
+                {drawerTab === "messages" && (
+                  <div className="space-y-4">
+                    {activeRequest.status !== "draft" && activeRequest.proposedRenterPartyId ? (
+                      <SubletChatThread
+                        subletRequestId={activeRequest.id}
+                        counterpartName={activeRequest.proposedRenterName || "your subtenant"}
+                      />
+                    ) : (
+                      <p className="muted">Messaging opens once you&apos;ve submitted the request with a named subtenant.</p>
                     )}
                   </div>
                 )}
