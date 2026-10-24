@@ -710,6 +710,8 @@ export interface ListingFeePolicy {
   approvedByAdminId: number | null;
   approvedAt: string | null;
   createdAt: string;
+  /** What still blocks a DRAFT from being approved (empty when it can be). */
+  activationProblems?: string[];
 }
 
 /** ZR-PAY-CFG-001 Section 7.1 Billing Entity Registry. */
@@ -1386,16 +1388,33 @@ export interface UserApplication {
   offerStatus: string | null;
   agreementId: number | null;
   agreementStatus: string | null;
+  /** The host's latest decision -- status is "DECIDED" for both a shortlist/approval and a rejection. */
+  decision?: "APPROVED" | "REJECTED" | null;
+  /** The host's message to the applicant with that decision. */
+  decisionNote?: string;
+  decidedAt?: string | null;
 }
 
 /** Host <-> renter messaging, one thread per application. */
 export interface RentalMessage {
   id: number;
-  senderRole: "RENTER" | "HOST";
+  /** HOST threads: RENTER | HOST. Sublet threads: RENTER (who sublet) | SUBTENANT. */
+  senderRole: "RENTER" | "HOST" | "SUBTENANT";
   body: string;
   createdAt: string;
   readAt: string | null;
   mine: boolean;
+}
+
+/** A renter the host can message on an application -- the original
+ *  applicant or a subtenant (each has their own thread). */
+export interface RenterThread {
+  guestId: string;
+  name: string;
+  role: "APPLICANT" | "SUBTENANT";
+  isCurrentOccupant: boolean;
+  unreadCount: number;
+  lastMessageAt: string | null;
 }
 
 export interface RentalConversation {
@@ -1438,6 +1457,13 @@ export interface UserOccupancy {
   monthlyRent?: number | null;
   /** Room has a free place for another tenancy (needed by the share-the-room sublet types). */
   roomHasSpaceForCoTenant?: boolean;
+  /** The application this tenancy came from -- the key for messaging the host (also for a subtenant). */
+  applicationId?: number | null;
+  /** Set when this tenant got the room through someone else's sublet -- the key for messaging that renter. */
+  subletFromRequestId?: number | null;
+  subletFromRenterName?: string;
+  /** Days the host has to confirm a move-out before silence counts as confirmation. */
+  moveOutConfirmDays?: number;
 }
 
 export interface PreMoveInCancellationResult {
@@ -1712,6 +1738,8 @@ export interface DisputeEvidenceRead {
   uploadedByAdminId: number | null;
   originalFilename: string;
   contentType: string;
+  /** False for a text-only note -- nothing to download. */
+  hasFile: boolean;
   sizeBytes: number;
   sha256Hash: string;
   noteText: string;

@@ -64,7 +64,11 @@ export function ReviewsList({ reviews }: { reviews: Review[] }) {
               <div className="mt-1.5 flex items-center gap-2">
                 <StarRating rating={r.rating} size={13} />
               </div>
-              <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">{r.comment}</p>
+              {r.comment ? (
+                <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">{r.comment}</p>
+              ) : (
+                <p className="mt-2 text-sm italic text-slate-400 dark:text-slate-400">Rating only — no written comment.</p>
+              )}
             </div>
           </div>
         ))}

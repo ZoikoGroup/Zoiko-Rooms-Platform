@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import {
   ActivationGateStatus,
-  AdminRole,
   AdminUserSummary,
   Application,
   DisclosureRequirement,
@@ -27,7 +26,6 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ApiError, apiClientFetch } from "@/lib/api-client";
-import { getCurrentAdmin } from "@/lib/auth";
 import { agreementStatusLabel, agreementStatusTone, offerStatusLabel, offerStatusTone } from "@/lib/status";
 import { formatCurrency, formatDate } from "@/lib/utils";
 
@@ -49,7 +47,6 @@ export function LeasingManager() {
   const [publishedListings, setPublishedListings] = useState<Listing[]>([]);
   const [listingsById, setListingsById] = useState<Record<string, Listing>>({});
   const [ownerNamesById, setOwnerNamesById] = useState<Record<number, string>>({});
-  const [role, setRole] = useState<AdminRole | null>(null);
   const [toast, setToast] = useState("");
   const [termsOfferId, setTermsOfferId] = useState<number | null>(null);
   const [termsListingId, setTermsListingId] = useState<string | null>(null);
@@ -88,8 +85,6 @@ export function LeasingManager() {
 
   const loadApplications = useCallback(async () => {
     try {
-      const admin = await getCurrentAdmin();
-      setRole(admin?.role ?? null);
       const [applicationsData, listingsData, occupanciesData] = await Promise.all([
         apiClientFetch<Application[]>("/api/leasing/applications"),
         apiClientFetch<Listing[]>("/api/listings"),
@@ -100,15 +95,12 @@ export function LeasingManager() {
       setListingsById(Object.fromEntries(listingsData.map((l) => [l.id, l])));
       setOccupancyByOfferId(Object.fromEntries(occupanciesData.map((o) => [o.offerId, o])));
 
-      // Owner/host names -- /api/admin-users is super_admin-only, so a regular
-      // admin falls back to "Owner #<id>" below rather than erroring on this fetch.
-      if (admin?.role === "super_admin") {
-        try {
-          const owners = await apiClientFetch<AdminUserSummary[]>("/api/admin-users");
-          setOwnerNamesById(Object.fromEntries(owners.map((o) => [o.id, o.fullName])));
-        } catch {
-          // Non-fatal -- host names just won't resolve.
-        }
+      // Owner/host names
+      try {
+        const owners = await apiClientFetch<AdminUserSummary[]>("/api/admin-users");
+        setOwnerNamesById(Object.fromEntries(owners.map((o) => [o.id, o.fullName])));
+      } catch {
+        // Non-fatal -- host names just won't resolve.
       }
     } catch {
       showToast("Failed to load applications");
@@ -720,7 +712,7 @@ export function LeasingManager() {
                       {expandedDisclosuresAgreementId === agreement.id ? "Hide Disclosures" : "Disclosures"}
                     </Button>
                   )}
-                  {role === "super_admin" && agreement.status === "SIGNED" && (
+                  {agreement.status === "SIGNED" && (
                     <Button size="sm" variant="outline" onClick={() => openLegalOrder(agreement.id)}>
                       Legal Order Change
                     </Button>

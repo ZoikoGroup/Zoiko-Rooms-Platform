@@ -24,11 +24,15 @@ from app.crud.user import get_user_by_party_id
 from app.models.guest import Guest
 from app.models.leasing import Application, Offer
 from app.models.occupancy import Occupancy
-from app.models.rental_message import RentalConversation, RentalMessage
+from app.models.rental_message import RentalConversation, RentalMessage, SubletMessage
+from app.models.sublet_request import CO_TENANCY_ARRANGEMENT_TYPES, REPLACING_ARRANGEMENT_TYPES, SubletRequest
 from app.models.user_account import UserAccount
 from app.schemas.rental_message import RentalConversationRead, RentalMessageRead
 
 RENTER, HOST = "RENTER", "HOST"
+# Sublet threads: RENTER is the renter who asked to sublet, SUBTENANT the
+# person they named.
+SUBTENANT = "SUBTENANT"
 
 
 def _renter_guest_ids(db: Session, application: Application) -> set[str]:
@@ -48,6 +52,38 @@ def get_renter_thread_or_403(db: Session, application_id: int, user: UserAccount
     if not guest or guest.id not in _renter_guest_ids(db, application):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only message about your own rentals")
     return application, guest
+
+
+def list_renter_threads_for_host(db: Session, application: Application) -> list[dict]:
+    """Every renter the host can message on this application: the original
+    applicant and anyone occupying the room under it (a subtenant after a
+    full handover), with unread counts -- so the host sees which person each
+    thread is with instead of everything under the applicant's name."""
+    occupant_ids = list(db.scalars(
+        select(Occupancy.guest_id).join(Offer, Offer.id == Occupancy.offer_id)
+        .where(Offer.application_id == application.id).order_by(Occupancy.id.desc())
+    ))
+    current_occupant = occupant_ids[0] if occupant_ids else None
+    ordered = [application.guest_id] + [g for g in dict.fromkeys(occupant_ids) if g != application.guest_id]
+    conversations = {
+        c.guest_id: c for c in db.scalars(
+            select(RentalConversation).where(RentalConversation.application_id == application.id)
+        )
+    }
+    unread = _unread_counts(db, [c.id for c in conversations.values()], HOST)
+    out = []
+    for guest_id in ordered:
+        guest = db.get(Guest, guest_id)
+        conversation = conversations.get(guest_id)
+        out.append({
+            "guest_id": guest_id,
+            "name": guest.name if guest else "Renter",
+            "role": "APPLICANT" if guest_id == application.guest_id else "SUBTENANT",
+            "is_current_occupant": guest_id == current_occupant,
+            "unread_count": unread.get(conversation.id, 0) if conversation else 0,
+            "last_message_at": conversation.last_message_at if conversation else None,
+        })
+    return out
 
 
 def get_host_thread_or_403(
@@ -139,11 +175,15 @@ def send_message(
             related_entity_type="application", related_entity_id=f"{application.id}:{message.id}",
         )
     else:
+        # A subtenant never applied, so their copy opens My Rentals rather
+        # than the Applications page.
         notif_crud.notify_user_by_guest(
             db, guest,
             title=f"New message from {_host_name(db, application)}",
             message=f'About "{listing_name}": {preview}',
-            notification_type="rental_message.received",
+            notification_type=(
+                "rental_message.received" if guest.id == application.guest_id else "rental_message.received_subtenant"
+            ),
             related_entity_type="application", related_entity_id=f"{application.id}:{message.id}",
         )
     db.commit()
@@ -202,3 +242,100 @@ def list_conversations_for_host(db: Session, user: UserAccount) -> list[RentalCo
         if c.application.listing and party_id_for_listing(c.application.listing) == user.party_id
     ]
     return _to_conversation_reads(db, conversations, HOST)
+
+
+# -- renter <-> subtenant ------------------------------------------------------
+
+def get_sublet_thread_or_403(db: Session, sublet_request_id: int, user: UserAccount) -> tuple[SubletRequest, str]:
+    """The two people on a sublet request can message each other once it's
+    been submitted: the renter who asked (requested_by_guest_id) and the
+    person they named (proposed_renter_party_id). Returns the caller's role."""
+    sublet_request = db.get(SubletRequest, sublet_request_id)
+    if sublet_request is None or sublet_request.status == "draft" or not sublet_request.proposed_renter_party_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    guest = get_guest_for_user(db, user)
+    if guest is not None and sublet_request.requested_by_guest_id == guest.id:
+        return sublet_request, RENTER
+    if user.party_id and sublet_request.proposed_renter_party_id == user.party_id:
+        return sublet_request, SUBTENANT
+    raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only message about your own sublets")
+
+
+def _to_sublet_message_read(message: SubletMessage, viewer_role: str) -> RentalMessageRead:
+    return RentalMessageRead(
+        id=message.id, sender_role=message.sender_role, body=message.body,
+        created_at=message.created_at, read_at=message.read_at, mine=message.sender_role == viewer_role,
+    )
+
+
+def list_sublet_messages(db: Session, sublet_request: SubletRequest, viewer_role: str) -> list[RentalMessageRead]:
+    """Returns the thread and marks the other side's messages as read."""
+    messages = list(db.scalars(
+        select(SubletMessage).where(SubletMessage.sublet_request_id == sublet_request.id).order_by(SubletMessage.id)
+    ))
+    now = datetime.now(timezone.utc)
+    changed = False
+    for message in messages:
+        if message.sender_role != viewer_role and message.read_at is None:
+            message.read_at = now
+            changed = True
+    if changed:
+        db.commit()
+    return [_to_sublet_message_read(m, viewer_role) for m in messages]
+
+
+def send_sublet_message(
+    db: Session, sublet_request: SubletRequest, sender: UserAccount, sender_role: str, body: str,
+) -> RentalMessageRead:
+    text = body.strip()
+    if not text:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Message can't be empty")
+    message = SubletMessage(sublet_request_id=sublet_request.id, sender_role=sender_role, sender_user_id=sender.id, body=text)
+    db.add(message)
+    db.flush()
+
+    listing = sublet_request.current_occupancy.listing if sublet_request.current_occupancy else None
+    listing_name = listing.name if listing else "your rental"
+    preview = text if len(text) <= 120 else text[:117] + "..."
+    notification = dict(
+        title=f"New message from {sender.full_name or 'your sublet contact'}",
+        message=f'About the sublet of "{listing_name}": {preview}',
+        related_entity_type="sublet_request", related_entity_id=f"{sublet_request.id}:{message.id}",
+    )
+    # The renter's copy opens their Sublets page; the subtenant's, My Rentals.
+    if sender_role == SUBTENANT:
+        requester = db.get(Guest, sublet_request.requested_by_guest_id) if sublet_request.requested_by_guest_id else None
+        if requester is not None:
+            notif_crud.notify_user_by_guest(db, requester, notification_type="sublet_message.received", **notification)
+    else:
+        notif_crud.notify_user_by_party(
+            db, sublet_request.proposed_renter_party_id, notification_type="sublet_message.received_subtenant", **notification,
+        )
+    db.commit()
+    db.refresh(message)
+    return _to_sublet_message_read(message, sender_role)
+
+
+def sublet_held_through(db: Session, occupancy: Occupancy) -> SubletRequest | None:
+    """The approved sublet request this occupancy's current occupant got the
+    room through, if any: a full handover (the original occupancy now holds
+    the incoming tenant) or a subtenancy/lodging (its own agreement, recorded
+    as the request's new_agreement_id)."""
+    handover = db.scalar(
+        select(SubletRequest).where(
+            SubletRequest.current_occupancy_id == occupancy.id,
+            SubletRequest.status == "approved",
+            SubletRequest.arrangement_type.in_(REPLACING_ARRANGEMENT_TYPES),
+        ).limit(1)
+    )
+    if handover is not None:
+        return handover if handover.requested_by_guest_id != occupancy.guest_id else None
+    agreement = occupancy.offer.agreement if occupancy.offer else None
+    if agreement is None:
+        return None
+    return db.scalar(
+        select(SubletRequest).where(
+            SubletRequest.new_agreement_id == agreement.id,
+            SubletRequest.arrangement_type.in_(CO_TENANCY_ARRANGEMENT_TYPES),
+        ).limit(1)
+    )

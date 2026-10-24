@@ -46,6 +46,9 @@ class Message:
     outro: list[str] = field(default_factory=list)
     cta_url: str = ""
     unsubscribe_url: str = ""
+    # Address a mail app POSTs to for one-click unsubscribe (RFC 8058). Never opened in a browser, so it
+    # can differ from the website link above. Empty = same as unsubscribe_url.
+    unsubscribe_post_url: str = ""
     variant: str = ""
     # Section 1.3: same key = same message; the second send is suppressed.
     # deliver() appends the recipient, so one key can cover both parties.

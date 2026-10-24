@@ -161,3 +161,63 @@ class TestDataExportAndClosure:
         db_session.expire_all()
         closed = db_session.get(UserAccount, host.id)
         assert closed.is_active is False and closed.closed_at is not None
+
+
+class TestSignupEmailConfirmation:
+    """A new account gets a confirm-your-email link; opening it marks the
+    email confirmed. The link can be resent from settings."""
+
+    def _capture(self, monkeypatch) -> list[dict]:
+        from app.api.routes import user_auth
+
+        sent: list[dict] = []
+        monkeypatch.setattr(
+            user_auth, "send_signup_email_confirmation_email",
+            lambda to, link, hours, name="": sent.append({"to": to, "link": link, "hours": hours}),
+        )
+        return sent
+
+    def test_signup_sends_a_link_that_confirms_the_email(self, client, db_session: Session, monkeypatch):
+        sent = self._capture(monkeypatch)
+        r = client.post(
+            "/api/users/register",
+            json={"email": "confirm-new@test.com", "password": "password123", "fullName": "Confirm New", "phone": ""},
+        )
+        assert r.status_code == 201, r.text
+        [mail] = sent
+        assert mail["to"] == "confirm-new@test.com" and mail["hours"] == 24
+        assert "/account/confirm-email?token=" in mail["link"] and "signup=1" in mail["link"]
+        user = db_session.query(UserAccount).filter(UserAccount.email == "confirm-new@test.com").one()
+        assert user.email_verified is False
+
+        # The signup link is not shown as a pending email change.
+        login = client.post("/api/users/login", json={"email": "confirm-new@test.com", "password": "password123"})
+        assert client.get("/api/users/email-change", cookies=login.cookies).json()["pendingEmail"] is None
+
+        token = mail["link"].split("token=")[1].split("&")[0]
+        r = client.post("/api/users/email-change/confirm", json={"token": token})
+        assert r.status_code == 200, r.text
+        assert r.json()["email"] == "confirm-new@test.com"
+        db_session.refresh(user)
+        assert user.email_verified is True
+        # Single use.
+        assert client.post("/api/users/email-change/confirm", json={"token": token}).status_code == 400
+
+    def test_resend_supersedes_the_old_link(self, client, db_session: Session, monkeypatch):
+        sent = self._capture(monkeypatch)
+        client.post(
+            "/api/users/register",
+            json={"email": "confirm-resend@test.com", "password": "password123", "fullName": "Resend", "phone": ""},
+        )
+        login = client.post("/api/users/login", json={"email": "confirm-resend@test.com", "password": "password123"})
+        r = client.post("/api/users/email-confirmation/resend", cookies=login.cookies)
+        assert r.status_code == 202 and r.json() == {"emailVerified": False}
+        assert len(sent) == 2
+        old, new = (m["link"].split("token=")[1].split("&")[0] for m in sent)
+        assert client.post("/api/users/email-change/confirm", json={"token": old}).status_code == 400
+        assert client.post("/api/users/email-change/confirm", json={"token": new}).status_code == 200
+
+        # Already confirmed: nothing more is sent.
+        r = client.post("/api/users/email-confirmation/resend", cookies=login.cookies)
+        assert r.json() == {"emailVerified": True}
+        assert len(sent) == 2

@@ -78,7 +78,7 @@ def forgot_password(payload: AdminForgotPasswordRequest, db: Session = Depends(g
     admin = get_admin_by_email(db, payload.email.strip())
     if admin and admin.is_active and admin.approval_status == "approved":
         raw_token = create_admin_reset_token(db, admin)
-        link = f"{settings.frontend_url}/login/reset-password?token={raw_token}"
+        link = f"{settings.email_site_url}/login/reset-password?token={raw_token}"
         send_password_reset_email(admin.email, link, settings.password_reset_token_expire_minutes, admin.full_name)
     return {"message": GENERIC_ADMIN_RESET_MESSAGE}
 

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { StarRating } from "@/components/ui/StarRating";
 import { PublicListing } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils";
+import { ListingReviews } from "@/components/user/ListingReviews";
 import { ListingImageGallery } from "@/components/user/ListingImageGallery";
 import { Card } from "@/components/user/ui";
 import { useUserSession } from "@/components/user/UserSessionContext";
@@ -97,6 +98,13 @@ export function ListingDetailContent({
           </div>
         </Card>
       )}
+
+      <Card>
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+          Reviews{listing.reviewCount > 0 ? ` (${listing.reviewCount})` : ""}
+        </p>
+        <ListingReviews listingId={listing.id} />
+      </Card>
 
       <Card>
         <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Host</p>

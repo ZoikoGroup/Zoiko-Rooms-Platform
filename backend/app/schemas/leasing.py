@@ -252,6 +252,16 @@ class AgreementAmendmentRead(CamelModel):
     effective_at: datetime | None = None
 
 
+class AgreementAmendmentOverviewRead(AgreementAmendmentRead):
+    """Super admin's read-only overview (ZR-44): an amendment plus enough
+    context to recognise it without looking anything up."""
+
+    listing_name: str = ""
+    renter_name: str = ""
+    host_name: str = ""
+    agreement_status: str = ""
+
+
 class AmendmentRequestCreate(CamelModel):
     reason: str = ""
 
@@ -457,6 +467,13 @@ class UserApplicationRead(CamelModel):
     offer_status: str | None = None
     agreement_id: int | None = None
     agreement_status: str | None = None
+    # The host's most recent decision -- status alone is "DECIDED" for both a
+    # shortlist/approval and a rejection, so the applicant couldn't tell them
+    # apart. decision_note is the message the host wrote to the applicant
+    # (already sent to them in the decision notification).
+    decision: str | None = None  # "APPROVED" | "REJECTED"
+    decision_note: str = ""
+    decided_at: datetime | None = None
 
 
 class UserOccupancyRead(CamelModel):
@@ -504,6 +521,13 @@ class UserOccupancyRead(CamelModel):
     # The application this tenancy came from -- the key for host<->renter
     # messages (crud/rental_message.py), also for a subtenant who never applied.
     application_id: int | None = None
+    # Set when this tenant got the room through someone else's sublet -- the
+    # key for messaging that renter (crud/rental_message.py:sublet_held_through).
+    sublet_from_request_id: int | None = None
+    sublet_from_renter_name: str = ""
+    # Days the host has to confirm a move-out before silence counts as
+    # confirmation (crud/occupancy_lifecycle.py).
+    move_out_confirm_days: int = 7
 
 
 class SubletRequestCreate(CamelModel):

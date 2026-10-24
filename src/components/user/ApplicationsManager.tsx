@@ -390,9 +390,21 @@ export function ApplicationsManager() {
         raw.agreementStatus !== "SIGNED" &&
         raw.agreementStatus !== "ACTIVE";
 
+      const tenancyStarted = raw.agreementStatus === "SIGNED" || raw.agreementStatus === "ACTIVE";
+
       if (raw.status === "WITHDRAWN") {
         st = "withdrawn";
         outText = `You withdrew this application on ${appliedDate}.`;
+      } else if (raw.decision === "REJECTED" && !tenancyStarted) {
+        // The host declined -- show it as such, with the host's own message.
+        st = "notsel";
+        const declinedOn = raw.decidedAt ? ` on ${safeFormatDate(raw.decidedAt)}` : "";
+        outText = raw.decisionNote?.trim()
+          ? `The host declined your application${declinedOn}: "${raw.decisionNote.trim()}"`
+          : `The host declined your application${declinedOn}.`;
+      } else if (raw.status === "DECIDED" && raw.decision === "APPROVED" && !raw.offerStatus && !raw.agreementStatus) {
+        // Shortlisted/selected, no offer sent yet -- still in progress, not closed.
+        st = "review";
       } else if (raw.status === "DECIDED" && !hasLiveDeal) {
         if (raw.offerStatus === "DECLINED") {
           st = "odecl";

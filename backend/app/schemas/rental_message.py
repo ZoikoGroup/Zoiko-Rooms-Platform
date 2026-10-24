@@ -19,6 +19,17 @@ class RentalMessageRead(CamelModel):
     mine: bool
 
 
+class RenterThreadRead(CamelModel):
+    """One renter the host can message on an application."""
+
+    guest_id: str
+    name: str
+    role: str  # "APPLICANT" | "SUBTENANT"
+    is_current_occupant: bool
+    unread_count: int
+    last_message_at: datetime | None
+
+
 class RentalConversationRead(CamelModel):
     application_id: int
     # The renter side of this thread (a subtenant has their own thread).

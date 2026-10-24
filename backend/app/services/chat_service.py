@@ -618,7 +618,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="revenue_trend",
-            description="Monthly revenue trend points for recent months.",
+            description="Monthly revenue trend points for recent months, in US dollars (other currencies converted at the configured fixed rates).",
             parameters={
                 "type": "object",
                 "properties": {"months": {"type": ["integer", "null"], "default": 6}},

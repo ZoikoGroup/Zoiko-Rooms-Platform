@@ -295,7 +295,12 @@ def download_own_listing_fee_receipt(payment_id: int, user: UserAccount = Depend
 
 @admin_router.get("/policies", response_model=list[ListingFeePolicyRead])
 def get_listing_fee_policies(jurisdiction_code: str | None = None, db: Session = Depends(get_db)):
-    return listing_fee_crud.list_listing_fee_policies(db, jurisdiction_code)
+    return [
+        ListingFeePolicyRead.model_validate(p).model_copy(update={
+            "activation_problems": listing_fee_crud.price_activation_problems(db, p) if p.status == "DRAFT" else [],
+        })
+        for p in listing_fee_crud.list_listing_fee_policies(db, jurisdiction_code)
+    ]
 
 
 @admin_router.post("/policies", response_model=ListingFeePolicyRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_super_admin)])

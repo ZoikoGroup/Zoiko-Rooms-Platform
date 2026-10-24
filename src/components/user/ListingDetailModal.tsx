@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { isApplicationOpen } from "@/lib/applications";
 import { AlertTriangle } from "lucide-react";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
@@ -38,7 +39,7 @@ export function ListingDetailModal({
     Promise.all([getPublicListing(listingId), listRentalApplications().catch(() => [])])
       .then(([found, applications]) => {
         setListing(found);
-        setApplied(applications.some((a) => a.listingId === listingId));
+        setApplied(applications.some((a) => a.listingId === listingId && isApplicationOpen(a)));
       })
       .catch((err) => setLoadError(errorMessage(err, "This listing could not be found. It may have been withdrawn or unpublished.")))
       .finally(() => setLoading(false));

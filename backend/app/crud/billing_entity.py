@@ -27,6 +27,32 @@ def get_billing_entity_or_404(db: Session, entity_id: int) -> BillingEntity:
     return entity
 
 
+def _canonical_markets(db: Session, markets: list[str]) -> list[str]:
+    """Stores each supported market as the exact code of a configured market
+    (MarketRelease.jurisdiction), so a Price Book entry for that market always
+    matches it -- typing "ind" for the "IND" market used to leave the entity
+    silently unable to bill it (ZR-16). Unknown markets are refused."""
+    from app.models.market_release import MarketRelease
+
+    configured = {code.strip().upper(): code for code in db.scalars(select(MarketRelease.jurisdiction).distinct())}
+    out, unknown = set(), []
+    for market in markets:
+        key = market.strip().upper()
+        if not key:
+            continue
+        if key in configured:
+            out.add(configured[key])
+        else:
+            unknown.append(market.strip())
+    if unknown:
+        available = ", ".join(sorted(configured.values())) or "none yet"
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Not a configured market: {', '.join(unknown)}. Configured markets: {available}",
+        )
+    return sorted(out)
+
+
 def _normalize(data: dict) -> dict:
     data = dict(data)
     if "code" in data and data["code"] is not None:
@@ -42,6 +68,8 @@ def _normalize(data: dict) -> dict:
 
 def create_billing_entity(db: Session, admin: AdminUser, data: dict, *, correlation_id: str = "") -> BillingEntity:
     data = _normalize(data)
+    if data.get("supported_markets") is not None:
+        data["supported_markets"] = _canonical_markets(db, data["supported_markets"])
     if db.scalar(select(BillingEntity.id).where(BillingEntity.code == data["code"])):
         raise HTTPException(status.HTTP_409_CONFLICT, f"A billing entity with code {data['code']} already exists")
     entity = BillingEntity(**data)
@@ -61,6 +89,8 @@ def update_billing_entity(
 ) -> BillingEntity:
     updates = _normalize({k: v for k, v in updates.items() if v is not None})
     updates.pop("code", None)  # the code is referenced by quotes/receipts -- never renamed
+    if updates.get("supported_markets") is not None:
+        updates["supported_markets"] = _canonical_markets(db, updates["supported_markets"])
     for field, value in updates.items():
         setattr(entity, field, value)
     entity.updated_at = datetime.now(timezone.utc)

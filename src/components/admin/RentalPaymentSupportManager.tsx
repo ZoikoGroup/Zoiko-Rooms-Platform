@@ -68,6 +68,11 @@ function actionUrl(action: Action): string {
 export function RentalPaymentSupportManager({ showToast }: { showToast: (message: string) => void }) {
   const [allowed, setAllowed] = useState(true);
   const [lookupId, setLookupId] = useState("");
+  // ZR-46: matches for the search box, and the most recent obligations so an
+  // admin can pick one without already knowing its ID.
+  const [matches, setMatches] = useState<RentalPaymentObligation[] | null>(null);
+  const [recent, setRecent] = useState<RentalPaymentObligation[]>([]);
+  const [searching, setSearching] = useState(false);
   const [obligation, setObligation] = useState<RentalPaymentObligation | null>(null);
   const [evidence, setEvidence] = useState<Record<number, EvidenceArtifact[]>>({});
   const [holds, setHolds] = useState<Record<number, RentalPaymentEvidenceHold[]>>({});
@@ -114,7 +119,46 @@ export function RentalPaymentSupportManager({ showToast }: { showToast: (message
     apiClientFetch(`${BASE}/disputes?status=`).catch((err) => {
       if (err instanceof ApiError && err.status === 403) setAllowed(false);
     });
+    apiClientFetch<RentalPaymentObligation[]>(`${BASE}/obligations?limit=10`).then(setRecent).catch(() => setRecent([]));
   }, []);
+
+  // Accepts what people actually see: "5", "#5", the "ZR-R-5" reference on
+  // renter/host pages, or a payment reference.
+  async function search(e: React.FormEvent) {
+    e.preventDefault();
+    const q = lookupId.trim();
+    if (!q) {
+      showToast("Enter an obligation ID, a ZR-R- reference or a payment reference");
+      return;
+    }
+    setSearching(true);
+    try {
+      const found = await apiClientFetch<RentalPaymentObligation[]>(`${BASE}/obligations?q=${encodeURIComponent(q)}`);
+      if (found.length === 0) {
+        setMatches(null);
+        setObligation(null);
+        showToast(`No obligation matches "${q}"`);
+      } else if (found.length === 1) {
+        setMatches(null);
+        setObligation(found[0]);
+        loadEvidence(found[0].records);
+      } else {
+        setObligation(null);
+        setMatches(found);
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) setAllowed(false);
+      else showToast("Search failed -- please try again");
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function pick(o: RentalPaymentObligation) {
+    setMatches(null);
+    setLookupId(String(o.id));
+    loadObligation(o.id);
+  }
 
   function open(next: Action) {
     setAction(next);
@@ -193,7 +237,8 @@ export function RentalPaymentSupportManager({ showToast }: { showToast: (message
         </Button>
       </div>
       <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-        Look up a rent or deposit obligation by ID (shown in the disputes queue and on tenant/host records) to act on it.
+        Find a rent or deposit obligation by its ID, the ZR-R- reference renters and hosts see, or its payment
+        reference -- or pick a recent one below.
       </p>
       {jobResults && (
         <p className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
@@ -201,20 +246,37 @@ export function RentalPaymentSupportManager({ showToast }: { showToast: (message
         </p>
       )}
 
-      <form
-        className="mt-4 flex flex-wrap items-center gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const id = Number(lookupId);
-          if (Number.isInteger(id) && id > 0) loadObligation(id);
-        }}
-      >
+      <form className="mt-4 flex flex-wrap items-center gap-2" onSubmit={search}>
         <input
-          value={lookupId} onChange={(e) => setLookupId(e.target.value)} inputMode="numeric" placeholder="Obligation ID"
-          className="w-40 rounded-xl bg-slate-50 px-3 py-2 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+          value={lookupId} onChange={(e) => setLookupId(e.target.value)} placeholder="e.g. 5, ZR-R-5 or payment reference"
+          className="w-64 rounded-xl bg-slate-50 px-3 py-2 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
         />
-        <Button type="submit" size="sm" variant="primary">Look up</Button>
+        <Button type="submit" size="sm" variant="primary" loading={searching}>Look up</Button>
       </form>
+
+      {(matches ?? (!obligation ? recent : [])).length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            {matches ? `${matches.length} matches` : "Recent obligations"}
+          </p>
+          {(matches ?? recent).map((o) => (
+            <button
+              key={o.id}
+              type="button"
+              onClick={() => pick(o)}
+              className="flex w-full flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2 text-left text-xs hover:bg-primary-50 dark:bg-slate-800 dark:hover:bg-primary-500/10"
+            >
+              <span className="font-semibold capitalize text-primary-900 dark:text-white">
+                #{o.id} {o.displayLabel} · {formatCurrency(o.amount, o.currency)}
+              </span>
+              <span className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
+                {o.paymentReference || `ZR-R-${o.id}`} · due {formatDate(o.dueDate)}
+                <Badge tone={rentalPaymentStatusTone[o.status] ?? "neutral"}>{rentalPaymentStatusLabel[o.status] ?? o.status}</Badge>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {obligation && (
         <div className="mt-4 space-y-3">

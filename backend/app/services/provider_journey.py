@@ -81,7 +81,7 @@ def read_provider_token(token: str) -> int:
 
 def provider_links(outreach_id: int) -> dict[str, str]:
     token = make_provider_token(outreach_id)
-    base = f"{settings.frontend_url.rstrip('/')}/provider/respond?token={token}"
+    base = f"{settings.email_site_url}/provider/respond?token={token}"
     return {"token": token, "respond_url": base, "opt_out_url": f"{base}&action=opt-out"}
 
 

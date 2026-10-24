@@ -25,6 +25,7 @@ from app.models.listing_approval import CURRENT_POLICY_VERSION
 from app.services.agreement_readiness import compute_host_readiness
 from app.services.booking_expiry import sweep_expired_checkouts, sweep_expired_offers
 from app.schemas.leasing import (
+    AgreementAmendmentOverviewRead,
     AgreementAmendmentRead,
     AgreementCreateRequest,
     AgreementPartyRead,
@@ -685,6 +686,32 @@ def post_request_amendment(
     log_audit_event(db, admin, "agreement_amendment.request", "agreement_amendment", str(amendment.id), get_correlation_id(request))
     db.commit()
     return amendment
+
+
+@router.get("/amendments", response_model=list[AgreementAmendmentOverviewRead])
+def list_all_agreement_amendments(db: Session = Depends(get_db)):
+    """ZR-44: every amendment on the platform, newest first -- the super
+    admin's read-only view. Amendments are decided between host and renter;
+    the admin only looks (no admin approve/review path is offered)."""
+    from sqlalchemy import select
+
+    from app.crud.user import get_user_by_party_id
+    from app.models.agreement_amendment import AgreementAmendment
+
+    out = []
+    for amendment in db.scalars(select(AgreementAmendment).order_by(AgreementAmendment.id.desc()).limit(500)):
+        agreement = amendment.agreement
+        offer = agreement.offer if agreement else None
+        listing = offer.listing if offer else None
+        host = get_user_by_party_id(db, listing.party_id) if listing and listing.party_id else None
+        guest = offer.guest if offer else None
+        out.append(AgreementAmendmentOverviewRead.model_validate(amendment).model_copy(update={
+            "listing_name": listing.name if listing else "",
+            "renter_name": guest.name if guest else "",
+            "host_name": host.full_name if host else "",
+            "agreement_status": agreement.status if agreement else "",
+        }))
+    return out
 
 
 @router.get("/agreements/{agreement_id}/amendments", response_model=list[AgreementAmendmentRead])

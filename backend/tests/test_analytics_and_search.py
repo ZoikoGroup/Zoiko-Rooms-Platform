@@ -117,14 +117,16 @@ class TestGlobalSearchIncludesRealLifecycle:
 
 
 class TestRevenueTrendIncludesConfirmedRentRecords:
-    def test_recipient_confirmed_rent_counts_and_deposit_does_not(self, client, db_session: Session):
+    def test_recipient_confirmed_rent_counts_and_deposit_does_not(self, client, db_session: Session, monkeypatch):
         """The ZR-PAY-002 record path confirms rent without ever creating a
         SimulatedPayment -- that rent must still reach the revenue chart,
         while a confirmed deposit (held, not earned) must not."""
         from datetime import datetime, timezone
 
+        from app.core.config import settings
         from app.models.rental_payment import RentalPaymentObligation, RentalPaymentRecord
 
+        monkeypatch.setattr(settings, "fx_rates_to_usd", {"USD": 1.0, "GBP": 1.25})
         _listing_id, occupancy = _make_listing_with_active_occupancy(db_session, guest_name="Rent Payer")
         offer = db_session.get(Offer, occupancy.offer_id)
         recipient_party_id = offer.listing.party_id
@@ -154,5 +156,53 @@ class TestRevenueTrendIncludesConfirmedRentRecords:
 
         row = next((item for item in r.json() if item["month"] == now.strftime("%b")), None)
         assert row is not None, r.json()
-        assert row["revenue"] == 129
+        assert row["revenue"] == 161.25  # £129 rent in US dollars at 1.25
         assert row["bookings"] == 1
+
+        # ZR-73: the Total Revenue card reads the same data, so it agrees.
+        r = client.get("/api/analytics/revenue-summary", cookies=auth_admin_cookie(admin))
+        assert r.status_code == 200, r.text
+        summary = r.json()
+        assert summary["totalRevenue"] == 161.25
+        assert summary["thisMonthRevenue"] == 161.25
+        assert summary["changePct"] is None  # nothing last month to compare with
+        assert summary["currency"] == "USD"
+        assert summary["sourceCurrencies"] == ["GBP"]
+        assert summary["unconvertedCurrencies"] == []
+
+    def test_rupees_dollars_and_pounds_add_up_in_us_dollars(self, client, db_session: Session, monkeypatch):
+        """Three renters pay in INR, USD and GBP: the total is one US-dollar
+        figure; a currency with no rate is left out and named, never counted
+        as dollars."""
+        from datetime import datetime, timezone
+
+        from app.core.config import settings
+        from app.models.rental_payment import RentalPaymentObligation, RentalPaymentRecord
+
+        monkeypatch.setattr(settings, "fx_rates_to_usd", {"USD": 1.0, "GBP": 1.25, "INR": 0.012})
+        now = datetime.now(timezone.utc)
+        for i, (currency, amount) in enumerate((("INR", 10000), ("USD", 50), ("GBP", 100), ("XYZ", 999))):
+            _listing_id, occupancy = _make_listing_with_active_occupancy(db_session, guest_name=f"Payer {currency}")
+            offer = db_session.get(Offer, occupancy.offer_id)
+            obligation = RentalPaymentObligation(
+                obligation_type="RENT", agreement_id=offer.agreement.id, tenant_guest_id=occupancy.guest_id,
+                recipient_party_id=offer.listing.party_id, amount=amount, currency=currency,
+                due_date=date.today(), status="CONFIRMED",
+            )
+            db_session.add(obligation)
+            db_session.flush()
+            db_session.add(RentalPaymentRecord(
+                obligation_id=obligation.id, status="CONFIRMED", declared_amount=amount, declared_currency=currency,
+                declared_date=date.today(), declared_by_guest_id=occupancy.guest_id,
+                confirmed_by_party_id=offer.listing.party_id, confirmed_at=now, confirmed_amount=amount,
+            ))
+        db_session.commit()
+
+        admin = _make_admin(db_session, email="fx-mixed@test.com", role="super_admin")
+        summary = client.get("/api/analytics/revenue-summary", cookies=auth_admin_cookie(admin)).json()
+        # 10,000 INR = $120, $50, £100 = $125 -> $295; XYZ has no rate.
+        assert summary["totalRevenue"] == 295
+        assert summary["sourceCurrencies"] == ["GBP", "INR", "USD"]
+        assert summary["unconvertedCurrencies"] == ["XYZ"]
+        trend = client.get("/api/analytics/revenue-trend", cookies=auth_admin_cookie(admin)).json()
+        assert next(p for p in trend if p["month"] == now.strftime("%b"))["revenue"] == 295

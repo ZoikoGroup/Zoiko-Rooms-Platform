@@ -9,6 +9,7 @@ from app.schemas.analytics import (
     DisputeOperationalMetricsRead,
     OccupancyByCityPoint,
     PaymentOperationalMetricsRead,
+    RevenueSummary,
     RevenueTrendPoint,
     Section1MetricsRead,
 )
@@ -22,6 +23,11 @@ router = APIRouter(prefix="/api/analytics", tags=["analytics"], dependencies=[De
 @router.get("/revenue-trend", response_model=list[RevenueTrendPoint])
 def get_revenue_trend(db: Session = Depends(get_db)):
     return crud.revenue_trend(db)
+
+
+@router.get("/revenue-summary", response_model=RevenueSummary)
+def get_revenue_summary(db: Session = Depends(get_db)):
+    return crud.revenue_summary(db)
 
 
 @router.get("/bookings-by-type", response_model=list[BookingsByTypePoint])

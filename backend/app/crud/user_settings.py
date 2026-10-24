@@ -174,10 +174,33 @@ def request_email_change(db: Session, user: UserAccount, new_email: str, current
     return raw
 
 
+def create_email_confirmation_token(db: Session, user: UserAccount) -> str:
+    """The confirm-your-email link sent at signup. Stored as an
+    EmailChangeRequest whose new_email is the address the account already has
+    -- confirm_email_change then only marks it confirmed. Earlier unused
+    confirmation links are superseded; a pending email *change* is left alone."""
+    now = datetime.now(timezone.utc)
+    for pending in db.scalars(select(EmailChangeRequest).where(
+        EmailChangeRequest.user_id == user.id, EmailChangeRequest.used_at.is_(None),
+        func.lower(EmailChangeRequest.new_email) == user.email.lower(),
+    )):
+        pending.used_at = now
+    raw = secrets.token_urlsafe(32)
+    db.add(EmailChangeRequest(
+        user_id=user.id, new_email=user.email.lower(), token_hash=_hash(raw),
+        expires_at=now + timedelta(minutes=settings.email_confirm_token_expire_minutes),
+    ))
+    db.commit()
+    return raw
+
+
 def pending_email_change(db: Session, user: UserAccount) -> str | None:
     now = datetime.now(timezone.utc)
     for req in db.scalars(
-        select(EmailChangeRequest).where(EmailChangeRequest.user_id == user.id, EmailChangeRequest.used_at.is_(None))
+        select(EmailChangeRequest).where(
+            EmailChangeRequest.user_id == user.id, EmailChangeRequest.used_at.is_(None),
+            func.lower(EmailChangeRequest.new_email) != user.email.lower(),  # not a signup confirmation link
+        )
         .order_by(EmailChangeRequest.id.desc())
     ):
         expires = req.expires_at if req.expires_at.tzinfo else req.expires_at.replace(tzinfo=timezone.utc)
@@ -195,6 +218,14 @@ def confirm_email_change(db: Session, raw_token: str) -> UserAccount:
     user = db.get(UserAccount, req.user_id)
     if user is None or not user.is_active:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This confirmation link is invalid or has expired")
+    if req.new_email.lower() == user.email.lower():
+        # A signup confirmation link (create_email_confirmation_token).
+        user.email_verified = True
+        user.updated_at = now
+        req.used_at = now
+        db.commit()
+        db.refresh(user)
+        return user
     if get_user_by_email(db, req.new_email) is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "That email address is already in use")
     user.email = req.new_email

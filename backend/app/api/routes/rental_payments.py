@@ -543,6 +543,29 @@ async def post_upload_rental_payment_evidence_as_recipient(
     )
 
 
+@admin_router.get("/obligations", response_model=list[RentalPaymentObligationRead])
+def search_rental_payment_obligations(q: str = "", limit: int = 20, db: Session = Depends(get_db)):
+    """ZR-46: find obligations the way people actually refer to them -- the
+    number, "#5", the "ZR-R-5" reference renters and hosts see, or a payment
+    reference. No query lists the most recent ones."""
+    import re
+
+    from sqlalchemy import select
+
+    from app.models.rental_payment import RentalPaymentObligation
+
+    limit = max(1, min(limit, 50))
+    text = q.strip()
+    query = select(RentalPaymentObligation).order_by(RentalPaymentObligation.id.desc()).limit(limit)
+    if text:
+        id_match = re.fullmatch(r"(?:zr-r-|#)?\s*(\d+)", text, flags=re.IGNORECASE)
+        if id_match:
+            obligation = db.get(RentalPaymentObligation, int(id_match.group(1)))
+            return [obligation] if obligation else []
+        query = query.where(RentalPaymentObligation.payment_reference.ilike(f"%{text}%"))
+    return list(db.scalars(query))
+
+
 @admin_router.get("/obligations/{obligation_id}", response_model=RentalPaymentObligationRead)
 def get_rental_payment_obligation(obligation_id: int, db: Session = Depends(get_db)):
     return rp_crud.get_obligation_or_404(db, obligation_id)

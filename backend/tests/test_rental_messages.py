@@ -140,3 +140,149 @@ class TestSubtenantThread:
             )
             assert r.status_code == 201, r.text
         assert len(_notifications_for(db_session, host, application_id)) == 2
+
+
+class TestRenterSubtenantThread:
+    """Renter <-> subtenant messaging on a sublet request (ZR-55): the
+    subtenant can reach the renter they sublet from, not just the host."""
+
+    def _approved_handover(self, client, db_session: Session, suffix: str):
+        from app.crud import sublet as sublet_crud
+        from tests.test_host_move_in_confirmation import _drive_agreement_to_signed
+
+        host, renter, host_cookies, renter_cookies, occupancy_id = _drive_agreement_to_signed(
+            client, db_session, host_email=f"sm-host-{suffix}@test.com", renter_email=f"sm-renter-{suffix}@test.com",
+        )
+        assert client.post(f"/api/users/hosting/occupancies/{occupancy_id}/confirm-move-in", cookies=host_cookies).status_code == 200
+        subtenant = _make_verified_renter(db_session, email=f"sm-subtenant-{suffix}@test.com")
+        db_session.commit()
+        sublet_request = sublet_crud.submit_sublet_request(db_session, renter, occupancy_id, subtenant.party_id, "ASSIGNMENT_FULL")
+        assert client.post(
+            f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve",
+            json={"stepUpPassword": "password123", "authorityConfirmed": True}, cookies=host_cookies,
+        ).status_code == 200
+        return renter, subtenant, renter_cookies, auth_user_cookie(subtenant), sublet_request.id
+
+    def test_subtenant_and_renter_exchange_messages(self, client, db_session: Session):
+        renter, subtenant, renter_cookies, sub_cookies, sublet_request_id = self._approved_handover(client, db_session, "a")
+
+        # The subtenant's rental says who they sublet from.
+        [rental] = client.get("/api/users/rentals/occupancies", cookies=sub_cookies).json()
+        assert rental["subletFromRequestId"] == sublet_request_id
+        assert rental["subletFromRenterName"]
+
+        url = f"/api/users/rentals/sublet-requests/{sublet_request_id}/messages"
+        r = client.post(url, json={"body": "Where are the spare keys?"}, cookies=sub_cookies)
+        assert r.status_code == 201, r.text
+        assert r.json()["senderRole"] == "SUBTENANT" and r.json()["mine"] is True
+        assert db_session.query(Notification).filter(
+            Notification.recipient_user_id == renter.id, Notification.notification_type == "sublet_message.received",
+        ).count() == 1
+
+        r = client.get(url, cookies=renter_cookies)
+        assert [(m["body"], m["mine"]) for m in r.json()] == [("Where are the spare keys?", False)]
+        assert r.json()[0]["readAt"] is not None
+
+        assert client.post(url, json={"body": "With the host."}, cookies=renter_cookies).status_code == 201
+        assert db_session.query(Notification).filter(
+            Notification.recipient_user_id == subtenant.id, Notification.notification_type == "sublet_message.received_subtenant",
+        ).count() == 1
+        r = client.get(url, cookies=sub_cookies)
+        assert [(m["senderRole"], m["mine"]) for m in r.json()] == [("SUBTENANT", True), ("RENTER", False)]
+
+    def test_outsiders_cannot_read_or_post(self, client, db_session: Session):
+        _renter, _subtenant, _rc, _sc, sublet_request_id = self._approved_handover(client, db_session, "b")
+        outsider = _make_verified_renter(db_session, email="sm-outsider-b@test.com")
+        db_session.commit()
+        url = f"/api/users/rentals/sublet-requests/{sublet_request_id}/messages"
+        cookies = auth_user_cookie(outsider)
+        assert client.get(url, cookies=cookies).status_code == 403
+        assert client.post(url, json={"body": "hi"}, cookies=cookies).status_code == 403
+
+    def test_original_renter_occupancy_has_no_sublet_from(self, client, db_session: Session):
+        from tests.test_sublet_arrangement_classification import _make_active_tenancy
+
+        tenant_user, _proposed, _party_id, _occupancy_id = _make_active_tenancy(db_session, suffix="sm-c")
+        [rental] = client.get("/api/users/rentals/occupancies", cookies=auth_user_cookie(tenant_user)).json()
+        assert rental["subletFromRequestId"] is None
+
+
+class TestHostSeesWhoEachThreadIsWith:
+    def test_host_lists_original_renter_and_subtenant_threads(self, client, db_session: Session):
+        """After a full sublet the host's Applications drawer must show the
+        subtenant's messages as the subtenant's, not under the original
+        applicant's name."""
+        from app.crud import sublet as sublet_crud
+        from app.models.occupancy import Occupancy
+        from tests.test_host_move_in_confirmation import _drive_agreement_to_signed
+
+        host, renter, host_cookies, renter_cookies, occupancy_id = _drive_agreement_to_signed(
+            client, db_session, host_email="who-host@test.com", renter_email="who-renter@test.com",
+        )
+        assert client.post(f"/api/users/hosting/occupancies/{occupancy_id}/confirm-move-in", cookies=host_cookies).status_code == 200
+        application_id = db_session.get(Occupancy, occupancy_id).offer.application_id
+        subtenant = _make_verified_renter(db_session, email="who-subtenant@test.com")
+        db_session.commit()
+        request = sublet_crud.submit_sublet_request(db_session, renter, occupancy_id, subtenant.party_id, "ASSIGNMENT_FULL")
+        assert client.post(
+            f"/api/users/hosting/sublet-requests/{request.id}/approve",
+            json={"stepUpPassword": "password123", "authorityConfirmed": True}, cookies=host_cookies,
+        ).status_code == 200
+        assert client.post(
+            f"/api/users/rentals/applications/{application_id}/messages", json={"body": "Subtenant here"},
+            cookies=auth_user_cookie(subtenant),
+        ).status_code == 201
+
+        r = client.get(f"/api/users/hosting/applications/{application_id}/renters", cookies=host_cookies)
+        assert r.status_code == 200, r.text
+        renters = r.json()
+        assert [x["role"] for x in renters] == ["APPLICANT", "SUBTENANT"]
+        applicant, sub = renters
+        assert sub["isCurrentOccupant"] and not applicant["isCurrentOccupant"]
+        assert sub["unreadCount"] == 1 and applicant["unreadCount"] == 0
+
+        sub_thread = client.get(
+            f"/api/users/hosting/applications/{application_id}/messages?guestId={sub['guestId']}", cookies=host_cookies,
+        ).json()
+        assert [m["body"] for m in sub_thread] == ["Subtenant here"]
+        applicant_thread = client.get(
+            f"/api/users/hosting/applications/{application_id}/messages?guestId={applicant['guestId']}", cookies=host_cookies,
+        ).json()
+        assert applicant_thread == []
+
+    def test_other_hosts_cannot_list_renters(self, client, db_session: Session):
+        _host, _renter, application_id = _setup(client, db_session, "who-b")
+        other = _make_verified_renter(db_session, email="who-other-host@test.com")
+        db_session.commit()
+        assert client.get(f"/api/users/hosting/applications/{application_id}/renters", cookies=auth_user_cookie(other)).status_code in (403, 404)
+
+
+class TestSubletPaymentRolesAfterHandover:
+    def test_original_renter_stays_the_sublessor_after_a_full_handover(self, client, db_session: Session):
+        """A full handover overwrites the occupancy's guest with the incoming
+        tenant; the sublet's payment view must still know who sublet (it
+        used to lock the original renter out and call the new tenant the
+        sublessor)."""
+        from app.crud import sublet as sublet_crud
+        from tests.test_host_move_in_confirmation import _drive_agreement_to_signed
+
+        host, renter, host_cookies, renter_cookies, occupancy_id = _drive_agreement_to_signed(
+            client, db_session, host_email="roles-host@test.com", renter_email="roles-renter@test.com",
+        )
+        assert client.post(f"/api/users/hosting/occupancies/{occupancy_id}/confirm-move-in", cookies=host_cookies).status_code == 200
+        subtenant = _make_verified_renter(db_session, email="roles-subtenant@test.com")
+        db_session.commit()
+        request = sublet_crud.submit_sublet_request(db_session, renter, occupancy_id, subtenant.party_id, "ASSIGNMENT_FULL")
+        assert client.post(
+            f"/api/users/hosting/sublet-requests/{request.id}/approve",
+            json={"stepUpPassword": "password123", "authorityConfirmed": True}, cookies=host_cookies,
+        ).status_code == 200
+
+        url = f"/api/users/sublets/{request.id}/payment-arrangement"
+        r = client.get(url, cookies=renter_cookies)
+        assert r.status_code == 200, r.text
+        assert r.json()["role"] == "SUBLESSOR"
+        r = client.get(url, cookies=auth_user_cookie(subtenant))
+        assert r.status_code == 200, r.text
+        assert r.json()["role"] == "SUBTENANT"
+        assert client.get(url, cookies=host_cookies).json()["role"] == "LANDLORD"

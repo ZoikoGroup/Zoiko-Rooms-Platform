@@ -28,6 +28,7 @@ import {
   listHostedAgreementDisclosures,
   listRecipientRentalPaymentObligations,
   rejectHostedOfferCounter,
+  reopenHostedOffer,
   sendHostedAgreement,
   sendHostedOffer,
   signHostedAgreement,
@@ -138,6 +139,16 @@ export function HostOfferAgreementPanel({
     await runAction(async () => {
       const created = await createHostedOffer(applicationId);
       await reload(created.id);
+    });
+  }
+
+  // ZR-36: a declined/expired/withdrawn offer reopens as a draft so the host
+  // can set new terms and send it again.
+  async function handleReopenOffer() {
+    if (!offer) return;
+    await runAction(async () => {
+      const reopened = await reopenHostedOffer(offer.id);
+      await reload(reopened.id);
     });
   }
 
@@ -414,8 +425,14 @@ export function HostOfferAgreementPanel({
           )}
 
           {offer && (offer.status === "DECLINED" || offer.status === "EXPIRED" || offer.status === "WITHDRAWN") && (
-            <div className="rounded-xl bg-slate-50 px-4 py-3 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
-              This offer is {offerStatusLabel[offer.status]?.toLowerCase()}. Nothing further to do here.
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 px-4 py-3 text-xs text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+              <span>
+                This offer was {offerStatusLabel[offer.status]?.toLowerCase()}. You can make the renter a new offer with
+                different terms.
+              </span>
+              <Button size="sm" loading={busy} onClick={handleReopenOffer}>
+                Make a new offer
+              </Button>
             </div>
           )}
 

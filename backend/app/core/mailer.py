@@ -149,7 +149,7 @@ def deliver(to_email: str, message: Message) -> bool:
         headers["X-Zoiko-Template-Variant"] = message.variant
     if message.unsubscribe_url:
         # RFC 8058 one-click unsubscribe (Section 3.2); the URL also accepts POST.
-        headers["List-Unsubscribe"] = f"<{message.unsubscribe_url}>"
+        headers["List-Unsubscribe"] = f"<{message.unsubscribe_post_url or message.unsubscribe_url}>"
         headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
     if settings.email_provider != "smtp":
@@ -194,7 +194,7 @@ def send_email(
 
 
 def _url(path: str) -> str:
-    return f"{settings.frontend_url}{path}"
+    return f"{settings.email_site_url}{path}"
 
 
 # ------------------------------------------------- A -- Account and security
@@ -212,6 +212,22 @@ def send_welcome_email(to_email: str, full_name: str) -> None:
             "Choose the path that matches what you need today. You can change or add roles later from your account.",
         ],
         cta_url=_url("/account"),
+    ))
+
+
+def send_signup_email_confirmation_email(to_email: str, confirm_link: str, expires_hours: int, full_name: str = "") -> None:
+    """ZR-EML-ID-001: sent at signup (and on request from settings) -- opening
+    the link marks the account's email as confirmed."""
+    deliver(to_email, Message(
+        spec=registry.get("ZR-EML-ID-001"), variant="signup",
+        heading="Confirm your email address", first_name=fmt.first_name(full_name),
+        intro=[
+            "Thanks for creating your Zoiko Rooms account.",
+            f"Use the secure button below to confirm this is your email address. The link expires in {expires_hours} "
+            "hours and can be used only once.",
+        ],
+        outro=["If you did not create a Zoiko Rooms account, you can ignore this email."],
+        cta_url=confirm_link,
     ))
 
 
@@ -371,7 +387,8 @@ def send_listing_published_email(
             "Review the public page for accuracy. Keep availability, price, household information and Room Passport "
             "evidence current. Material changes may require a new review before publication continues.",
         ],
-        cta_url=_url("/account/host/listings"),
+        # "View Live Listing" opens the public page renters see.
+        cta_url=_url(f"/listings/{listing_id}" if listing_id else "/account/host/listings"),
     ))
 
 
@@ -412,6 +429,7 @@ def _budget(min_price: float | None, max_price: float | None) -> str:
 def send_alert_confirmation_email(
     to_email: str, city: str, unsubscribe_url: str, *,
     min_price: float | None = None, max_price: float | None = None, room_type: str | None = None,
+    unsubscribe_post_url: str = "",
 ) -> None:
     """ZR-EML-MKT-001, "search created" variant."""
     deliver(to_email, Message(
@@ -430,6 +448,7 @@ def send_alert_confirmation_email(
         ],
         cta_url=_url(f"/find-a-room?city={city}"),
         unsubscribe_url=unsubscribe_url,
+        unsubscribe_post_url=unsubscribe_post_url,
     ))
 
 

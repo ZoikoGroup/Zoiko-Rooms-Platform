@@ -40,7 +40,24 @@ export function SubletPaymentsPanel({ subletId }: { subletId: number }) {
   if (error) return <p className="mt-3 text-xs text-accent-700" role="alert">{error}</p>;
   if (!view) return <p className="mt-3 text-xs text-slate-400" role="status">Loading payments...</p>;
   const a = view.arrangement;
-  if (!a) return null;
+  if (!a) {
+    // A full handover has no sublet payment arrangement: the incoming tenant
+    // takes over the tenancy and pays the landlord's normal rent directly.
+    const handover = ["ASSIGNMENT_FULL", "REPLACEMENT_OCCUPANT"].includes(view.arrangementType);
+    if (!handover || view.subletStatus !== "approved") return null;
+    const message =
+      view.role === "SUBTENANT"
+        ? "You've taken over this tenancy. Pay rent straight to the landlord from Rent payments — it shows the amount, due date and the landlord's verified details."
+        : view.role === "LANDLORD"
+          ? "This was a full handover. The incoming tenant now pays you rent directly; it shows in your payments like any other tenancy."
+          : "This was a full handover. The incoming tenant now pays rent straight to the landlord — you have nothing more to pay for this room after the handover.";
+    return (
+      <div className="mt-3 flex items-start gap-2 rounded-xl bg-slate-50 p-4 text-sm text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
+        <Wallet className="mt-0.5 h-4 w-4 shrink-0 text-primary-700 dark:text-primary-300" aria-hidden="true" />
+        <p>{message}</p>
+      </div>
+    );
+  }
   const currency = a.terms.currency;
   const rentReady = a.readiness.rent.state === "READY";
   const depositReady = ["READY", "NOT_REQUIRED"].includes(a.readiness.deposit.state);

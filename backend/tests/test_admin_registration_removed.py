@@ -42,11 +42,29 @@ class TestPublicAdminRegistrationRemoved:
 
         r = client.post(
             "/api/admin-users",
-            json={"email": "provisioned-admin@test.com", "password": "password123", "fullName": "Provisioned Admin", "role": "admin"},
+            json={"email": "provisioned-admin@test.com", "password": "password123", "fullName": "Provisioned Admin"},
             cookies=auth_admin_cookie(super_admin),
         )
         assert r.status_code == 201, r.text
         assert r.json()["email"] == "provisioned-admin@test.com"
+        assert r.json()["role"] == "super_admin"
+
+    def test_plain_admin_role_can_no_longer_be_issued(self, client, db_session: Session):
+        super_admin = _make_admin(db_session, email="superadmin-norole@test.com", role="super_admin")
+        db_session.commit()
+        cookies = auth_admin_cookie(super_admin)
+
+        r = client.post(
+            "/api/admin-users",
+            json={"email": "plain-role@test.com", "password": "password123", "fullName": "Plain", "role": "admin"},
+            cookies=cookies,
+        )
+        assert r.status_code == 400, r.text
+
+        other = _make_admin(db_session, email="superadmin-other@test.com", role="super_admin")
+        db_session.commit()
+        r2 = client.put(f"/api/admin-users/{other.id}", json={"role": "admin"}, cookies=cookies)
+        assert r2.status_code == 400, r2.text
 
     def test_admin_login_still_works(self, client, db_session: Session):
         admin = _make_admin(db_session, email="loginadmin@test.com", role="admin")

@@ -4,32 +4,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
-  ArrowDownToLine,
-  Building2,
   Calendar,
   Check,
   CheckCircle2,
-  ChevronDown,
   Clock,
   Copy,
   CreditCard,
   Download,
-  ExternalLink,
-  Eye,
-  FileText,
-  Filter,
-  HelpCircle,
   Lock,
-  Plus,
-  Receipt,
-  Repeat,
   Search,
-  ShieldAlert,
   ShieldCheck,
   X,
 } from "lucide-react";
-import { Badge } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
 import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
@@ -41,17 +27,16 @@ import {
   Property,
   RentalPaymentDiscrepancyReason,
 } from "@/lib/types";
-import { formatCurrency, formatDate, formatMoney } from "@/lib/utils";
+import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   confirmRentalPaymentReceipt,
   errorMessage,
   listHostedProperties,
   listMyRentalPaymentInstructions,
   listRecipientRentalPaymentObligations,
-  recordRentalPaymentReceiptAsRecipient,
   reportRentalPaymentDiscrepancyAsRecipient,
 } from "@/lib/user-api";
-import { rentalPaymentStatusLabel, rentalPaymentStatusTone } from "@/lib/status";
+import { rentalPaymentStatusLabel } from "@/lib/status";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { InstructionsManager } from "@/components/user/RecipientRentalPaymentsManager";
 import { paymentMethodDisplay } from "@/components/user/payment-methods/PaymentMethodFields";

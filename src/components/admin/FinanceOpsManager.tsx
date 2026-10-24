@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertOctagon, BadgeCheck, CheckCircle2, Landmark, ReceiptText, RotateCcw } from "lucide-react";
 import {
-  AdminRole,
   DisputeCase,
   PaymentCapabilities,
   PayoutRecord,
@@ -18,7 +17,6 @@ import { RentalPaymentDisputesManager } from "@/components/admin/RentalPaymentDi
 import { RentalPaymentSupportManager } from "@/components/admin/RentalPaymentSupportManager";
 import { ListingFeePaymentsAdmin } from "@/components/admin/ListingFeePaymentsAdmin";
 import { apiClientFetch } from "@/lib/api-client";
-import { getCurrentAdmin } from "@/lib/auth";
 import {
   disputeStatusLabel,
   disputeStatusTone,
@@ -39,7 +37,6 @@ export function FinanceOpsManager() {
   const [runs, setRuns] = useState<ReconciliationRun[]>([]);
   const [capabilities, setCapabilities] = useState<PaymentCapabilities | null>(null);
   const [toast, setToast] = useState("");
-  const [role, setRole] = useState<AdminRole | null>(null);
 
   const [payoutModalOpen, setPayoutModalOpen] = useState(false);
   const [payoutForm, setPayoutForm] = useState(emptyPayoutForm);
@@ -52,8 +49,6 @@ export function FinanceOpsManager() {
 
   const loadAll = useCallback(async () => {
     try {
-      const admin = await getCurrentAdmin();
-      setRole(admin?.role ?? null);
       setCapabilities(await apiClientFetch<PaymentCapabilities>("/api/finance/capabilities"));
 
       const [payoutsData, refundsData, disputesData] = await Promise.all([
@@ -65,11 +60,7 @@ export function FinanceOpsManager() {
       setRefunds(refundsData);
       setDisputes(disputesData);
 
-      // Reconciliation is a platform-wide metric, super_admin only -- fetched
-      // separately so a 403 here never blocks the rest of the page for a provider.
-      if (admin?.role === "super_admin") {
-        setRuns(await apiClientFetch<ReconciliationRun[]>("/api/finance/reconciliation"));
-      }
+      setRuns(await apiClientFetch<ReconciliationRun[]>("/api/finance/reconciliation"));
     } catch {
       showToast("Failed to load finance operations data");
     }
@@ -207,51 +198,49 @@ export function FinanceOpsManager() {
 
       <RentalPaymentSupportManager showToast={showToast} />
 
-      {role === "super_admin" && <ListingFeePriceBookManager showToast={showToast} />}
+      <ListingFeePriceBookManager showToast={showToast} />
 
-      {role === "super_admin" && <ListingFeePaymentsAdmin showToast={showToast} />}
+      <ListingFeePaymentsAdmin showToast={showToast} />
 
-      {role === "super_admin" && (
-        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <ReceiptText className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
-              <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Reconciliation</h2>
-            </div>
-            <Button size="sm" variant="accent" onClick={runReconciliation}>
-              <BadgeCheck className="h-3.5 w-3.5" /> Run Reconciliation
-            </Button>
+      <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ReceiptText className="h-4.5 w-4.5 text-primary-700 dark:text-primary-300" />
+            <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Reconciliation</h2>
           </div>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            A platform-wide view across every provider — super admin only.
-          </p>
-          <div className="mt-4 space-y-2">
-            {runs.map((run) => (
-              <div key={run.id} className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold text-primary-900 dark:text-white">{formatDate(run.runAt)}</p>
-                  <Badge tone={reconciliationStatusTone[run.status]}>{reconciliationStatusLabel[run.status] ?? run.status}</Badge>
-                </div>
-                <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400 sm:grid-cols-3">
-                  {Object.entries(run.totals).map(([key, value]) => (
-                    <p key={key}>
-                      {key}: <span className="font-medium text-slate-700 dark:text-slate-200">{formatCurrency(value)}</span>
-                    </p>
-                  ))}
-                </div>
-                {run.mismatches.length > 0 && (
-                  <ul className="mt-2 list-disc pl-4 text-xs text-accent-600">
-                    {run.mismatches.map((m, i) => (
-                      <li key={i}>{m}</li>
-                    ))}
-                  </ul>
-                )}
+          <Button size="sm" variant="accent" onClick={runReconciliation}>
+            <BadgeCheck className="h-3.5 w-3.5" /> Run Reconciliation
+          </Button>
+        </div>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          A platform-wide view across every provider — super admin only.
+        </p>
+        <div className="mt-4 space-y-2">
+          {runs.map((run) => (
+            <div key={run.id} className="rounded-xl bg-slate-50 p-3 dark:bg-slate-800">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-primary-900 dark:text-white">{formatDate(run.runAt)}</p>
+                <Badge tone={reconciliationStatusTone[run.status]}>{reconciliationStatusLabel[run.status] ?? run.status}</Badge>
               </div>
-            ))}
-            {runs.length === 0 && <p className="text-sm text-slate-400">No reconciliation runs yet.</p>}
-          </div>
-        </section>
-      )}
+              <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400 sm:grid-cols-3">
+                {Object.entries(run.totals).map(([key, value]) => (
+                  <p key={key}>
+                    {key}: <span className="font-medium text-slate-700 dark:text-slate-200">{formatCurrency(value)}</span>
+                  </p>
+                ))}
+              </div>
+              {run.mismatches.length > 0 && (
+                <ul className="mt-2 list-disc pl-4 text-xs text-accent-600">
+                  {run.mismatches.map((m, i) => (
+                    <li key={i}>{m}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+          {runs.length === 0 && <p className="text-sm text-slate-400">No reconciliation runs yet.</p>}
+        </div>
+      </section>
 
       <Modal open={payoutModalOpen} onClose={() => setPayoutModalOpen(false)} title="Run Provider Payout">
         <form onSubmit={runPayout} className="space-y-3.5">

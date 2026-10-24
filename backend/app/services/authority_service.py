@@ -1535,7 +1535,7 @@ def _send_confirmation_emails(db: Session, v: AuthorityVerification, c: Authorit
     what = {"MANDATE": "advertise and rent your property as your agent / property manager",
             "SUBLET_PERMISSION": "sublet the property they rent from you",
             "CO_OWNER_CONSENT": "list the property you co-own"}[c.kind]
-    link = f"{settings.frontend_url.rstrip('/')}/account/authority-confirmation?token={token}"
+    link = f"{settings.email_site_url}/account/authority-confirmation?token={token}"
     send_email(email, "Please confirm a request on Zoiko Rooms", heading="Confirm or decline a request",
                body_lines=[f"{requester} asks for your permission to {what} ({prop.city}).",
                            "Open the secure link and enter the 6-digit code we send in a separate email.",

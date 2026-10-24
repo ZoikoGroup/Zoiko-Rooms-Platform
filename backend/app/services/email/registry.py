@@ -47,6 +47,9 @@ _T = TemplateSpec
 
 REGISTRY: dict[str, TemplateSpec] = {t.template_id: t for t in (
     # A -- Account, Identity and Security
+    _T("ZR-EML-ID-001", "1.0.0", "Confirm email address", TIER_0, streams.SECURITY, ("security",),
+       "Confirm Email", "Confirm your Zoiko Rooms email address",
+       "Confirm this address to finish setting up your account."),
     _T("ZR-EML-ID-002", "1.0.0", "Welcome to Zoiko Rooms", TIER_2, streams.TRANSACTIONS, (),
        "Choose Your Path", "Welcome to Zoiko Rooms",
        "Find a private room, list one you are authorized to offer, or join an organization."),
