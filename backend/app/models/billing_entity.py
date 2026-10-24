@@ -48,7 +48,11 @@ class BillingEntity(Base):
         )
 
     def supports(self, market: str, currency: str) -> bool:
-        return market in (self.supported_markets or []) and currency.upper() in [c.upper() for c in (self.supported_currencies or [])]
+        # Case/whitespace-insensitive: "IND" must match an entity saved as
+        # "ind" or " IND " (ZR-16).
+        markets = {m.strip().upper() for m in (self.supported_markets or [])}
+        currencies = {c.strip().upper() for c in (self.supported_currencies or [])}
+        return market.strip().upper() in markets and currency.strip().upper() in currencies
 
     def customer_facing_name(self) -> str:
         """ZR-PAY-CFG-001 Section 7: 'Zoiko Rooms -- a trading name of Zoiko

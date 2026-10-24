@@ -32,7 +32,8 @@ def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _confirm_days(occupancy: Occupancy) -> int:
+def move_out_confirm_days(occupancy: Occupancy) -> int:
+    """How long the host has to confirm a move-out before silence counts."""
     from app.services.policy import get_policy
 
     return int(get_policy(occupancy.listing.market_release if occupancy.listing else None, "tenancy.move_out_confirm_days"))
@@ -50,7 +51,7 @@ def handed_back_on(db: Session, occupancy: Occupancy) -> date | None:
     if confirmed is not None:
         return _aware(confirmed.created_at).date()
     ready = events.get("MOVE_OUT_READY")
-    if ready is not None and datetime.now(timezone.utc) - _aware(ready.created_at) >= timedelta(days=_confirm_days(occupancy)):
+    if ready is not None and datetime.now(timezone.utc) - _aware(ready.created_at) >= timedelta(days=move_out_confirm_days(occupancy)):
         return _aware(ready.created_at).date()
     return None
 

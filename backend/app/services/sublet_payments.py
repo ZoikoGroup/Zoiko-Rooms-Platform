@@ -114,9 +114,9 @@ def landlord_payee(db: Session, sublet: SubletRequest) -> tuple[int | None, str,
 
 
 def sublessor_party_id(db: Session, sublet: SubletRequest) -> int | None:
-    from app.crud.rental_payment import original_renter_party_id
+    from app.crud.rental_payment import sublet_requester_party_id
 
-    return original_renter_party_id(db, sublet.current_occupancy)
+    return sublet_requester_party_id(db, sublet)
 
 
 def sublessor_collection_basis(db: Session, sublet: SubletRequest) -> tuple[str, str] | None:

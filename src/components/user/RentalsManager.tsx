@@ -1,42 +1,31 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   ArrowRight,
-  Building2,
   Calendar,
   Check,
-  ChevronRight,
   ClipboardList,
   Clock,
-  CreditCard,
-  DoorOpen,
   Download,
-  ExternalLink,
-  Eye,
   FileText,
   Home,
   Info,
   Key,
   MessageSquare,
-  Plus,
-  Repeat,
   Search,
   Shield,
   ShieldCheck,
-  Upload,
   UserCheck,
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
 import { Loader } from "@/components/ui/Loader";
 import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
-import { ApiError } from "@/lib/api-client";
 import {
   HabitabilityIncident,
   HabitabilitySeverity,
@@ -53,19 +42,11 @@ import {
   SubletRequest,
   SubletRenterLookup,
   TerminationCase,
-  TerminationCasePreview,
   UserOccupancy,
   DisputeCaseRead,
 } from "@/lib/types";
-import {
-  CO_TENANCY_ARRANGEMENT_TYPES,
-  RENTER_TERMINATION_CAUSE_CODES,
-  subletArrangementTypeLabel,
-  terminationCauseCodeLabel,
-} from "@/lib/status";
-import { addMonths, formatCurrency, formatDate } from "@/lib/utils";
-import { matchRentalPaymentObligation } from "@/lib/rentalPaymentMatch";
-import { SingleObligationPaymentCard } from "@/components/user/RentalPaymentsManager";
+import { subletArrangementTypeLabel } from "@/lib/status";
+import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   addOwnConditionReportItem,
   cancelOwnBookingBeforeMoveIn,
@@ -73,10 +54,7 @@ import {
   reviewPaymentRecipient,
   confirmMoveOutReady,
   errorMessage,
-  getObligationAvailableMethods,
   getOwnAgreementPaymentPreview,
-  getOwnRefundEntitlement,
-  getOwnSubletTerminology,
   giveMoveOutNotice,
   listMyAutopayMandates,
   listMyChangeRequests,
@@ -87,7 +65,6 @@ import {
   listPublicListings,
   listSubletRequests,
   lookupSubletRenter,
-  previewOwnTermination,
   requestOwnTermination,
   renterTermination,
   listMyRefunds,
@@ -100,7 +77,6 @@ import {
   renterProceedDespiteDispute,
   acceptOwnMutualSurrender,
   declineOwnMutualSurrender,
-  submitPremisesChangeRequest,
   submitSubletRequest,
   tenantAgreementPdfUrl,
   withdrawOwnTerminationCase,
@@ -110,6 +86,8 @@ import { DisputeCasesSection } from "@/components/user/DisputeCasePanel";
 import { useToast } from "@/components/user/ui";
 import { DepositClaimsSection } from "@/components/user/DepositClaimsSection";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
+import { RentalMessagesTab } from "@/components/user/RentalMessagesTab";
+import { RentalReviewCard } from "@/components/user/RentalReviewCard";
 import { InstructionsModalView } from "@/components/user/RentalPaymentsManager";
 import { Modal } from "@/components/ui/Modal";
 
@@ -123,7 +101,8 @@ type DrawerTab =
   | "notices"
   | "documents"
   | "disputes"
-  | "record";
+  | "record"
+  | "messages";
 
 interface RentalCardItem {
   occupancy: UserOccupancy;
@@ -415,7 +394,8 @@ export function RentalsManager() {
       // Upcoming means move-in not yet confirmed; once the host confirms, the
       // backend status is ACTIVE regardless of how the date parses locally.
       else if (occ.status === "PENDING_MOVE_IN") st = "upcoming";
-      else if (occ.moveOutDate || terminationCases[occ.id]) st = "notice";
+      else if (occ.moveOutDate || terminationCases[occ.id] || (occ.handoverEventTypes ?? []).includes("MOVE_OUT_NOTICE_GIVEN"))
+        st = "notice";
       else if (daysUntilEnd !== null && daysUntilEnd <= ENDING_SOON_DAYS && daysUntilEnd >= 0) st = "ending";
 
       let milestone = "Agreement in effect";
@@ -725,6 +705,20 @@ export function RentalsManager() {
       showToast("Key & room receipt confirmed — host can complete tenancy activation.");
     } catch (err) {
       showToast(errorMessage(err, "Could not confirm handover receipt."), "error");
+    }
+  };
+
+  const [confirmingMovedOut, setConfirmingMovedOut] = useState(false);
+  const handleConfirmMovedOut = async (occupancyId: number) => {
+    setConfirmingMovedOut(true);
+    try {
+      await confirmMoveOutReady(occupancyId, "");
+      showToast("Thanks — your host has been asked to confirm the room was handed back.");
+      await load();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not record your move-out."), "error");
+    } finally {
+      setConfirmingMovedOut(false);
     }
   };
 
@@ -1584,6 +1578,17 @@ export function RentalsManager() {
                 >
                   Transaction Record
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setDrawerTab("messages")}
+                  className={`h-11 px-3.5 border-b-2 text-xs font-bold whitespace-nowrap transition-colors ${
+                    drawerTab === "messages"
+                      ? "border-[#0E2F73] text-[#0E2F73]"
+                      : "border-transparent text-[#4A5878] hover:text-[#0E2F73]"
+                  }`}
+                >
+                  Messages
+                </button>
               </div>
 
               {/* Drawer Content */}
@@ -1797,6 +1802,14 @@ export function RentalsManager() {
                         <strong className="text-sm text-[#0B1B3F]">{selectedItem.ms}</strong>
                       </div>
                     </div>
+
+                    {(selectedItem.st === "active" || selectedItem.st === "notice" || selectedItem.st === "ending" || selectedItem.st === "ended") && (
+                      <RentalReviewCard
+                        listingId={selectedItem.occupancy.listingId}
+                        listingName={selectedItem.occupancy.listingName ?? ""}
+                        onMessage={showToast}
+                      />
+                    )}
                   </div>
                 )}
 
@@ -2205,6 +2218,43 @@ export function RentalsManager() {
                         </button>
                       </div>
 
+                      {(() => {
+                        // Move-out handshake: notice -> renter moved out -> host confirms.
+                        const steps = selectedItem.occupancy.handoverEventTypes ?? [];
+                        if (!steps.includes("MOVE_OUT_NOTICE_GIVEN")) return null;
+                        const days = selectedItem.occupancy.moveOutConfirmDays ?? 7;
+                        return (
+                          <div className="p-4 space-y-2 bg-[#F7F9FD]">
+                            <strong className="text-sm text-[#0B1B3F] block">Moving out</strong>
+                            {steps.includes("HOST_MOVE_OUT_CONFIRMED") ? (
+                              <p className="text-xs text-[#05603A]">
+                                Your host confirmed the room was handed back. Your tenancy closes on {selectedItem.to}.
+                              </p>
+                            ) : steps.includes("MOVE_OUT_READY") ? (
+                              <p className="text-xs text-[#5B6886]">
+                                You told your host you&apos;ve moved out. Waiting for them to confirm the room and keys are back
+                                — if they don&apos;t respond within {days} days, it counts as confirmed.
+                              </p>
+                            ) : (
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="text-xs text-[#5B6886]">
+                                  Your host knows you&apos;re leaving on {selectedItem.to}. Once you&apos;ve moved out and handed
+                                  back the keys, confirm it here so your host can check the room.
+                                </p>
+                                <button
+                                  type="button"
+                                  disabled={confirmingMovedOut}
+                                  onClick={() => handleConfirmMovedOut(selectedItem.occupancy.id)}
+                                  className="shrink-0 px-3 py-1.5 rounded-lg bg-[#0E2F73] text-xs font-bold text-white hover:bg-[#0B2560] disabled:opacity-50 transition-colors"
+                                >
+                                  {confirmingMovedOut ? "Saving…" : "I've moved out"}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+
                       {selectedItem.st === "upcoming" && (
                         <div className="p-4 flex items-center justify-between gap-3 bg-[#FFF7F7]">
                           <div>
@@ -2299,16 +2349,23 @@ export function RentalsManager() {
                     <RentalTransactionRecord occupancyId={selectedItem.occupancy.id} role="renter" />
                   </div>
                 )}
+
+                {/* TAB: Messages -- the host, and on a sublet the other renter */}
+                {drawerTab === "messages" && (
+                  <RentalMessagesTab occupancy={selectedItem.occupancy} subletRequests={subletRequests} />
+                )}
               </div>
 
               {/* Drawer Footer */}
               <div className="p-6 border-t border-[#EEF1F7] flex items-center justify-between gap-3 bg-[#F7F9FD]">
-                <Link
-                  href="/account/applications"
+                <button
+                  type="button"
+                  onClick={() => setDrawerTab("messages")}
                   className="w-full inline-flex items-center justify-center gap-2 h-11 rounded-xl border border-[#0E2F73] text-[#0E2F73] hover:bg-[#0E2F73] hover:text-white text-xs sm:text-sm font-bold transition-colors"
                 >
-                  <MessageSquare className="w-4 h-4" /> Message Host / Manager
-                </Link>
+                  <MessageSquare className="w-4 h-4" />{" "}
+                  {selectedItem.occupancy.subletFromRequestId ? "Message Host / Renter" : "Message Host / Manager"}
+                </button>
               </div>
             </aside>
           </div>,

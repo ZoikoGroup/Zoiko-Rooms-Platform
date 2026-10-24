@@ -47,3 +47,26 @@ class RentalMessage(Base):
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     conversation: Mapped[RentalConversation] = relationship(back_populates="messages")
+
+
+SUBLET_MESSAGE_SENDER_ROLES = ("RENTER", "SUBTENANT")
+
+
+class SubletMessage(Base):
+    """Renter <-> subtenant messaging, one thread per sublet request: the
+    renter who asked to sublet (requested_by_guest_id) and the person they
+    named (proposed_renter_party_id). Separate from RentalConversation, which
+    is always the host on one side."""
+
+    __tablename__ = "sublet_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sublet_request_id: Mapped[int] = mapped_column(
+        ForeignKey("sublet_requests.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    sender_role: Mapped[str] = mapped_column(String(10), nullable=False)
+    sender_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # Set when the other side opens the thread.
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { BadgeCheck, Bell, Eye, EyeOff, Lock, Mail, Phone, User } from "lucide-react";
+import { BadgeCheck, Bell, Eye, EyeOff, Lock, Mail, User } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { identityStatusLabel, identityStatusTone } from "@/lib/status";

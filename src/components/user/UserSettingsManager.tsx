@@ -38,6 +38,7 @@ import {
   profilePhotoUrl,
   removeProfilePhoto,
   requestEmailChange,
+  resendEmailConfirmation,
   signOutOtherSessions,
   updateUserPreferences,
   uploadProfilePhoto,
@@ -64,9 +65,20 @@ const OPTABLE: Array<{ key: NotificationCategory; title: string; description: st
   { key: "OCCUPANCY", title: "Tenancy", description: "Move-in and move-out steps, notices, change requests and sublets." },
   { key: "PAYMENTS", title: "Rent & payments", description: "Rent due reminders, receipts, confirmations and deposit updates." },
 ];
-const ALWAYS_ON: Array<{ title: string; description: string }> = [
-  { title: "Disputes & safety", description: "Disputes, safety reports and identity checks." },
-  { title: "Account & support", description: "Replies to your support requests and account security." },
+// Always delivered -- safety notices and replies to your own support requests
+// can't be silenced (backend NOTIFICATION_OPTABLE_CATEGORIES). Shown as a
+// "Required" label, not a disabled switch, so it doesn't look broken (ZR-61).
+const ALWAYS_ON: Array<{ title: string; description: string; why: string }> = [
+  {
+    title: "Disputes & safety",
+    description: "Disputes, safety reports and identity checks.",
+    why: "Required so you never miss a deadline or a safety notice.",
+  },
+  {
+    title: "Account & support",
+    description: "Replies to your support requests and account security.",
+    why: "Required -- these answer requests you made and protect your account.",
+  },
 ];
 
 const LANGUAGES: Array<[UserPreferences["language"], string]> = [
@@ -135,6 +147,7 @@ export function UserSettingsManager({
   const [savingProfile, setSavingProfile] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [pendingEmail, setPendingEmail] = useState<string | null>(null);
+  const [resendingConfirmation, setResendingConfirmation] = useState(false);
 
   // Server-backed settings
   const [prefs, setPrefs] = useState<UserPreferences | null>(null);
@@ -435,6 +448,29 @@ export function UserSettingsManager({
                         Waiting for you to confirm {pendingEmail} — check that inbox for the link.
                       </p>
                     )}
+                    {!pendingEmail && !user.emailVerified && (
+                      <p className="mt-1 text-xs text-amber-700">
+                        Not confirmed yet — check your inbox for the link we sent.{" "}
+                        <button
+                          type="button"
+                          disabled={resendingConfirmation}
+                          onClick={async () => {
+                            setResendingConfirmation(true);
+                            try {
+                              await resendEmailConfirmation();
+                              showToast(`We sent a new confirmation link to ${user.email}.`);
+                            } catch (err) {
+                              showToast(errorMessage(err, "Could not send the confirmation email"), "error");
+                            } finally {
+                              setResendingConfirmation(false);
+                            }
+                          }}
+                          className="font-bold underline disabled:opacity-60"
+                        >
+                          {resendingConfirmation ? "Sending…" : "Resend email"}
+                        </button>
+                      </p>
+                    )}
                   </div>
                   <button type="button" onClick={() => openModal("email")} className={cn(secondaryBtn, "inline-flex items-center gap-1.5")}>
                     <Mail className="h-3.5 w-3.5" /> Change
@@ -509,9 +545,12 @@ export function UserSettingsManager({
                       <li key={c.title} className="flex items-center justify-between gap-4 py-3">
                         <div>
                           <p className="text-sm font-semibold text-neutral-900 dark:text-white">{c.title}</p>
-                          <p className="text-xs text-neutral-500">{c.description} Always on.</p>
+                          <p className="text-xs text-neutral-500">{c.description}</p>
+                          <p className="text-xs text-neutral-400">{c.why}</p>
                         </div>
-                        <Toggle label={c.title} checked disabled onChange={() => undefined} />
+                        <span className="shrink-0 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30">
+                          Required
+                        </span>
                       </li>
                     ))}
                   </ul>

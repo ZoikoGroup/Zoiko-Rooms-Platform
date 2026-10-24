@@ -97,6 +97,13 @@ export function resolveNotificationHref(
   ) {
     return "/account/host/listings";
   }
+  // The renter's move-out steps -- the host confirms from Rental Records.
+  if (
+    notificationType === "occupancy.move_out_notice_for_host" ||
+    notificationType === "occupancy.move_out_ready_for_host"
+  ) {
+    return "/account/host/rental-records";
+  }
   // Sublet notifications that only ever go to the host (backend/app/crud/sublet.py
   // sends them to the listing's party) -- the host decides sublet requests, so
   // they open the host review page, never the renter's own /account/sublets.
@@ -110,6 +117,10 @@ export function resolveNotificationHref(
   }
   if (notificationType.startsWith("application.")) return "/account/applications";
   if (notificationType === "rental_message.received") return "/account/applications";
+  // A subtenant never applied -- their host and sublet threads live on My Rentals.
+  if (notificationType === "rental_message.received_subtenant") return "/account/rentals";
+  if (notificationType === "sublet_message.received_subtenant") return "/account/rentals";
+  if (notificationType === "sublet_message.received") return "/account/sublets";
   if (notificationType.startsWith("support_ticket.")) return "/account/support";
   if (notificationType.startsWith("offer.")) return "/account/applications";
   if (notificationType.startsWith("agreement.")) return "/account/applications";

@@ -8,7 +8,7 @@ from pydantic import Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import USER_COOKIE_NAME, get_current_user, get_db
-from app.api.routes.user_auth import _set_user_cookie
+from app.api.routes.user_auth import _set_user_cookie, send_email_confirmation
 from app.core.config import settings
 from app.core.mailer import send_email_change_confirmation_email
 from app.crud import user_settings as crud
@@ -75,11 +75,20 @@ def request_email_change(
     """Emails a confirmation link to the new address; the change applies only
     once it's opened."""
     raw = crud.request_email_change(db, user, payload.new_email, payload.current_password)
-    link = f"{settings.frontend_url}/account/confirm-email?token={raw}"
+    link = f"{settings.email_site_url}/account/confirm-email?token={raw}"
     send_email_change_confirmation_email(payload.new_email.strip().lower(), link, settings.email_change_token_expire_minutes, user.full_name)
     log_audit_event(db, None, "user.email_change_requested", "user_account", str(user.id), reason=f"user:{user.id}")
     db.commit()
     return {"pendingEmail": payload.new_email.strip().lower()}
+
+
+@router.post("/email-confirmation/resend", status_code=status.HTTP_202_ACCEPTED)
+def resend_email_confirmation(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """Sends a fresh confirm-your-email link; earlier ones stop working."""
+    if user.email_verified:
+        return {"emailVerified": True}
+    send_email_confirmation(db, user)
+    return {"emailVerified": False}
 
 
 @router.post("/email-change/confirm", response_model=UserRead)

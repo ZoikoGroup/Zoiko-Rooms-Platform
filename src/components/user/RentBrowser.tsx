@@ -1,20 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listingsWithOpenApplication } from "@/lib/applications";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
-  AlertTriangle,
-  Bath,
-  BedDouble,
   Bookmark,
-  Building,
   Calendar,
   Check,
-  ChevronRight,
   Clock,
-  Eye,
   FileText,
   Heart,
   Info,
@@ -23,13 +18,10 @@ import {
   MapPin,
   MessageSquare,
   Search,
-  Send,
   ShieldCheck,
   SlidersHorizontal,
-  Sparkles,
-  Wifi,
+  Star,
   X,
-  DoorOpen,
 } from "lucide-react";
 import { PublicListing, HostedListing } from "@/lib/types";
 import { formatCurrency, resolveImageUrl, todayIsoDate } from "@/lib/utils";
@@ -42,6 +34,7 @@ import {
   submitRentalApplication,
 } from "@/lib/user-api";
 import { useUserSession } from "@/components/user/UserSessionContext";
+import { ListingReviews } from "@/components/user/ListingReviews";
 import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 
 /** Room representation dynamically mapped from backend listings */
@@ -70,6 +63,9 @@ export interface FindARoomItem {
   description?: string;
   houseRules?: string[];
   ownerName?: string;
+  /** Average star rating and number of reviews from renters who have rented this room. */
+  rating?: number;
+  reviewCount?: number;
 }
 
 const DEFAULT_ROOM_PHOTOS = [
@@ -150,6 +146,8 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
     description: item.description || "",
     houseRules,
     ownerName: hosted.contactName || "Host",
+    rating: item.rating,
+    reviewCount: item.reviewCount,
   };
 }
 
@@ -198,7 +196,7 @@ export function RentBrowser() {
 
   // Modals & Drawers
   const [drawerRoom, setDrawerRoom] = useState<FindARoomItem | null>(null);
-  const [drawerTab, setDrawerTab] = useState<"overview" | "amenities" | "availability" | "rules" | "about">("overview");
+  const [drawerTab, setDrawerTab] = useState<"overview" | "amenities" | "availability" | "rules" | "reviews" | "about">("overview");
 
   const [applyModalRoom, setApplyModalRoom] = useState<FindARoomItem | null>(null);
   const [applyMessage, setApplyMessage] = useState("");
@@ -270,10 +268,8 @@ export function RentBrowser() {
         // 3. Map user applications
         if (Array.isArray(applications) && applications.length > 0) {
           const appliedMap: Record<string, boolean> = {};
-          applications.forEach((a) => {
-            if (a.status !== "WITHDRAWN") {
-              appliedMap[String(a.listingId)] = true;
-            }
+          listingsWithOpenApplication(applications).forEach((listingId) => {
+            appliedMap[listingId] = true;
           });
           setAppliedRooms((prev) => ({ ...prev, ...appliedMap }));
         }
@@ -1066,6 +1062,17 @@ export function RentBrowser() {
                       </p>
                     )}
 
+                    {/* Renter rating */}
+                    {(room.reviewCount ?? 0) > 0 && (
+                      <p className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        <Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />
+                        <span>{(room.rating ?? 0).toFixed(1)}</span>
+                        <span className="font-normal text-slate-500 dark:text-slate-400">
+                          ({room.reviewCount} review{room.reviewCount === 1 ? "" : "s"})
+                        </span>
+                      </p>
+                    )}
+
                     {/* Specs summary */}
                     <p className="mt-1.5 text-xs text-slate-600 dark:text-slate-400 line-clamp-1">
                       {[room.roomType, ...room.amenities].join(" · ")}
@@ -1214,12 +1221,13 @@ export function RentBrowser() {
                     { id: "amenities", label: "Amenities" },
                     { id: "availability", label: "Availability" },
                     { id: "rules", label: "House Rules" },
+                    { id: "reviews", label: `Reviews${drawerRoom.reviewCount ? ` (${drawerRoom.reviewCount})` : ""}` },
                     { id: "about", label: "About the Property" },
                   ].map((tab) => (
                     <button
                       key={tab.id}
                       type="button"
-                      onClick={() => setDrawerTab(tab.id as "overview" | "amenities" | "availability" | "rules" | "about")}
+                      onClick={() => setDrawerTab(tab.id as "overview" | "amenities" | "availability" | "rules" | "reviews" | "about")}
                       className={`pb-2.5 px-3 border-b-2 transition-colors ${
                         drawerTab === tab.id
                           ? "border-[#0E2F73] text-[#0E2F73] dark:border-blue-400 dark:text-blue-400"
@@ -1326,6 +1334,8 @@ export function RentBrowser() {
                       </ul>
                     </div>
                   )}
+
+                  {drawerTab === "reviews" && <ListingReviews listingId={drawerRoom.listingId} />}
 
                   {drawerTab === "about" && (
                     <div className="space-y-3">

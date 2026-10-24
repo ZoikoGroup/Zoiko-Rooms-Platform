@@ -6,47 +6,70 @@
 # are deliberately not counted here: they're not yet a completed rental or
 # a confirmed payment, so including them would inflate "bookings"/"revenue"
 # with unconfirmed activity.
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.config import settings
 from app.models.booking import Booking
 from app.models.finance import Obligation, PaymentAllocation, SimulatedPayment
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
 from app.models.rental_payment import RentalPaymentObligation, RentalPaymentRecord
-from app.schemas.analytics import BookingsByTypePoint, OccupancyByCityPoint, RevenueTrendPoint
+from app.schemas.analytics import BookingsByTypePoint, OccupancyByCityPoint, RevenueSummary, RevenueTrendPoint
+from app.services.fx import REPORTING_CURRENCY, to_usd
 
 PROPERTY_TYPE_LABELS = {
     "private_room": "Private Rooms",
 }
 
-def revenue_trend(db: Session, months: int = 6) -> list[RevenueTrendPoint]:
+class _MonthlyRevenue:
+    """Revenue per (year, month) in US dollars (services/fx.py), plus what
+    went into it."""
+
+    def __init__(self) -> None:
+        self.usd: dict[tuple[int, int], float] = {}
+        self.events: dict[tuple[int, int], set[tuple[str, object]]] = {}
+        self.currencies: set[str] = set()
+        # Currencies with no configured rate -- left out of the totals rather
+        # than counted as if they were dollars.
+        self.unconverted: set[str] = set()
+
+    def add(self, at: datetime, amount: float, currency: str | None, event: tuple[str, object]) -> None:
+        code = (currency or "").strip().upper()
+        usd = to_usd(amount, code)
+        if usd is None:
+            self.unconverted.add(code or "UNKNOWN")
+            return
+        self.currencies.add(code)
+        bucket = (at.year, at.month)
+        self.usd[bucket] = self.usd.get(bucket, 0.0) + usd
+        self.events.setdefault(bucket, set()).add(event)
+
+
+def _revenue_by_month(db: Session) -> _MonthlyRevenue:
     """Merges legacy Booking revenue (nights * price, at booking creation
     time) with real rental-lifecycle rent, bucketed by month at confirmation
     time: SimulatedPayment amounts allocated to RENT obligations, plus
     recipient-confirmed RentalPaymentRecords against RENT obligations (the
     ZR-PAY-002 record path, which never creates a SimulatedPayment).
-    Deposits are excluded on both paths -- held, not earned -- matching
-    crud/booking.py's totalAmount so the dashboard's Total Revenue card and
-    this chart agree. Rows are bucketed in Python rather than with Postgres'
-    date_trunc so this also runs on the SQLite test database."""
-    revenue: dict[tuple[int, int], float] = {}
-    events: dict[tuple[int, int], set[tuple[str, object]]] = {}
-
-    def _add(at: datetime, amount: float, event: tuple[str, object]) -> None:
-        bucket = (at.year, at.month)
-        revenue[bucket] = revenue.get(bucket, 0.0) + amount
-        events.setdefault(bucket, set()).add(event)
+    Deposits are excluded on both paths -- held, not earned. Every amount is
+    converted to US dollars at the configured rate, so rupees, pounds and
+    dollars add up to a real total. Both the Revenue Trend chart
+    (revenue_trend) and the Total Revenue card (revenue_summary) read from
+    here, so they always agree. Rows are bucketed in Python rather than with
+    Postgres' date_trunc so this also runs on the SQLite test database."""
+    out = _MonthlyRevenue()
 
     for booking in db.scalars(
         select(Booking).options(joinedload(Booking.listing)).where(Booking.payment_status == "paid")
     ):
-        _add(booking.created_at, float(booking.total_amount), ("booking", booking.id))
+        currency = booking.listing.currency if booking.listing is not None else None
+        out.add(booking.created_at, float(booking.total_amount), currency, ("booking", booking.id))
 
     payment_rows = db.execute(
-        select(SimulatedPayment.id, SimulatedPayment.confirmed_at, PaymentAllocation.amount_allocated)
+        select(SimulatedPayment.id, SimulatedPayment.confirmed_at, PaymentAllocation.amount_allocated, Obligation.currency)
         .join(PaymentAllocation, PaymentAllocation.payment_id == SimulatedPayment.id)
         .join(Obligation, Obligation.id == PaymentAllocation.obligation_id)
         .where(
@@ -55,11 +78,14 @@ def revenue_trend(db: Session, months: int = 6) -> list[RevenueTrendPoint]:
             Obligation.obligation_type == "RENT",
         )
     ).all()
-    for payment_id, confirmed_at, amount in payment_rows:
-        _add(confirmed_at, float(amount), ("payment", payment_id))
+    for payment_id, confirmed_at, amount, currency in payment_rows:
+        out.add(confirmed_at, float(amount), currency, ("payment", payment_id))
 
     record_rows = db.execute(
-        select(RentalPaymentRecord.id, RentalPaymentRecord.confirmed_at, RentalPaymentRecord.confirmed_amount)
+        select(
+            RentalPaymentRecord.id, RentalPaymentRecord.confirmed_at, RentalPaymentRecord.confirmed_amount,
+            RentalPaymentObligation.currency,
+        )
         .join(RentalPaymentObligation, RentalPaymentObligation.id == RentalPaymentRecord.obligation_id)
         .where(
             RentalPaymentRecord.status == "CONFIRMED",
@@ -67,18 +93,50 @@ def revenue_trend(db: Session, months: int = 6) -> list[RevenueTrendPoint]:
             RentalPaymentObligation.obligation_type == "RENT",
         )
     ).all()
-    for record_id, confirmed_at, amount in record_rows:
-        _add(confirmed_at, float(amount or 0), ("record", record_id))
+    for record_id, confirmed_at, amount, currency in record_rows:
+        out.add(confirmed_at, float(amount or 0), currency, ("record", record_id))
+    return out
 
-    ordered = sorted(revenue)[-months:]
+
+def revenue_trend(db: Session, months: int = 6) -> list[RevenueTrendPoint]:
+    """The last `months` months of _revenue_by_month (US dollars), for the chart."""
+    monthly = _revenue_by_month(db)
+    ordered = sorted(monthly.usd)[-months:]
     return [
         RevenueTrendPoint(
             month=datetime(year, month, 1).strftime("%b"),
-            revenue=round(revenue[(year, month)], 2),
-            bookings=len(events[(year, month)]),
+            revenue=round(monthly.usd[(year, month)], 2),
+            bookings=len(monthly.events[(year, month)]),
         )
         for year, month in ordered
     ]
+
+
+def revenue_summary(db: Session) -> RevenueSummary:
+    """ZR-73: the Total Revenue card, from the same data as the Revenue Trend
+    chart (legacy paid bookings + confirmed rent) -- the card used to sum only
+    legacy bookings and showed 0 while the chart showed this month's rent.
+    All amounts are in US dollars (services/fx.py). change_pct compares this
+    calendar month with last month; None when last month had no revenue (no
+    real comparison to show)."""
+    monthly = _revenue_by_month(db)
+    now = datetime.now(timezone.utc)
+    this_month = (now.year, now.month)
+    last_month = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
+    this_amount = monthly.usd.get(this_month, 0.0)
+    last_amount = monthly.usd.get(last_month, 0.0)
+    change_pct = round((this_amount - last_amount) / last_amount * 100, 1) if last_amount else None
+    return RevenueSummary(
+        total_revenue=round(sum(monthly.usd.values()), 2),
+        this_month_revenue=round(this_amount, 2),
+        last_month_revenue=round(last_amount, 2),
+        change_pct=change_pct,
+        paid_events=sum(len(e) for e in monthly.events.values()),
+        currency=REPORTING_CURRENCY,
+        source_currencies=sorted(monthly.currencies),
+        unconverted_currencies=sorted(monthly.unconverted),
+        fx_rates_as_of=settings.fx_rates_as_of,
+    )
 
 
 def bookings_by_type(db: Session) -> list[BookingsByTypePoint]:

@@ -15,6 +15,9 @@ class DisputeEvidenceRead(CamelModel):
     original_filename: str
     content_type: str
     size_bytes: int
+    # False for a text-only note (nothing to download) -- ZR-28: the UI
+    # offered Download on those and the click landed on a raw 404.
+    has_file: bool = False
     sha256_hash: str
     note_text: str
     disclosure_class: str

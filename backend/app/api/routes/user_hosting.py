@@ -809,6 +809,20 @@ def send_hosted_offer(
     return updated
 
 
+@router.post("/offers/{offer_id}/reopen", response_model=OfferRead)
+def reopen_hosted_offer(
+    offer_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """ZR-36: make a new offer after the renter declined -- reopens the offer
+    as a draft for fresh terms (crud/leasing.py:reopen_offer)."""
+    correlation_id = get_correlation_id(request)
+    offer = leasing_crud.get_offer_for_host_or_404(db, offer_id, user)
+    updated = leasing_crud.reopen_offer(db, offer, user, correlation_id=correlation_id)
+    log_audit_event(db, None, "user_offer.reopen", "offer", str(offer_id), correlation_id, reason=f"user:{user.id}")
+    db.commit()
+    return updated
+
+
 @router.post("/offers/{offer_id}/agreement", response_model=AgreementRead, status_code=status.HTTP_201_CREATED)
 def create_hosted_agreement(
     offer_id: int,

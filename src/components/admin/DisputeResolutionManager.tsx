@@ -1091,10 +1091,14 @@ export function DisputeResolutionManager() {
                   {caseDetail.evidence.map((ev) => (
                     <div key={ev.id} className="space-y-2 rounded-xl bg-white p-3 ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <a href={evidenceFileUrl(ev.id)} target="_blank" rel="noreferrer" className="text-sm font-semibold text-primary-700 hover:underline dark:text-primary-300">
-                          {ev.originalFilename || `Evidence #${ev.id}`}
-                        </a>
-                        <span className="text-xs text-slate-400">{(ev.sizeBytes / 1024).toFixed(1)} KB</span>
+                        {ev.hasFile ? (
+                          <a href={evidenceFileUrl(ev.id)} target="_blank" rel="noreferrer" className="text-sm font-semibold text-primary-700 hover:underline dark:text-primary-300">
+                            {ev.originalFilename || `Evidence #${ev.id}`}
+                          </a>
+                        ) : (
+                          <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">Note #{ev.id}</span>
+                        )}
+                        <span className="text-xs text-slate-400">{ev.hasFile ? `${(ev.sizeBytes / 1024).toFixed(1)} KB` : "No file"}</span>
                       </div>
                       <div className="flex flex-wrap gap-1.5">
                         <Badge tone={ev.verificationStatus === "VERIFIED" ? "success" : "neutral"}>{formatClassificationLabel(ev.verificationStatus)}</Badge>

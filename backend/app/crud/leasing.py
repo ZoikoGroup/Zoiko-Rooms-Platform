@@ -360,8 +360,10 @@ def decide_application_as_host(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only decide applications for your own listings")
     if application.status == "DECIDED":
         # Shortlisting records an approval, so a shortlisted applicant can still be
-        # selected (the approval stands -- nothing new is recorded or sent) or
-        # declined, until an offer is made.
+        # selected or declined, until an offer is made. Selecting a shortlisted
+        # applicant records its own approval (ZR-38: otherwise the host's list
+        # still read "shortlisted" until an offer existed); the renter isn't
+        # told twice -- the approval notification/email dedupe per application.
         latest = max(application.decisions, key=lambda d: (d.decided_at, d.id), default=None)
         offer = application.offer
         live_offer = offer is not None and offer.status not in ("DECLINED", "EXPIRED", "WITHDRAWN")
@@ -372,7 +374,10 @@ def decide_application_as_host(
                 status.HTTP_409_CONFLICT,
                 "This applicant already has an offer. Withdraw the offer before changing the decision.",
             )
-        if data.decision == "APPROVED" and latest is not None:
+        selecting_shortlisted = (
+            latest is not None and latest.reason_code == "SHORTLISTED" and data.reason_code != "SHORTLISTED"
+        )
+        if data.decision == "APPROVED" and latest is not None and not selecting_shortlisted:
             return latest
         return _apply_application_decision(db, application, data, admin_id=None, user_id=user.id)
     if application.status != "SUBMITTED":
@@ -783,6 +788,38 @@ def set_offer_status(
     return offer
 
 
+REOPENABLE_OFFER_STATUSES = ("DECLINED", "EXPIRED", "WITHDRAWN")
+
+
+def reopen_offer(db: Session, offer: Offer, actor: AdminUser | UserAccount, correlation_id: str = "") -> Offer:
+    """ZR-36: after the renter declines (or the offer expires / is withdrawn)
+    the host can make a new offer on the same application. An application has
+    exactly one Offer row (offers.application_id is unique), so a new offer
+    is this one reopened as a DRAFT: the host sets fresh terms and sends it
+    again. Earlier terms versions stay as history. The same eligibility a
+    first offer needs applies (application still approved, listing still
+    publishable)."""
+    assert_provider_access_any(db, actor, party_id_for_listing(offer.listing))
+    if offer.status not in REOPENABLE_OFFER_STATUSES:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a declined, expired or withdrawn offer can be reopened")
+    if offer.agreement is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This offer already has an agreement and can't be reopened")
+    reasons = check_offer_eligibility(db, offer.application)
+    if reasons:
+        raise HTTPException(status.HTTP_409_CONFLICT, {"message": "Not eligible to make a new offer", "reasons": reasons})
+    previous = offer.status
+    offer.status = "DRAFT"
+    offer.accepted_at = None
+    offer.confirmation_expires_at = None
+    _close_pending_counters(offer, "SUPERSEDED")
+    emit_event(
+        db, "offer.reopened", "offer", str(offer.id), {"previousStatus": previous}, correlation_id=correlation_id,
+    )
+    db.commit()
+    db.refresh(offer)
+    return offer
+
+
 def _assert_renter_has_no_account(db: Session, guest_id: str, *, action: str) -> None:
     """Accepting/declining an offer or signing as renter is admin-doable only
     for a walk-in guest with no Zoiko login -- a renter with a real account
@@ -845,6 +882,15 @@ def user_decline_offer(db: Session, user: UserAccount, offer: Offer, correlation
     offer.status = "DECLINED"
     _release_room_hold_for_offer(db, offer, reason="offer_declined", correlation_id=correlation_id)
     _close_pending_counters(offer, "SUPERSEDED")
+    listing = offer.listing
+    if listing and listing.party_id:
+        notif_crud.notify_user_by_party(
+            db, listing.party_id,
+            title="An offer was declined",
+            message=f'The renter declined your offer for "{listing.name}". You can make them a new offer.',
+            notification_type="offer.declined_for_host",
+            related_entity_type="offer", related_entity_id=str(offer.id),
+        )
     db.commit()
     db.refresh(offer)
     _email_offer_outcome(db, offer, "declined")

@@ -171,6 +171,20 @@ class Settings(BaseSettings):
     support_upload_dir: str = "secure_uploads/support"
     avatar_upload_dir: str = "secure_uploads/avatars"
     email_change_token_expire_minutes: int = 60
+    # The confirm-your-email link sent at signup (crud/user_settings.py).
+    email_confirm_token_expire_minutes: int = 1440
+    # Dashboard revenue is reported in one currency (services/fx.py). Rates are
+    # "1 unit of <currency> = N US dollars", set by hand -- never fetched --
+    # so totals are stable and auditable. Override in .env as JSON, e.g.
+    # FX_RATES_TO_USD={"GBP": 1.27, "INR": 0.012}, and record the date the
+    # rates were taken in FX_RATES_AS_OF. The defaults are approximate and
+    # cover every currency a listing can use (models/listing.py
+    # SUPPORTED_CURRENCIES -- tests/test_fx.py keeps the two in step).
+    fx_rates_to_usd: dict[str, float] = {
+        "USD": 1.0, "GBP": 1.27, "EUR": 1.08, "INR": 0.012, "AUD": 0.66, "CAD": 0.73, "AED": 0.27, "SGD": 0.74,
+        "NZD": 0.60,
+    }
+    fx_rates_as_of: str = ""
     evidence_document_max_size_mb: int = 10
     # ZR-ENG-CLR-010 Section 20: "Maker-checker: Mandatory above configured
     # thresholds or for safety/legal/manual override cases." A reasonable
@@ -239,6 +253,10 @@ class Settings(BaseSettings):
     dispute_financial_hold_default_review_days: int = 30
 
     frontend_url: str = "http://localhost:3000"
+    # Site address put in links inside emails (password reset, confirmations, "open the website"
+    # buttons). Empty = use frontend_url. Kept apart from frontend_url because that one is also where
+    # Stripe and Veriff send people back to, which has to stay on the machine running the app.
+    public_site_url: str = ""
     password_reset_token_expire_minutes: int = 30
 
     llm_provider: str = "groq"
@@ -407,6 +425,11 @@ class Settings(BaseSettings):
     # test suite turns them off for tests that predate these rules.
     listing_fee_fail_closed: bool = True
     payment_receipt_authority_required: bool = True
+
+    @property
+    def email_site_url(self) -> str:
+        """Base address for links written into emails, no trailing slash."""
+        return (self.public_site_url.strip() or self.frontend_url).rstrip("/")
 
     @property
     def is_production(self) -> bool:

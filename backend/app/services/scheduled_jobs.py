@@ -423,6 +423,13 @@ def apply_host_refund_deadlines(db: Session) -> int:
     return _apply(db)
 
 
+def notify_pending_move_outs(db: Session) -> int:
+    """Hosts not yet told about a move-out waiting on them (crud/occupancy.py)."""
+    from app.crud.occupancy import notify_pending_move_out_steps
+
+    return notify_pending_move_out_steps(db)
+
+
 def end_due_occupancies(db: Session) -> int:
     """Tenancies whose end date has arrived and whose room is handed back
     (crud/occupancy_lifecycle.py)."""
@@ -466,6 +473,7 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("remind_hosts_to_reconfirm_availability", remind_hosts_to_reconfirm_availability),
     ("purge_stale_external_opportunities", purge_stale_external_opportunities),
     ("apply_termination_response_deadlines", apply_termination_response_deadlines),
+    ("notify_pending_move_outs", notify_pending_move_outs),
     ("end_due_occupancies", end_due_occupancies),
     ("apply_host_refund_deadlines", apply_host_refund_deadlines),
     ("apply_habitability_deadlines", apply_habitability_deadlines),

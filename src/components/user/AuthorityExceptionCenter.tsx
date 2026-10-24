@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { AuthorityVerificationWizard } from "@/components/user/AuthorityVerificationWizard";
-import { Card, EmptyState, inputClass, selectClass } from "@/components/user/ui";
+import { Card, EmptyState, selectClass } from "@/components/user/ui";
 import { errorMessage } from "@/lib/user-api";
 import { formatDate } from "@/lib/utils";
 import {

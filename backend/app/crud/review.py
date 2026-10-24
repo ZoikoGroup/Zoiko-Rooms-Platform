@@ -21,6 +21,18 @@ def list_reviews_for_listing(db: Session, listing_id: str) -> list[ReviewRead]:
     return [to_review_read(r) for r in reviews]
 
 
+def list_reviews_by_guest(db: Session, guest_id: str) -> list[ReviewRead]:
+    """The reviews one renter has written -- lets their own screen show a
+    listing as already reviewed instead of offering the form again."""
+    reviews = db.scalars(
+        select(Review)
+        .options(joinedload(Review.listing), joinedload(Review.guest))
+        .where(Review.guest_id == guest_id)
+        .order_by(Review.date.desc())
+    )
+    return [to_review_read(r) for r in reviews]
+
+
 def guest_has_stayed_at_listing(db: Session, guest_id: str, listing_id: str) -> bool:
     """Eligibility rule: a guest may review a listing only if an Occupancy row
     ties them to it -- i.e. they were actually a tenant there, current or past.

@@ -2,6 +2,7 @@ import { ApiError, apiClientFetch } from "@/lib/api-client";
 import {
   RentalConversation,
   RentalMessage,
+  RenterThread,
   SupportTicket,
   SupportTicketInput,
   HostRentalRecord,
@@ -74,7 +75,6 @@ import {
   RentalPaymentReturnKind,
   RentalPaymentTimelinePage,
   RentalTransactionRecord,
-  RentalTransactionTimelineEntry,
   RenterVerificationStatus,
   Room,
   SimulatedPayment,
@@ -889,17 +889,38 @@ export function sendRenterApplicationMessage(applicationId: number, body: string
   });
 }
 
+// --- Renter <-> subtenant messages (one thread per sublet request) ------------
+
+/** Either side of a sublet; opening the thread marks the other side's messages read. */
+export function listSubletMessages(subletRequestId: number): Promise<RentalMessage[]> {
+  return apiClientFetch<RentalMessage[]>(`/api/users/rentals/sublet-requests/${subletRequestId}/messages`);
+}
+
+export function sendSubletMessage(subletRequestId: number, body: string): Promise<RentalMessage> {
+  return apiClientFetch<RentalMessage>(`/api/users/rentals/sublet-requests/${subletRequestId}/messages`, {
+    method: "POST", body: JSON.stringify({ body }),
+  });
+}
+
 export function listHostConversations(): Promise<RentalConversation[]> {
   return apiClientFetch<RentalConversation[]>("/api/users/hosting/conversations");
 }
 
 /** Opening a thread also marks the renter's messages in it as read. */
-export function listHostApplicationMessages(applicationId: number): Promise<RentalMessage[]> {
-  return apiClientFetch<RentalMessage[]>(`/api/users/hosting/applications/${applicationId}/messages`);
+/** The original renter and any subtenant on an application -- each has their own thread. */
+export function listHostRenterThreads(applicationId: number): Promise<RenterThread[]> {
+  return apiClientFetch<RenterThread[]>(`/api/users/hosting/applications/${applicationId}/renters`);
 }
 
-export function sendHostApplicationMessage(applicationId: number, body: string): Promise<RentalMessage> {
-  return apiClientFetch<RentalMessage>(`/api/users/hosting/applications/${applicationId}/messages`, {
+const guestQuery = (guestId?: string) => (guestId ? `?guestId=${encodeURIComponent(guestId)}` : "");
+
+/** guestId picks which renter's thread (defaults to the current occupant, else the applicant). */
+export function listHostApplicationMessages(applicationId: number, guestId?: string): Promise<RentalMessage[]> {
+  return apiClientFetch<RentalMessage[]>(`/api/users/hosting/applications/${applicationId}/messages${guestQuery(guestId)}`);
+}
+
+export function sendHostApplicationMessage(applicationId: number, body: string, guestId?: string): Promise<RentalMessage> {
+  return apiClientFetch<RentalMessage>(`/api/users/hosting/applications/${applicationId}/messages${guestQuery(guestId)}`, {
     method: "POST", body: JSON.stringify({ body }),
   });
 }
@@ -946,6 +967,11 @@ export function rejectHostedOfferCounter(offerId: number, counterId: number, not
     method: "POST",
     body: JSON.stringify({ note }),
   });
+}
+
+/** After a decline/expiry: reopen the offer as a draft for new terms. */
+export function reopenHostedOffer(offerId: number): Promise<Offer> {
+  return apiClientFetch<Offer>(`/api/users/hosting/offers/${offerId}/reopen`, { method: "POST" });
 }
 
 export function sendHostedOffer(offerId: number): Promise<Offer> {
@@ -1703,6 +1729,11 @@ export function confirmEmailChange(token: string): Promise<UserProfile> {
   return apiClientFetch<UserProfile>("/api/users/email-change/confirm", { method: "POST", body: JSON.stringify({ token }) });
 }
 
+/** Sends a fresh confirm-your-email link (the one from signup); earlier links stop working. */
+export function resendEmailConfirmation(): Promise<{ emailVerified: boolean }> {
+  return apiClientFetch<{ emailVerified: boolean }>("/api/users/email-confirmation/resend", { method: "POST" });
+}
+
 export function signOutOtherSessions(): Promise<{ ok: boolean }> {
   return apiClientFetch<{ ok: boolean }>("/api/users/sessions/revoke-others", { method: "POST" });
 }
@@ -1905,4 +1936,39 @@ export function sendHelpArticleFeedback(articleId: string, helpful: boolean): Pr
     method: "POST",
     body: JSON.stringify({ helpful }),
   });
+}
+
+/** A review the signed-in renter has written (GET /api/users/rentals/reviews). */
+export interface MyReview {
+  id: string;
+  listingId: string;
+  listingName: string;
+  rating: number;
+  comment: string;
+  date: string;
+}
+
+export function listMyReviews(): Promise<MyReview[]> {
+  return apiClientFetch<MyReview[]>("/api/users/rentals/reviews");
+}
+
+/** Allowed only for a listing the renter has had a tenancy at; one review per listing. */
+export function submitReview(payload: { listingId: string; rating: number; comment: string }): Promise<MyReview> {
+  return apiClientFetch<MyReview>("/api/users/rentals/reviews", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** A review shown publicly on a listing (reviewer name is already shortened to "First L."). */
+export interface PublicReview {
+  id: string;
+  guestName: string;
+  rating: number;
+  comment: string;
+  date: string;
+}
+
+export function listPublicListingReviews(listingId: string): Promise<PublicReview[]> {
+  return apiClientFetch<PublicReview[]>(`/api/public/listings/${encodeURIComponent(listingId)}/reviews`);
 }

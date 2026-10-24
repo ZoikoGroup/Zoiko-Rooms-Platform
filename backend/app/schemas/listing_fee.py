@@ -83,6 +83,9 @@ class ListingFeePolicyRead(CamelModel):
     approved_by_admin_id: int | None
     approved_at: datetime | None
     created_at: datetime
+    # What still blocks a DRAFT from being approved (ZR-16) -- shown on the
+    # price so the super admin doesn't have to guess from a toast.
+    activation_problems: list[str] = []
 
 
 class BillingEntityCreate(CamelModel):

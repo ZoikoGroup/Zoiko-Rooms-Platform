@@ -5,7 +5,6 @@ import { Repeat } from "lucide-react";
 import { SubletRequest } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { apiClientFetch } from "@/lib/api-client";
-import { getCurrentAdmin } from "@/lib/auth";
 import { subletArrangementTypeAdminLabel, subletRequestStatusLabel, subletRequestStatusTone } from "@/lib/status";
 import { formatDate } from "@/lib/utils";
 
@@ -13,8 +12,6 @@ import { formatDate } from "@/lib/utils";
  * stay between the host and the renter (the host's own Sublet requests page).
  * Admins only see what is waiting on a host. */
 export function SubletRequestsManager() {
-  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
-  const [checkingRole, setCheckingRole] = useState(true);
   const [requests, setRequests] = useState<SubletRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -32,18 +29,8 @@ export function SubletRequestsManager() {
   }, []);
 
   useEffect(() => {
-    getCurrentAdmin().then((admin) => {
-      const superAdmin = admin?.role === "super_admin";
-      setIsSuperAdmin(superAdmin);
-      setCheckingRole(false);
-      if (superAdmin) load();
-    });
+    load();
   }, [load]);
-
-  // Only super_admin can see this per the backend (require_super_admin on
-  // every /api/occupancy/sublet-requests* route) -- a regular admin gets nothing
-  // rather than an empty/erroring card.
-  if (checkingRole || !isSuperAdmin) return null;
 
   return (
     <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10">

@@ -9,14 +9,12 @@ import {
   Building2,
   CheckCircle2,
   Contact,
-  Copy,
   Eye,
   Globe,
   Mail,
   MapPin,
   Pencil,
   Phone,
-  Plus,
   Rocket,
   Search,
   ShieldAlert,
@@ -26,7 +24,7 @@ import {
   Users,
   XCircle,
 } from "lucide-react";
-import { AdminRole, Listing, ListingState, OpenJurisdiction, Property, PublishEligibility, Room } from "@/lib/types";
+import { Listing, ListingState, Property, PublishEligibility, Room } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { StarRating } from "@/components/ui/StarRating";
 import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
@@ -35,7 +33,6 @@ import { Modal } from "@/components/ui/Modal";
 import { StatCard } from "@/components/admin/StatCard";
 import { formatCurrency, resolveImageUrl } from "@/lib/utils";
 import { apiClientFetch, ApiError } from "@/lib/api-client";
-import { getCurrentAdmin } from "@/lib/auth";
 import { listingStateLabel, listingStateTone } from "@/lib/status";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
 
@@ -69,8 +66,6 @@ const emptyForm = {
   contactEmail: "",
 };
 
-const emptyNewRoom = { address: "", city: "", jurisdictionCode: "", size: "120", hasEnsuite: false };
-
 export function PropertiesManager({ initialListings }: { initialListings: Listing[] }) {
   const [items, setItems] = useState(initialListings);
   const searchParams = useSearchParams();
@@ -80,19 +75,11 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
   const [editingId, setEditingId] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const [form, setForm] = useState(emptyForm);
-  const [role, setRole] = useState<AdminRole | null>(null);
   const [roomOptions, setRoomOptions] = useState<RoomOption[]>([]);
-  const [regions, setRegions] = useState<OpenJurisdiction[]>([]);
-  const [addingRoom, setAddingRoom] = useState(false);
-  const [newRoom, setNewRoom] = useState(emptyNewRoom);
   const [reviewListing, setReviewListing] = useState<Listing | null>(null);
   const [reviewSignals, setReviewSignals] = useState<PublishEligibility | null>(null);
   const [rejectReason, setRejectReason] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
-
-  useEffect(() => {
-    getCurrentAdmin().then((admin) => setRole(admin?.role ?? null));
-  }, []);
 
   // Deep-link from a "listing pending review" notification (see
   // resolveNotificationHref in lib/notifications.ts) -- open straight to the
@@ -115,9 +102,6 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
   }, [searchParams]);
 
   async function loadRoomOptions() {
-    apiClientFetch<OpenJurisdiction[]>("/api/properties/jurisdictions")
-      .then(setRegions)
-      .catch(() => setRegions([]));
     try {
       const properties = await apiClientFetch<Property[]>("/api/properties");
       const rooms = await Promise.all(
@@ -171,16 +155,6 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
       showToast("Listing removed");
     } catch {
       showToast("Failed to remove listing");
-    }
-  }
-
-  async function duplicateListing(listing: Listing) {
-    try {
-      const copy = await apiClientFetch<Listing>(`/api/listings/${listing.id}/duplicate`, { method: "POST" });
-      setItems((prev) => [copy, ...prev]);
-      showToast("Listing duplicated as a new draft");
-    } catch {
-      showToast("Failed to duplicate listing");
     }
   }
 
@@ -267,14 +241,6 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
     }
   }
 
-  function openAddModal() {
-    setEditingId(null);
-    setForm(emptyForm);
-    setAddingRoom(false);
-    setNewRoom(emptyNewRoom);
-    setModalOpen(true);
-  }
-
   function openEditModal(listing: Listing) {
     setEditingId(listing.id);
     setForm({
@@ -299,64 +265,22 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
       contactPhone: listing.contactPhone,
       contactEmail: listing.contactEmail,
     });
-    setAddingRoom(false);
-    setNewRoom(emptyNewRoom);
     setModalOpen(true);
-  }
-
-  async function createPropertyAndRoom() {
-    if (!newRoom.address.trim() || !newRoom.city.trim()) {
-      showToast("Enter an address and city for the new property");
-      return;
-    }
-    if (!newRoom.jurisdictionCode) {
-      showToast("Select the region the new property is in");
-      return;
-    }
-    try {
-      const property = await apiClientFetch<Property>("/api/properties", {
-        method: "POST",
-        body: JSON.stringify({
-          address: newRoom.address.trim(),
-          city: newRoom.city.trim(),
-          jurisdictionCode: newRoom.jurisdictionCode,
-        }),
-      });
-      const room = await apiClientFetch<Room>(`/api/properties/${property.id}/rooms`, {
-        method: "POST",
-        body: JSON.stringify({ size: Number(newRoom.size) || 0, hasEnsuite: newRoom.hasEnsuite }),
-      });
-      const option: RoomOption = { ...room, property };
-      setRoomOptions((prev) => [...prev, option]);
-      setForm((f) => ({ ...f, roomId: String(room.id), city: f.city.trim() || property.city }));
-      setAddingRoom(false);
-      setNewRoom(emptyNewRoom);
-      showToast("Property and room created");
-    } catch (err) {
-      showToast(err instanceof Error && err.message ? err.message : "Failed to create property and room");
-    }
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // Edit only -- super admins review and manage hosts' listings; they
+    // don't create properties, rooms or listings themselves.
+    if (!editingId) return;
     if (!form.name.trim() || !form.city.trim() || !form.price) return;
     if (!form.roomId) {
-      showToast("Select or create a room for this listing");
+      showToast("Select a room for this listing");
       return;
     }
     if (Number(form.minStayNights) < 30) {
       showToast("Minimum stay must be at least 30 nights");
       return;
-    }
-    if (!editingId) {
-      if (!form.images.length) {
-        showToast("Add at least one photo before creating this listing");
-        return;
-      }
-      if (!form.description.trim()) {
-        showToast("Add a description before creating this listing");
-        return;
-      }
     }
 
     const amenities = form.amenities;
@@ -366,69 +290,39 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
       .filter(Boolean);
 
     try {
-      if (editingId) {
-        const updated = await apiClientFetch<Listing>(`/api/listings/${editingId}`, {
-          method: "PUT",
-          body: JSON.stringify({
-            name: form.name.trim(),
-            roomType: form.roomType.trim() || "Private Room",
-            city: form.city.trim(),
-            location: form.location.trim() || form.city.trim(),
-            latitude: form.latitude,
-            longitude: form.longitude,
-            pricePerNight: Number(form.price),
-            guests: Number(form.guests),
-            bedrooms: Number(form.bedrooms),
-            bathrooms: Number(form.bathrooms),
-            size: Number(form.size),
-            minStayNights: Number(form.minStayNights),
-            roomId: Number(form.roomId),
-            images: form.images,
-            description: form.description.trim() || undefined,
-            amenities: amenities.length ? amenities : undefined,
-            tags: tags.length ? tags : undefined,
-            contactName: form.contactName.trim(),
-            contactPhone: form.contactPhone.trim(),
-            contactEmail: form.contactEmail.trim(),
-          }),
-        });
-        setItems((prev) => prev.map((l) => (l.id === editingId ? updated : l)));
-        showToast("Listing updated successfully");
-      } else {
-        const created = await apiClientFetch<Listing>("/api/listings", {
-          method: "POST",
-          body: JSON.stringify({
-            name: form.name.trim(),
-            roomType: form.roomType.trim() || "Private Room",
-            city: form.city.trim(),
-            location: form.location.trim() || form.city.trim(),
-            latitude: form.latitude,
-            longitude: form.longitude,
-            pricePerNight: Number(form.price),
-            guests: Number(form.guests),
-            bedrooms: Number(form.bedrooms),
-            bathrooms: Number(form.bathrooms),
-            size: Number(form.size),
-            minStayNights: Number(form.minStayNights),
-            roomId: Number(form.roomId),
-            images: form.images,
-            amenities: amenities.length ? amenities : ["Free WiFi"],
-            description: form.description.trim(),
-            tags: tags.length ? tags : ["New"],
-            contactName: form.contactName.trim(),
-            contactPhone: form.contactPhone.trim(),
-            contactEmail: form.contactEmail.trim(),
-          }),
-        });
-        setItems((prev) => [created, ...prev]);
-        showToast("Listing created as a draft — publish once evidence is verified");
-      }
+      const updated = await apiClientFetch<Listing>(`/api/listings/${editingId}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          name: form.name.trim(),
+          roomType: form.roomType.trim() || "Private Room",
+          city: form.city.trim(),
+          location: form.location.trim() || form.city.trim(),
+          latitude: form.latitude,
+          longitude: form.longitude,
+          pricePerNight: Number(form.price),
+          guests: Number(form.guests),
+          bedrooms: Number(form.bedrooms),
+          bathrooms: Number(form.bathrooms),
+          size: Number(form.size),
+          minStayNights: Number(form.minStayNights),
+          roomId: Number(form.roomId),
+          images: form.images,
+          description: form.description.trim() || undefined,
+          amenities: amenities.length ? amenities : undefined,
+          tags: tags.length ? tags : undefined,
+          contactName: form.contactName.trim(),
+          contactPhone: form.contactPhone.trim(),
+          contactEmail: form.contactEmail.trim(),
+        }),
+      });
+      setItems((prev) => prev.map((l) => (l.id === editingId ? updated : l)));
+      showToast("Listing updated successfully");
 
       setModalOpen(false);
       setEditingId(null);
       setForm(emptyForm);
     } catch {
-      showToast(editingId ? "Failed to update listing" : "Failed to create listing");
+      showToast("Failed to update listing");
     }
   }
 
@@ -466,9 +360,6 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
             </button>
           ))}
         </div>
-        <Button variant="accent" size="sm" onClick={openAddModal}>
-          <Plus className="h-4 w-4" /> Add Listing
-        </Button>
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -524,7 +415,7 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
                     <Ban className="h-3.5 w-3.5" /> Withdraw
                   </Button>
                 )}
-                {role === "super_admin" && listing.state !== "SUSPENDED" && (
+                {listing.state !== "SUSPENDED" && (
                   <Button size="sm" variant="outline" className="flex-1" onClick={() => transitionListing(listing.id, "suspend")}>
                     <ShieldAlert className="h-3.5 w-3.5" /> Suspend
                   </Button>
@@ -565,13 +456,6 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
 
               <div className="mt-3 flex items-center justify-end gap-1 border-t border-slate-100 pt-3 dark:border-slate-800">
                 <button
-                  onClick={() => duplicateListing(listing)}
-                  title="Duplicate"
-                  className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-primary-50 hover:text-primary-700 dark:text-slate-400 dark:hover:bg-primary-500/10 dark:hover:text-primary-300"
-                >
-                  <Copy className="h-4 w-4" />
-                </button>
-                <button
                   onClick={() => openEditModal(listing)}
                   title="Edit"
                   className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-primary-50 hover:text-primary-700 dark:text-slate-400 dark:hover:bg-primary-500/10 dark:hover:text-primary-300"
@@ -595,7 +479,7 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
         <p className="mt-10 text-center text-sm text-slate-400 dark:text-slate-400">No listings match your search.</p>
       )}
 
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editingId ? "Edit Listing" : "Add New Listing"}>
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Edit Listing">
         <form onSubmit={handleSubmit} autoComplete="off" className="max-h-[70vh] space-y-3.5 overflow-y-auto pr-1">
           <div>
             <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
@@ -622,15 +506,8 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
               <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
                 Room
               </label>
-              <button
-                type="button"
-                onClick={() => setAddingRoom((v) => !v)}
-                className="text-xs font-semibold text-primary-700 hover:underline dark:text-primary-300"
-              >
-                {addingRoom ? "Cancel" : "+ New property & room"}
-              </button>
             </div>
-            {!addingRoom ? (
+
               <select
                 value={form.roomId}
                 onChange={(e) => setForm((f) => ({ ...f, roomId: e.target.value }))}
@@ -644,58 +521,6 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
                   </option>
                 ))}
               </select>
-            ) : (
-              <div className="space-y-2 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200 dark:bg-slate-800 dark:ring-slate-700">
-                <input
-                  value={newRoom.address}
-                  onChange={(e) => setNewRoom((r) => ({ ...r, address: e.target.value }))}
-                  placeholder="Property address"
-                  className="w-full rounded-lg bg-white px-3 py-2 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700"
-                />
-                <select
-                  value={newRoom.jurisdictionCode}
-                  onChange={(e) => setNewRoom((r) => ({ ...r, jurisdictionCode: e.target.value }))}
-                  className="w-full rounded-lg bg-white px-3 py-2 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700"
-                >
-                  <option value="">
-                    {regions.length === 0 ? "No regions open — create a market release + policy pack first" : "Select a region…"}
-                  </option>
-                  {regions.map((region) => (
-                    <option key={region.code} value={region.code}>
-                      {region.code}
-                      {region.agreementsSupported ? "" : " (agreements manual)"}
-                    </option>
-                  ))}
-                </select>
-                <div className="grid grid-cols-2 gap-2">
-                  <input
-                    value={newRoom.city}
-                    onChange={(e) => setNewRoom((r) => ({ ...r, city: e.target.value }))}
-                    placeholder="City"
-                    className="w-full rounded-lg bg-white px-3 py-2 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700"
-                  />
-                  <input
-                    type="number"
-                    min={0}
-                    value={newRoom.size}
-                    onChange={(e) => setNewRoom((r) => ({ ...r, size: e.target.value }))}
-                    placeholder="Room size (sqft)"
-                    className="w-full rounded-lg bg-white px-3 py-2 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700"
-                  />
-                </div>
-                <label className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                  <input
-                    type="checkbox"
-                    checked={newRoom.hasEnsuite}
-                    onChange={(e) => setNewRoom((r) => ({ ...r, hasEnsuite: e.target.checked }))}
-                  />
-                  Has ensuite bathroom
-                </label>
-                <Button type="button" size="sm" variant="primary" fullWidth onClick={createPropertyAndRoom}>
-                  Create property & room
-                </Button>
-              </div>
-            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -878,15 +703,7 @@ export function PropertiesManager({ initialListings }: { initialListings: Listin
           </div>
 
           <Button type="submit" variant="primary" fullWidth className="mt-2">
-            {editingId ? (
-              <>
-                <Pencil className="h-4 w-4" /> Save Changes
-              </>
-            ) : (
-              <>
-                <Plus className="h-4 w-4" /> Add Listing
-              </>
-            )}
+            <Pencil className="h-4 w-4" /> Save Changes
           </Button>
         </form>
       </Modal>

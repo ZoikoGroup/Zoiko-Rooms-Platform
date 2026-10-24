@@ -246,7 +246,80 @@ def record_handover_event(
     )
     db.add(event)
     db.flush()
+    if event_type in MOVE_OUT_HANDOVER_EVENT_TYPES:
+        _notify_move_out_step(db, occupancy, event_type)
     return event
+
+
+def _notify_move_out_step(db: Session, occupancy: Occupancy, event_type: str) -> bool:
+    """The move-out handshake is renter notice -> renter moved out -> host
+    confirms; each step tells the side that acts next (ZR-26: the host was
+    never told, so the renter waited on a host who didn't know)."""
+    from app.crud.occupancy_lifecycle import move_out_confirm_days
+
+    listing = occupancy.listing
+    room = f'"{listing.name}"' if listing else "your room"
+    renter_name = occupancy.guest.name if occupancy.guest else "Your renter"
+    end = occupancy.expected_end_date.strftime("%d %b %Y") if occupancy.expected_end_date else "the end of the term"
+    host_party_id = party_id_for_listing(listing) if listing and listing.room else None
+    entity = {"related_entity_type": "occupancy", "related_entity_id": str(occupancy.id)}
+    sent = None
+    if event_type == "MOVE_OUT_NOTICE_GIVEN":
+        sent = notif_crud.notify_user_by_party(
+            db, host_party_id,
+            title=f"{renter_name} is moving out",
+            message=f"{renter_name} gave notice to leave {room} on {end}. They'll tell you once they've moved out.",
+            notification_type="occupancy.move_out_notice_for_host", **entity,
+        )
+    elif event_type == "MOVE_OUT_READY":
+        days = move_out_confirm_days(occupancy)
+        sent = notif_crud.notify_user_by_party(
+            db, host_party_id,
+            title=f"{renter_name} has moved out — please confirm",
+            message=(
+                f"{renter_name} says they've left {room}. Confirm in Rental Records once you have the room and keys back. "
+                f"If you don't respond within {days} days, the move-out counts as confirmed."
+            ),
+            notification_type="occupancy.move_out_ready_for_host", **entity,
+        )
+    elif event_type == "HOST_MOVE_OUT_CONFIRMED" and occupancy.guest is not None:
+        sent = notif_crud.notify_user_by_guest(
+            db, occupancy.guest,
+            title="Your host confirmed your move-out",
+            message=f"Your host confirmed {room} was handed back.",
+            notification_type="occupancy.move_out_confirmed", **entity,
+        )
+    return sent is not None
+
+
+def notify_pending_move_out_steps(db: Session) -> int:
+    """Scheduler catch-up: a host told of nothing for a move-out already in
+    progress (one started before these notifications existed) is told of the
+    step now waiting on them. The notification dedupe (type, occupancy,
+    recipient) makes this a no-op for anyone already notified. Returns how
+    many notifications it sent."""
+    from app.models.occupancy_activation import OccupancyHandoverEvent
+
+    steps_by_occupancy: dict[int, set[str]] = {}
+    for occupancy_id, event_type in db.execute(
+        select(OccupancyHandoverEvent.occupancy_id, OccupancyHandoverEvent.event_type)
+        .join(Occupancy, Occupancy.id == OccupancyHandoverEvent.occupancy_id)
+        .where(
+            Occupancy.status == "ACTIVE",
+            OccupancyHandoverEvent.event_type.in_(("MOVE_OUT_NOTICE_GIVEN", "MOVE_OUT_READY", "HOST_MOVE_OUT_CONFIRMED")),
+        )
+    ):
+        steps_by_occupancy.setdefault(occupancy_id, set()).add(event_type)
+    sent = 0
+    for occupancy_id, steps in steps_by_occupancy.items():
+        if "HOST_MOVE_OUT_CONFIRMED" in steps:
+            continue
+        pending = "MOVE_OUT_READY" if "MOVE_OUT_READY" in steps else "MOVE_OUT_NOTICE_GIVEN"
+        occupancy = db.get(Occupancy, occupancy_id)
+        if occupancy is not None and _notify_move_out_step(db, occupancy, pending):
+            sent += 1
+    db.commit()
+    return sent
 
 
 def list_occupancies_for(db: Session, admin: AdminUser) -> list[Occupancy]:
