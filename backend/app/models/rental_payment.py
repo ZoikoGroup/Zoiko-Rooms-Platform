@@ -148,6 +148,10 @@ class RentalPaymentObligation(Base):
         ForeignKey("sublet_payment_arrangements.id", ondelete="SET NULL"), nullable=True, index=True)
     arrangement_version: Mapped[int | None] = mapped_column(nullable=True)
     agreement_version_no: Mapped[int | None] = mapped_column(nullable=True)
+    # A shared-room co-tenant has no agreement or occupancy of their own; their monthly rent share to the
+    # renter is tied to the co-tenancy instead (services/shared_room_payments.py).
+    sublet_request_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sublet_requests.id", ondelete="SET NULL"), nullable=True, index=True)
     # Reference the payer quotes on the bank / UPI transfer so the payee can
     # match it (e.g. ZR-SUB-11-202611).
     payment_reference: Mapped[str] = mapped_column(String(40), default="", server_default="")
@@ -164,6 +168,7 @@ class RentalPaymentObligation(Base):
     # own docstring on why the two domains stay independent).
     agreement: Mapped["Agreement | None"] = relationship(viewonly=True)
     occupancy: Mapped["Occupancy | None"] = relationship(viewonly=True)
+    sublet_request: Mapped["SubletRequest | None"] = relationship(viewonly=True)  # noqa: F821
     records: Mapped[list["RentalPaymentRecord"]] = relationship(back_populates="obligation", order_by="RentalPaymentRecord.created_at")
     # ZR-PAY-LINK-003 Section 15: 'Two tenants, one rent obligation --
     # Agreement can create payer allocations ... Each payment contribution
@@ -215,6 +220,16 @@ class RentalPaymentObligation(Base):
         if self.obligation_type == "DEPOSIT":
             return resolve_deposit_terminology(self.jurisdiction_code)
         return self.obligation_type.lower()
+
+    @property
+    def context_label(self) -> str:
+        """What this payment is for when it has no agreement or occupancy to say so (a shared-room
+        co-tenant's rent share)."""
+        sublet = self.sublet_request
+        if sublet is None:
+            return ""
+        listing = sublet.current_occupancy.listing if sublet.current_occupancy is not None else None
+        return f"Shared room · {listing.name}" if listing is not None else "Shared room"
 
     @property
     def outstanding_amount(self) -> float:

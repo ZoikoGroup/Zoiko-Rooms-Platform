@@ -1,14 +1,27 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+/** Something the person can do about a refusal: what's wrong, in plain words, and where to fix it
+ *  (e.g. the host's authority verification when an agreement can't be created). */
+export interface ApiFix {
+  code: string;
+  status?: string;
+  message: string;
+  href: string;
+  label: string;
+}
+
 export class ApiError extends Error {
   status: number;
   /** A machine-readable `detail.code` when the backend sends one
    *  (e.g. "POSSIBLE_DUPLICATE"). */
   code?: string;
-  constructor(status: number, message: string, code?: string) {
+  /** `detail.fixes` when the backend sends them. */
+  fixes?: ApiFix[];
+  constructor(status: number, message: string, code?: string, fixes?: ApiFix[]) {
     super(message);
     this.status = status;
     this.code = code;
+    this.fixes = fixes;
   }
 }
 
@@ -60,7 +73,14 @@ export async function apiClientFetch<T>(path: string, init?: RequestInit): Promi
     const body = await res.json().catch(() => ({}));
     const code =
       body.detail && typeof body.detail === "object" && typeof body.detail.code === "string" ? body.detail.code : undefined;
-    throw new ApiError(res.status, extractDetailMessage(body.detail) ?? `Request to ${path} failed with ${res.status}`, code);
+    const fixes: ApiFix[] | undefined =
+      body.detail && typeof body.detail === "object" && Array.isArray(body.detail.fixes)
+        ? body.detail.fixes.filter(
+            (f: unknown): f is ApiFix =>
+              Boolean(f) && typeof (f as ApiFix).message === "string" && typeof (f as ApiFix).href === "string",
+          )
+        : undefined;
+    throw new ApiError(res.status, extractDetailMessage(body.detail) ?? `Request to ${path} failed with ${res.status}`, code, fixes);
   }
 
   if (res.status === 204) return undefined as T;

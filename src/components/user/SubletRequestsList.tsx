@@ -19,7 +19,6 @@ import {
   errorMessage,
 } from "@/lib/user-api";
 import { SubletPaymentsPanel } from "@/components/user/SubletPaymentsPanel";
-import { SubletChatThread } from "@/components/user/RentalMessagesTab";
 import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 import { formatDate } from "@/lib/utils";
 
@@ -190,7 +189,6 @@ export function SubletRequestsList() {
   const [wizardSubtenantPartyId, setWizardSubtenantPartyId] = useState<number | null>(null);
   const [wizardRent, setWizardRent] = useState("");
   const [wizardPayee, setWizardPayee] = useState("Tenant / Sublessor (you)");
-  const [wizardDeposit, setWizardDeposit] = useState("");
   const [wizardOccupants, setWizardOccupants] = useState("1");
   const [wizardError, setWizardError] = useState("");
   const [wizardSubmitting, setWizardSubmitting] = useState(false);
@@ -519,7 +517,6 @@ export function SubletRequestsList() {
     setWizardSubtenantPartyId(null);
     setWizardRent("");
     setWizardPayee("Tenant / Sublessor (you)");
-    setWizardDeposit("");
     setWizardOccupants("1");
     setWizardError("");
     setLookupMessage("");
@@ -2657,17 +2654,13 @@ export function SubletRequestsList() {
                   </div>
                 )}
 
-                {/* MESSAGES TAB -- renter <-> named subtenant */}
+                {/* MESSAGES TAB -- each person talks to the host only */}
                 {drawerTab === "messages" && (
                   <div className="space-y-4">
-                    {activeRequest.status !== "draft" && activeRequest.proposedRenterPartyId ? (
-                      <SubletChatThread
-                        subletRequestId={activeRequest.id}
-                        counterpartName={activeRequest.proposedRenterName || "your subtenant"}
-                      />
-                    ) : (
-                      <p className="muted">Messaging opens once you&apos;ve submitted the request with a named subtenant.</p>
-                    )}
+                    <p className="muted">
+                      Messages go to your host from My Rentals &rarr; Messages. The person you sublet to messages the host
+                      separately &mdash; you and they don&apos;t see each other&apos;s conversations.
+                    </p>
                   </div>
                 )}
 
@@ -3113,8 +3106,7 @@ export function SubletRequestsList() {
                     const options: { value: SubletArrangementType; title: string; hint: string; needsSpace: boolean }[] = [
                       { value: "ASSIGNMENT_FULL", title: "Full handover", hint: "You move out and they take over the room completely", needsSpace: false },
                       { value: "REPLACEMENT_OCCUPANT", title: "Replacement occupant", hint: "They replace you as the occupant", needsSpace: false },
-                      { value: "SUBLEASE_PARTIAL", title: "Sublease part of the room", hint: "You stay on; they get their own agreement", needsSpace: true },
-                      { value: "ADD_CO_TENANT", title: "Add a co-tenant", hint: "You both hold your own tenancy", needsSpace: true },
+                      { value: "ADD_CO_TENANT", title: "Add a co-tenant", hint: "You stay the tenant; they share the room and pay you", needsSpace: true },
                     ];
                     return (
                       <fieldset className="roles">
@@ -3136,7 +3128,7 @@ export function SubletRequestsList() {
                                 <strong>{opt.title}</strong>
                                 <br />
                                 <span className="muted small">
-                                  {disabled ? "Not available — this room is already at its occupant limit" : opt.hint}
+                                  {disabled ? "Not available — this room is set to one occupant. Ask your host to raise its occupant limit." : opt.hint}
                                 </span>
                               </span>
                             </label>
@@ -3270,16 +3262,6 @@ export function SubletRequestsList() {
                         <option>Tenant / Sublessor (you)</option>
                         <option>Landlord / Agent</option>
                       </select>
-                    </div>
-                    <div className="field">
-                      <label htmlFor="f-dep">Proposed deposit (optional)</label>
-                      <input
-                        id="f-dep"
-                        className="tinput"
-                        value={wizardDeposit}
-                        onChange={(e) => setWizardDeposit(e.target.value)}
-                        placeholder="Leave blank if none"
-                      />
                     </div>
                     <div className="field">
                       <label htmlFor="f-occ">Occupants</label>

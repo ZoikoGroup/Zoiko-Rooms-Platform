@@ -1,22 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { BadgeCheck, ChevronDown, ChevronUp, ShieldAlert, Users } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, Toast, useToast } from "@/components/user/ui";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
+import { SubletHostChatThread } from "@/components/user/RentalMessagesTab";
 import { SubletRequest } from "@/lib/types";
 import { subletRequestStatusLabel, subletRequestStatusTone } from "@/lib/status";
 import { formatDate } from "@/lib/utils";
-import { endCoTenancy, errorMessage, listCoTenancies, listSubletRequests, respondToCoTenancy } from "@/lib/user-api";
+import { endCoTenancy, errorMessage, listCoTenancies, listSubletRequests } from "@/lib/user-api";
 
-/** ADD_CO_TENANT shared rooms, from both sides: invitations the user has been
- *  named in (accept/decline), rooms they share as a co-tenant (with the
- *  renter's rent and payments, read-only), and co-tenants sharing the user's
- *  own room. Renders nothing when the user has none of these. */
-export function SharedRoomsPanel() {
+/** ADD_CO_TENANT shared rooms, from both sides: rooms the user shares as a
+ *  co-tenant once the host has approved (with the renter's rent and payments,
+ *  read-only), and co-tenants sharing the user's own room. Renders nothing when the user has none of these. */
+/** mode "co_tenant": the rooms the user shares as the person added (shown in My Applications). mode "renter":
+ *  the co-tenants sharing the user's own room (shown in Sublet Requests). */
+export function SharedRoomsPanel({ mode }: { mode: "co_tenant" | "renter" }) {
   const { toast, showToast } = useToast();
   const [namingMe, setNamingMe] = useState<SubletRequest[]>([]);
   const [myCoTenants, setMyCoTenants] = useState<SubletRequest[]>([]);
@@ -48,62 +49,14 @@ export function SharedRoomsPanel() {
     }
   }
 
-  const invitations = namingMe.filter((r) => r.status === "awaiting_co_tenant");
-  const sharing = namingMe.filter((r) => r.sharedRoomActive);
-  const others = namingMe.filter((r) => r.status !== "awaiting_co_tenant" && !r.sharedRoomActive);
+  const sharing = mode === "co_tenant" ? namingMe.filter((r) => r.sharedRoomActive) : [];
+  const others = mode === "co_tenant" ? namingMe.filter((r) => !r.sharedRoomActive) : [];
+  const ownCoTenants = mode === "renter" ? myCoTenants : [];
 
-  if (!invitations.length && !sharing.length && !myCoTenants.length && !others.length) return null;
+  if (!sharing.length && !ownCoTenants.length && !others.length) return null;
 
   return (
     <div className="mb-6 space-y-4">
-      {invitations.map((r) => (
-        <Card key={r.id} className="!ring-amber-200 dark:!ring-amber-500/30">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">Invitation to share a room</p>
-              <h3 className="mt-1 font-heading text-base font-bold text-primary-900 dark:text-white">
-                {r.currentTenantName || "A renter"} invited you to share {r.listingName || "their room"}
-              </h3>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                {[r.listingCity, r.roomType].filter(Boolean).join(" · ")}
-                {r.proposedStartDate && ` · from ${formatDate(r.proposedStartDate)}`}
-                {r.proposedEndDate && ` to ${formatDate(r.proposedEndDate)}`}
-              </p>
-              <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                You&apos;d live in the room with them and pay your share to them directly. They stay the tenant and keep
-                paying the host. Once you accept, the host reviews it.
-              </p>
-              {r.reason && <p className="mt-1 text-xs italic text-slate-500">&ldquo;{r.reason}&rdquo;</p>}
-              <People request={r} />
-              {!r.proposedRenterIdentityVerified && (
-                <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
-                  Verify your identity before accepting.{" "}
-                  <Link href="/account/identity" className="font-semibold underline">Verify now</Link>
-                </p>
-              )}
-            </div>
-            <div className="flex shrink-0 gap-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={busyId === r.id}
-                onClick={() => run(r.id, () => respondToCoTenancy(r.id, false), "Invitation declined.")}
-              >
-                Decline
-              </Button>
-              <Button
-                size="sm"
-                loading={busyId === r.id}
-                disabled={!r.proposedRenterIdentityVerified}
-                onClick={() => run(r.id, () => respondToCoTenancy(r.id, true), "Accepted — the host will review it next.")}
-              >
-                Accept
-              </Button>
-            </div>
-          </div>
-        </Card>
-      ))}
-
       {sharing.map((r) => (
         <SharedRoomCard
           key={r.id}
@@ -114,7 +67,7 @@ export function SharedRoomsPanel() {
         />
       ))}
 
-      {myCoTenants.map((r) => (
+      {ownCoTenants.map((r) => (
         <SharedRoomCard
           key={r.id}
           request={r}
@@ -172,11 +125,16 @@ function People({ request }: { request: SubletRequest }) {
         <span className="text-xs text-slate-400">co-tenant · pays {request.currentTenantName || "the renter"}</span>
         <VerifiedBadge verified={request.proposedRenterIdentityVerified} />
       </div>
+      {request.proposedMonthlyRent != null && (
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          {`Co-tenant's monthly share: ${request.proposedMonthlyRent}, paid to ${request.currentTenantName || "the renter"} and confirmed by them. No separate deposit.`}
+        </p>
+      )}
     </div>
   );
 }
 
-function SharedRoomCard({
+export function SharedRoomCard({
   request,
   role,
   busy,
@@ -190,11 +148,12 @@ function SharedRoomCard({
   const [showRecord, setShowRecord] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [reason, setReason] = useState("");
+  const [chat, setChat] = useState<"none" | "renter" | "host">("none");
 
   return (
     <Card className="!ring-emerald-200 dark:!ring-emerald-500/30">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
+      <div className={`flex flex-wrap items-start gap-3 ${role === "co_tenant" ? "justify-end" : "justify-between"}`}>
+        <div className={role === "co_tenant" ? "hidden" : "min-w-0"}>
           <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
             <Users className="h-3.5 w-3.5" /> Shared room
           </p>
@@ -208,7 +167,7 @@ function SharedRoomCard({
           <People request={request} />
         </div>
         {!confirming && (
-          <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}>
+          <Button variant="ghost" size="sm" className="w-full sm:w-auto" onClick={() => setConfirming(true)}>
             {role === "co_tenant" ? "Leave room" : "End co-tenancy"}
           </Button>
         )}
@@ -228,7 +187,7 @@ function SharedRoomCard({
             placeholder="Reason (optional)"
             className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-white/10 dark:bg-slate-900"
           />
-          <div className="mt-2 flex justify-end gap-2">
+          <div className="mt-2 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
             <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
               Cancel
             </Button>
@@ -241,10 +200,29 @@ function SharedRoomCard({
 
       {role === "co_tenant" && (
         <div className="mt-4 border-t border-slate-100 pt-3 dark:border-white/10">
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            {request.hostThreadAvailable && (
+              <button
+                type="button"
+                aria-expanded={chat === "host"}
+                onClick={() => setChat((c) => (c === "host" ? "none" : "host"))}
+                className={`rounded-full border px-4 py-2.5 sm:px-3 sm:py-1.5 text-xs font-bold transition-colors ${
+                  chat === "host" ? "border-primary-700 bg-primary-700 text-white" : "border-slate-200 text-slate-600 hover:text-primary-700 dark:border-white/10 dark:text-slate-300"
+                }`}
+              >
+                Message the host
+              </button>
+            )}
+          </div>
+          {chat === "host" && request.hostThreadAvailable && (
+            <div className="mb-3">
+              <SubletHostChatThread subletRequestId={request.id} side="occupant" counterpartName="your host" />
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setShowRecord((v) => !v)}
-            className="flex items-center gap-1.5 text-sm font-semibold text-primary-700 dark:text-primary-300"
+            className="flex min-h-10 items-center gap-1.5 text-left text-sm font-semibold text-primary-700 dark:text-primary-300"
           >
             {showRecord ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
             {showRecord ? "Hide" : "View"} the room&apos;s rent &amp; payments

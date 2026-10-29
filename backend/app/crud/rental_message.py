@@ -246,13 +246,44 @@ def list_conversations_for_host(db: Session, user: UserAccount) -> list[RentalCo
 
 # -- renter <-> subtenant ------------------------------------------------------
 
-def get_sublet_thread_or_403(db: Session, sublet_request_id: int, user: UserAccount) -> tuple[SubletRequest, str]:
-    """The two people on a sublet request can message each other once it's
-    been submitted: the renter who asked (requested_by_guest_id) and the
-    person they named (proposed_renter_party_id). Returns the caller's role."""
+THREAD_PEER, THREAD_HOST = "PEER", "HOST"
+# The person added to a room (a co-tenant, a permitted occupant) or who takes it over (a replacement or full
+# handover) talks to the host in this thread, kept with the sublet itself -- never in the renter's application thread.
+HOST_THREAD_ARRANGEMENT_TYPES = ("ADD_CO_TENANT", "ADDITIONAL_OCCUPANT", "ASSIGNMENT_FULL", "REPLACEMENT_OCCUPANT")
+# Someone taking the room over only has a rental -- and so a thread -- once the host has approved.
+_HOST_THREAD_AFTER_APPROVAL_TYPES = ("ASSIGNMENT_FULL", "REPLACEMENT_OCCUPANT")
+# Before the host has the request, the host has no thread with the person named in it.
+_HOST_THREAD_NOT_YET_STATUSES = ("draft", "declined_by_co_tenant")
+
+
+def host_thread_available(sublet_request: SubletRequest) -> bool:
+    return (
+        bool(sublet_request.proposed_renter_party_id)
+        and sublet_request.arrangement_type in HOST_THREAD_ARRANGEMENT_TYPES
+        and sublet_request.status not in _HOST_THREAD_NOT_YET_STATUSES
+        and (sublet_request.arrangement_type not in _HOST_THREAD_AFTER_APPROVAL_TYPES or sublet_request.status == "approved")
+    )
+
+
+def get_sublet_thread_or_403(
+    db: Session, sublet_request_id: int, user: UserAccount, thread: str = THREAD_PEER,
+) -> tuple[SubletRequest, str]:
+    """The renter thread: the two people on a sublet request can message each other once it's been
+    submitted -- the renter who asked (requested_by_guest_id) and the person they named
+    (proposed_renter_party_id). The host thread: the host of the listing and the person named, for a
+    co-tenant or permitted occupant. Returns the caller's role."""
     sublet_request = db.get(SubletRequest, sublet_request_id)
     if sublet_request is None or sublet_request.status == "draft" or not sublet_request.proposed_renter_party_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+    if thread == THREAD_HOST:
+        if not host_thread_available(sublet_request):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Sublet request not found")
+        listing = sublet_request.current_occupancy.listing if sublet_request.current_occupancy else None
+        if user.party_id and sublet_request.proposed_renter_party_id == user.party_id:
+            return sublet_request, SUBTENANT
+        if user.party_id and listing is not None and party_id_for_listing(listing) == user.party_id:
+            return sublet_request, HOST
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only message about your own sublets")
     guest = get_guest_for_user(db, user)
     if guest is not None and sublet_request.requested_by_guest_id == guest.id:
         return sublet_request, RENTER
@@ -268,10 +299,14 @@ def _to_sublet_message_read(message: SubletMessage, viewer_role: str) -> RentalM
     )
 
 
-def list_sublet_messages(db: Session, sublet_request: SubletRequest, viewer_role: str) -> list[RentalMessageRead]:
+def list_sublet_messages(
+    db: Session, sublet_request: SubletRequest, viewer_role: str, thread: str = THREAD_PEER,
+) -> list[RentalMessageRead]:
     """Returns the thread and marks the other side's messages as read."""
     messages = list(db.scalars(
-        select(SubletMessage).where(SubletMessage.sublet_request_id == sublet_request.id).order_by(SubletMessage.id)
+        select(SubletMessage)
+        .where(SubletMessage.sublet_request_id == sublet_request.id, SubletMessage.thread == thread)
+        .order_by(SubletMessage.id)
     ))
     now = datetime.now(timezone.utc)
     changed = False
@@ -286,11 +321,14 @@ def list_sublet_messages(db: Session, sublet_request: SubletRequest, viewer_role
 
 def send_sublet_message(
     db: Session, sublet_request: SubletRequest, sender: UserAccount, sender_role: str, body: str,
+    thread: str = THREAD_PEER,
 ) -> RentalMessageRead:
     text = body.strip()
     if not text:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Message can't be empty")
-    message = SubletMessage(sublet_request_id=sublet_request.id, sender_role=sender_role, sender_user_id=sender.id, body=text)
+    message = SubletMessage(
+        sublet_request_id=sublet_request.id, sender_role=sender_role, sender_user_id=sender.id, body=text, thread=thread,
+    )
     db.add(message)
     db.flush()
 
@@ -302,8 +340,20 @@ def send_sublet_message(
         message=f'About the sublet of "{listing_name}": {preview}',
         related_entity_type="sublet_request", related_entity_id=f"{sublet_request.id}:{message.id}",
     )
+    if thread == THREAD_HOST:
+        # Host <-> the person added: each side tells the other.
+        if sender_role == SUBTENANT:
+            notif_crud.notify_user_by_party(
+                db, party_id_for_listing(listing) if listing else None,
+                notification_type="sublet_message.host_received", **notification,
+            )
+        else:
+            notif_crud.notify_user_by_party(
+                db, sublet_request.proposed_renter_party_id,
+                notification_type="sublet_message.received_subtenant", **notification,
+            )
     # The renter's copy opens their Sublets page; the subtenant's, My Rentals.
-    if sender_role == SUBTENANT:
+    elif sender_role == SUBTENANT:
         requester = db.get(Guest, sublet_request.requested_by_guest_id) if sublet_request.requested_by_guest_id else None
         if requester is not None:
             notif_crud.notify_user_by_guest(db, requester, notification_type="sublet_message.received", **notification)

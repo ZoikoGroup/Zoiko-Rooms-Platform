@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.crud import notification as notif_crud
 from app.crud.ids import new_id
 from app.models.listing import Listing
 from app.models.occupancy import Occupancy
@@ -87,6 +88,12 @@ def create_review(db: Session, guest_id: str, data: ReviewCreate) -> Review:
     db.add(review)
     db.flush()
     _recompute_listing_rating(db, listing)
+    # Admins who switched on "New review alerts" (Settings > Notification
+    # Preferences) hear about it; the switch is applied in notify_admin.
+    notif_crud.notify_all_admins(
+        db, title="New review", message=f'A {review.rating}-star review was posted for "{listing.name}".',
+        notification_type="review.new", related_entity_type="review", related_entity_id=review.id,
+    )
     db.commit()
     db.refresh(review)
     return review

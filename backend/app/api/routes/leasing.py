@@ -231,7 +231,9 @@ def post_decline_offer(offer_id: int, request: Request, admin: AdminUser = Depen
 def get_agreement_eligibility(offer_id: int, request: Request, db: Session = Depends(get_db)):
     offer = crud.get_offer_or_404(db, offer_id, correlation_id=get_correlation_id(request))
     reasons = check_agreement_eligibility(db, offer)
-    return {"eligible": not reasons, "reasons": reasons}
+    from app.services.eligibility import agreement_fix_hints
+
+    return {"eligible": not reasons, "reasons": reasons, "fixes": agreement_fix_hints(db, offer.listing.room) if reasons else []}
 
 
 @router.get("/offers/{offer_id}/agreement-readiness", response_model=HostReadinessRead)

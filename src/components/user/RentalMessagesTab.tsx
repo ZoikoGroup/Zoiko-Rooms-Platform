@@ -4,8 +4,10 @@ import { useCallback, useMemo, useState } from "react";
 import { RentalChatThread } from "@/components/user/RentalChatThread";
 import { SubletRequest, UserOccupancy } from "@/lib/types";
 import {
+  listHostedSubletMessages,
   listRenterApplicationMessages,
   listSubletMessages,
+  sendHostedSubletMessage,
   sendRenterApplicationMessage,
   sendSubletMessage,
 } from "@/lib/user-api";
@@ -19,21 +21,30 @@ interface Thread {
   send: (body: string) => ReturnType<typeof sendSubletMessage>;
 }
 
-/** My Rentals -> Messages: the host thread for this tenancy, plus -- on a
- *  sublet -- the renter it was sublet from, or the subtenants this renter
- *  named. A subtenant never applied for the room, so the host thread is keyed
- *  on the tenancy's own application rather than an Applications-page entry. */
+/** My Rentals -> Messages: the private thread with the host for this tenancy. The renter and the person they
+ *  sublet to each talk to the host only -- never to each other. A subtenant never applied for the room, so the
+ *  host thread is keyed on the tenancy's own application. */
 export function RentalMessagesTab({
   occupancy,
-  subletRequests,
 }: {
   occupancy: UserOccupancy;
-  subletRequests: SubletRequest[];
+  subletRequests?: SubletRequest[];
 }) {
   const threads = useMemo<Thread[]>(() => {
     const out: Thread[] = [];
     const applicationId = occupancy.applicationId;
-    if (applicationId) {
+    const subletFromId = occupancy.subletFromRequestId;
+    if (occupancy.subletFromHostThread && subletFromId) {
+      // Took the room over through a sublet: the host thread is kept with that sublet, not the renter's application.
+      out.push({
+        key: "host",
+        label: occupancy.hostName ? `Host · ${occupancy.hostName}` : "Host / Manager",
+        placeholder: "Message the host or authorized manager…",
+        emptyText: "No messages yet. Ask the host anything about this rental.",
+        load: () => listSubletMessages(subletFromId, "host"),
+        send: (body) => sendSubletMessage(subletFromId, body, "host"),
+      });
+    } else if (applicationId) {
       out.push({
         key: "host",
         label: occupancy.hostName ? `Host · ${occupancy.hostName}` : "Host / Manager",
@@ -43,32 +54,8 @@ export function RentalMessagesTab({
         send: (body) => sendRenterApplicationMessage(applicationId, body),
       });
     }
-    const subletFromId = occupancy.subletFromRequestId;
-    if (subletFromId) {
-      const name = occupancy.subletFromRenterName || "the renter";
-      out.push({
-        key: `sublet-${subletFromId}`,
-        label: `${occupancy.subletFromRenterName || "Renter"} · you sublet from`,
-        placeholder: `Message ${name}…`,
-        emptyText: `No messages yet. You can reach ${name}, who sublet this room to you, here.`,
-        load: () => listSubletMessages(subletFromId),
-        send: (body) => sendSubletMessage(subletFromId, body),
-      });
-    }
-    for (const request of subletRequests) {
-      if (request.currentOccupancyId !== occupancy.id || request.status === "draft" || !request.proposedRenterPartyId) continue;
-      const name = request.proposedRenterName || "your subtenant";
-      out.push({
-        key: `sublet-${request.id}`,
-        label: `${request.proposedRenterName || "Subtenant"} · your sublet`,
-        placeholder: `Message ${name}…`,
-        emptyText: `No messages yet. You can reach ${name} about this sublet here.`,
-        load: () => listSubletMessages(request.id),
-        send: (body) => sendSubletMessage(request.id, body),
-      });
-    }
     return out;
-  }, [occupancy, subletRequests]);
+  }, [occupancy]);
 
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const selected = threads.find((t) => t.key === selectedKey) ?? threads[0];
@@ -120,6 +107,39 @@ export function SubletChatThread({ subletRequestId, counterpartName }: { subletR
       send={send}
       placeholder={`Message ${counterpartName}…`}
       emptyText={`No messages yet. You can reach ${counterpartName} about this sublet here.`}
+    />
+  );
+}
+
+/** The private thread between the host and the person added to a room (a co-tenant or permitted occupant),
+ *  from either side. The renter who asked can't see it. */
+export function SubletHostChatThread({
+  subletRequestId,
+  side,
+  counterpartName,
+}: {
+  subletRequestId: number;
+  side: "host" | "occupant";
+  counterpartName: string;
+}) {
+  const load = useCallback(
+    () => (side === "host" ? listHostedSubletMessages(subletRequestId) : listSubletMessages(subletRequestId, "host")),
+    [subletRequestId, side],
+  );
+  const send = useCallback(
+    (body: string) => (side === "host" ? sendHostedSubletMessage(subletRequestId, body) : sendSubletMessage(subletRequestId, body, "host")),
+    [subletRequestId, side],
+  );
+  return (
+    <RentalChatThread
+      load={load}
+      send={send}
+      placeholder={`Message ${counterpartName}…`}
+      emptyText={
+        side === "host"
+          ? `No messages yet. This is a private thread between you and ${counterpartName}.`
+          : `No messages yet. Ask ${counterpartName} anything about sharing this room.`
+      }
     />
   );
 }

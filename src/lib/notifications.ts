@@ -107,6 +107,11 @@ export function resolveNotificationHref(
   // Sublet notifications that only ever go to the host (backend/app/crud/sublet.py
   // sends them to the listing's party) -- the host decides sublet requests, so
   // they open the host review page, never the renter's own /account/sublets.
+  // A message from the person added to / taking over the room opens that sublet's details, with its chat.
+  if (notificationType === "sublet_message.host_received") {
+    const subletId = (relatedEntityId ?? "").split(":")[0];
+    return subletId ? `/account/host/sublet-requests?open=${encodeURIComponent(subletId)}` : "/account/host/sublet-requests";
+  }
   if (
     notificationType === "sublet_request.submitted" ||
     notificationType === "sublet_request.tenant_response_submitted" ||

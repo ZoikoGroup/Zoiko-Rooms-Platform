@@ -25,11 +25,10 @@ from app.services.eligibility import jurisdiction_gates_pass, listing_publicatio
 from app.services.verification_requirements import resolve_verification_requirements
 
 
-def check_room_capacity(db, room: Room, *, exclude_occupancy_id: int | None = None) -> list[str]:
-    """Blocks move-in once a room already holds max_occupants live tenancies.
-    Previously nothing checked this at all -- two independent tenancies could
-    silently double-book the same room. exclude_occupancy_id lets a re-check on
-    an occupancy already counted (e.g. re-running eligibility) skip itself."""
+def room_occupant_count(db, room: Room, *, exclude_occupancy_id: int | None = None) -> int:
+    """How many people hold a place in the room right now: live tenancies, plus approved co-tenants
+    sharing a renter's room. exclude_occupancy_id lets a re-check on an occupancy already counted
+    (e.g. re-running eligibility) skip itself."""
     query = select(func.count()).select_from(Occupancy).where(
         Occupancy.room_id == room.id,
         Occupancy.status.in_(("PENDING_MOVE_IN", "ACTIVE")),
@@ -52,6 +51,14 @@ def check_room_capacity(db, room: Room, *, exclude_occupancy_id: int | None = No
             SubletRequest.new_agreement_id.is_(None),
         )
     ) or 0
+    return current_occupants
+
+
+def check_room_capacity(db, room: Room, *, exclude_occupancy_id: int | None = None) -> list[str]:
+    """Blocks move-in once a room already holds max_occupants live tenancies.
+    Previously nothing checked this at all -- two independent tenancies could
+    silently double-book the same room."""
+    current_occupants = room_occupant_count(db, room, exclude_occupancy_id=exclude_occupancy_id)
     if current_occupants >= room.max_occupants:
         return [f"Room is already at capacity ({current_occupants}/{room.max_occupants} occupants)"]
     return []

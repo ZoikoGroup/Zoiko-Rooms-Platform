@@ -1,5 +1,7 @@
 from datetime import date, datetime
 
+from typing import Literal
+
 from pydantic import field_validator
 
 from app.models.market_policy import DEPOSIT_INSTRUMENT_ALLOWED_VALUES
@@ -31,6 +33,9 @@ class MarketPolicyPackCreate(CamelModel):
     sublet_max_rent_multiple_of_original: float = 1.0
     sublet_assignment_payee_model: str = "HOST_OR_LANDLORD_PAYEE"
     sublet_sublease_payee_model: str = "ORIGINAL_RENTER_PAYEE"
+    # "E_SIGNATURE": a sublease / lodger / co-tenant agreement must actually be signed by the host and the
+    # person added before it takes effect. "NONE": it is treated as signed when the host approves.
+    sublet_signature_mode: Literal["NONE", "E_SIGNATURE"] = "NONE"
 
     rent_change_min_interval_days: int = 365
 
@@ -90,6 +95,7 @@ class MarketPolicyPackUpdate(CamelModel):
     sublet_max_rent_multiple_of_original: float | None = None
     sublet_assignment_payee_model: str | None = None
     sublet_sublease_payee_model: str | None = None
+    sublet_signature_mode: Literal["NONE", "E_SIGNATURE"] | None = None
 
     rent_change_min_interval_days: int | None = None
 
@@ -147,6 +153,7 @@ class MarketPolicyPackRead(CamelModel):
     sublet_max_rent_multiple_of_original: float
     sublet_assignment_payee_model: str
     sublet_sublease_payee_model: str
+    sublet_signature_mode: str
 
     rent_change_min_interval_days: int
 

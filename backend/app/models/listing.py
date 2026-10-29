@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -131,6 +131,10 @@ class Listing(Base):
     # creation, which has been removed (offers are always created manually
     # by the host). Kept so existing rows/API payloads stay valid; nothing
     # reads them any more.
+    # The first day the room can be moved into, as the host states it (None = available now). A live
+    # fact like rating: not part of the versioned content, so changing it never needs a re-review.
+    available_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+
     default_monthly_rent: Mapped[float | None] = mapped_column(Float, nullable=True)
     default_deposit_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     default_term_months: Mapped[int | None] = mapped_column(Integer, nullable=True)

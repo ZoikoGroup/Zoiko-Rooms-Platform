@@ -195,6 +195,15 @@ def _get_agreement_or_409(db: Session, occupancy: Occupancy) -> Agreement:
     return agreement
 
 
+def _host_party_id(listing: Listing) -> int | None:
+    """Who to tell on the host side: the property's owning party, as every host
+    permission check uses (party_id_for_listing). Listing.party_id is empty on
+    admin-created listings, so reading only it left those hosts un-notified."""
+    if listing.room is not None:
+        return party_id_for_listing(listing)
+    return listing.party_id
+
+
 def _notify_case_opened(db: Session, case: TerminationCase, occupancy: Occupancy, *, notify_party: bool) -> None:
     listing = db.get(Listing, occupancy.listing_id)
     if not listing:
@@ -207,10 +216,10 @@ def _notify_case_opened(db: Session, case: TerminationCase, occupancy: Occupancy
         date_phrase = f"proposed for {case.earliest_effective_date.isoformat()}"
     else:
         date_phrase = f"effective {case.earliest_effective_date.isoformat()}"
-    if notify_party and listing.party_id:
+    if notify_party and _host_party_id(listing):
         title = "A renter has requested to end their tenancy"
         notif_crud.notify_user_by_party(
-            db, listing.party_id,
+            db, _host_party_id(listing),
             title=title,
             message=f'A termination notice was submitted for "{listing.name}", {date_phrase}.',
             notification_type="termination_case.opened",
@@ -540,9 +549,9 @@ def _notify_surrender_response(db: Session, case: TerminationCase, *, accepted: 
             notification_type="termination_case.surrender_responded",
             related_entity_type="termination_case", related_entity_id=str(case.id),
         )
-    elif listing.party_id:
+    elif _host_party_id(listing):
         notif_crud.notify_user_by_party(
-            db, listing.party_id,
+            db, _host_party_id(listing),
             title=f"Your renter {verb} your mutual surrender proposal",
             message=f'Your proposal to end "{listing.name}" was {verb}.',
             notification_type="termination_case.surrender_responded",
@@ -745,9 +754,30 @@ def acknowledge_notice(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "An acknowledging party is required")
     if case.notice_acknowledged_at is None:
         case.notice_acknowledged_at = datetime.now(timezone.utc)
+        _notify_notice_acknowledged(db, case)
         db.commit()
         db.refresh(case)
     return case
+
+
+def _notify_notice_acknowledged(db: Session, case: TerminationCase) -> None:
+    """Tells whoever gave the notice that the other side has received it."""
+    listing = db.get(Listing, case.occupancy.listing_id)
+    room = f'"{listing.name}"' if listing else "the room"
+    entity = {
+        "notification_type": "termination_case.notice_acknowledged",
+        "related_entity_type": "termination_case", "related_entity_id": str(case.id),
+    }
+    if case.initiator_guest_id is not None:
+        notif_crud.notify_user_by_guest(
+            db, case.occupancy.guest, title="Your host received your notice",
+            message=f"Your host confirmed they received your notice to end the tenancy for {room}.", **entity,
+        )
+    elif listing is not None:
+        notif_crud.notify_user_by_party(
+            db, _host_party_id(listing), title="Your renter received your notice",
+            message=f"Your renter confirmed they received your notice to end the tenancy for {room}.", **entity,
+        )
 
 
 _TERMINAL_CASE_STATUSES = ("TERMINATED", "WITHDRAWN", "REJECTED_PATHWAY")

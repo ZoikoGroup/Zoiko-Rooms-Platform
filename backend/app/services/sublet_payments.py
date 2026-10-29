@@ -63,7 +63,10 @@ REASON_TEXT = {
     "PAYEE_MISSING": "We couldn't identify who should receive this payment.",
     "PAYMENT_SETUP_INCOMPLETE": "Payment setup incomplete -- the payee hasn't added confirmed bank or UPI details yet.",
     "DEPOSIT_ROUTE_UNRESOLVED": "Where the deposit must be paid isn't settled yet, so the deposit can't be paid.",
-    "CUSTODIAN_DETAILS_MISSING": "The deposit must go to a deposit protection scheme, but the scheme's details haven't been added.",
+    "CUSTODIAN_DETAILS_MISSING": (
+        "The deposit must go to a deposit protection scheme, but the scheme's details haven't been added yet. "
+        "The landlord or the original tenant adds them under Sublet payments, and you'll be told as soon as they do."
+    ),
     "DEPOSIT_TO_SUBLESSOR_NOT_PERMITTED": "In this country the deposit can't be paid to the original tenant.",
 }
 
@@ -720,6 +723,55 @@ def _notify_setup_incomplete(db: Session, a: SubletPaymentArrangement) -> None:
             notification_type="sublet.payee_setup_incomplete", related_entity_type="sublet_request",
             related_entity_id=str(a.sublet_request_id))
         db.commit()
+    _notify_custodian_missing(db, a, result)
+
+
+def _notify_custodian_missing(db: Session, a: SubletPaymentArrangement, result: dict) -> None:
+    """The deposit has to go to a protection scheme but its details aren't in yet. Only the landlord and the
+    original tenant can add them, so they are the ones told -- not the incoming tenant who is stuck waiting
+    (they hear when it's fixed, from the arrangement update). One notice per sublet."""
+    if "CUSTODIAN_DETAILS_MISSING" not in result["deposit"]["reason_codes"]:
+        return
+    from app.crud import notification as notif_crud
+
+    sublet = db.get(SubletRequest, a.sublet_request_id)
+    if sublet is None:
+        return
+    who = _party_name(db, sublet.proposed_renter_party_id) or "The incoming tenant"
+    for party_id in dict.fromkeys([landlord_payee(db, sublet)[0], sublessor_party_id(db, sublet)]):
+        if not party_id:
+            continue
+        notif_crud.notify_user_by_party(
+            db, party_id, title="Add the deposit protection scheme details",
+            message=(
+                f"{who} can't pay the deposit until the deposit protection scheme's name and payment instructions are "
+                "added. Open Sublet payments for this sublet and add them."
+            ),
+            notification_type="sublet.deposit_setup_incomplete", related_entity_type="sublet_request",
+            related_entity_id=str(a.sublet_request_id))
+    db.commit()
+
+
+def remind_missing_custodian_details(db: Session) -> int:
+    """Scheduler job: tells the landlord and the original tenant about any live sublet whose deposit can't
+    be paid yet because the protection scheme's details are missing -- including ones approved before that
+    notice existed. One notice per sublet (the notification dedupe), so this is quiet once they've been told."""
+    from app.models.notification import Notification
+
+    told = 0
+    for a in db.scalars(select(SubletPaymentArrangement).where(SubletPaymentArrangement.status == "ACTIVE")):
+        sublet = db.get(SubletRequest, a.sublet_request_id)
+        if sublet is None or sublet.status != "approved":
+            continue
+        before = db.scalar(select(Notification.id).where(
+            Notification.notification_type == "sublet.deposit_setup_incomplete",
+            Notification.related_entity_id == str(a.sublet_request_id)))
+        _notify_custodian_missing(db, a, evaluate(db, a))
+        if before is None and db.scalar(select(Notification.id).where(
+                Notification.notification_type == "sublet.deposit_setup_incomplete",
+                Notification.related_entity_id == str(a.sublet_request_id))) is not None:
+            told += 1
+    return told
 
 
 def on_payment_confirmed(db: Session, obligation: RentalPaymentObligation) -> None:

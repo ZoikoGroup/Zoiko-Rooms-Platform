@@ -25,6 +25,7 @@ and jurisdiction gates.
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.crud.authority import get_valid_authority_for_room
@@ -96,3 +97,70 @@ def failed_gate_visibility_allowed(db: Session, room: Room, market_release: Mark
     if not jurisdiction_gates_pass(db, room, market_release):
         return True
     return get_policy(market_release, "visibility.failed_gate_behavior") == "visible_unbookable"
+
+
+# Where a host goes to fix an authority problem.
+HOST_VERIFICATION_PATH = "/account/host/verification"
+SUPPORT_PATH = "/account/support"
+
+
+def _authority_fix(db: Session, room: Room) -> dict:
+    """Why this room has no valid authority record, in the host's words, and where to fix it."""
+    from app.models.authority_verification import AuthorityVerification
+    from app.services.authority_service import describe, effective_state
+
+    latest = db.scalar(
+        select(AuthorityVerification)
+        .where(
+            AuthorityVerification.property_id == room.property_id,
+            AuthorityVerification.party_id == room.property.owner_party_id,
+        )
+        .order_by(AuthorityVerification.id.desc())
+    )
+    fix = {"code": "AUTHORITY", "href": HOST_VERIFICATION_PATH, "label": "Open Verification"}
+    if latest is None:
+        return {**fix, "status": "NOT_STARTED", "message": (
+            "You haven't completed authority verification for this property yet. Verify your authority to let it, "
+            "then come back and create the agreement.")}
+    state = effective_state(latest)
+    if state == "EXPIRED":
+        return {**fix, "status": "EXPIRED", "message": (
+            "Your authority verification for this property has expired. Renew it to continue.")}
+    if state == "REVOKED":
+        why = describe([latest.revocation_reason_code])["message"]
+        return {**fix, "status": "REVOKED", "message": (
+            "Your authority verification for this property was withdrawn" + (f": {why}" if why else ".")
+            + " Renew it to continue.")}
+    if state == "COLLECTING":
+        return {**fix, "status": "NOT_SUBMITTED", "message": (
+            "You started authority verification for this property but haven't submitted it yet. Finish and submit it.")}
+    if state in ("SUBMITTED", "MANUAL_REVIEW"):
+        return {**fix, "status": "CHECKING", "message": (
+            "Your authority verification is still being checked. You can create the agreement as soon as it's verified."),
+            "label": "View progress"}
+    if state == "ACTION_REQUIRED":
+        why = describe(latest.reason_codes or [])["message"]
+        return {**fix, "status": "ACTION_REQUIRED", "message": (
+            "Your authority verification needs your attention" + (f": {why}" if why else ".")), "label": "Fix it now"}
+    if state == "REJECTED":
+        return {**fix, "status": "REJECTED", "message": (
+            "Your authority verification for this property wasn't accepted. Start a new one with the right documents.")}
+    if latest.state == "VERIFIED" and latest.room_scope_ids and room.id not in latest.room_scope_ids:
+        return {**fix, "status": "ROOM_NOT_COVERED", "message": (
+            "Your verified authority for this property doesn't cover this room. Add the room to it.")}
+    return {**fix, "status": state, "message": "Your authority verification for this property isn't current. Review it."}
+
+
+def agreement_fix_hints(db: Session, room: Room) -> list[dict]:
+    """What the host can do about the authority and classification reasons that block creating an
+    agreement (jurisdiction_gates_pass): each with a plain-language message and where to go."""
+    hints: list[dict] = []
+    if get_valid_authority_for_room(db, room.id) is None:
+        hints.append(_authority_fix(db, room))
+    classification = get_classification_for_room(db, room.id)
+    if not classification or classification.review_state in ("UNKNOWN", "UNSUPPORTED"):
+        hints.append({
+            "code": "CLASSIFICATION", "status": "UNRESOLVED", "href": SUPPORT_PATH, "label": "Contact support",
+            "message": "This room's occupancy classification isn't set up. Contact support and we'll sort it out.",
+        })
+    return hints

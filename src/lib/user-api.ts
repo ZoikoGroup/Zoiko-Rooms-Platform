@@ -145,6 +145,25 @@ export function listPublicListings(filters: PublicListingFilters = {}): Promise<
   return apiClientFetch<PublicListingsPage>(`/api/public/listings?${params.toString()}`);
 }
 
+/** Every public listing, read page by page. The endpoint returns at most 100 per request, so a
+ *  single call silently drops everything after the first 100 rooms. Stops when the server says
+ *  there is no more, and at a sanity cap so a misbehaving server can't loop forever. */
+export async function listAllPublicListings(
+  filters: Omit<PublicListingFilters, "limit" | "offset"> = {},
+  maxListings = 2000,
+): Promise<PublicListingsPage> {
+  const pageSize = 100;
+  const items: PublicListingsPage["items"] = [];
+  let total = 0;
+  while (items.length < maxListings) {
+    const page = await listPublicListings({ ...filters, limit: pageSize, offset: items.length });
+    total = page.total;
+    items.push(...page.items);
+    if (!page.hasMore || page.items.length === 0) break;
+  }
+  return { items, limit: pageSize, offset: 0, total, hasMore: items.length < total };
+}
+
 /** Single-listing detail view -- same PUBLISHED-only visibility as the list endpoint. */
 export function getPublicListing(listingId: string): Promise<PublicListing> {
   return apiClientFetch<PublicListing>(`/api/public/listings/${listingId}`);
@@ -400,6 +419,8 @@ export function submitSubletRequest(
     authorityEvidenceRef?: string;
     arrangementType?: SubletArrangementType;
     proposedMonthlyRent?: number;
+    /** The new occupant's own deposit; 0 = none, omitted = same as the original tenancy's. */
+    proposedDepositAmount?: number;
     reason?: string;
     proposedStartDate?: string;
     proposedEndDate?: string;
@@ -435,13 +456,6 @@ export function listCoTenancies(): Promise<SubletRequest[]> {
 }
 
 /** The named co-tenant accepts (sends it to the host) or declines (closes it). */
-export function respondToCoTenancy(subletRequestId: number, accept: boolean): Promise<SubletRequest> {
-  return apiClientFetch<SubletRequest>(`/api/users/rentals/co-tenancies/${subletRequestId}/respond`, {
-    method: "POST",
-    body: JSON.stringify({ accept }),
-  });
-}
-
 /** The renter or the co-tenant ends a shared room. */
 export function endCoTenancy(subletRequestId: number, reason = ""): Promise<SubletRequest> {
   return apiClientFetch<SubletRequest>(`/api/users/rentals/co-tenancies/${subletRequestId}/end`, {
@@ -629,7 +643,7 @@ export function listHostedRooms(propertyId: number): Promise<Room[]> {
 
 export function createHostedRoom(
   propertyId: number,
-  payload: { size: number; hasEnsuite: boolean }
+  payload: { size: number; hasEnsuite: boolean; maxOccupants?: number }
 ): Promise<Room> {
   return apiClientFetch<Room>(`/api/users/hosting/properties/${propertyId}/rooms`, {
     method: "POST",
@@ -640,7 +654,7 @@ export function createHostedRoom(
 export function updateHostedRoom(
   propertyId: number,
   roomId: number,
-  payload: { size: number; hasEnsuite: boolean }
+  payload: { size: number; hasEnsuite: boolean; maxOccupants?: number }
 ): Promise<Room> {
   return apiClientFetch<Room>(`/api/users/hosting/properties/${propertyId}/rooms/${roomId}`, {
     method: "PUT",
@@ -746,6 +760,8 @@ export interface HostedListingInput {
   amenities: string[];
   images: string[];
   minStayNights: number;
+  /** First day the room can be moved into; null = available now. */
+  availableFrom?: string | null;
   roomId: number;
   contactName: string;
   contactPhone: string;
@@ -892,12 +908,24 @@ export function sendRenterApplicationMessage(applicationId: number, body: string
 // --- Renter <-> subtenant messages (one thread per sublet request) ------------
 
 /** Either side of a sublet; opening the thread marks the other side's messages read. */
-export function listSubletMessages(subletRequestId: number): Promise<RentalMessage[]> {
-  return apiClientFetch<RentalMessage[]>(`/api/users/rentals/sublet-requests/${subletRequestId}/messages`);
+/** thread "host" = the co-tenant's (or permitted occupant's) private thread with the host. */
+export function listSubletMessages(subletRequestId: number, thread: "peer" | "host" = "peer"): Promise<RentalMessage[]> {
+  return apiClientFetch<RentalMessage[]>(`/api/users/rentals/sublet-requests/${subletRequestId}/messages?thread=${thread}`);
 }
 
-export function sendSubletMessage(subletRequestId: number, body: string): Promise<RentalMessage> {
-  return apiClientFetch<RentalMessage>(`/api/users/rentals/sublet-requests/${subletRequestId}/messages`, {
+export function sendSubletMessage(subletRequestId: number, body: string, thread: "peer" | "host" = "peer"): Promise<RentalMessage> {
+  return apiClientFetch<RentalMessage>(`/api/users/rentals/sublet-requests/${subletRequestId}/messages?thread=${thread}`, {
+    method: "POST", body: JSON.stringify({ body }),
+  });
+}
+
+/** The host's side of that thread. */
+export function listHostedSubletMessages(subletRequestId: number): Promise<RentalMessage[]> {
+  return apiClientFetch<RentalMessage[]>(`/api/users/hosting/sublet-requests/${subletRequestId}/messages`);
+}
+
+export function sendHostedSubletMessage(subletRequestId: number, body: string): Promise<RentalMessage> {
+  return apiClientFetch<RentalMessage>(`/api/users/hosting/sublet-requests/${subletRequestId}/messages`, {
     method: "POST", body: JSON.stringify({ body }),
   });
 }
@@ -1488,6 +1516,10 @@ function makeDisputeClient(basePath: string) {
     evidenceFileUrl(caseId: number, evidenceId: number): string {
       return `${API_URL}${basePath}/${caseId}/evidence/${evidenceId}/file`;
     },
+    /** The person who opened a resolved/closed dispute deletes it from their own view (no admin step). */
+    removeCase(caseId: number): Promise<void> {
+      return apiClientFetch<void>(`${basePath}/${caseId}/remove`, { method: "POST" });
+    },
     requestEvidenceDeletion(caseId: number, evidenceId: number): Promise<DisputeEvidenceRead> {
       return apiClientFetch<DisputeEvidenceRead>(`${basePath}/${caseId}/evidence/${evidenceId}/delete`, { method: "POST" });
     },
@@ -1971,4 +2003,33 @@ export interface PublicReview {
 
 export function listPublicListingReviews(listingId: string): Promise<PublicReview[]> {
   return apiClientFetch<PublicReview[]>(`/api/public/listings/${encodeURIComponent(listingId)}/reviews`);
+}
+
+// --- Host sublet policy (Sublet Requests > Sublet policy settings) ---
+
+export interface HostSubletPolicy {
+  minNoticeEnabled: boolean;
+  minNoticeDays: number;
+}
+
+export function getHostSubletPolicy(): Promise<HostSubletPolicy> {
+  return apiClientFetch<HostSubletPolicy>("/api/users/hosting/sublet-policy");
+}
+
+export function saveHostSubletPolicy(policy: HostSubletPolicy): Promise<HostSubletPolicy> {
+  return apiClientFetch<HostSubletPolicy>("/api/users/hosting/sublet-policy", { method: "PUT", body: JSON.stringify(policy) });
+}
+
+// --- Indicative exchange rates (Find a Room price filter only) ---
+
+export interface ExchangeRates {
+  base: string;
+  /** US dollars one unit of each currency is worth -- indicative, never used for payments. */
+  usdPerUnit: Record<string, number>;
+  asOf: string | null;
+  indicative: boolean;
+}
+
+export function getExchangeRates(): Promise<ExchangeRates> {
+  return apiClientFetch<ExchangeRates>("/api/public/exchange-rates");
 }

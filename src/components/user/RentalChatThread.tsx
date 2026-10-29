@@ -62,7 +62,7 @@ export function RentalChatThread({
 
   return (
     <div className="space-y-3">
-      <div className="max-h-[45vh] min-h-32 space-y-2 overflow-y-auto rounded-2xl border border-[#E1E7F1] bg-[#F7F9FD] p-3">
+      <div className="max-h-[50vh] min-h-32 space-y-2 overflow-y-auto rounded-2xl border border-[#E1E7F1] bg-[#F7F9FD] p-3">
         {messages === null ? (
           <p className="text-xs text-[#5B6886]">Loading messages…</p>
         ) : messages.length === 0 ? (
@@ -71,7 +71,7 @@ export function RentalChatThread({
           messages.map((m) => (
             <div key={m.id} className={`flex ${m.mine ? "justify-end" : "justify-start"}`}>
               <div
-                className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm ${
+                className={`max-w-[88%] sm:max-w-[80%] rounded-2xl px-3 py-2 text-sm ${
                   m.mine ? "bg-[#0E2F73] text-white" : "border border-[#E1E7F1] bg-white text-[#0B1B3F]"
                 }`}
               >
@@ -99,14 +99,14 @@ export function RentalChatThread({
           onKeyDown={(e) => {
             if (e.key === "Enter") handleSend();
           }}
-          className="h-11 flex-1 rounded-xl border border-[#E1E7F1] bg-white px-3 text-sm outline-none focus:border-[#0E2F73]"
+          className="h-11 min-w-0 flex-1 rounded-xl border border-[#E1E7F1] bg-white px-3 text-base sm:text-sm outline-none focus:border-[#0E2F73]"
         />
         <button
           type="button"
           onClick={handleSend}
           disabled={sending || !input.trim()}
           aria-label="Send message"
-          className="inline-flex h-11 w-11 items-center justify-center rounded-xl bg-[#0E2F73] text-white transition-colors hover:bg-[#0B2560] disabled:opacity-50"
+          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#0E2F73] text-white transition-colors hover:bg-[#0B2560] disabled:opacity-50"
         >
           <Send className="h-4 w-4" />
         </button>
