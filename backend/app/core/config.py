@@ -257,7 +257,7 @@ class Settings(BaseSettings):
 
     frontend_url: str = "http://localhost:3000"
     # Site address put in links inside emails (password reset, confirmations, "open the website"
-    # buttons). Empty = use frontend_url. Kept apart from frontend_url because that one is also where
+    # buttons). Empty = the live site (app.zoikorooms.com). Kept apart from frontend_url because that one is also where
     # Stripe and Veriff send people back to, which has to stay on the machine running the app.
     public_site_url: str = ""
     # Indicative exchange-rate overrides for the Find a Room price filter (see app/core/fx.py):
@@ -438,13 +438,13 @@ class Settings(BaseSettings):
     def email_site_url(self) -> str:
         """Base address for links written into emails, no trailing slash.
 
-        PUBLIC_SITE_URL, else FRONTEND_URL. In production an address that isn't a public https one
-        (localhost, or nothing set) would give every email button a dead link, so it falls back to
-        the live site instead."""
-        url = (self.public_site_url.strip() or self.frontend_url).rstrip("/")
-        if self.is_production and (not url.startswith("https://") or "localhost" in url):
-            return PRODUCTION_SITE_URL
-        return url
+        Always the live site (app.zoikorooms.com), in every environment -- an email is read away from the
+        machine that sent it, so a localhost link is never useful. Only an explicit PUBLIC_SITE_URL that is a
+        public https address (e.g. a staging site) overrides it; FRONTEND_URL is never used for emails."""
+        url = self.public_site_url.strip().rstrip("/")
+        if url.startswith("https://") and "localhost" not in url and "127.0.0.1" not in url:
+            return url
+        return PRODUCTION_SITE_URL
 
     @property
     def is_production(self) -> bool:

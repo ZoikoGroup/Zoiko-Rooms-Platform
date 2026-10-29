@@ -42,12 +42,11 @@ services:
         value: secure_uploads/identity
       - key: IDENTITY_DOCUMENT_MAX_SIZE_MB
         value: "10"
-      # The deployed frontend address (Stripe Checkout and Veriff send people back here). Email buttons use
-      # PUBLIC_SITE_URL below, falling back to this.
+      # The deployed frontend address (Stripe Checkout and Veriff send people back here). Not used for emails.
       - key: FRONTEND_URL
         sync: false
       # The public site address written into every button/link in emails (confirm email,
-      # reset password, "choose your path"). Without it emails fall back to FRONTEND_URL.
+      # reset password, "choose your path"). Emails always use the live site; only a public https value here overrides it.
       - key: PUBLIC_SITE_URL
         value: https://app.zoikorooms.com
       - key: PASSWORD_RESET_TOKEN_EXPIRE_MINUTES

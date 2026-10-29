@@ -20,24 +20,22 @@ def site(monkeypatch):
 
 
 class TestEmailSiteUrl:
-    def test_local_development_uses_the_local_site(self, site):
-        assert site(environment="development", frontend_url="http://localhost:3000") == "http://localhost:3000"
+    def test_local_development_still_links_to_the_live_site(self, site):
+        assert site(environment="development", frontend_url="http://localhost:3000") == PRODUCTION_SITE_URL
 
-    def test_public_site_url_wins_when_set(self, site):
-        assert site(environment="development", frontend_url="http://localhost:3000",
-                    public_site_url="https://app.zoikorooms.com/") == "https://app.zoikorooms.com"
+    def test_frontend_url_is_never_used_for_emails(self, site):
+        assert site(environment="production", frontend_url="https://staging.zoikorooms.com") == PRODUCTION_SITE_URL
 
-    def test_production_never_links_to_localhost(self, site):
-        assert site(environment="production", frontend_url="http://localhost:3000") == PRODUCTION_SITE_URL
-
-    def test_production_with_nothing_set_falls_back_to_the_live_site(self, site):
+    def test_nothing_set_uses_the_live_site(self, site):
         assert site(environment="production", frontend_url="") == PRODUCTION_SITE_URL
 
-    def test_production_with_a_plain_http_address_falls_back_to_the_live_site(self, site):
-        assert site(environment="production", frontend_url="http://app.zoikorooms.com") == PRODUCTION_SITE_URL
+    def test_an_explicit_public_https_site_url_wins(self, site):
+        assert site(environment="development", frontend_url="http://localhost:3000",
+                    public_site_url="https://staging.zoikorooms.com/") == "https://staging.zoikorooms.com"
 
-    def test_production_keeps_a_configured_https_address(self, site):
-        assert site(environment="production", frontend_url="https://staging.zoikorooms.com") == "https://staging.zoikorooms.com"
+    @pytest.mark.parametrize("bad", ["http://localhost:3000", "https://localhost", "http://app.zoikorooms.com", "https://127.0.0.1:3000"])
+    def test_a_localhost_or_plain_http_public_site_url_is_ignored(self, site, bad):
+        assert site(environment="development", frontend_url="http://localhost:3000", public_site_url=bad) == PRODUCTION_SITE_URL
 
 
 class TestEmailButtons:
