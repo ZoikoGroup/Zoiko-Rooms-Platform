@@ -24,7 +24,7 @@ from app.services.chat_service import (
 # it will reuse the same service layer once it ships.
 router = APIRouter(prefix="/api/admin/chat", tags=["chatbot"], dependencies=[Depends(get_current_admin)])
 
-MAX_HISTORY_MESSAGES = 30
+MAX_HISTORY_MESSAGES = 12
 TITLE_MAX_LENGTH = 60
 
 logger = logging.getLogger("zoiko.chatbot")

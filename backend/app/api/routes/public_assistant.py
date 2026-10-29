@@ -37,7 +37,7 @@ from app.schemas.public_assistant import (
     PublicAssistantTurn,
     PublicCitation,
 )
-from app.services.chat_service import ChatServiceError, build_client
+from app.services.chat_service import ChatServiceError, build_client, create_completion
 from app.services.guardrails import (
     DETERMINATION_NOTICE,
     classify_action_tier,
@@ -167,7 +167,8 @@ def _sanitised_history(items: list[PublicAssistantHistoryItem]) -> list[dict]:
 def _compose_answer(messages: list[dict]) -> str:
     """Single, non-streaming completion. Patched in tests."""
     client = build_client()
-    completion = client.chat.completions.create(
+    completion = create_completion(
+        client,
         model=settings.groq_model,
         messages=messages,
         max_tokens=700,

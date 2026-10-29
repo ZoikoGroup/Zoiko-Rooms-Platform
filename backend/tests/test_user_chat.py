@@ -229,3 +229,59 @@ class TestUserToolRegistry:
         assert "list_guests" not in names
         assert "revenue_trend" not in names
         assert "search_platform" not in names
+
+
+class TestGroqRateLimitRetry:
+    """A 429 from Groq is retried after a short wait instead of surfacing
+    "Assistant is busy" straight away."""
+
+    @staticmethod
+    def _rate_limited(retry_after: str | None = None):
+        from groq import RateLimitError
+
+        headers = {"retry-after": retry_after} if retry_after is not None else {}
+        return RateLimitError(
+            message="rate limited",
+            response=MagicMock(status_code=429, headers=headers),
+            body=None,
+        )
+
+    def test_retries_short_rate_limit_then_succeeds(self):
+        from app.services import chat_service as cs
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [self._rate_limited("2"), "ok"]
+        with patch.object(cs.time, "sleep") as sleep:
+            assert cs.create_completion(client, model="m") == "ok"
+        sleep.assert_called_once_with(2.0)
+        assert client.chat.completions.create.call_count == 2
+
+    def test_gives_up_after_max_attempts(self):
+        from groq import RateLimitError
+
+        from app.services import chat_service as cs
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [self._rate_limited() for _ in range(5)]
+        with patch.object(cs.time, "sleep"):
+            try:
+                cs.create_completion(client, model="m")
+                raise AssertionError("expected RateLimitError")
+            except RateLimitError:
+                pass
+        assert client.chat.completions.create.call_count == cs.RATE_LIMIT_RETRY_ATTEMPTS
+
+    def test_long_retry_after_surfaces_immediately(self):
+        from groq import RateLimitError
+
+        from app.services import chat_service as cs
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [self._rate_limited("600")]
+        with patch.object(cs.time, "sleep") as sleep:
+            try:
+                cs.create_completion(client, model="m")
+                raise AssertionError("expected RateLimitError")
+            except RateLimitError:
+                pass
+        sleep.assert_not_called()
