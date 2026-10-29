@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, useRef, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -199,23 +200,40 @@ export function HostingListingsManager() {
     "overview" | "content" | "availability" | "verification" | "applications" | "activity"
   >("overview");
 
-  // Three-dots menu open state
-  const [openMenuListingId, setOpenMenuListingId] = useState<string | null>(null);
-  const menuContainerRef = useRef<HTMLDivElement>(null);
+  // Portal-based Three-dots menu state
+  const [menuAnchor, setMenuAnchor] = useState<{
+    key: string;
+    listing: any;
+    rect: DOMRect;
+  } | null>(null);
+  const portalMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (menuContainerRef.current && !menuContainerRef.current.contains(event.target as Node)) {
-        setOpenMenuListingId(null);
+    if (!menuAnchor) return;
+
+    function handleClickOutside(event: MouseEvent | TouchEvent) {
+      const target = event.target as Node;
+      if (portalMenuRef.current && !portalMenuRef.current.contains(target)) {
+        setMenuAnchor(null);
       }
     }
-    if (openMenuListingId) {
-      document.addEventListener("mousedown", handleClickOutside);
+
+    function handleScrollOrResize() {
+      setMenuAnchor(null);
     }
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("touchstart", handleClickOutside);
+    window.addEventListener("scroll", handleScrollOrResize, true);
+    window.addEventListener("resize", handleScrollOrResize);
+
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("touchstart", handleClickOutside);
+      window.removeEventListener("scroll", handleScrollOrResize, true);
+      window.removeEventListener("resize", handleScrollOrResize);
     };
-  }, [openMenuListingId]);
+  }, [menuAnchor]);
 
   // Handle Stripe return checkout session
   useEffect(() => {
@@ -1221,12 +1239,192 @@ export function HostingListingsManager() {
     );
   }
 
+  // Render Three Dots Button (Portal-anchored, shared for Desktop & Mobile)
+  function renderThreeDotsButton(
+    l: (typeof mappedListings)[0],
+    isMobile = false
+  ) {
+    if (l.actionLabel === "View Review") return null;
+
+    const menuKey = isMobile ? `m-${l.id}` : String(l.id);
+
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          if (menuAnchor?.key === menuKey) {
+            setMenuAnchor(null);
+          } else {
+            const btnRect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            setMenuAnchor({
+              key: menuKey,
+              listing: l,
+              rect: btnRect,
+            });
+          }
+        }}
+        className={
+          isMobile
+            ? "size-10 rounded-full border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition cursor-pointer flex items-center justify-center shrink-0 shadow-2xs"
+            : "size-9 rounded-full flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 dark:hover:text-white transition cursor-pointer"
+        }
+        aria-label="More actions"
+      >
+        <MoreVertical className="size-4" />
+      </button>
+    );
+  }
+
+  // Render Portal Dropdown Menu attached to document.body
+  // Completely immune to parent overflow-hidden or overflow-x-auto clipping
+  function renderPortalMenu() {
+    if (typeof window === "undefined" || !menuAnchor) return null;
+
+    const { listing: l, rect } = menuAnchor;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    const menuHeightEstimate = 220;
+    const openUpward = spaceBelow < menuHeightEstimate && spaceAbove > spaceBelow;
+    const rightOffset = Math.max(12, window.innerWidth - rect.right);
+
+    const style: React.CSSProperties = {
+      position: "fixed",
+      right: `${rightOffset}px`,
+      zIndex: 9999,
+      ...(openUpward
+        ? { bottom: `${window.innerHeight - rect.top + 6}px` }
+        : { top: `${rect.bottom + 6}px` }),
+    };
+
+    return createPortal(
+      <div
+        ref={portalMenuRef}
+        onClick={(e) => e.stopPropagation()}
+        style={style}
+        className="w-48 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl py-1.5 animate-in fade-in zoom-in-95 duration-100"
+      >
+        <button
+          type="button"
+          onClick={() => {
+            setMenuAnchor(null);
+            setForm(toFormState(l.rawListing));
+          }}
+          className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
+        >
+          <Pencil className="size-3.5 text-slate-400" />
+          <span>Edit Listing</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setMenuAnchor(null);
+            router.push("/account/host/applications");
+          }}
+          className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
+        >
+          <FileText className="size-3.5 text-slate-400" />
+          <span>View Applications</span>
+        </button>
+
+        {l.rawListing.state === "APPROVED" && (
+          <button
+            type="button"
+            onClick={() => {
+              setMenuAnchor(null);
+              setPayingFeeListingId(l.id);
+            }}
+            className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
+          >
+            <Receipt className="size-3.5 text-slate-400" />
+            <span>Pay Listing Fee</span>
+          </button>
+        )}
+
+        {/* View Public Listing commented out as requested
+        {l.listingStatus === "LIVE" && (
+          <Link
+            href={`/listings/${l.id}`}
+            target="_blank"
+            onClick={() => setMenuAnchor(null)}
+            className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2"
+          >
+            <ExternalLink className="size-3.5 text-slate-400" />
+            <span>View Public Listing</span>
+          </Link>
+        )}
+        */}
+
+        {l.listingStatus === "LIVE" && (
+          <button
+            type="button"
+            onClick={async () => {
+              setMenuAnchor(null);
+              try {
+                await pauseHostedListing(l.id);
+                showToast(`Listing #${l.id} paused.`);
+                load();
+              } catch (err) {
+                showToast(errorMessage(err, "Could not pause listing"), "error");
+              }
+            }}
+            className="w-full text-left px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
+          >
+            <Pause className="size-3.5 text-slate-400" />
+            <span>Pause Listing</span>
+          </button>
+        )}
+
+        {l.rawListing.state === "PAUSED" && (
+          <button
+            type="button"
+            onClick={async () => {
+              setMenuAnchor(null);
+              try {
+                await resumeHostedListing(l.id);
+                showToast(`Listing #${l.id} is live again.`);
+                load();
+              } catch (err) {
+                showToast(errorMessage(err, "Could not resume listing"), "error");
+              }
+            }}
+            className="w-full text-left px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
+          >
+            <Eye className="size-3.5 text-slate-400" />
+            <span>Resume Listing</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={async () => {
+            setMenuAnchor(null);
+            try {
+              await archiveHostedListing(l.id);
+              showToast(`Listing #${l.id} archived.`);
+              load();
+            } catch (err) {
+              showToast(errorMessage(err, "Could not archive listing"), "error");
+            }
+          }}
+          className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#B42318] hover:bg-red-50 dark:hover:bg-red-950/20 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2 mt-1 cursor-pointer"
+        >
+          <Minus className="size-3.5 text-[#B42318]" />
+          <span>Archive</span>
+        </button>
+      </div>,
+      document.body
+    );
+  }
+
   if (loading) {
     return <Loader label="Loading listings..." />;
   }
 
   return (
     <div className="w-full space-y-5 font-sans">
+      {renderPortalMenu()}
       {/* 1. Page Header Section matching Figma Frame */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pt-1">
         <div className="space-y-1.5">
@@ -1717,8 +1915,11 @@ export function HostingListingsManager() {
                   </div>
                 </div>
 
-                {/* 4. Action Button (Full width on mobile) */}
-                <div className="pt-1">{renderActionButton(l, true)}</div>
+                {/* 4. Action Button & Three Dots Menu (Mobile) */}
+                <div className="pt-1 flex items-center gap-2">
+                  <div className="flex-1 min-w-0">{renderActionButton(l, true)}</div>
+                  {renderThreeDotsButton(l, true)}
+                </div>
               </div>
             ))}
           </div>
@@ -1736,8 +1937,8 @@ export function HostingListingsManager() {
             </div>
 
             {/* Listing Rows */}
-            <div className="divide-y divide-slate-100 dark:divide-slate-800 min-w-[1020px]">
-              {filteredListings.map((l) => (
+            <div className="divide-y divide-slate-100 dark:divide-slate-800 min-w-[1020px] min-h-[220px]">
+              {filteredListings.map((l, index) => (
                 <div
                   key={l.id}
                   onClick={() => {
@@ -1828,139 +2029,7 @@ export function HostingListingsManager() {
                   {/* 6. Action Button & Three dots */}
                   <div className="flex-1 flex items-center justify-end gap-2 relative">
                     {renderActionButton(l, false)}
-
-                    {/* Three-dots menu trigger (hidden for listings under review) */}
-                    {l.actionLabel !== "View Review" && (
-                      <div className="relative" ref={openMenuListingId === l.id ? menuContainerRef : null}>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setOpenMenuListingId((prev) => (prev === l.id ? null : l.id));
-                        }}
-                        className="size-9 rounded-full flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 transition cursor-pointer"
-                        aria-label="More actions"
-                      >
-                        <MoreVertical className="size-4" />
-                      </button>
-
-                      {/* Dropdown Menu */}
-                      {openMenuListingId === l.id && (
-                        <div
-                          onClick={(e) => e.stopPropagation()}
-                          className="absolute right-0 top-10 z-30 w-48 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl py-1.5 animate-in fade-in zoom-in-95 duration-100"
-                        >
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setOpenMenuListingId(null);
-                              setForm(toFormState(l.rawListing));
-                            }}
-                            className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2"
-                          >
-                            <Pencil className="size-3.5 text-slate-400" />
-                            <span>Edit Listing</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setOpenMenuListingId(null);
-                              router.push("/account/host/applications");
-                            }}
-                            className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2"
-                          >
-                            <FileText className="size-3.5 text-slate-400" />
-                            <span>View Applications</span>
-                          </button>
-
-                          {l.rawListing.state === "APPROVED" && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setOpenMenuListingId(null);
-                                setPayingFeeListingId(l.id);
-                              }}
-                              className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2"
-                            >
-                              <Receipt className="size-3.5 text-slate-400" />
-                              <span>Pay Listing Fee</span>
-                            </button>
-                          )}
-
-                          {l.listingStatus === "LIVE" && (
-                            <Link
-                              href={`/listings/${l.id}`}
-                              target="_blank"
-                              onClick={() => setOpenMenuListingId(null)}
-                              className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2"
-                            >
-                              <ExternalLink className="size-3.5 text-slate-400" />
-                              <span>View Public Listing</span>
-                            </Link>
-                          )}
-
-                          {l.listingStatus === "LIVE" && (
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                setOpenMenuListingId(null);
-                                try {
-                                  await pauseHostedListing(l.id);
-                                  showToast(`Listing #${l.id} paused.`);
-                                  load();
-                                } catch (err) {
-                                  showToast(errorMessage(err, "Could not pause listing"), "error");
-                                }
-                              }}
-                              className="w-full text-left px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
-                            >
-                              <Pause className="size-3.5 text-slate-400" />
-                              <span>Pause Listing</span>
-                            </button>
-                          )}
-
-                          {l.rawListing.state === "PAUSED" && (
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                setOpenMenuListingId(null);
-                                try {
-                                  await resumeHostedListing(l.id);
-                                  showToast(`Listing #${l.id} is live again.`);
-                                  load();
-                                } catch (err) {
-                                  showToast(errorMessage(err, "Could not resume listing"), "error");
-                                }
-                              }}
-                              className="w-full text-left px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
-                            >
-                              <Eye className="size-3.5 text-slate-400" />
-                              <span>Resume Listing</span>
-                            </button>
-                          )}
-
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              setOpenMenuListingId(null);
-                              try {
-                                await archiveHostedListing(l.id);
-                                showToast(`Listing #${l.id} archived.`);
-                                load();
-                              } catch (err) {
-                                showToast(errorMessage(err, "Could not archive listing"), "error");
-                              }
-                            }}
-                            className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#B42318] hover:bg-red-50 dark:hover:bg-red-950/20 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2 mt-1 cursor-pointer"
-                          >
-                            <Minus className="size-3.5 text-[#B42318]" />
-                            <span>Archive</span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                    {renderThreeDotsButton(l, false)}
                   </div>
                 </div>
               ))}
@@ -2458,6 +2527,7 @@ export function HostingListingsManager() {
                   </button>
                 )}
 
+              {/* View Public Listing commented out as requested
               {selectedListingForDrawer.listingStatus === "LIVE" && (
                 <Link
                   href={`/listings/${selectedListingForDrawer.id}`}
@@ -2468,6 +2538,7 @@ export function HostingListingsManager() {
                   <span>View Public Listing</span>
                 </Link>
               )}
+              */}
 
               <button
                 type="button"

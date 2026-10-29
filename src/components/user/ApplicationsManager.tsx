@@ -263,10 +263,18 @@ export function ApplicationsManager() {
   // The sign modal can open straight from a list row, before the drawer has
   // loaded the offer -- fetch it so the card shows the real agreed terms.
   const [signOffer, setSignOffer] = useState<Offer | null>(null);
+  const [signActionError, setSignActionError] = useState("");
   useEffect(() => {
     if (!signModalApp) {
       setSignOffer(null);
+      setSignActionError("");
       return;
+    }
+    const agreementId = signModalApp.rawApp.agreementId;
+    if (agreementId) {
+      listOwnAgreementDisclosures(agreementId)
+        .then((loaded) => setDisclosures(loaded))
+        .catch(() => undefined);
     }
     if (offerDetails && offerDetails.applicationId === signModalApp.rawApp.id) {
       setSignOffer(offerDetails);
@@ -275,7 +283,16 @@ export function ApplicationsManager() {
     let cancelled = false;
     getOwnOffer(signModalApp.rawApp.id)
       .then((loaded) => {
-        if (!cancelled) setSignOffer(loaded);
+        if (!cancelled) {
+          setSignOffer(loaded);
+          if (loaded.agreement?.id && !agreementId) {
+            listOwnAgreementDisclosures(loaded.agreement.id)
+              .then((discs) => {
+                if (!cancelled) setDisclosures(discs);
+              })
+              .catch(() => undefined);
+          }
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -765,8 +782,9 @@ export function ApplicationsManager() {
     }
     setActionBusy(true);
     setSignError(false);
+    setSignActionError("");
     try {
-      const agreementId = signModalApp.rawApp.agreementId;
+      const agreementId = signModalApp.rawApp.agreementId || signOffer?.agreement?.id;
       if (agreementId) {
         await signOwnAgreement(agreementId);
       }
@@ -777,7 +795,9 @@ export function ApplicationsManager() {
         handleOpenDrawer(signModalApp, "overview");
       }
     } catch (err) {
-      showToast(errorMessage(err, "Could not sign agreement."));
+      const msg = errorMessage(err, "Could not sign agreement.");
+      setSignActionError(msg);
+      showToast(msg);
     } finally {
       setActionBusy(false);
     }
@@ -823,14 +843,18 @@ export function ApplicationsManager() {
   };
 
   const handleAcknowledgeDisclosure = async (discId: number) => {
-    if (!selectedApp?.rawApp.agreementId) return;
+    const agrId = signModalApp?.rawApp.agreementId || selectedApp?.rawApp.agreementId;
+    if (!agrId) return;
     setAcknowledgingId(discId);
     try {
-      const updated = await acknowledgeOwnDisclosure(selectedApp.rawApp.agreementId, discId);
+      const updated = await acknowledgeOwnDisclosure(agrId, discId);
       setDisclosures((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
       showToast("Disclosure acknowledged.");
+      setSignActionError("");
     } catch (err) {
-      showToast(errorMessage(err, "Could not acknowledge disclosure."));
+      const msg = errorMessage(err, "Could not acknowledge disclosure.");
+      showToast(msg);
+      setSignActionError(msg);
     } finally {
       setAcknowledgingId(null);
     }
@@ -1413,18 +1437,28 @@ export function ApplicationsManager() {
         }
         .drawer {
           position: relative;
-          width: 520px;
+          width: 540px;
           max-width: 100%;
           height: 100%;
-          overflow-y: auto;
           background: #ffffff;
           border-radius: 24px 0 0 24px;
-          padding: 24px;
           display: flex;
           flex-direction: column;
-          gap: 18px;
           box-shadow: -20px 0 50px rgba(8, 22, 56, 0.25);
           animation: slide 0.22s ease-out;
+          overflow: hidden;
+        }
+        .dhead-sticky {
+          flex-shrink: 0;
+          background: #ffffff;
+          padding: 24px 24px 0 24px;
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+          border-bottom: 1px solid #e1e7f1;
+          position: sticky;
+          top: 0;
+          z-index: 10;
         }
         @keyframes slide {
           from {
@@ -1441,6 +1475,7 @@ export function ApplicationsManager() {
           justify-content: space-between;
           align-items: flex-start;
           gap: 12px;
+          flex-shrink: 0;
         }
         .dhead h2 {
           font-size: 21px;
@@ -1458,6 +1493,7 @@ export function ApplicationsManager() {
           align-items: center;
           gap: 10px;
           flex-wrap: wrap;
+          flex-shrink: 0;
         }
         .tracker {
           list-style: none;
@@ -1466,6 +1502,7 @@ export function ApplicationsManager() {
           display: flex;
           gap: 6px;
           flex-wrap: wrap;
+          flex-shrink: 0;
         }
         .tracker li {
           display: inline-flex;
@@ -1510,13 +1547,19 @@ export function ApplicationsManager() {
         }
         .dtabs {
           display: flex;
-          gap: 2px;
-          border-bottom: 1px solid #e1e7f1;
+          gap: 4px;
           overflow-x: auto;
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+          flex-shrink: 0;
+          margin-bottom: -1px;
+        }
+        .dtabs::-webkit-scrollbar {
+          display: none;
         }
         .dtab {
-          min-height: 42px;
-          padding: 0 12px;
+          height: 42px;
+          padding: 0 14px;
           border: 0;
           background: none;
           font-size: 13px;
@@ -1525,15 +1568,24 @@ export function ApplicationsManager() {
           border-bottom: 2px solid transparent;
           white-space: nowrap;
           cursor: pointer;
+          flex-shrink: 0;
+          transition: all 0.15s ease;
+        }
+        .dtab:hover {
+          color: #0e2f73;
         }
         .dtab[aria-selected="true"] {
           color: #0e2f73;
           border-bottom-color: #0e2f73;
+          font-weight: 800;
         }
         .dtbody {
+          flex: 1;
+          overflow-y: auto;
+          padding: 20px 24px 28px;
           display: flex;
           flex-direction: column;
-          gap: 16px;
+          gap: 18px;
         }
         .dalert,
         .dinfo {
@@ -1720,14 +1772,16 @@ export function ApplicationsManager() {
           left: 50%;
           bottom: 24px;
           transform: translateX(-50%);
-          z-index: 10000;
+          z-index: 10005;
           background: #0b1b3f;
           color: #ffffff;
           padding: 12px 18px;
           border-radius: 12px;
           font-size: 13.5px;
           font-weight: 600;
-          box-shadow: 0 12px 30px rgba(8, 22, 56, 0.3);
+          box-shadow: 0 12px 30px rgba(8, 22, 56, 0.4);
+          max-width: 90vw;
+          text-align: center;
         }
         .empty-demo {
           position: relative;
@@ -1909,6 +1963,13 @@ export function ApplicationsManager() {
           .drawer {
             width: 100%;
             border-radius: 0;
+          }
+          .dhead-sticky {
+            padding: 16px 16px 0 16px;
+            gap: 12px;
+          }
+          .dtbody {
+            padding: 16px 16px 24px;
           }
           .filters-wrap {
             grid-template-columns: 1fr;
@@ -2542,8 +2603,10 @@ export function ApplicationsManager() {
               onClick={handleCloseDrawer}
             />
             <aside className="drawer">
-              {/* Drawer Header */}
-              <div className="dhead">
+              {/* Sticky Top Header Section (Header + Badges + Tracker + Tabs) */}
+              <div className="dhead-sticky">
+                {/* Drawer Header */}
+                <div className="dhead">
                 <div className="dwho">
                   <span className="thumbsm lg" aria-hidden="true">
                     <SvgIcon name="building" size={22} strokeWidth={2} />
@@ -2636,6 +2699,7 @@ export function ApplicationsManager() {
                     {tabLabel}
                   </button>
                 ))}
+                </div>
               </div>
 
               {/* Drawer Body */}
@@ -3364,6 +3428,7 @@ export function ApplicationsManager() {
                 setSignModalApp(null);
                 setSignAck(false);
                 setSignError(false);
+                setSignActionError("");
               }}
             />
             <div className="dialog">
@@ -3452,6 +3517,13 @@ export function ApplicationsManager() {
                 <p className="text-xs font-bold text-[#b42318]">
                   Confirm you’ve read the agreement to sign.
                 </p>
+              )}
+
+              {signActionError && (
+                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-[#b42318] text-xs font-semibold flex items-center gap-2">
+                  <SvgIcon name="info" size={16} strokeWidth={2.2} />
+                  <span>{signActionError}</span>
+                </div>
               )}
 
               <div className="dlg-acts">
@@ -3580,12 +3652,15 @@ export function ApplicationsManager() {
           document.body
         )}
 
-      {/* Floating Toast Notification */}
-      {toastMessage && (
-        <div className="toast" role="status" aria-live="polite">
-          {toastMessage}
-        </div>
-      )}
+      {/* Floating Toast Notification (Portaled directly to document.body so it is always on top of modals and drawers) */}
+      {typeof document !== "undefined" &&
+        toastMessage &&
+        createPortal(
+          <div className="toast" role="status" aria-live="polite">
+            {toastMessage}
+          </div>,
+          document.body
+        )}
     </div>
   );
 }
