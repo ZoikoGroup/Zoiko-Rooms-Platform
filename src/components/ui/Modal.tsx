@@ -2,6 +2,7 @@
 
 import { X } from "lucide-react";
 import { useEffect, useId, useRef } from "react";
+import { createPortal } from "react-dom";
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -78,14 +79,23 @@ export function Modal({
     return () => previouslyFocused?.focus();
   }, [open]);
 
-  if (!open) return null;
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open]);
 
-  return (
+  if (!open || typeof document === "undefined") return null;
+
+  return createPortal(
     <div className="fixed inset-0 z-[200] flex items-start justify-center overflow-y-auto p-4 pt-10 sm:pt-16">
       <button
         aria-label="Close modal"
         onClick={onClose}
-        className="animate-fade-in absolute inset-0 bg-primary-900/50 backdrop-blur-sm"
+        className="animate-fade-in fixed inset-0 bg-primary-900/50 backdrop-blur-sm cursor-default"
       />
       <div
         ref={dialogRef}
@@ -100,7 +110,7 @@ export function Modal({
           <button
             onClick={onClose}
             aria-label="Close"
-            className="text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
+            className="text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300 cursor-pointer"
           >
             <X className="h-5 w-5" aria-hidden="true" />
           </button>
@@ -109,6 +119,7 @@ export function Modal({
           {children}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
