@@ -124,6 +124,10 @@ class DisputeResolutionCase(Base):
     external_dependency_flag: Mapped[bool] = mapped_column(default=False)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The person who opened a completed case removed it from their own view
+    # (crud/disputes.py:remove_case_as_opener). The case itself, the other
+    # party's view, the money records and the audit trail all stay.
+    removed_by_opener_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     # AC-31: "A closed case can be reopened without deleting or altering its
     # prior closure event" -- closed_at/closed_by_admin_id above are NEVER

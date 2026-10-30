@@ -8,7 +8,13 @@ from sqlalchemy.orm import Session
 
 from app.models.admin_user import AdminUser
 from app.models.guest import Guest
-from app.models.notification import Notification, category_for_notification_type, priority_for_notification_type
+from app.models.admin_user import AdminSettings
+from app.models.notification import (
+    Notification,
+    admin_preference_for_notification_type,
+    category_for_notification_type,
+    priority_for_notification_type,
+)
 from app.models.notification_preference import NotificationPreference
 from app.models.user_account import UserAccount
 
@@ -77,6 +83,19 @@ def _is_suppressed_by_preference(db: Session, recipient_key: str, *, category: s
     return False
 
 
+def _admin_switched_off(db: Session, admin_id: int | None, notification_type: str) -> bool:
+    """The admin turned this kind of notification off in Settings >
+    Notification Preferences. An admin with no saved settings gets the column
+    defaults (new bookings and payments on; reviews and marketing off)."""
+    attribute = admin_preference_for_notification_type(notification_type)
+    if attribute is None or admin_id is None:
+        return False
+    row = db.scalar(select(AdminSettings).where(AdminSettings.admin_user_id == admin_id))
+    if row is None:
+        return not AdminSettings.__table__.c[attribute].default.arg
+    return not getattr(row, attribute)
+
+
 def _create(
     db: Session,
     *,
@@ -98,6 +117,9 @@ def _create(
     triggered it, which is why this is always called well before the
     caller's own db.commit()."""
     recipient_key = f"user:{recipient_user_id}" if recipient_type == "user" else f"admin:{recipient_admin_id}"
+    if recipient_type == "admin" and _admin_switched_off(db, recipient_admin_id, notification_type):
+        logger.info("notification: switched off by admin preference (type=%s recipient=%s)", notification_type, recipient_key)
+        return None
     category = category_for_notification_type(notification_type)
     priority = priority_for_notification_type(notification_type)
     if _is_suppressed_by_preference(db, recipient_key, category=category, priority=priority):
@@ -152,16 +174,20 @@ def notify_user(
 def notify_user_by_party(db: Session, party_id: int | None, **kwargs) -> Notification | None:
     """Looks up the active UserAccount for a party -- the same party_id ->
     UserAccount lookup already used across hosting/sublet crud -- and notifies
-    them. No-ops silently if the party has no user account (e.g. it's an
+    them (every active account on the party). No-ops silently if the party has no user account (e.g. it's an
     admin-owned party, which has nobody on the USER side to notify)."""
     if not party_id:
         return None
-    user = db.scalar(
-        select(UserAccount).where(UserAccount.party_id == party_id, UserAccount.is_active.is_(True))
-    )
-    if not user:
-        return None
-    return notify_user(db, user.id, **kwargs)
+    # Everyone on the party hears about it, not just the first account found --
+    # a host's co-managers act for the same party. Returns the first notice made.
+    users = db.scalars(
+        select(UserAccount).where(UserAccount.party_id == party_id, UserAccount.is_active.is_(True)).order_by(UserAccount.id)
+    ).all()
+    first = None
+    for user in users:
+        sent = notify_user(db, user.id, **kwargs)
+        first = first or sent
+    return first
 
 
 @_never_raises

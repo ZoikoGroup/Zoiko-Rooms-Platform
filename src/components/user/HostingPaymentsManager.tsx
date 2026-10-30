@@ -1,5 +1,6 @@
 "use client";
 
+import { downloadCsv } from "@/lib/csv-download";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
@@ -303,26 +304,18 @@ export function HostingPaymentsManager() {
     const rows = filteredObligations.map((o) => {
       const info = getObligationPropertyInfo(o);
       return [
-        `"${info.propertyName.replace(/"/g, '""')}"`,
-        `"${info.rentalCode.replace(/"/g, '""')}"`,
-        `"${o.displayLabel.replace(/"/g, '""')}"`,
-        `"${o.dueDate}"`,
+        info.propertyName,
+        info.rentalCode,
+        o.displayLabel,
+        o.dueDate,
         o.amount,
-        `"${o.currency || "INR"}"`,
-        `"${rentalPaymentStatusLabel[o.status] || o.status}"`,
-        `"${info.tenantName.replace(/"/g, '""')}"`,
+        o.currency || "INR",
+        rentalPaymentStatusLabel[o.status] || o.status,
+        info.tenantName,
       ];
     });
 
-    const csvContent =
-      "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map((e) => e.join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `host_payment_records_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    downloadCsv(`host_payment_records_${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
 
     showToast("Payment records exported successfully.", "success");
   }

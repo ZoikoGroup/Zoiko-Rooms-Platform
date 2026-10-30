@@ -177,6 +177,20 @@ def get_case_as_renter(case_id: int, user: UserAccount = Depends(get_current_use
     return _to_case_read(case)
 
 
+@renter_router.post("/{case_id}/remove", status_code=status.HTTP_204_NO_CONTENT)
+def post_remove_case_as_renter(case_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The renter who opened a resolved/closed dispute deletes it -- no admin step."""
+    guest = get_or_create_guest_for_user(db, user)
+    case = crud.get_case_or_404(db, case_id)
+    crud.assert_guest_can_access_case(case, guest)
+    crud.remove_case_as_opener(db, case, guest=guest)
+    log_audit_event(
+        db, None, "dispute_case.removed_by_opener", "dispute_resolution_case", str(case_id), get_correlation_id(request),
+        reason=f"guest:{guest.id}",
+    )
+    db.commit()
+
+
 @renter_router.get("/{case_id}/export", response_model=DisputeCaseExportRead)
 def get_case_export_as_renter(case_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     guest = get_or_create_guest_for_user(db, user)
@@ -478,6 +492,20 @@ def get_case_as_host(case_id: int, user: UserAccount = Depends(get_current_user)
     case = crud.get_case_or_404(db, case_id)
     crud.assert_party_can_access_case(case, _host_party_id(user))
     return _to_case_read(case)
+
+
+@host_router.post("/{case_id}/remove", status_code=status.HTTP_204_NO_CONTENT)
+def post_remove_case_as_host(case_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The host who opened a resolved/closed dispute deletes it -- no admin step."""
+    party_id = _host_party_id(user)
+    case = crud.get_case_or_404(db, case_id)
+    crud.assert_party_can_access_case(case, party_id)
+    crud.remove_case_as_opener(db, case, party_id=party_id)
+    log_audit_event(
+        db, None, "dispute_case.removed_by_opener", "dispute_resolution_case", str(case_id), get_correlation_id(request),
+        reason=f"user:{user.id}",
+    )
+    db.commit()
 
 
 @host_router.get("/{case_id}/export", response_model=DisputeCaseExportRead)

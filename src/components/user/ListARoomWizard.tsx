@@ -91,6 +91,7 @@ interface ListingDetailsForm {
   pricePerNight: string;
   currency: string;
   minStayNights: string;
+  availableFrom: string;
   guests: string;
   bedrooms: string;
   bathrooms: string;
@@ -111,6 +112,7 @@ function emptyDetails(contact: { name: string; phone: string; email: string }): 
     pricePerNight: "",
     currency: "GBP",
     minStayNights: "30",
+    availableFrom: "",
     guests: "1",
     bedrooms: "1",
     bathrooms: "1",
@@ -332,6 +334,7 @@ export function ListARoomWizard({
         amenities: details.amenities,
         images: details.images,
         minStayNights: Math.round(minStay),
+        availableFrom: details.availableFrom || null,
         roomId,
         contactName: details.contactName.trim(),
         contactPhone: details.contactPhone.trim(),
@@ -596,6 +599,15 @@ export function ListARoomWizard({
                       inputMode="numeric"
                       value={details.minStayNights}
                       onChange={(e) => setDetails((d) => ({ ...d, minStayNights: e.target.value }))}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field label="Available from (optional)" hint="The first day a renter can move in. Leave empty if it's free now.">
+                    <input
+                      type="date"
+                      min={new Date().toISOString().slice(0, 10)}
+                      value={details.availableFrom}
+                      onChange={(e) => setDetails((d) => ({ ...d, availableFrom: e.target.value }))}
                       className={inputClass}
                     />
                   </Field>

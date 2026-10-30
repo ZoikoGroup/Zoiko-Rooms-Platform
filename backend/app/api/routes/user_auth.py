@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import USER_COOKIE_NAME, get_current_user
@@ -147,14 +147,17 @@ def change_user_password(
 
 
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
-def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
+def forgot_password(payload: ForgotPasswordRequest, background: BackgroundTasks, db: Session = Depends(get_db)):
     """Requests a password reset. Always returns the same response, whether or not
     the email belongs to an account -- never reveals which."""
     user = get_user_by_email(db, payload.email)
     if user and user.is_active:
         raw_token = create_reset_token(db, user)
         reset_link = f"{settings.email_site_url}/account/reset-password?token={raw_token}"
-        send_password_reset_email(user.email, reset_link, settings.password_reset_token_expire_minutes, user.full_name)
+        # Sent after the response: SMTP can be slow, and the reply is identical either way.
+        background.add_task(
+            send_password_reset_email, user.email, reset_link, settings.password_reset_token_expire_minutes, user.full_name,
+        )
     return ForgotPasswordResponse(message=GENERIC_FORGOT_PASSWORD_MESSAGE)
 
 

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listingsWithOpenApplication } from "@/lib/applications";
 import { createPortal } from "react-dom";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Bookmark,
   Calendar,
@@ -25,10 +25,21 @@ import {
 } from "lucide-react";
 import { PublicListing, HostedListing } from "@/lib/types";
 import { formatCurrency, resolveImageUrl, todayIsoDate } from "@/lib/utils";
+import { applyFiltersToParams, filtersFromParams } from "@/lib/find-a-room-filters";
+import {
+  availabilityDate,
+  deriveAccessibility,
+  deriveFurnishedState,
+  convertAmount,
+  dominantCurrency,
+  priceStepsFor,
+  roomMatchesSearch,
+} from "@/lib/find-a-room-search";
 import {
   errorMessage,
   listHostedListings,
-  listPublicListings,
+  getExchangeRates,
+  listAllPublicListings,
   listRentalApplications,
   getUserPreferences,
   submitRentalApplication,
@@ -92,27 +103,9 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
   const minStayMonths = Math.max(1, Math.round((item.minStayNights || 30) / 30));
   const bathroomType = item.bathrooms && item.bathrooms >= 1 ? "Private" : "Shared";
 
-  // Furnished determination
-  const amenitiesLower = (item.amenities || []).map((a) => a.toLowerCase());
-  let furnishedState: "yes" | "part" | "no" | "unknown" = "no";
-  if (
-    amenitiesLower.some(
-      (a) => a.includes("furnished") && !a.includes("part") && !a.includes("unfurnished")
-    )
-  ) {
-    furnishedState = "yes";
-  } else if (amenitiesLower.some((a) => a.includes("part"))) {
-    furnishedState = "part";
-  } else if (amenitiesLower.some((a) => a.includes("unfurnished"))) {
-    furnishedState = "no";
-  } else {
-    furnishedState = "unknown";  // the listing doesn't say
-  }
-
-  // Accessibility tags
-  const accessibility = (item.tags || []).filter(
-    (t) => t.toLowerCase().includes("step-free") || t.toLowerCase().includes("lift")
-  );
+  // What the amenities and tags say about furnishing and accessibility (see lib/find-a-room-search.ts).
+  const furnishedState = deriveFurnishedState(item.amenities || []);
+  const accessibility = deriveAccessibility(item.tags || [], item.amenities || []);
 
   const isAvailable = hosted.available !== false;
   const isOffer = hosted.state === "REVIEW" || hosted.state === "APPROVED";
@@ -133,7 +126,7 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
     monthlyRent,
     currency,
     minStayMonths,
-    availableDate: todayIsoDate(),
+    availableDate: availabilityDate(item.availableFrom, todayIsoDate()),
     roomState: isOffer ? "offer" : "available",
     applicationsState: isAvailable ? "open" : "closed",
     furnishedState,
@@ -156,20 +149,23 @@ export function RentBrowser() {
   // enforces the same rule, so this only keeps the button honest).
   const { user, identityVerified, loading: sessionLoading } = useUserSession();
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
+  // The filters live in the page address, so a refresh, the back button or a shared link keeps the search.
+  const [initial] = useState(() => filtersFromParams(searchParams, todayIsoDate()));
 
   // Search Bar States
-  const [locationInput, setLocationInput] = useState(() => searchParams.get("city") || "");
-  const [activeLocationQuery, setActiveLocationQuery] = useState(() => searchParams.get("city") || "");
-  const [moveInDate, setMoveInDate] = useState(() => todayIsoDate());
-  const [stayMonths, setStayMonths] = useState(0); // 0 = Flexible
+  const [locationInput, setLocationInput] = useState(initial.city);
+  const [activeLocationQuery, setActiveLocationQuery] = useState(initial.city);
+  const [moveInDate, setMoveInDate] = useState(initial.moveIn);
+  const [stayMonths, setStayMonths] = useState(initial.stayMonths); // 0 = Flexible
 
   // Recent searches list
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
 
   // Filter controls
-  const [viewMode, setViewMode] = useState<"list" | "map">("list");
-  const [sortBy, setSortBy] = useState<"best" | "plow" | "phigh" | "soon">("best");
+  const [viewMode, setViewMode] = useState<"list" | "map">(initial.view);
+  const [sortBy, setSortBy] = useState<"best" | "plow" | "phigh" | "soon">(initial.sortBy);
   // Settings > Privacy "Personalised recommendations" (on unless switched off).
   const [personalized, setPersonalized] = useState(false);
   useEffect(() => {
@@ -178,16 +174,48 @@ export function RentBrowser() {
       .then((p) => setPersonalized(p.personalizedRecommendations))
       .catch(() => setPersonalized(false));
   }, [user]);
-  const [priceFilter, setPriceFilter] = useState("all");
-  const [roomTypeFilter, setRoomTypeFilter] = useState("all");
-  const [furnishedFilter, setFurnishedFilter] = useState("all");
-  const [availabilityFilter, setAvailabilityFilter] = useState("all");
+  const [priceFilter, setPriceFilter] = useState(initial.price);
+  const [roomTypeFilter, setRoomTypeFilter] = useState(initial.roomType);
+  const [furnishedFilter, setFurnishedFilter] = useState(initial.furnished);
+  const [availabilityFilter, setAvailabilityFilter] = useState(initial.availability);
 
-  // More filters checkboxes
-  const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
-  const [selectedBathrooms, setSelectedBathrooms] = useState<string[]>([]);
-  const [selectedAmenities, setSelectedAmenities] = useState<string[]>([]);
-  const [selectedAccessibility, setSelectedAccessibility] = useState<string[]>([]);
+  // More filters checkboxes (open if any of them was saved in the address)
+  const [moreFiltersOpen, setMoreFiltersOpen] = useState(
+    initial.bathrooms.length + initial.amenities.length + initial.accessibility.length > 0,
+  );
+  const [selectedBathrooms, setSelectedBathrooms] = useState<string[]>(initial.bathrooms);
+  const [selectedAmenities, setSelectedAmenities] = useState<string[]>(initial.amenities);
+  const [selectedAccessibility, setSelectedAccessibility] = useState<string[]>(initial.accessibility);
+
+  // Write every change of a filter back into the address (replace, so the back button isn't flooded).
+  useEffect(() => {
+    const today = todayIsoDate();
+    const next = applyFiltersToParams(
+      new URLSearchParams(searchParams.toString()),
+      {
+        city: activeLocationQuery,
+        price: priceFilter,
+        roomType: roomTypeFilter,
+        furnished: furnishedFilter,
+        availability: availabilityFilter,
+        moveIn: moveInDate,
+        stayMonths,
+        sortBy,
+        view: viewMode,
+        bathrooms: selectedBathrooms,
+        amenities: selectedAmenities,
+        accessibility: selectedAccessibility,
+      },
+      today,
+    ).toString();
+    if (next === searchParams.toString()) return;
+    router.replace(next ? `${pathname}?${next}` : pathname, { scroll: false });
+    // Only the filters should trigger this -- not the address they have just written.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeLocationQuery, priceFilter, roomTypeFilter, furnishedFilter, availabilityFilter, moveInDate,
+    stayMonths, sortBy, viewMode, selectedBathrooms, selectedAmenities, selectedAccessibility,
+  ]);
 
   // User interactions
   const [savedRooms, setSavedRooms] = useState<Record<string, boolean>>({});
@@ -245,7 +273,7 @@ export function RentBrowser() {
   useEffect(() => {
     setLoadingBackend(true);
     Promise.all([
-      listPublicListings({ limit: 100 }).catch(() => null),
+      listAllPublicListings().catch(() => null),
       listHostedListings().catch(() => []),
       listRentalApplications().catch(() => []),
     ])
@@ -276,6 +304,14 @@ export function RentBrowser() {
       })
       .finally(() => setLoadingBackend(false));
   }, []);
+
+  // Search as the visitor types: apply the text a moment after they stop (Enter / Search still apply it at once).
+  useEffect(() => {
+    const typed = locationInput.trim();
+    if (typed === activeLocationQuery) return;
+    const timer = setTimeout(() => setActiveLocationQuery(typed), 350);
+    return () => clearTimeout(timer);
+  }, [locationInput, activeLocationQuery]);
 
   // Execute Search query
   const handleSearchSubmit = (e: React.FormEvent) => {
@@ -314,63 +350,45 @@ export function RentBrowser() {
     return new Set([...cities, ...recentSearches].map((c) => c.trim().toLowerCase()).filter(Boolean));
   }, [personalized, allRooms, appliedRooms, recentSearches]);
 
+  // Indicative exchange rates, so a £ room can be compared with a ₹ budget. Without them (a failed
+  // request), only rooms in the limit's own currency are compared.
+  const [rates, setRates] = useState<{ usdPerUnit: Record<string, number>; asOf: string | null } | null>(null);
+  useEffect(() => {
+    getExchangeRates()
+      .then((r) => setRates({ usdPerUnit: r.usdPerUnit, asOf: r.asOf }))
+      .catch(() => setRates(null));
+  }, []);
+
+  // Price limits are offered in the currency of the rooms in the place being searched (£ for London,
+  // ₹ for Mumbai), so a limit is always compared with prices in that same currency.
+  const priceCurrency = useMemo(() => {
+    const inPlace = allRooms.filter((r) =>
+      roomMatchesSearch(r, {
+        query: activeLocationQuery, price: "all", priceCurrency: "", roomType: "all", furnished: "all",
+        availability: "all", moveIn: "", stayMonths: 0, bathrooms: [], amenities: [], accessibility: [],
+      }),
+    );
+    return dominantCurrency(inPlace.length > 0 ? inPlace : allRooms);
+  }, [allRooms, activeLocationQuery]);
+
   const filteredRooms = useMemo(() => {
-    const q = activeLocationQuery.toLowerCase().trim();
+    const criteria = {
+      query: activeLocationQuery,
+      price: priceFilter,
+      priceCurrency,
+      rates: rates?.usdPerUnit ?? null,
+      roomType: roomTypeFilter,
+      furnished: furnishedFilter,
+      availability: availabilityFilter,
+      moveIn: moveInDate,
+      stayMonths,
+      bathrooms: selectedBathrooms,
+      amenities: selectedAmenities,
+      accessibility: selectedAccessibility,
+    };
 
     return allRooms
-      .filter((r) => {
-        // Location text filter
-        if (q && q !== "all") {
-          const matchArea = r.area.toLowerCase().includes(q);
-          const matchCity = r.city.toLowerCase().includes(q);
-          const matchTitle = r.title.toLowerCase().includes(q);
-          if (!matchArea && !matchCity && !matchTitle) {
-            return false;
-          }
-        }
-
-        // Price filter
-        if (priceFilter !== "all") {
-          const max = Number(priceFilter);
-          if (r.monthlyRent > max) return false;
-        }
-
-        // Room Type filter
-        if (roomTypeFilter !== "all" && r.roomType.toLowerCase() !== roomTypeFilter.toLowerCase()) {
-          return false;
-        }
-
-        // Furnished filter
-        if (furnishedFilter !== "all" && r.furnishedState !== furnishedFilter) {
-          return false;
-        }
-
-        // Availability filter
-        if (availabilityFilter === "date" && r.availableDate > moveInDate) {
-          return false;
-        }
-
-        // Bathroom filter
-        if (selectedBathrooms.length > 0 && !selectedBathrooms.includes(r.bathroomType)) {
-          return false;
-        }
-
-        // Amenities filter
-        if (selectedAmenities.length > 0) {
-          const hasAll = selectedAmenities.every((a) =>
-            r.amenities.some((am) => am.toLowerCase().includes(a.toLowerCase()))
-          );
-          if (!hasAll) return false;
-        }
-
-        // Accessibility filter
-        if (selectedAccessibility.length > 0) {
-          const hasAll = selectedAccessibility.every((acc) => r.accessibility.includes(acc));
-          if (!hasAll) return false;
-        }
-
-        return true;
-      })
+      .filter((r) => roomMatchesSearch(r, criteria))
       .sort((a, b) => {
         if (sortBy === "plow") return a.monthlyRent - b.monthlyRent;
         if (sortBy === "phigh") return b.monthlyRent - a.monthlyRent;
@@ -391,6 +409,8 @@ export function RentBrowser() {
     allRooms,
     preferredCities,
     activeLocationQuery,
+    priceCurrency,
+    rates,
     priceFilter,
     roomTypeFilter,
     furnishedFilter,
@@ -404,6 +424,41 @@ export function RentBrowser() {
   ]);
 
   const isZeroState = filteredRooms.length === 0;
+
+  // "Up to £500" -- plus the saved limit itself, if it isn't one of the usual steps.
+  const priceOptions = useMemo(() => {
+    const steps = priceStepsFor(priceCurrency);
+    const values = priceFilter !== "all" && !steps.includes(Number(priceFilter)) ? [...steps, Number(priceFilter)].sort((a, b) => a - b) : steps;
+    return [
+      { value: "all", label: "Any price" },
+      ...values.map((v) => ({ value: String(v), label: `Up to ${formatCurrency(v, priceCurrency)}` })),
+    ];
+  }, [priceCurrency, priceFilter]);
+
+  // With a limit set, rooms in another currency are compared at indicative rates -- or left out when
+  // there is no rate for them. Say which, so the visitor isn't surprised.
+  const { convertedByRate, hiddenByCurrency } = useMemo(() => {
+    if (priceFilter === "all") return { convertedByRate: 0, hiddenByCurrency: 0 };
+    const others = allRooms.filter((r) => r.currency !== priceCurrency);
+    const hidden = others.filter((r) => convertAmount(r.monthlyRent, r.currency, priceCurrency, rates?.usdPerUnit) === null).length;
+    return { convertedByRate: others.length - hidden, hiddenByCurrency: hidden };
+  }, [allRooms, priceFilter, priceCurrency, rates]);
+
+  const anyFilterActive =
+    Boolean(activeLocationQuery.trim()) || priceFilter !== "all" || roomTypeFilter !== "all" || furnishedFilter !== "all" ||
+    availabilityFilter !== "all" || selectedBathrooms.length + selectedAmenities.length + selectedAccessibility.length > 0;
+
+  const resetFilters = () => {
+    setLocationInput("");
+    setActiveLocationQuery("");
+    setPriceFilter("all");
+    setRoomTypeFilter("all");
+    setFurnishedFilter("all");
+    setAvailabilityFilter("all");
+    setSelectedBathrooms([]);
+    setSelectedAmenities([]);
+    setSelectedAccessibility([]);
+  };
 
   // Toggle Save Room
   const handleToggleSave = (room: FindARoomItem, e?: React.MouseEvent) => {
@@ -603,6 +658,15 @@ export function RentBrowser() {
               : isZeroState
               ? "0 rooms match your search"
               : `${filteredRooms.length} room${filteredRooms.length === 1 ? "" : "s"} match your search`}
+            {anyFilterActive && !loadingBackend && (
+              <button
+                type="button"
+                onClick={resetFilters}
+                className="ml-3 align-middle text-xs font-bold text-[#0E2F73] underline underline-offset-2 hover:text-[#D80B0B] dark:text-blue-300"
+              >
+                Clear filters
+              </button>
+            )}
           </h2>
 
           <div className="flex flex-wrap items-center gap-2.5">
@@ -655,6 +719,19 @@ export function RentBrowser() {
           </div>
         </div>
 
+        {convertedByRate > 0 && (
+          <p className="text-xs font-medium text-slate-600 dark:text-slate-400" role="status">
+            The price limit is in {priceCurrency}. Rooms listed in another currency are compared using approximate exchange
+            rates{rates?.asOf ? ` (${rates.asOf})` : ""}, so treat the edge of the limit as a guide. Prices on each room stay in its own currency.
+          </p>
+        )}
+        {hiddenByCurrency > 0 && (
+          <p className="text-xs font-medium text-slate-600 dark:text-slate-400" role="status">
+            {hiddenByCurrency} room{hiddenByCurrency === 1 ? "" : "s"} listed in a currency we can&apos;t compare with {priceCurrency}{" "}
+            {hiddenByCurrency === 1 ? "is" : "are"} hidden. Choose &ldquo;Any price&rdquo; to see {hiddenByCurrency === 1 ? "it" : "them"}.
+          </p>
+        )}
+
         {/* Filter Pills / Dropdowns Row */}
         <div className="rounded-2xl border border-slate-200 bg-white p-3.5 shadow-xs dark:border-slate-800 dark:bg-slate-900">
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-3 items-end">
@@ -663,14 +740,7 @@ export function RentBrowser() {
               label="Price (per month)"
               value={priceFilter}
               onChange={setPriceFilter}
-              options={[
-                { value: "all", label: "Any price" },
-                { value: "20000", label: "Up to ₹20,000" },
-                { value: "25000", label: "Up to ₹25,000" },
-                { value: "30000", label: "Up to ₹30,000" },
-                { value: "50000", label: "Up to ₹50,000" },
-                { value: "100000", label: "Up to ₹100,000" },
-              ]}
+              options={priceOptions}
               size="sm"
             />
 
@@ -910,17 +980,7 @@ export function RentBrowser() {
             {allRooms.length > 0 ? (
               <button
                 type="button"
-                onClick={() => {
-                  setLocationInput("");
-                  setActiveLocationQuery("");
-                  setPriceFilter("all");
-                  setRoomTypeFilter("all");
-                  setFurnishedFilter("all");
-                  setAvailabilityFilter("all");
-                  setSelectedBathrooms([]);
-                  setSelectedAmenities([]);
-                  setSelectedAccessibility([]);
-                }}
+                onClick={resetFilters}
                 className="rounded-xl bg-[#0E2F73] px-5 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-[#0B2560] transition-colors"
               >
                 Clear all filters

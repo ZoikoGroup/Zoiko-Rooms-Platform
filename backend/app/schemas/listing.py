@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import Field
 
@@ -38,6 +38,8 @@ class ListingBase(CamelModel):
     featured: bool = False
     room_id: int | None = None
     min_stay_nights: int = 30
+    # First day the room can be moved into; None = available now.
+    available_from: date | None = None
     # Legacy, unused: these only fed automatic offer creation, which has been
     # removed (see models/listing.py). Still accepted for compatibility.
     default_monthly_rent: float | None = None
@@ -75,6 +77,8 @@ class ListingUpdate(CamelModel):
     featured: bool | None = None
     room_id: int | None = None
     min_stay_nights: int | None = None
+    # Send null to clear it (= available now).
+    available_from: date | None = None
     contact_name: str | None = None
     contact_phone: str | None = None
     contact_email: str | None = None

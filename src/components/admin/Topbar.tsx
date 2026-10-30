@@ -16,12 +16,14 @@ import {
   resolveNotificationHref,
 } from "@/lib/notifications";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
-import { Bell, BedDouble, CalendarRange, ChevronDown, Loader2, LogOut, Menu, Search, Settings, UserCircle2, Users } from "lucide-react";
+import { Bell, BedDouble, CalendarRange, ChevronDown, FileText, KeyRound, Loader2, LogOut, Menu, Search, Settings, UserCircle2, Users } from "lucide-react";
 
 const resultIcons: Record<SearchResult["type"], typeof BedDouble> = {
   listing: BedDouble,
   guest: Users,
   booking: CalendarRange,
+  application: FileText,
+  occupancy: KeyRound,
 };
 
 const NOTIFICATION_POLL_MS = 45_000;
@@ -190,7 +192,8 @@ export function Topbar({
                 </p>
               ) : (
                 searchResults.map((result) => {
-                  const Icon = resultIcons[result.type];
+                  // A result type this screen doesn't know yet still gets an icon, never a crash.
+                  const Icon = resultIcons[result.type] ?? Search;
                   return (
                     <button
                       key={`${result.type}-${result.id}`}

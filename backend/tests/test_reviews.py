@@ -159,3 +159,27 @@ class TestReviewEligibility:
             json={"listingId": listing.id, "rating": 5, "comment": "Anon"},
         )
         assert r.status_code == 401, r.text
+
+    def test_new_review_alert_reaches_only_admins_who_switched_it_on(self, client, db_session: Session):
+        """ZR-20: 'New review alerts' (Settings > Notification Preferences) is off by default."""
+        from app.models.admin_user import AdminSettings
+        from app.models.notification import Notification
+        from tests.conftest import _make_admin
+
+        listing, room_id = _make_published_listing(db_session)
+        user = _make_user(db_session, email="reviewer-alert@test.com")
+        _renter_with_occupancy(db_session, listing, room_id, email=user.email)
+        on = _make_admin(db_session, email="review-on@test.com")
+        off = _make_admin(db_session, email="review-off@test.com")
+        db_session.add(AdminSettings(admin_user_id=on.id, notify_reviews=True))
+        db_session.commit()
+
+        r = client.post(
+            "/api/users/rentals/reviews", json={"listingId": listing.id, "rating": 4, "comment": "Nice"},
+            cookies=auth_user_cookie(user),
+        )
+        assert r.status_code == 201, r.text
+        got = lambda admin: db_session.query(Notification).filter_by(  # noqa: E731
+            recipient_admin_id=admin.id, notification_type="review.new").count()
+        assert got(on) == 1
+        assert got(off) == 0

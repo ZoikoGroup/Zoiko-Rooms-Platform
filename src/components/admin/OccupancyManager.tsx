@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { ListSearchInput, matchesQuery } from "@/components/admin/ListSearchInput";
 import { AlertTriangle, ArrowRightLeft, CalendarClock, FileWarning, History } from "lucide-react";
 import { Occupancy, RefundEntitlement, TerminationCase } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
@@ -21,6 +23,10 @@ import { formatCurrency, formatDate } from "@/lib/utils";
  *  (rent is created by the hourly scheduler), so this page only shows them. */
 export function OccupancyManager() {
   const [occupancies, setOccupancies] = useState<Occupancy[]>([]);
+  // A global-search result links here with ?q=<renter name>.
+  const searchParams = useSearchParams();
+  const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
+  const visibleOccupancies = occupancies.filter((o) => matchesQuery(query, o.guestName, o.listingName, o.propertyAddress, o.propertyCity));
   const [rentDue, setRentDue] = useState<Occupancy[]>([]);
   const [holdover, setHoldover] = useState<Occupancy[]>([]);
   const [loadError, setLoadError] = useState("");
@@ -109,8 +115,10 @@ export function OccupancyManager() {
 
       {loadError && <p className="text-sm text-accent-600">{loadError}</p>}
 
+      <ListSearchInput value={query} onChange={setQuery} placeholder="Search tenancies by renter, listing or address" />
+
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {occupancies.map((occupancy) => (
+        {visibleOccupancies.map((occupancy) => (
           <div
             key={occupancy.id}
             className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-white/10"
@@ -152,6 +160,9 @@ export function OccupancyManager() {
 
       {occupancies.length === 0 && !loadError && (
         <p className="py-10 text-center text-sm text-slate-400 dark:text-slate-400">No tenancies yet.</p>
+      )}
+      {occupancies.length > 0 && visibleOccupancies.length === 0 && (
+        <p className="py-10 text-center text-sm text-slate-400 dark:text-slate-400">No tenancies match &ldquo;{query.trim()}&rdquo;.</p>
       )}
 
       <TenancyRecordModal occupancyId={recordFor} onClose={() => setRecordFor(null)} />
