@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -225,6 +226,26 @@ export function UserHelpSupportManager() {
   const [casesLoading, setCasesLoading] = useState(true);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [statusModalOpen, setStatusModalOpen] = useState(false);
+
+  // Handle escape key and body scroll lock for service status modal
+  useEffect(() => {
+    if (!statusModalOpen) return;
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setStatusModalOpen(false);
+      }
+    }
+
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = originalOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [statusModalOpen]);
 
   // Dynamic user items for ticket linking
   const [dynamicItems, setDynamicItems] = useState<Record<string, string[]>>(DEFAULT_FALLBACK_ITEMS);
@@ -498,20 +519,31 @@ export function UserHelpSupportManager() {
         </div>
       )}
 
-      {/* Service Status Modal */}
-      {statusModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+      {/* Service Status Modal (Portal-rendered directly into document.body to break out of layout transform contexts) */}
+      {statusModalOpen && typeof window !== "undefined" && createPortal(
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="system-status-title"
+          onClick={() => setStatusModalOpen(false)}
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs animate-in fade-in duration-150"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 animate-in zoom-in-95 duration-150"
+          >
             <div className="flex items-center justify-between border-b border-slate-100 pb-4 dark:border-slate-800">
               <div className="flex items-center gap-2">
                 <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 ring-4 ring-emerald-500/20" />
-                <h3 className="font-heading text-lg font-bold text-primary-950 dark:text-white">
+                <h3 id="system-status-title" className="font-heading text-lg font-bold text-primary-950 dark:text-white">
                   System Status
                 </h3>
               </div>
               <button
+                type="button"
                 onClick={() => setStatusModalOpen(false)}
-                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 cursor-pointer"
+                aria-label="Close dialog"
               >
                 <X className="h-5 w-5" />
               </button>
@@ -546,13 +578,15 @@ export function UserHelpSupportManager() {
               </div>
             </div>
             <button
+              type="button"
               onClick={() => setStatusModalOpen(false)}
-              className="mt-6 w-full rounded-xl bg-primary-800 py-2.5 text-sm font-semibold text-white hover:bg-primary-900"
+              className="mt-6 w-full rounded-xl bg-primary-800 py-2.5 text-sm font-semibold text-white hover:bg-primary-900 cursor-pointer"
             >
               Close
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* ========================================================================= */}
