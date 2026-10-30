@@ -2,7 +2,7 @@
 
 import { useState, type KeyboardEvent } from "react";
 import { Check, Plus, X } from "lucide-react";
-import { COMMON_AMENITIES, COMMON_AMENITY_VALUES } from "@/lib/amenities";
+import { COMMON_AMENITIES, COMMON_AMENITY_VALUES, FURNISHING_OPTIONS } from "@/lib/amenities";
 
 /**
  * Pick-from-a-list amenities input, backed by the same string[] the backend
@@ -16,7 +16,14 @@ export function AmenitiesPicker({ value, onChange }: { value: string[]; onChange
   const customAmenities = value.filter((a) => !COMMON_AMENITY_VALUES.has(a));
 
   function toggle(amenity: string) {
-    onChange(value.includes(amenity) ? value.filter((a) => a !== amenity) : [...value, amenity]);
+    if (value.includes(amenity)) {
+      onChange(value.filter((a) => a !== amenity));
+      return;
+    }
+    // A room is furnished, part furnished or unfurnished -- never two of them.
+    const isFurnishing = (FURNISHING_OPTIONS as readonly string[]).includes(amenity);
+    const kept = isFurnishing ? value.filter((a) => !(FURNISHING_OPTIONS as readonly string[]).includes(a)) : value;
+    onChange([...kept, amenity]);
   }
 
   function addCustom() {

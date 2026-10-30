@@ -65,9 +65,14 @@ def to_sublet_request_read(db: Session, sr: SubletRequest) -> SubletRequestRead:
     else:
         risk_tier, risk_reason = sr.occupant_risk_tier, sr.occupant_risk_reason
 
+    from app.crud.rental_message import host_thread_available
+
+    new_agreement = sr.new_agreement if sr.new_agreement_id else None
     return SubletRequestRead(
         id=sr.id,
         current_occupancy_id=sr.current_occupancy_id,
+        host_thread_available=host_thread_available(sr),
+        new_application_id=new_agreement.offer.application_id if new_agreement is not None and new_agreement.offer else None,
         proposed_renter_party_id=sr.proposed_renter_party_id,
         status=sr.status,
         authority_evidence_ref=sr.authority_evidence_ref,
@@ -96,6 +101,8 @@ def to_sublet_request_read(db: Session, sr: SubletRequest) -> SubletRequestRead:
         original_renter_liability=sr.original_renter_liability,
         new_occupant_liability=sr.new_occupant_liability,
         deposit_disposition=sr.deposit_disposition,
+        proposed_monthly_rent=(sr.policy_snapshot or {}).get("proposed_monthly_rent"),
+        proposed_deposit_amount=(sr.policy_snapshot or {}).get("proposed_deposit_amount"),
         policy_snapshot=sr.policy_snapshot,
         new_agreement_id=sr.new_agreement_id,
         payee_model=sr.payee_model,
@@ -222,6 +229,7 @@ def submit_sublet_request(
     idempotency_key: str = "",
     proposed_start_date: date | None = None,
     proposed_end_date: date | None = None,
+    proposed_deposit_amount: float | None = None,
 ) -> SubletRequest:
     """Current renter submits a sublet request."""
     if not user.party_id:
@@ -271,6 +279,17 @@ def submit_sublet_request(
             f"The proposed end date cannot be later than the tenancy's own end date ({occupancy.expected_end_date.isoformat()})",
         )
 
+    # The host's own minimum-notice rule (Sublet Requests > Sublet policy settings).
+    from app.crud.host_sublet_policy import get_policy as get_host_sublet_policy
+
+    host_policy = get_host_sublet_policy(db, occupancy.room.property.owner_party_id)
+    if host_policy.min_notice_enabled and proposed_start_date is not None:
+        if (proposed_start_date - date.today()).days < host_policy.min_notice_days:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"This host needs sublet requests at least {host_policy.min_notice_days} days before the start date",
+            )
+
     policy = resolve_market_policy(db, jurisdiction_code_for_occupancy(occupancy))
 
     # ZR-SUB-003 Section 8: sublet.maxDuration -- "Configured duration
@@ -299,6 +318,19 @@ def submit_sublet_request(
                     f"Proposed rent {proposed_monthly_rent:.2f} exceeds the resolved cap of {max_rent:.2f} "
                     f"({policy.sublet_max_rent_multiple_of_original}x the original {original_rent:.2f})",
                 )
+        if proposed_deposit_amount is not None:
+            # The incoming tenant's own deposit is whatever is agreed between the people involved -- including none --
+            # but never more than the market's deposit cap on the rent they will actually pay.
+            if proposed_deposit_amount < 0:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "The deposit can't be negative")
+            effective_rent = proposed_monthly_rent if proposed_monthly_rent is not None else float(occupancy.offer.terms[-1].monthly_rent)
+            max_deposit = round(effective_rent * float(policy.deposit_max_rent_multiple), 2)
+            if proposed_deposit_amount > max_deposit:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Proposed deposit {proposed_deposit_amount:.2f} exceeds the maximum of {max_deposit:.2f} "
+                    f"({policy.deposit_max_rent_multiple}x the monthly rent)",
+                )
 
     # Proposed renter party must exist
     proposed_party = db.get(Party, proposed_renter_party_id)
@@ -322,8 +354,9 @@ def submit_sublet_request(
     sublet_request = SubletRequest(
         current_occupancy_id=occupancy_id,
         proposed_renter_party_id=proposed_renter_party_id,
-        # A co-tenant agrees to share the room before the Host is asked.
-        status="awaiting_co_tenant" if arrangement_type in SHARED_ROOM_ARRANGEMENT_TYPES else "pending_admin_review",
+        # Every request goes to the Host first. For a shared room the named person is asked only once the Host has
+        # approved (status "awaiting_co_tenant"), and moves in only after they accept.
+        status="pending_admin_review",
         authority_evidence_ref=authority_evidence_ref,
         arrangement_type=arrangement_type,
         reason=reason.strip(),
@@ -351,6 +384,8 @@ def submit_sublet_request(
             "retention_class": policy.sublet_retention_class,
             "additional_gates": policy.sublet_additional_gates,
             **({"proposed_monthly_rent": proposed_monthly_rent} if proposed_monthly_rent is not None else {}),
+            **({"proposed_deposit_amount": proposed_deposit_amount}
+               if proposed_deposit_amount is not None and arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES else {}),
         },
     )
     db.add(sublet_request)
@@ -368,25 +403,24 @@ def submit_sublet_request(
     # ZR-ENG-CLR-003 Section 17.2 notification matrix: the proposed occupant must
     # be told a request naming them exists, even before any approval -- previously
     # this platform never notified them at all, at any stage.
+    # A shared-room co-tenant hears nothing yet: their one notification comes when the host has approved and it
+    # is theirs to accept.
     if arrangement_type in SHARED_ROOM_ARRANGEMENT_TYPES:
-        room_name = f'"{listing.name}"' if listing else "their room"
-        proposed_message = (
-            f"{user.full_name} has invited you to share {room_name} as their co-tenant. "
-            "Open Sublets to accept or decline -- the host is only asked once you accept."
-        )
+        proposed_message = ""
     elif arrangement_type in CO_TENANCY_ARRANGEMENT_TYPES:
         proposed_message = f"{user.full_name} has requested to add you as a co-tenant on their room, pending the host's review."
     elif arrangement_type in NO_TENANCY_ARRANGEMENT_TYPES:
         proposed_message = f"{user.full_name} has requested permission for you to reside in their room, pending the host's review."
     else:
         proposed_message = f"{user.full_name} has requested to hand over their room to you, pending the host's review."
-    notif_crud.notify_user_by_party(
-        db, proposed_renter_party_id,
-        title="You've been proposed as a sublet occupant",
-        message=proposed_message,
-        notification_type="sublet_request.proposed",
-        related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
-    )
+    if proposed_message:
+        notif_crud.notify_user_by_party(
+            db, proposed_renter_party_id,
+            title="You've been proposed as a sublet occupant",
+            message=proposed_message,
+            notification_type="sublet_request.proposed",
+            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+        )
 
     db.commit()
     db.refresh(sublet_request)
@@ -567,6 +601,7 @@ def _sublet_agreement_snapshot(db: Session, offer: Offer, *, signed_on_approval:
 def _create_co_tenancy_agreement(
     db: Session, occupancy: Occupancy, proposed_guest: Guest, monthly_rent_override: float | None = None,
     *, require_e_signature: bool = False, recipient_party_id: int | None = None,
+    deposit_override: float | None = None,
 ) -> Agreement:
     """SUBLEASE_PARTIAL/ADD_CO_TENANT: builds a real, independent Application ->
     Offer -> Terms -> Agreement chain for the co-tenant, rather than overwriting
@@ -594,6 +629,8 @@ def _create_co_tenancy_agreement(
     listing = occupancy.listing
     latest_terms = occupancy.offer.terms[-1]
     monthly_rent = monthly_rent_override if monthly_rent_override is not None else latest_terms.monthly_rent
+    # The incoming tenant's own deposit: what was agreed (0 = none), else the original tenancy's.
+    deposit_amount = deposit_override if deposit_override is not None else latest_terms.deposit_amount
     start_date = date.today()
 
     # ZR-ENG-CLR-003 Rule 4.9 DATE INVARIANT: "sublet_end <= master_occupancy_end
@@ -616,7 +653,7 @@ def _create_co_tenancy_agreement(
     db.flush()
     db.add(OfferTerms(
         offer_id=offer.id, version=1,
-        monthly_rent=monthly_rent, deposit_amount=latest_terms.deposit_amount,
+        monthly_rent=monthly_rent, deposit_amount=deposit_amount,
         start_date=start_date, term_months=term_months,
     ))
     db.flush()
@@ -660,10 +697,11 @@ def _create_co_tenancy_agreement(
         obligation_type="RENT", money_plane=OBLIGATION_TYPE_TO_PLANE["RENT"],
         amount=monthly_rent, currency=listing.currency, due_date=start_date, agreement_id=agreement.id,
     ))
-    db.add(Obligation(
-        obligation_type="DEPOSIT", money_plane=OBLIGATION_TYPE_TO_PLANE["DEPOSIT"],
-        amount=latest_terms.deposit_amount, currency=listing.currency, due_date=start_date, agreement_id=agreement.id,
-    ))
+    if float(deposit_amount) > 0:
+        db.add(Obligation(
+            obligation_type="DEPOSIT", money_plane=OBLIGATION_TYPE_TO_PLANE["DEPOSIT"],
+            amount=deposit_amount, currency=listing.currency, due_date=start_date, agreement_id=agreement.id,
+        ))
     db.flush()
 
     # ZR-PAY-002 Section 4/6: the record/evidence-layer counterpart to the two
@@ -685,11 +723,12 @@ def _create_co_tenancy_agreement(
                 amount=monthly_rent, currency=listing.currency, due_date=start_date,
                 agreement_id=agreement.id,
             )
-            create_rental_payment_obligation(
-                db, obligation_type="DEPOSIT", tenant_guest_id=proposed_guest.id, recipient_party_id=recipient_party_id,
-                amount=latest_terms.deposit_amount, currency=listing.currency, due_date=start_date,
-                agreement_id=agreement.id,
-            )
+            if float(deposit_amount) > 0:
+                create_rental_payment_obligation(
+                    db, obligation_type="DEPOSIT", tenant_guest_id=proposed_guest.id, recipient_party_id=recipient_party_id,
+                    amount=deposit_amount, currency=listing.currency, due_date=start_date,
+                    agreement_id=agreement.id,
+                )
     except Exception:
         pass
 
@@ -960,6 +999,7 @@ def approve_sublet_request(
             db, sublet_request.current_occupancy, proposed_guest, negotiated_rent,
             require_e_signature=(policy.sublet_signature_mode == "E_SIGNATURE"),
             recipient_party_id=recipient_party_id,
+            deposit_override=sublet_request.policy_snapshot.get("proposed_deposit_amount"),
         )
         sublet_request.new_agreement_id = new_agreement.id
         new_agreement.offer.occupant_risk_tier = sublet_request.occupant_risk_tier
@@ -973,7 +1013,10 @@ def approve_sublet_request(
         sublet_request.new_occupant_liability = (
             "LICENSEE" if sublet_request.arrangement_type == "LODGER_OR_LICENSEE" else "JOINT"
         )
-        sublet_request.deposit_disposition = "SEPARATE_DEPOSIT_CREATED"
+        sublet_request.deposit_disposition = (
+            "NO_SEPARATE_DEPOSIT" if sublet_request.policy_snapshot.get("proposed_deposit_amount") == 0
+            else "SEPARATE_DEPOSIT_CREATED"
+        )
         # ZR-ENG-CLR-003 Rule 4.5: the co-tenant funds their own agreement
         # directly -- there's no third party routing their rent through the
         # original tenant. This is the sublease/co-tenancy payee model
@@ -1028,6 +1071,10 @@ def approve_sublet_request(
     sublet_request.decided_by_user_id = actor.id
     sublet_request.decided_at = datetime.now(timezone.utc)
     db.flush()
+    if is_shared_room:
+        # The Host's yes is the only approval: the co-tenant is in the room and gets one notification.
+        _finalize_shared_room(db, sublet_request, proposed_guest, requester_guest_id)
+        return sublet_request
     # ZR-SUBLET-PAY-003: who receives each payment, where the deposit goes and
     # how it's paid (bank / UPI / cash) -- derived from the approval.
     from app.services.sublet_payments import on_sublet_approved
@@ -1036,16 +1083,7 @@ def approve_sublet_request(
 
     _notify_sublet_requester(db, requester_guest_id, sublet_request.id, approved=True, notes=notes)
     _notify_sublet_host(db, sublet_request.current_occupancy, sublet_request.id, approved=True)
-    if is_shared_room:
-        notif_crud.notify_user_by_guest(
-            db, proposed_guest,
-            title="You're now sharing the room",
-            message=f'The host approved you as a co-tenant of "{listing.name if listing else "this room"}". '
-                    "You pay your share to the renter directly; the room's rent and payments are in your Sublets page.",
-            notification_type="sublet_request.co_tenant_approved",
-            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
-        )
-    elif is_no_tenancy:
+    if is_no_tenancy:
         notif_crud.notify_user_by_guest(
             db, proposed_guest,
             title="You've been given permission to reside",
@@ -1072,7 +1110,7 @@ def approve_sublet_request(
             "Sign your agreement, then complete payment to move in."
             if policy.sublet_signature_mode == "E_SIGNATURE"
             else "Complete payment to move in."
-        )
+        ) + " You can message your host from My Applications."
         notif_crud.notify_user_by_guest(
             db, proposed_guest,
             title="You've been added as a co-tenant",
@@ -1120,6 +1158,65 @@ def approve_sublet_request(
         freeze_agreement_version(db, sublet_request.current_occupancy.offer.agreement)
     db.refresh(sublet_request)
     return sublet_request
+
+
+def _finalize_shared_room(db: Session, sublet_request: SubletRequest, proposed_guest: Guest, requester_guest_id: str | None) -> None:
+    """The Host approved: the named person is in the room. Records who pays what and tells everyone how it
+    works -- the co-tenant gets one notification, with their share and how to pay it."""
+    from app.services.sublet_payments import on_sublet_approved
+
+    listing = sublet_request.current_occupancy.listing
+    sublet_request.status = "approved"
+    db.flush()
+    on_sublet_approved(db, sublet_request)
+    _notify_sublet_host(db, sublet_request.current_occupancy, sublet_request.id, approved=True)
+    from app.services.shared_room_payments import agreed_rent
+
+    share = agreed_rent(sublet_request)
+    how_to_pay = (
+        f"You pay your {share:,.2f} share to the renter directly each month and record each payment under "
+        "Rent & Deposit Payments; the renter confirms it there. The room's own rent is in your Sublets page."
+        if share is not None else
+        "You pay your share to the renter directly. The room's rent and payments are in your Sublets page."
+    )
+    notif_crud.notify_user_by_guest(
+        db, proposed_guest,
+        title="You're now sharing the room",
+        message=f'The host approved you as a co-tenant of "{listing.name if listing else "this room"}". {how_to_pay}',
+        notification_type="sublet_request.co_tenant_approved",
+        related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+    )
+    requester = db.get(Guest, requester_guest_id)
+    if requester is not None:
+        notif_crud.notify_user_by_guest(
+            db, requester, title="Your co-tenant was approved",
+            message=f"The host approved {proposed_guest.name or 'your co-tenant'}. They are now sharing the room with you.",
+            notification_type="sublet_request.co_tenant_approved_requester",
+            related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+        )
+    if share is not None:
+        requester = db.get(Guest, requester_guest_id)
+        if requester is not None:
+            notif_crud.notify_user_by_guest(
+                db, requester, title="You'll receive your co-tenant's rent share",
+                message=(
+                    "Your co-tenant pays their share to you directly. Add your payment instructions (bank, UPI or "
+                    "cash) in Payments so they know how to pay you, then confirm each payment there. You keep "
+                    "paying your own rent to your host as before."
+                ),
+                notification_type="sublet_request.payee_setup",
+                related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
+            )
+    db.commit()
+    db.refresh(sublet_request)
+    # The co-tenant's monthly rent share to the renter becomes a payment record. Best effort: a failure here must
+    # never undo the acceptance itself.
+    try:
+        from app.services.shared_room_payments import sync_shared_room_rent
+
+        sync_shared_room_rent(db, sublet_request)
+    except Exception:
+        db.rollback()
 
 
 def reject_sublet_request(
@@ -1437,7 +1534,7 @@ _LIABILITY_LABELS = {
     "ASSIGNEE": "Takes over full responsibility", "JOINT": "Jointly responsible", "LICENSEE": "Licensee only",
 }
 _DEPOSIT_LABELS = {
-    "NOT_APPLICABLE": "Not affected", "SEPARATE_DEPOSIT_CREATED": "A separate deposit applies to the new occupant",
+    "NOT_APPLICABLE": "Not affected", "SEPARATE_DEPOSIT_CREATED": "A separate deposit applies to the new occupant", "NO_SEPARATE_DEPOSIT": "No separate deposit for the new occupant",
     "RETAINED_BY_ORIGINAL_TENANCY": "Stays with the original tenancy",
 }
 
@@ -1706,50 +1803,6 @@ def get_shared_room_for_co_tenant_or_404(db: Session, sublet_request_id: int, us
     return sublet_request
 
 
-def respond_as_co_tenant(db: Session, sublet_request: SubletRequest, user: UserAccount, *, accept: bool) -> SubletRequest:
-    """The named co-tenant agrees (or not) to share the room. Nobody is added
-    to a room without saying yes, and the Host only sees requests the
-    co-tenant has accepted."""
-    if sublet_request.status != "awaiting_co_tenant":
-        raise HTTPException(status.HTTP_409_CONFLICT, "This request is no longer waiting for your answer")
-    now = datetime.now(timezone.utc)
-    requester = db.get(Guest, sublet_request.requested_by_guest_id) if sublet_request.requested_by_guest_id else None
-    listing = sublet_request.current_occupancy.listing
-    room_name = f'"{listing.name}"' if listing else "your room"
-
-    if accept:
-        if not verify_sublet_identity(db, sublet_request):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Verify your identity before accepting a co-tenancy")
-        capacity_reasons = check_room_capacity(db, sublet_request.current_occupancy.room)
-        if capacity_reasons:
-            raise HTTPException(status.HTTP_409_CONFLICT, {"message": "Room cannot accept a co-tenant", "reasons": capacity_reasons})
-        sublet_request.status = "pending_admin_review"
-        sublet_request.co_tenant_responded_at = now
-        _notify_host_of_submission(db, sublet_request, requester.name if requester else "A renter")
-        if requester is not None:
-            notif_crud.notify_user_by_guest(
-                db, requester,
-                title="Your co-tenant accepted",
-                message=f"{user.full_name} agreed to share {room_name}. It's now with the host for review.",
-                notification_type="sublet_request.co_tenant_accepted",
-                related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
-            )
-    else:
-        sublet_request.status = "declined_by_co_tenant"
-        sublet_request.co_tenant_responded_at = now
-        if requester is not None:
-            notif_crud.notify_user_by_guest(
-                db, requester,
-                title="Your co-tenant declined",
-                message=f"{user.full_name} declined to share {room_name}. The request is closed.",
-                notification_type="sublet_request.co_tenant_declined",
-                related_entity_type="sublet_request", related_entity_id=str(sublet_request.id),
-            )
-    db.commit()
-    db.refresh(sublet_request)
-    return sublet_request
-
-
 def end_shared_room(db: Session, sublet_request: SubletRequest, user: UserAccount, reason: str = "") -> SubletRequest:
     """The renter, the co-tenant or the Host ends an active shared room; the
     other two are told."""
@@ -1769,6 +1822,10 @@ def end_shared_room(db: Session, sublet_request: SubletRequest, user: UserAccoun
     sublet_request.ended_at = datetime.now(timezone.utc)
     sublet_request.ended_by_user_id = user.id
     sublet_request.end_reason = reason.strip()[:2000]
+    # Rent that hasn't started being paid and falls after the end is no longer owed.
+    from app.services.shared_room_payments import cancel_unpaid_rent_after
+
+    cancel_unpaid_rent_after(db, sublet_request, on_or_after=sublet_request.ended_at.date())
 
     room_name = f'"{listing.name}"' if listing else "the room"
     message = f"{user.full_name} ended the co-tenancy of {room_name}." + (f" Reason: {reason.strip()}" if reason.strip() else "")

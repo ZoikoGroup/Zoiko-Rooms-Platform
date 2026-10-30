@@ -447,6 +447,30 @@ def apply_termination_response_deadlines(db: Session) -> int:
     return apply_due_responses(db)
 
 
+def route_pending_termination_reviews(db: Session) -> int:
+    """Cases stuck in the retired admin-review state go to the host and renter
+    to settle between them (crud/termination_responses.py)."""
+    from app.crud.termination_responses import route_pending_reviews_to_parties
+
+    return route_pending_reviews_to_parties(db)
+
+
+def remind_missing_deposit_scheme(db: Session) -> int:
+    """A sublet whose UK deposit can't be paid until the protection scheme's details are added: the landlord
+    and the original tenant are told once (services/sublet_payments.py)."""
+    from app.services.sublet_payments import remind_missing_custodian_details
+
+    return remind_missing_custodian_details(db)
+
+
+def generate_shared_room_rent(db: Session) -> int:
+    """Each active shared room's next month of rent share (co-tenant -> renter) is recorded as a payment
+    (services/shared_room_payments.py)."""
+    from app.services.shared_room_payments import sweep_shared_room_rent
+
+    return sweep_shared_room_rent(db)
+
+
 JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("expire_overdue_bookings", expire_overdue_bookings),
     ("generate_due_rent", generate_due_rent),
@@ -472,6 +496,7 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("sync_internalised_external_leads", sync_internalised_external_leads),
     ("remind_hosts_to_reconfirm_availability", remind_hosts_to_reconfirm_availability),
     ("purge_stale_external_opportunities", purge_stale_external_opportunities),
+    ("route_pending_termination_reviews", route_pending_termination_reviews),
     ("apply_termination_response_deadlines", apply_termination_response_deadlines),
     ("notify_pending_move_outs", notify_pending_move_outs),
     ("end_due_occupancies", end_due_occupancies),
@@ -480,6 +505,8 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("redecide_legacy_property_reviews", redecide_legacy_property_reviews),
     ("activate_due_payment_instructions", activate_due_payment_instructions),
     ("apply_deposit_deadlines", apply_deposit_deadlines),
+    ("generate_shared_room_rent", generate_shared_room_rent),
+    ("remind_missing_deposit_scheme", remind_missing_deposit_scheme),
     ("close_inactive_support_tickets", close_inactive_support_tickets),
     ("seed_help_centre", seed_help_centre),
     ("apply_dispute_deadlines", apply_dispute_deadlines),

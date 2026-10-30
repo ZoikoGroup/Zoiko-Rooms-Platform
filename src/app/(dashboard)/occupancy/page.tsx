@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { BookingChangeRequestsManager } from "@/components/admin/BookingChangeRequestsManager";
 import { OccupancyManager } from "@/components/admin/OccupancyManager";
 import { SubletRequestsManager } from "@/components/admin/SubletRequestsManager";
@@ -12,7 +13,10 @@ export default function AdminOccupancyPage() {
           between themselves.
         </p>
       </div>
-      <OccupancyManager />
+      {/* OccupancyManager reads ?q= from the URL, so it needs a Suspense boundary on a prerendered page. */}
+      <Suspense fallback={null}>
+        <OccupancyManager />
+      </Suspense>
       <BookingChangeRequestsManager />
       <SubletRequestsManager />
     </div>

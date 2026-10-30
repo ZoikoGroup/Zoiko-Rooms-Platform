@@ -343,6 +343,15 @@ export function UserHelpSupportManager() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  // "Review Guidelines" on the payment-protection card. Articles come from the knowledge base with
+  // their own ids, so look the article up by title; fall back to the Payments topic.
+  const openPaymentGuidelines = () => {
+    const guide =
+      articles.find((a) => a.t === "Review verified payment instructions") ?? articles.find((a) => a.cat === "payments");
+    if (guide) navigateTo("article", guide.id);
+    else navigateTo("topic", "payments");
+  };
+
   const handleSearchSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const q = searchQuery.trim();
@@ -700,7 +709,7 @@ export function UserHelpSupportManager() {
               </div>
               <button
                 type="button"
-                onClick={() => navigateTo("article", "a1")}
+                onClick={openPaymentGuidelines}
                 className="rounded-xl bg-[#0E2F73] px-3.5 py-2 text-xs font-bold text-white transition hover:bg-primary-950"
               >
                 Review Guidelines
@@ -1199,6 +1208,22 @@ export function UserHelpSupportManager() {
           </article>
         </div>
       )}
+
+      {(view === "article" && !currentArticle) || (view === "case" && !currentCase) ? (
+        <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-8 text-center dark:border-slate-800 dark:bg-slate-900">
+          <p className="text-sm font-bold text-slate-900 dark:text-white">
+            {view === "article" ? "We couldn't find that help article." : "We couldn't find that support case."}
+          </p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">It may have been moved or removed.</p>
+          <button
+            type="button"
+            onClick={() => navigateTo(view === "case" ? "cases" : "home")}
+            className="rounded-xl bg-[#0E2F73] px-4 py-2 text-xs font-bold text-white transition hover:bg-primary-950"
+          >
+            {view === "case" ? "Back to my cases" : "Back to Help & Support"}
+          </button>
+        </div>
+      ) : null}
 
       {/* ========================================================================= */}
       {/* 5. SAFETY & TRUST EMERGENCY GUIDANCE */}

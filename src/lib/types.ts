@@ -49,6 +49,8 @@ export interface Listing {
   partyId: number | null;
   roomId: number | null;
   minStayNights: number;
+  /** First day the room can be moved into (YYYY-MM-DD); empty = available now. */
+  availableFrom?: string | null;
   marketReleaseId: number | null;
   state: ListingState;
   rejectionReason: string;
@@ -173,6 +175,8 @@ export interface Room {
   roomType: string;
   size: number;
   hasEnsuite: boolean;
+  /** How many people can live in the room (1 = just one renter). More than 1 allows a partial sublease or a co-tenant. */
+  maxOccupants?: number;
   status: "active" | "inactive";
   createdAt: string;
 }
@@ -348,7 +352,7 @@ export interface AdminUserSummary {
 
 export interface SearchResult {
   id: string;
-  type: "listing" | "guest" | "booking";
+  type: "listing" | "guest" | "booking" | "application" | "occupancy";
   title: string;
   subtitle: string;
   href: string;
@@ -1065,6 +1069,8 @@ export interface RentalPaymentObligation {
    *  word for deposit ("tenancy deposit" / "bond" / "security deposit" / ...).
    *  Always use this over obligationType for user-facing copy. */
   displayLabel: string;
+  /** What a payment with no agreement or occupancy is for, e.g. "Shared room · Sunny room" (a co-tenant's rent share). */
+  contextLabel?: string;
   /** ISO country the payment-method list resolves from ("" = unknown). */
   countryCode: string;
   waivedReason: string;
@@ -1462,6 +1468,8 @@ export interface UserOccupancy {
   /** Set when this tenant got the room through someone else's sublet -- the key for messaging that renter. */
   subletFromRequestId?: number | null;
   subletFromRenterName?: string;
+  /** Got the room by a handover: they message the host in the sublet's own thread, not the application's. */
+  subletFromHostThread?: boolean;
   /** Days the host has to confirm a move-out before silence counts as confirmation. */
   moveOutConfirmDays?: number;
 }
@@ -2049,6 +2057,13 @@ export interface SubletRequest {
   endedAt: string | null;
   endReason: string;
   sharedRoomActive: boolean;
+  /** The person added (a co-tenant / permitted occupant) and the host can message each other on this request. */
+  hostThreadAvailable?: boolean;
+  /** What the renter proposed for the new occupant (a co-tenant / sublease); null = same as the original tenancy. */
+  proposedMonthlyRent?: number | null;
+  proposedDepositAmount?: number | null;
+  /** A sublease / lodger gets their own application, so they message the host from My Applications. */
+  newApplicationId?: number | null;
   currentTenantIdentityVerified: boolean;
   proposedRenterIdentityVerified: boolean;
   // Only set for SUBLEASE_PARTIAL/ADD_CO_TENANT/LODGER_OR_LICENSEE -- the
@@ -2107,6 +2122,8 @@ export interface PublicListing {
   featured?: boolean;
   roomId: number | null;
   minStayNights: number;
+  /** First day the room can be moved into (YYYY-MM-DD); empty = available now. */
+  availableFrom?: string | null;
   // Deliberately no ownerEmail/ownerPhone -- the public endpoint never returns a
   // host's contact details to an unauthenticated caller.
   ownerName: string;
@@ -2569,6 +2586,7 @@ export interface HostRentalRecord {
     status: string;
     terminationCaseId: number | null;
     causeCode: string | null;
+    acknowledgedAt: string | null;
     pendingResponders: string[];
     responseDueAt: string | null;
   } | null;

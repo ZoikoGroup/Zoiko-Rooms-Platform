@@ -20,7 +20,6 @@ import {
   Search,
   ShieldCheck,
   X,
-  ExternalLink,
   MoreVertical,
   Bed,
   Calendar,
@@ -103,6 +102,7 @@ interface ListingFormState {
   bathrooms: string;
   size: string;
   minStayNights: string;
+  availableFrom: string;
   description: string;
   amenities: string[];
   images: string[];
@@ -132,6 +132,7 @@ function toFormState(listing: HostedListing): ListingFormState {
     bathrooms: String(listing.bathrooms),
     size: String(listing.size),
     minStayNights: String(listing.minStayNights),
+    availableFrom: listing.availableFrom ?? "",
     description: listing.description,
     amenities: listing.amenities,
     images: listing.images,
@@ -970,6 +971,7 @@ export function HostingListingsManager() {
       amenities: form.amenities,
       images: form.images,
       minStayNights: Math.round(minStay),
+      availableFrom: form.availableFrom || null,
       roomId,
       contactName: form.contactName.trim(),
       contactPhone: form.contactPhone.trim(),
@@ -1889,18 +1891,6 @@ export function HostingListingsManager() {
                           )}
 
                           {l.listingStatus === "LIVE" && (
-                            <Link
-                              href={`/listings/${l.id}`}
-                              target="_blank"
-                              onClick={() => setOpenMenuListingId(null)}
-                              className="w-full text-left px-4 py-2.5 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2"
-                            >
-                              <ExternalLink className="size-3.5 text-slate-400" />
-                              <span>View Public Listing</span>
-                            </Link>
-                          )}
-
-                          {l.listingStatus === "LIVE" && (
                             <button
                               type="button"
                               onClick={async () => {
@@ -2458,16 +2448,6 @@ export function HostingListingsManager() {
                   </button>
                 )}
 
-              {selectedListingForDrawer.listingStatus === "LIVE" && (
-                <Link
-                  href={`/listings/${selectedListingForDrawer.id}`}
-                  target="_blank"
-                  className="h-10 px-4 rounded-full border border-slate-300 dark:border-slate-700 hover:bg-slate-50 text-xs font-bold text-[#0E2F73] dark:text-white flex items-center gap-1.5 shadow-2xs transition"
-                >
-                  <ExternalLink className="size-3.5" />
-                  <span>View Public Listing</span>
-                </Link>
-              )}
 
               <button
                 type="button"
@@ -2546,6 +2526,15 @@ export function HostingListingsManager() {
                 type="number"
                 value={form?.minStayNights ?? "30"}
                 onChange={(e) => setForm((f) => (f ? { ...f, minStayNights: e.target.value } : f))}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="Available from (optional)">
+              <input
+                type="date"
+                min={new Date().toISOString().slice(0, 10)}
+                value={form?.availableFrom ?? ""}
+                onChange={(e) => setForm((f) => (f ? { ...f, availableFrom: e.target.value } : f))}
                 className={inputClass}
               />
             </Field>

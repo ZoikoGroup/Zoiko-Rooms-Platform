@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { ApiError, type ApiFix } from "@/lib/api-client";
 import { CheckCircle2, Clock, FileSignature, MessageSquare, Send, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -67,6 +69,8 @@ export function HostOfferAgreementPanel({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // What the host can do about a refusal (e.g. go and finish authority verification).
+  const [fixes, setFixes] = useState<ApiFix[]>([]);
   const [termsForm, setTermsForm] = useState<TermsForm>(emptyTermsForm);
   // SENT offers: the host can answer a renter's counter proposal, or send
   // revised terms of their own instead.
@@ -101,6 +105,7 @@ export function HostOfferAgreementPanel({
   useEffect(() => {
     if (!open) return;
     setError("");
+    setFixes([]);
     setTermsForm(emptyTermsForm);
     setReviseOpen(false);
     setCounterNote("");
@@ -125,11 +130,13 @@ export function HostOfferAgreementPanel({
   async function runAction(action: () => Promise<void>) {
     setBusy(true);
     setError("");
+    setFixes([]);
     try {
       await action();
       onChanged();
     } catch (err) {
       setError(errorMessage(err, "That action could not be completed."));
+      setFixes(err instanceof ApiError ? err.fixes ?? [] : []);
     } finally {
       setBusy(false);
     }
@@ -557,6 +564,24 @@ export function HostOfferAgreementPanel({
             <p className="rounded-lg bg-accent-50 px-3 py-2 text-xs font-medium text-accent-700 ring-1 ring-accent-200">
               {error}
             </p>
+          )}
+          {fixes.length > 0 && (
+            <div className="space-y-2" role="group" aria-label="How to fix this">
+              {fixes.map((fix) => (
+                <div
+                  key={fix.code}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-amber-50 px-3.5 py-3 text-xs text-amber-900 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-500/30"
+                >
+                  <span className="min-w-0 flex-1">{fix.message}</span>
+                  <Link
+                    href={fix.href}
+                    className="shrink-0 rounded-lg bg-[#0E2F73] px-3 py-1.5 font-bold text-white transition hover:bg-primary-950"
+                  >
+                    {fix.label}
+                  </Link>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       )}

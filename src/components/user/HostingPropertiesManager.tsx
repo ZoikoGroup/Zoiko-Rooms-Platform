@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -75,6 +76,7 @@ type RoomForm = {
   id: number | null;
   size: string;
   hasEnsuite: boolean;
+  maxOccupants: string;
 };
 
 // Default room imagery fallback when no custom photos have been uploaded yet
@@ -89,6 +91,142 @@ const DEFAULT_ROOM_IMAGES = [
   "https://images.unsplash.com/photo-1595526114035-0d45ed16cfbf?auto=format&fit=crop&w=320&q=80",
   "https://images.unsplash.com/photo-1583847268964-b28dc8f51f92?auto=format&fit=crop&w=320&q=80",
 ];
+
+/** A three-dots dropdown. The menu is drawn in a portal with fixed positioning so a card's or table's
+ *  overflow can never clip it, and it flips upward when there is no room below. `dataAttr` marks the
+ *  trigger and the menu so the page's outside-click handler treats both as "inside". */
+function FloatingMenu({
+  open,
+  onToggle,
+  onClose,
+  dataAttr,
+  width,
+  menuHeight,
+  triggerClassName,
+  ariaLabel,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  dataAttr: "data-room-menu" | "data-property-menu";
+  width: number;
+  menuHeight: number;
+  triggerClassName: string;
+  ariaLabel: string;
+  children: React.ReactNode;
+}) {
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  // Latest onClose without making it an effect dependency (it is a new function every render).
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const rect = buttonRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const below = rect.bottom + 4;
+      const top = below + menuHeight > window.innerHeight ? Math.max(8, rect.top - menuHeight - 4) : below;
+      const left = Math.min(Math.max(8, rect.right - width), window.innerWidth - width - 8);
+      setPos({ top, left });
+    };
+    place();
+    const close = () => closeRef.current();
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [open, width, menuHeight]);
+
+  const marker = { [dataAttr]: true };
+  return (
+    <div className="relative shrink-0" {...marker}>
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggle();
+        }}
+        className={triggerClassName}
+      >
+        <MoreVertical className="size-4" />
+      </button>
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            {...marker}
+            role="menu"
+            onClick={(e) => e.stopPropagation()}
+            style={{ position: "fixed", top: pos.top, left: pos.left, width }}
+            className="z-[60] bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl py-1.5"
+          >
+            {children}
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
+
+const MENU_ITEM =
+  "block w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800";
+
+/** The three-dots menu on a room row. */
+function RoomActionsMenu({
+  open,
+  onToggle,
+  onClose,
+  hasListing,
+  hasOccupancy,
+  onEdit,
+  onRecord,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  hasListing: boolean;
+  hasOccupancy: boolean;
+  onEdit: () => void;
+  onRecord: () => void;
+}) {
+  return (
+    <FloatingMenu
+      open={open}
+      onToggle={onToggle}
+      onClose={onClose}
+      dataAttr="data-room-menu"
+      width={176}
+      menuHeight={3 * 38 + 12}
+      ariaLabel="Room actions"
+      triggerClassName="size-8 rounded-full flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 transition cursor-pointer"
+    >
+      <button type="button" role="menuitem" className={MENU_ITEM} onClick={() => { onClose(); onEdit(); }}>
+        Edit room
+      </button>
+      {hasListing && (
+        <Link href="/account/host/listings" role="menuitem" onClick={onClose} className={MENU_ITEM}>
+          View Listing
+        </Link>
+      )}
+      {hasOccupancy && (
+        <button type="button" role="menuitem" className={MENU_ITEM} onClick={() => { onClose(); onRecord(); }}>
+          Rental Record
+        </button>
+      )}
+    </FloatingMenu>
+  );
+}
 
 export function HostingPropertiesManager() {
   const { user } = useUserSession();
@@ -140,6 +278,9 @@ export function HostingPropertiesManager() {
   // Three-dots menus open state
   const [openPropertyMenuId, setOpenPropertyMenuId] = useState<number | null>(null);
   const [openRoomMenuId, setOpenRoomMenuId] = useState<number | null>(null);
+  // The room drawer is drawn in a portal on <body>, so it is always pinned to the screen.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -358,6 +499,7 @@ export function HostingPropertiesManager() {
           type: roomType,
           size: room.size,
           hasEnsuite: room.hasEnsuite,
+          maxOccupants: room.maxOccupants ?? 1,
           roomStatus,
           listingStatus: isLive ? ("LIVE" as const) : ("PAUSED" as const),
           listingStatusSubtext,
@@ -629,10 +771,15 @@ export function HostingPropertiesManager() {
       setError("Room size must be a positive number of square feet.");
       return;
     }
+    const maxOccupants = Number(roomForm.maxOccupants || 1);
+    if (!Number.isInteger(maxOccupants) || maxOccupants < 1 || maxOccupants > 10) {
+      setError("Enter how many people can live in the room as a whole number from 1 to 10.");
+      return;
+    }
     setError("");
     setSubmitting(true);
     try {
-      const payload = { size: Math.round(size), hasEnsuite: roomForm.hasEnsuite };
+      const payload = { size: Math.round(size), hasEnsuite: roomForm.hasEnsuite, maxOccupants };
       if (roomForm.id === null) {
         await createHostedRoom(roomForm.propertyId, payload);
         showToast("Room added successfully!");
@@ -1123,6 +1270,7 @@ export function HostingPropertiesManager() {
                           id: null,
                           size: "",
                           hasEnsuite: false,
+                          maxOccupants: "1",
                         })
                       }
                       className="flex-1 sm:flex-initial h-9 sm:h-10 px-3 sm:px-4 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 text-[#0E2F73] dark:text-white text-xs font-bold font-heading rounded-full shadow-2xs transition flex items-center justify-center gap-1.5 cursor-pointer"
@@ -1148,69 +1296,64 @@ export function HostingPropertiesManager() {
                     </button>
 
                     {/* Three-dots menu trigger */}
-                    <div
-                      className="relative shrink-0"
-                      data-property-menu
+                    <FloatingMenu
+                      open={openPropertyMenuId === prop.id}
+                      onToggle={() => setOpenPropertyMenuId((prev) => (prev === prop.id ? null : prop.id))}
+                      onClose={() => setOpenPropertyMenuId(null)}
+                      dataAttr="data-property-menu"
+                      width={192}
+                      menuHeight={3 * 38 + 16}
+                      ariaLabel="Property actions"
+                      triggerClassName="size-9 rounded-full flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 hover:text-slate-900 transition cursor-pointer"
                     >
                       <button
                         type="button"
-                        onClick={() =>
-                          setOpenPropertyMenuId((prev) => (prev === prop.id ? null : prop.id))
-                        }
-                        className="size-9 rounded-full flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 hover:text-slate-900 transition cursor-pointer"
+                        role="menuitem"
+                        onClick={() => {
+                          setOpenPropertyMenuId(null);
+                          setVerifyProperty({
+                            id: prop.id,
+                            label: `${prop.address} · Property #${prop.id}`,
+                          });
+                        }}
+                        className={`${MENU_ITEM} flex items-center gap-2`}
                       >
-                        <MoreVertical className="size-4" />
+                        <ShieldCheck className="size-3.5 text-slate-400" />
+                        <span>View verification</span>
                       </button>
-
-                      {openPropertyMenuId === prop.id && (
-                        <div className="absolute right-0 top-10 z-30 w-48 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl py-1.5 animate-in fade-in zoom-in-95 duration-100">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setOpenPropertyMenuId(null);
-                              setVerifyProperty({
-                                id: prop.id,
-                                label: `${prop.address} · Property #${prop.id}`,
-                              });
-                            }}
-                            className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2"
-                          >
-                            <ShieldCheck className="size-3.5 text-slate-400" />
-                            <span>View verification</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setOpenPropertyMenuId(null);
-                              setPropertyForm({
-                                id: prop.rawProperty.id,
-                                address: prop.rawProperty.address,
-                                city: prop.rawProperty.city,
-                                landmark: prop.rawProperty.landmark ?? "",
-                                jurisdictionCode: prop.rawProperty.jurisdictionCode,
-                                savedJurisdictionCode: prop.rawProperty.jurisdictionCode,
-                                regionLocked: prop.rawProperty.regionLocked,
-                              });
-                            }}
-                            className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2"
-                          >
-                            <FileText className="size-3.5 text-slate-400" />
-                            <span>Edit property details</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setOpenPropertyMenuId(null);
-                              showToast(`Archiving property ${prop.name}...`);
-                            }}
-                            className="w-full text-left px-4 py-2 text-xs font-semibold text-[#B42318] hover:bg-red-50 dark:hover:bg-red-950/20 flex items-center gap-2 border-t border-slate-100 dark:border-slate-800 mt-1"
-                          >
-                            <X className="size-3.5 text-[#B42318]" />
-                            <span>Archive property</span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setOpenPropertyMenuId(null);
+                          setPropertyForm({
+                            id: prop.rawProperty.id,
+                            address: prop.rawProperty.address,
+                            city: prop.rawProperty.city,
+                            landmark: prop.rawProperty.landmark ?? "",
+                            jurisdictionCode: prop.rawProperty.jurisdictionCode,
+                            savedJurisdictionCode: prop.rawProperty.jurisdictionCode,
+                            regionLocked: prop.rawProperty.regionLocked,
+                          });
+                        }}
+                        className={`${MENU_ITEM} flex items-center gap-2`}
+                      >
+                        <FileText className="size-3.5 text-slate-400" />
+                        <span>Edit property details</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setOpenPropertyMenuId(null);
+                          showToast(`Archiving property ${prop.name}...`);
+                        }}
+                        className="w-full text-left px-4 py-2 text-xs font-semibold text-[#B42318] hover:bg-red-50 dark:hover:bg-red-950/20 flex items-center gap-2 border-t border-slate-100 dark:border-slate-800 mt-1"
+                      >
+                        <X className="size-3.5 text-[#B42318]" />
+                        <span>Archive property</span>
+                      </button>
+                    </FloatingMenu>
                   </div>
                 </div>
 
@@ -1250,6 +1393,7 @@ export function HostingPropertiesManager() {
                               id: null,
                               size: "",
                               hasEnsuite: false,
+                              maxOccupants: "1",
                             })
                           }
                           className="h-10 px-5 rounded-full bg-[#0E2F73] hover:bg-[#0a2358] text-white text-xs font-bold font-heading transition flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
@@ -1290,66 +1434,23 @@ export function HostingPropertiesManager() {
                                       </p>
 
                                       {/* Three dots button */}
-                                      <div
-                                        className="relative shrink-0"
-                                        data-room-menu
-                                      >
-                                        <button
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            setOpenRoomMenuId((prev) =>
-                                              prev === room.id ? null : room.id
-                                            );
-                                          }}
-                                          className="size-8 rounded-full flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 transition cursor-pointer"
-                                        >
-                                          <MoreVertical className="size-4" />
-                                        </button>
-
-                                        {openRoomMenuId === room.id && (
-                                          <div
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="absolute right-0 top-8 z-30 w-44 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl py-1.5 animate-in fade-in zoom-in-95 duration-100"
-                                          >
-                                            <button
-                                              type="button"
-                                              onClick={() => {
-                                                setOpenRoomMenuId(null);
-                                                setRoomForm({
-                                                  propertyId: prop.id,
-                                                  id: room.id,
-                                                  size: String(room.size),
-                                                  hasEnsuite: room.hasEnsuite,
-                                                });
-                                              }}
-                                              className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                                            >
-                                              Edit room
-                                            </button>
-                                            {room.listing && (
-                                              <Link
-                                                href={`/account/host/listings`}
-                                                className="block w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                                              >
-                                                View Listing
-                                              </Link>
-                                            )}
-                                            {room.occupancyId && (
-                                              <button
-                                                type="button"
-                                                onClick={() => {
-                                                  setOpenRoomMenuId(null);
-                                                  setRecordOccupancyId(room.occupancyId ?? null);
-                                                }}
-                                                className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                                              >
-                                                Rental Record
-                                              </button>
-                                            )}
-                                          </div>
-                                        )}
-                                      </div>
+                                      <RoomActionsMenu
+                                        open={openRoomMenuId === room.id}
+                                        onToggle={() => setOpenRoomMenuId((prev) => (prev === room.id ? null : room.id))}
+                                        onClose={() => setOpenRoomMenuId(null)}
+                                        hasListing={Boolean(room.listing)}
+                                        hasOccupancy={Boolean(room.occupancyId)}
+                                        onEdit={() =>
+                                          setRoomForm({
+                                            propertyId: prop.id,
+                                            id: room.id,
+                                            size: String(room.size),
+                                            hasEnsuite: room.hasEnsuite,
+                                            maxOccupants: String(room.maxOccupants),
+                                          })
+                                        }
+                                        onRecord={() => setRecordOccupancyId(room.occupancyId ?? null)}
+                                      />
                                     </div>
                                     <p className="text-xs text-slate-500 dark:text-slate-400">
                                       {room.type} {room.size > 0 ? `· ${room.size} sq ft` : ""}{room.hasEnsuite ? " · Ensuite" : ""}
@@ -1647,66 +1748,23 @@ export function HostingPropertiesManager() {
                                     )}
 
                                     {/* Three dots button */}
-                                    <div
-                                      className="relative"
-                                      data-room-menu
-                                    >
-                                      <button
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setOpenRoomMenuId((prev) =>
-                                            prev === room.id ? null : room.id
-                                          );
-                                        }}
-                                        className="size-8 rounded-full flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 transition cursor-pointer"
-                                      >
-                                        <MoreVertical className="size-4" />
-                                      </button>
-
-                                      {openRoomMenuId === room.id && (
-                                        <div
-                                          onClick={(e) => e.stopPropagation()}
-                                          className="absolute right-0 top-9 z-30 w-44 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl py-1.5 animate-in fade-in zoom-in-95 duration-100"
-                                        >
-                                          <button
-                                            type="button"
-                                            onClick={() => {
-                                              setOpenRoomMenuId(null);
-                                              setRoomForm({
-                                                propertyId: prop.id,
-                                                id: room.id,
-                                                size: String(room.size),
-                                                hasEnsuite: room.hasEnsuite,
-                                              });
-                                            }}
-                                            className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                                          >
-                                            Edit room
-                                          </button>
-                                          {room.listing && (
-                                            <Link
-                                              href={`/account/host/listings`}
-                                              className="block w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                                            >
-                                              View Listing
-                                            </Link>
-                                          )}
-                                          {room.occupancyId && (
-                                            <button
-                                              type="button"
-                                              onClick={() => {
-                                                setOpenRoomMenuId(null);
-                                                setRecordOccupancyId(room.occupancyId ?? null);
-                                              }}
-                                              className="w-full text-left px-4 py-2 text-xs font-semibold text-[#0E2F73] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                                            >
-                                              Rental Record
-                                            </button>
-                                          )}
-                                        </div>
-                                      )}
-                                    </div>
+                                    <RoomActionsMenu
+                                        open={openRoomMenuId === room.id}
+                                        onToggle={() => setOpenRoomMenuId((prev) => (prev === room.id ? null : room.id))}
+                                        onClose={() => setOpenRoomMenuId(null)}
+                                        hasListing={Boolean(room.listing)}
+                                        hasOccupancy={Boolean(room.occupancyId)}
+                                        onEdit={() =>
+                                          setRoomForm({
+                                            propertyId: prop.id,
+                                            id: room.id,
+                                            size: String(room.size),
+                                            hasEnsuite: room.hasEnsuite,
+                                            maxOccupants: String(room.maxOccupants),
+                                          })
+                                        }
+                                        onRecord={() => setRecordOccupancyId(room.occupancyId ?? null)}
+                                      />
                                   </div>
                                 </div>
                               );
@@ -1731,7 +1789,7 @@ export function HostingPropertiesManager() {
       </div>
 
       {/* 7. Slide-out Inspection Drawer (Sidebar) matching zoiko-rooms-properties-rooms.html exactly */}
-      {selectedRoomForDrawer && (
+      {mounted && selectedRoomForDrawer && createPortal(
         <div className="fixed inset-0 z-50 flex justify-end">
           {/* Backdrop Scrim */}
           <div
@@ -1961,6 +2019,7 @@ export function HostingPropertiesManager() {
                       id: roomData.id,
                       size: String(roomData.size),
                       hasEnsuite: roomData.hasEnsuite,
+                      maxOccupants: String(roomData.maxOccupants),
                     });
                   }}
                   className="h-11 px-4 rounded-full border border-slate-300 dark:border-slate-700 hover:bg-slate-50 text-[#0E2F73] dark:text-white text-xs font-bold font-heading flex items-center justify-center gap-2 transition cursor-pointer"
@@ -1977,7 +2036,8 @@ export function HostingPropertiesManager() {
               </div>
             </div>
           </aside>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 8. Modals: Add / Edit Property (Real DB) */}
@@ -2074,6 +2134,21 @@ export function HostingPropertiesManager() {
               onChange={(checked) => setRoomForm((f) => (f ? { ...f, hasEnsuite: checked } : f))}
             />
           </div>
+
+          <Field
+            label="People who can live in this room"
+            hint="1 means just one renter. Raise it (up to 10) if the room can be shared: a renter can then ask your permission to sublease part of it or add a co-tenant. You still approve every request."
+          >
+            <input
+              type="number"
+              min={1}
+              max={10}
+              inputMode="numeric"
+              value={roomForm?.maxOccupants ?? "1"}
+              onChange={(e) => setRoomForm((f) => (f ? { ...f, maxOccupants: e.target.value } : f))}
+              className={inputClass}
+            />
+          </Field>
 
           {error && (
             <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700 ring-1 ring-red-200">

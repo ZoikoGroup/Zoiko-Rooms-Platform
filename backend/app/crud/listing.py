@@ -225,6 +225,13 @@ def list_listings_for(db: Session, admin: AdminUser) -> list[Listing]:
     return list(db.scalars(select(Listing).options(joinedload(Listing.room)).order_by(Listing.name)))
 
 
+def _like_contains(value: str) -> str:
+    """A LIKE pattern matching `value` anywhere, with the visitor's own % and _ taken literally
+    (otherwise searching "50%" or "a_b" would match far more than typed)."""
+    escaped = value.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def list_public_listings(
     db: Session,
     *,
@@ -259,9 +266,9 @@ def list_public_listings(
         | Listing.room_id.in_(select(Room.id).where(Room.status == "active"))
     )
     if city:
-        conditions.append(Listing.city.ilike(f"%{city.strip()}%"))
+        conditions.append(Listing.city.ilike(_like_contains(city), escape="\\"))
     if room_type:
-        conditions.append(Listing.room_type.ilike(f"%{room_type.strip()}%"))
+        conditions.append(Listing.room_type.ilike(_like_contains(room_type), escape="\\"))
     if min_price is not None:
         conditions.append(Listing.price_per_night >= min_price)
     if max_price is not None:
@@ -280,7 +287,9 @@ def list_public_listings(
             select(Listing)
             .options(joinedload(Listing.owner))
             .where(*conditions)
-            .order_by(Listing.name)
+            # id as a tie-break: two listings with the same name must keep one fixed order, or a
+            # room can be repeated or skipped between one page and the next.
+            .order_by(Listing.name, Listing.id)
             .limit(limit)
             .offset(offset)
         )
@@ -350,6 +359,8 @@ def to_public_listing_read(listing: Listing) -> PublicListingRead:
         featured=field("featured"),
         room_id=field("room_id"),
         min_stay_nights=field("min_stay_nights"),
+        # A live fact the host can change at once, so it is read from the listing itself, not the snapshot.
+        available_from=listing.available_from,
         owner_name=listing.contact_name or (listing.owner.full_name if listing.owner else "Host"),
     )
 

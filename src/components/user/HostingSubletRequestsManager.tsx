@@ -22,6 +22,7 @@ import { Loader } from "@/components/ui/Loader";
 import { Modal } from "@/components/ui/Modal";
 import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 import { Toast, useToast } from "@/components/user/ui";
+import { SubletHostChatThread } from "@/components/user/RentalMessagesTab";
 import { AuthorityVerificationWizard } from "@/components/user/AuthorityVerificationWizard";
 import { SubletPaymentsPanel } from "@/components/user/SubletPaymentsPanel";
 import { SubletRequest, Property } from "@/lib/types";
@@ -31,10 +32,13 @@ import {
   declineHostedSubletRequest,
   endHostedSharedRoom,
   errorMessage,
+  getHostSubletPolicy,
   hostSubletDecisionRecordUrl,
+  type HostSubletPolicy,
   listHostedProperties,
   listHostedSubletRequests,
   requestHostedSubletMoreInfo,
+  saveHostSubletPolicy,
   signHostedAgreement,
 } from "@/lib/user-api";
 import {
@@ -125,6 +129,45 @@ export function HostingSubletRequestsManager({
   // Modal targets & form states
   const [busyId, setBusyId] = useState<number | null>(null);
   const [policySettingsOpen, setPolicySettingsOpen] = useState(false);
+  const [policyDraft, setPolicyDraft] = useState<HostSubletPolicy>({ minNoticeEnabled: false, minNoticeDays: 14 });
+  const [policyLoading, setPolicyLoading] = useState(false);
+  const [policySaving, setPolicySaving] = useState(false);
+  const [policyError, setPolicyError] = useState("");
+
+  // Load the saved rules each time the dialog opens, so it shows what's really stored.
+  useEffect(() => {
+    if (!policySettingsOpen) return;
+    let cancelled = false;
+    setPolicyLoading(true);
+    setPolicyError("");
+    getHostSubletPolicy()
+      .then((p) => !cancelled && setPolicyDraft(p))
+      .catch((err) => !cancelled && setPolicyError(errorMessage(err, "Could not load your sublet policy.")))
+      .finally(() => !cancelled && setPolicyLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [policySettingsOpen]);
+
+  async function savePolicy() {
+    const days = Math.floor(Number(policyDraft.minNoticeDays));
+    if (policyDraft.minNoticeEnabled && (!Number.isFinite(days) || days < 1 || days > 365)) {
+      setPolicyError("Enter the minimum notice as a number of days between 1 and 365.");
+      return;
+    }
+    setPolicySaving(true);
+    setPolicyError("");
+    try {
+      const saved = await saveHostSubletPolicy({ minNoticeEnabled: policyDraft.minNoticeEnabled, minNoticeDays: days || 14 });
+      setPolicyDraft(saved);
+      showToast("Sublet policy settings saved.", "success");
+      setPolicySettingsOpen(false);
+    } catch (err) {
+      setPolicyError(errorMessage(err, "Could not save your sublet policy."));
+    } finally {
+      setPolicySaving(false);
+    }
+  }
 
   // Decision & Review modal
   const [reviewTarget, setReviewTarget] = useState<SubletRequest | null>(null);
@@ -151,6 +194,19 @@ export function HostingSubletRequestsManager({
   // View details modal
   const [detailsTarget, setDetailsTarget] = useState<SubletRequest | null>(null);
   const [endingSharedRoom, setEndingSharedRoom] = useState(false);
+
+  // A notification link (?open=<sublet id>) opens that sublet's details, with its chat, once the list has loaded.
+  const [openedFromLink, setOpenedFromLink] = useState(false);
+  useEffect(() => {
+    if (openedFromLink || requests.length === 0) return;
+    const wanted = Number(new URLSearchParams(window.location.search).get("open"));
+    if (!wanted) return;
+    const match = requests.find((r) => r.id === wanted);
+    if (match) {
+      setDetailsTarget(match);
+      setOpenedFromLink(true);
+    }
+  }, [requests, openedFromLink]);
 
   // Send to owner modal
   const [sendToOwnerTarget, setSendToOwnerTarget] = useState<SubletRequest | null>(null);
@@ -346,9 +402,10 @@ export function HostingSubletRequestsManager({
   const arrangementFilterOptions = useMemo(
     () => [
       { value: "ALL", label: "All arrangements" },
-      ...Object.entries(subletArrangementTypeAdminLabel).map(([key, label]) => ({
+      // Only the arrangements a renter can ask for today.
+      ...(["ASSIGNMENT_FULL", "REPLACEMENT_OCCUPANT", "ADD_CO_TENANT"] as const).map((key) => ({
         value: key,
-        label,
+        label: subletArrangementTypeAdminLabel[key],
       })),
     ],
     []
@@ -478,15 +535,26 @@ export function HostingSubletRequestsManager({
   const approveNeedsOverride = reviewTarget?.occupantRiskTier === "BLOCK";
 
   async function handleSubmitApprove() {
-    if (!reviewTarget || !approveAuthorityConfirmed) return;
-    if (approveRequiresStepUp && !approveStepUpPassword) return;
-    if (approveNeedsOverride && !approveOverrideReason.trim()) return;
+    if (!reviewTarget) return;
+    // Say what is missing instead of leaving the button dead.
+    const missing: string[] = [];
+    if (!approveAuthorityConfirmed) missing.push("tick the box confirming you are authorized to decide this");
+    if (approveRequiresStepUp && !approveStepUpPassword) missing.push("enter your account password");
+    if (approveNeedsOverride && !approveOverrideReason.trim()) missing.push("explain why the overlapping tenancy is acceptable");
+    if (missing.length > 0) {
+      showToast(`To approve: ${missing.join("; ")}.`, "error");
+      return;
+    }
+
+    // A condition typed into the box but not added with "+ Add" is still a condition.
+    const typedCondition = approveConditionDraft.trim();
+    const conditionList = typedCondition ? [...approveConditionList, typedCondition] : approveConditionList;
 
     setBusyId(reviewTarget.id);
     try {
       const updated = await approveHostedSubletRequest(reviewTarget.id, {
         conditions: approveConditions.trim(),
-        conditionList: approveConditionList,
+        conditionList,
         expiresAt: approveExpiresAt ? new Date(approveExpiresAt).toISOString() : null,
         authorityConfirmed: approveAuthorityConfirmed,
         stepUpPassword: approveStepUpPassword,
@@ -1093,7 +1161,7 @@ export function HostingSubletRequestsManager({
                             onClick={() => setDetailsTarget(req)}
                             className="inline-flex items-center justify-center px-4 py-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[#0C2B4E] dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700/60 text-xs font-bold shadow-sm transition cursor-pointer"
                           >
-                            {hasConditions ? "View Approval" : "View Sublet"}
+                            {req.hostThreadAvailable ? "View & Message" : hasConditions ? "View Approval" : "View Sublet"}
                           </button>
                         )}
 
@@ -1262,7 +1330,7 @@ export function HostingSubletRequestsManager({
                         onClick={() => setDetailsTarget(req)}
                         className="w-full py-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[#0C2B4E] dark:text-white text-xs font-bold shadow-sm cursor-pointer"
                       >
-                        {hasConditions ? "View Approval" : "View Sublet"}
+                        {req.hostThreadAvailable ? "View & Message" : hasConditions ? "View Approval" : "View Sublet"}
                       </button>
                     )}
                   </div>
@@ -1338,12 +1406,41 @@ export function HostingSubletRequestsManager({
                   {subletArrangementTypeAdminLabel[reviewTarget.arrangementType] || reviewTarget.arrangementType}
                 </span>
               </div>
+              {(reviewTarget.proposedMonthlyRent != null || reviewTarget.proposedDepositAmount != null) && (
+                <div className="flex justify-between">
+                  <span className="text-slate-400 font-semibold">Proposed Terms:</span>
+                  <span className="font-bold text-slate-800 dark:text-slate-200">
+                    {reviewTarget.proposedMonthlyRent != null ? `Rent ${reviewTarget.proposedMonthlyRent}/month` : "Rent as original"}
+                    {" · "}
+                    {reviewTarget.proposedDepositAmount == null
+                      ? "Deposit as original"
+                      : reviewTarget.proposedDepositAmount === 0
+                        ? "No separate deposit"
+                        : `Deposit ${reviewTarget.proposedDepositAmount}`}
+                  </span>
+                </div>
+              )}
               {reviewTarget.reason && (
                 <div className="pt-1 text-slate-600 dark:text-slate-300 italic border-t border-slate-200 dark:border-slate-700">
                   &ldquo;{reviewTarget.reason}&rdquo;
                 </div>
               )}
             </div>
+
+            {reviewTarget.hostThreadAvailable && (
+              <details className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+                <summary className="cursor-pointer text-xs font-bold text-[#0C2B4E] dark:text-slate-100">
+                  Message {reviewTarget.proposedRenterName || "the person named"}
+                </summary>
+                <div className="mt-3">
+                  <SubletHostChatThread
+                    subletRequestId={reviewTarget.id}
+                    side="host"
+                    counterpartName={reviewTarget.proposedRenterName || "the person named"}
+                  />
+                </div>
+              </details>
+            )}
 
             {/* Mode Selector Tabs */}
             <div className="flex rounded-xl bg-slate-100 dark:bg-slate-800 p-1 text-xs font-bold">
@@ -1506,12 +1603,7 @@ export function HostingSubletRequestsManager({
                   </button>
                   <button
                     type="button"
-                    disabled={
-                      !approveAuthorityConfirmed ||
-                      (approveRequiresStepUp && !approveStepUpPassword) ||
-                      (approveNeedsOverride && !approveOverrideReason.trim()) ||
-                      busyId === reviewTarget.id
-                    }
+                    disabled={busyId === reviewTarget.id}
                     onClick={handleSubmitApprove}
                     className="px-5 py-2 rounded-xl bg-[#0C2B4E] hover:bg-[#071c33] disabled:opacity-50 text-white text-xs font-bold shadow-sm transition cursor-pointer"
                   >
@@ -1670,7 +1762,22 @@ export function HostingSubletRequestsManager({
               </a>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            {detailsTarget.hostThreadAvailable && (
+              <details open className="rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+                <summary className="min-h-8 cursor-pointer py-1 text-xs font-bold text-[#0C2B4E] dark:text-slate-100">
+                  Message {detailsTarget.proposedRenterName || "the person named"}
+                </summary>
+                <div className="mt-3">
+                  <SubletHostChatThread
+                    subletRequestId={detailsTarget.id}
+                    side="host"
+                    counterpartName={detailsTarget.proposedRenterName || "the person named"}
+                  />
+                </div>
+              </details>
+            )}
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-xl">
                 <span className="text-[10px] uppercase font-bold text-slate-400 block">Original Tenant</span>
                 <span className="font-bold text-slate-900 dark:text-slate-100">
@@ -1691,9 +1798,7 @@ export function HostingSubletRequestsManager({
               <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-xl space-y-2">
                 <span className="text-[10px] uppercase font-bold text-slate-400 block">Shared room</span>
                 <p className="text-slate-600 dark:text-slate-300">
-                  {detailsTarget.status === "awaiting_co_tenant"
-                    ? "Waiting for the co-tenant to accept. You can decide once they do."
-                    : "The co-tenant shares the room under the tenant's own tenancy and pays the tenant directly. The tenant stays responsible for the full rent."}
+                  The co-tenant shares the room under the tenant&apos;s own tenancy and pays the tenant directly. The tenant stays responsible for the full rent.
                 </p>
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-bold text-slate-900 dark:text-slate-100">{detailsTarget.currentTenantName || "Tenant"}</span>
@@ -1821,55 +1926,67 @@ export function HostingSubletRequestsManager({
             <p className="text-slate-600 dark:text-slate-400">
               Configure baseline policy rules applied to incoming tenant sublet requests on your properties.
             </p>
-            <div className="space-y-3">
-              <label className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800">
-                <input
-                  type="checkbox"
-                  defaultChecked
-                  className="mt-0.5 rounded text-indigo-600"
-                />
-                <div>
-                  <div className="font-bold text-slate-900 dark:text-slate-100">
-                    Mandatory Government ID verification
-                  </div>
-                  <div className="text-[11px] text-slate-500">
-                    Require all proposed subtenants to complete Zoiko identity checks before approval.
+            {policyLoading ? (
+              <p className="text-slate-400">Loading your settings…</p>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800">
+                  <input type="checkbox" checked disabled readOnly className="mt-0.5 rounded text-indigo-600" />
+                  <div>
+                    <div className="font-bold text-slate-900 dark:text-slate-100">
+                      Mandatory Government ID verification <span className="font-semibold text-slate-400">· Required by Zoiko</span>
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      Every proposed subtenant must complete Zoiko identity checks before approval. This applies to all sublets and can&apos;t be switched off.
+                    </div>
                   </div>
                 </div>
-              </label>
 
-              <label className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800">
-                <input
-                  type="checkbox"
-                  defaultChecked
-                  className="mt-0.5 rounded text-indigo-600"
-                />
-                <div>
-                  <div className="font-bold text-slate-900 dark:text-slate-100">
-                    Minimum notice period (14 days)
-                  </div>
-                  <div className="text-[11px] text-slate-500">
-                    Require requests to be submitted at least two weeks before proposed start date.
+                <div className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800">
+                  <input
+                    id="sublet-min-notice"
+                    type="checkbox"
+                    checked={policyDraft.minNoticeEnabled}
+                    onChange={(e) => setPolicyDraft((p) => ({ ...p, minNoticeEnabled: e.target.checked }))}
+                    className="mt-0.5 rounded text-indigo-600"
+                  />
+                  <div className="space-y-1.5">
+                    <label htmlFor="sublet-min-notice" className="block font-bold text-slate-900 dark:text-slate-100">
+                      Minimum notice period
+                    </label>
+                    <div className="text-[11px] text-slate-500">
+                      Require sublet requests to be submitted at least this many days before the proposed start date.
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={365}
+                        value={policyDraft.minNoticeDays}
+                        disabled={!policyDraft.minNoticeEnabled}
+                        onChange={(e) => setPolicyDraft((p) => ({ ...p, minNoticeDays: Number(e.target.value) }))}
+                        className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900"
+                        aria-label="Minimum notice in days"
+                      />
+                      <span className="text-slate-500">days</span>
+                    </div>
                   </div>
                 </div>
-              </label>
 
-              <label className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800">
-                <input
-                  type="checkbox"
-                  defaultChecked
-                  className="mt-0.5 rounded text-indigo-600"
-                />
-                <div>
-                  <div className="font-bold text-slate-900 dark:text-slate-100">
-                    Require Owner Confirmation for Agent accounts
-                  </div>
-                  <div className="text-[11px] text-slate-500">
-                    Enforce written owner approval before representatives can grant sublet rights.
+                <div className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800">
+                  <input type="checkbox" checked disabled readOnly className="mt-0.5 rounded text-indigo-600" />
+                  <div>
+                    <div className="font-bold text-slate-900 dark:text-slate-100">
+                      Owner confirmation for Agent accounts <span className="font-semibold text-slate-400">· Required by Zoiko</span>
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      Written owner approval is always checked before a representative can grant sublet rights. This can&apos;t be switched off.
+                    </div>
                   </div>
                 </div>
-              </label>
-            </div>
+              </div>
+            )}
+            {policyError && <p className="rounded-lg bg-rose-50 px-3 py-2 font-medium text-rose-700">{policyError}</p>}
 
             <div className="flex justify-end gap-2 pt-2">
               <button
@@ -1881,13 +1998,11 @@ export function HostingSubletRequestsManager({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  showToast("Sublet policy settings updated.", "success");
-                  setPolicySettingsOpen(false);
-                }}
-                className="px-5 py-2 rounded-xl bg-[#0C2B4E] hover:bg-[#071c33] text-white font-bold shadow-sm"
+                disabled={policyLoading || policySaving}
+                onClick={savePolicy}
+                className="px-5 py-2 rounded-xl bg-[#0C2B4E] hover:bg-[#071c33] text-white font-bold shadow-sm disabled:opacity-50"
               >
-                Save Settings
+                {policySaving ? "Saving…" : "Save Settings"}
               </button>
             </div>
           </div>

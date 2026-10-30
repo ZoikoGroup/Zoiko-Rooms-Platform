@@ -10,7 +10,13 @@ export interface AmenityOption {
   label: string;
 }
 
+/** Furnishing is one choice, not several: ticking one of these un-ticks the others. */
+export const FURNISHING_OPTIONS = ["Furnished", "Part Furnished", "Unfurnished"] as const;
+
 export const COMMON_AMENITIES: AmenityOption[] = [
+  { value: "Furnished", label: "Furnished" },
+  { value: "Part Furnished", label: "Part Furnished" },
+  { value: "Unfurnished", label: "Unfurnished" },
   { value: "Wi-Fi", label: "Wi-Fi" },
   { value: "Washing Machine", label: "Washing Machine" },
   { value: "Air Conditioning", label: "Air Conditioning" },
@@ -22,6 +28,7 @@ export const COMMON_AMENITIES: AmenityOption[] = [
   { value: "TV", label: "TV" },
   { value: "Parking", label: "Parking" },
   { value: "Lift / Elevator", label: "Lift / Elevator" },
+  { value: "Step-free Entrance", label: "Step-free Entrance" },
   { value: "CCTV Security", label: "CCTV Security" },
   { value: "Housekeeping", label: "Housekeeping" },
   { value: "Meals Included", label: "Meals Included" },

@@ -216,11 +216,19 @@ function OpenCaseModal({
   async function handleSubmit() {
     const resolvedOccupancyId = allowOccupancyInput ? parseOptionalNumber(occupancyInput) : occupancyId;
     if (allowOccupancyInput && !resolvedOccupancyId) {
-      setError("Enter a valid occupancy ID.");
+      setError("Enter the occupancy ID of the tenancy this dispute is about (a whole number, e.g. 12).");
       return;
     }
     if (!claimCode.trim()) {
-      setError("Claim code is required.");
+      setError("Enter a claim code — a short code for what this is about, e.g. DEPOSIT_NOT_RETURNED.");
+      return;
+    }
+    if (amount.trim() && parseOptionalNumber(amount) === undefined) {
+      setError("Enter the amount as a number, e.g. 250.00 — or leave it empty.");
+      return;
+    }
+    if (currency.trim() && currency.trim().length !== 3) {
+      setError("Enter the currency as a 3-letter code, e.g. GBP.");
       return;
     }
     setSubmitting(true);
@@ -492,8 +500,32 @@ function DisputeCaseDetail({
     setList(list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
   }
 
+  // The person who opened a finished dispute deletes it -- no admin review.
+  const [confirmRemoveCase, setConfirmRemoveCase] = useState(false);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  async function handleRemoveCase() {
+    setRemoveBusy(true);
+    try {
+      await client.removeCase(caseId);
+      showToast("Dispute deleted.");
+      onClose();
+      onChanged();
+    } catch (err) {
+      showToast(errorMessage(err, "Could not delete this dispute."), "error");
+    } finally {
+      setRemoveBusy(false);
+    }
+  }
+
   async function handleAddClaim() {
-    if (!newClaimCode.trim()) return;
+    if (!newClaimCode.trim()) {
+      showToast("Enter a claim code — a short code for what this claim is about, e.g. DEPOSIT_NOT_RETURNED.", "error");
+      return;
+    }
+    if (newClaimAmount.trim() && parseOptionalNumber(newClaimAmount) === undefined) {
+      showToast("Enter the amount as a number, e.g. 250.00 — or leave it empty.", "error");
+      return;
+    }
     setClaimBusy(true);
     try {
       await client.addClaim(caseId, {
@@ -520,7 +552,10 @@ function DisputeCaseDetail({
   }
 
   async function handleRequestReview(claimId: number) {
-    if (!reviewReason.trim()) return;
+    if (!reviewReason.trim()) {
+      showToast("Tell us why you want this claim reviewed.", "error");
+      return;
+    }
     setClaimBusy(true);
     try {
       await client.requestClaimReview(caseId, claimId, reviewReason.trim());
@@ -537,6 +572,10 @@ function DisputeCaseDetail({
   }
 
   async function handleUploadEvidence() {
+    if (!evidenceFile && !evidenceNote.trim()) {
+      showToast("Choose a file to upload or write a note — evidence can't be empty.", "error");
+      return;
+    }
     setEvidenceBusy(true);
     try {
       await client.uploadEvidence(caseId, {
@@ -575,7 +614,10 @@ function DisputeCaseDetail({
   }
 
   async function handleSendMessage() {
-    if (!messageDraft.trim()) return;
+    if (!messageDraft.trim()) {
+      showToast("Type a message before sending.", "error");
+      return;
+    }
     setMessageBusy(true);
     try {
       await client.postMessage(caseId, messageDraft.trim());
@@ -589,7 +631,15 @@ function DisputeCaseDetail({
   }
 
   async function handleProposeSettlement() {
-    if (!settlementTerms.trim() || !settlementAck || settlementClaimIds.length === 0) return;
+    const missing: string[] = [];
+    if (settlementClaimIds.length === 0) missing.push("choose at least one claim this settlement covers");
+    if (!settlementTerms.trim()) missing.push("write the settlement terms");
+    if (settlementAmount.trim() && parseOptionalNumber(settlementAmount) === undefined) missing.push("enter the amount as a number");
+    if (!settlementAck) missing.push("tick the box confirming this doesn't waive any legal right");
+    if (missing.length > 0) {
+      showToast(`To send this proposal: ${missing.join("; ")}.`, "error");
+      return;
+    }
     setSettlementBusy(true);
     try {
       await client.proposeSettlement(caseId, {
@@ -631,7 +681,15 @@ function DisputeCaseDetail({
   }
 
   async function handleCounterSettlement() {
-    if (!counterTargetId || !counterTerms.trim()) return;
+    if (!counterTargetId) return;
+    if (!counterTerms.trim()) {
+      showToast("Write your counter-offer terms before sending.", "error");
+      return;
+    }
+    if (counterAmount.trim() && parseOptionalNumber(counterAmount) === undefined) {
+      showToast("Enter the counter amount as a number, e.g. 250.00 — or leave it empty.", "error");
+      return;
+    }
     setSettlementActionBusy(counterTargetId);
     try {
       await client.respondSettlement(caseId, counterTargetId, {
@@ -656,7 +714,10 @@ function DisputeCaseDetail({
   }
 
   async function handlePaymentResolution() {
-    if (!paymentConfirm) return;
+    if (!paymentConfirm) {
+      showToast("Choose how you want to resolve this payment problem first.", "error");
+      return;
+    }
     setPaymentBusy(true);
     try {
       await client.resolvePaymentClaim(caseId, paymentConfirm.claimId, paymentConfirm.action, paymentNotes.trim());
@@ -765,6 +826,33 @@ function DisputeCaseDetail({
               {caseData.assignedTeam && <Badge tone="neutral">{label(caseData.assignedTeam)}</Badge>}
               <span className="text-xs text-slate-400">Opened {formatDate(caseData.openedAt)}</span>
             </div>
+            {/* Only the person who opened a finished dispute can delete it. */}
+            {(viewerRole === "RENTER" ? Boolean(caseData.openedByGuestId) : Boolean(caseData.openedByPartyId)) &&
+              (caseData.status === "RESOLVED" || caseData.status === "CLOSED") && (
+                <div className="flex flex-wrap items-center gap-2 rounded-xl bg-slate-50 p-3 text-xs text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
+                  {!confirmRemoveCase ? (
+                    <>
+                      <span>This dispute is finished. You can delete it from your account.</span>
+                      <Button size="sm" variant="outline" onClick={() => setConfirmRemoveCase(true)}>
+                        Delete this dispute
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <span>
+                        Delete this dispute? It disappears from your list and the evidence and messages you added are erased.
+                        The other side keeps their copy, and money records are not changed.
+                      </span>
+                      <Button size="sm" variant="primary" loading={removeBusy} onClick={handleRemoveCase}>
+                        Yes, delete it
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setConfirmRemoveCase(false)}>
+                        Cancel
+                      </Button>
+                    </>
+                  )}
+                </div>
+              )}
             {caseData.moneyStatus.length > 0 && (
               <div className="space-y-1 rounded-xl bg-slate-50 p-3 text-xs text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
                 {caseData.moneyStatus.map((m) => (
@@ -1145,7 +1233,6 @@ function DisputeCaseDetail({
                   variant="primary"
                   fullWidth
                   loading={settlementBusy}
-                  disabled={!settlementAck || settlementClaimIds.length === 0 || !settlementTerms.trim()}
                   onClick={handleProposeSettlement}
                 >
                   Send proposal
@@ -1217,7 +1304,7 @@ function DisputeCaseDetail({
                                 onChange={(e) => setCounterExpiresAt(e.target.value)}
                                 className={inputClass}
                               />
-                              <Button size="sm" variant="primary" fullWidth loading={busy} disabled={!counterTerms.trim()} onClick={handleCounterSettlement}>
+                              <Button size="sm" variant="primary" fullWidth loading={busy} onClick={handleCounterSettlement}>
                                 Send counter-offer
                               </Button>
                             </div>

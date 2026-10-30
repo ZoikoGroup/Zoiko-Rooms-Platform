@@ -525,6 +525,8 @@ class UserOccupancyRead(CamelModel):
     # key for messaging that renter (crud/rental_message.py:sublet_held_through).
     sublet_from_request_id: int | None = None
     sublet_from_renter_name: str = ""
+    # True when this tenant got the room by a handover: they message the host in the sublet's own thread.
+    sublet_from_host_thread: bool = False
     # Days the host has to confirm a move-out before silence counts as
     # confirmation (crud/occupancy_lifecycle.py).
     move_out_confirm_days: int = 7
@@ -546,6 +548,8 @@ class SubletRequestCreate(CamelModel):
     # provided, validated against the market pack's resolved cap
     # (ZR-ENG-CLR-003 Rule 4.4 / Section 6).
     proposed_monthly_rent: float | None = None
+    # The incoming tenant's own deposit (0 = none). Omitted -> the original tenancy's deposit is copied.
+    proposed_deposit_amount: float | None = Field(default=None, ge=0)
     # ZR-SUB-003 Section 3 Step 2 Wireframe B: "Proposed start date / Proposed
     # end date." Both optional (never in the original build) -- when given,
     # crud/sublet.py:submit_sublet_request validates start<end and both fall
@@ -581,6 +585,10 @@ class SubletRequestRead(CamelModel):
 
     id: int
     current_occupancy_id: int
+    # The person added (a co-tenant / permitted occupant) can message the host on this request.
+    host_thread_available: bool = False
+    # A sublease / lodger gets their own application, so they message the host there.
+    new_application_id: int | None = None
     # ZR-SUB-003 Section 3 Step 1: a DRAFT "carries no proposed occupant yet"
     # -- crud/sublet.py:create_draft_sublet_request sets this to None.
     proposed_renter_party_id: int | None
@@ -612,6 +620,8 @@ class SubletRequestRead(CamelModel):
     original_renter_liability: str = "ACTIVE"
     new_occupant_liability: str = "NONE"
     deposit_disposition: str = ""
+    proposed_monthly_rent: float | None = None
+    proposed_deposit_amount: float | None = None
     policy_snapshot: dict = {}
     new_agreement_id: int | None = None
     payee_model: str = ""
@@ -648,10 +658,6 @@ class SubletRequestRead(CamelModel):
     shared_room_active: bool = False
     current_tenant_identity_verified: bool = False
     proposed_renter_identity_verified: bool = False
-
-
-class CoTenancyResponse(CamelModel):
-    accept: bool
 
 
 class SharedRoomEnd(CamelModel):

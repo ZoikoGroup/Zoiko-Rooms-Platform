@@ -66,6 +66,10 @@ class SubletMessage(Base):
     )
     sender_role: Mapped[str] = mapped_column(String(10), nullable=False)
     sender_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True)
+    # "PEER" = renter <-> subtenant; "HOST" = host <-> the person added (a co-tenant or permitted
+    # occupant has no application of their own, so no other way to reach the host). Never mixed:
+    # the renter can't read the host thread and the host can't read the renter's.
+    thread: Mapped[str] = mapped_column(String(10), nullable=False, default="PEER", server_default="PEER")
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     # Set when the other side opens the thread.

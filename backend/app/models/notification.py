@@ -46,6 +46,27 @@ _HIGH_PRIORITY_TYPE_PREFIXES = (
 )
 
 
+# An admin's own Settings > Notification Preferences switches (AdminSettings
+# notify_*), by notification-type prefix. A prefix not listed here (disputes,
+# identity and property verification, support tickets, listing review...) is
+# operational or safety-related and is never switched off.
+_ADMIN_PREFERENCE_BY_TYPE_PREFIX = {
+    "application": "notify_new_booking", "offer": "notify_new_booking", "agreement": "notify_new_booking",
+    "occupancy": "notify_new_booking", "booking_change_request": "notify_new_booking",
+    "termination_case": "notify_new_booking", "sublet_request": "notify_new_booking",
+    "payment": "notify_payments", "payout": "notify_payments", "refund": "notify_payments",
+    "refund_entitlement": "notify_payments", "deposit": "notify_payments", "deposit_claim": "notify_payments",
+    "listing_fee": "notify_payments",
+    "review": "notify_reviews",
+    "marketing": "notify_marketing",
+}
+
+
+def admin_preference_for_notification_type(notification_type: str) -> str | None:
+    """The AdminSettings switch that governs this type, or None if none does."""
+    return _ADMIN_PREFERENCE_BY_TYPE_PREFIX.get(notification_type.split(".", 1)[0])
+
+
 def category_for_notification_type(notification_type: str) -> str:
     prefix = notification_type.split(".", 1)[0]
     # An unmapped/future prefix falls to OCCUPANCY rather than raising --
