@@ -1242,7 +1242,13 @@ def create_agreement(
     assert_provider_access_any(db, admin, party_id_for_listing(offer.listing))
     reasons = check_agreement_eligibility(db, offer)
     if reasons:
-        raise HTTPException(status.HTTP_409_CONFLICT, {"message": "Not eligible to create an agreement", "reasons": reasons})
+        from app.services.eligibility import agreement_fix_hints
+
+        raise HTTPException(status.HTTP_409_CONFLICT, {
+            "message": "Not eligible to create an agreement", "reasons": reasons,
+            # Where the host can fix the authority / classification reasons.
+            "fixes": agreement_fix_hints(db, offer.listing.room),
+        })
 
     # ZR-ENG-CLR-004 Section 3.3 'Fail closed': no approved
     # jurisdiction/agreement profile means no automated contract -- never a

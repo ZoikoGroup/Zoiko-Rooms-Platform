@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { AgreementAmendmentsManager } from "@/components/admin/AgreementAmendmentsManager";
 import { AutomationMetricsPanel } from "@/components/admin/AutomationMetricsPanel";
 import { ProviderStatusPanel } from "@/components/admin/ProviderStatusPanel";
@@ -13,7 +14,10 @@ export default function AdminLeasingPage() {
           between themselves and the platform automates the rest.
         </p>
       </div>
-      <LeasingManager />
+      {/* LeasingManager reads ?q= from the URL, so it needs a Suspense boundary on a prerendered page. */}
+      <Suspense fallback={null}>
+        <LeasingManager />
+      </Suspense>
       <AgreementAmendmentsManager />
       <AutomationMetricsPanel source="leasing" />
       <ProviderStatusPanel provider="signatures" />

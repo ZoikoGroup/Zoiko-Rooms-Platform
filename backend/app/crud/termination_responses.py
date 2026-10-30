@@ -296,3 +296,25 @@ def apply_due_responses(db: Session) -> int:
         resolved += 1
         db.commit()
     return resolved
+
+
+def route_pending_reviews_to_parties(db: Session) -> int:
+    """Scheduler job: a case left in the retired PENDING_REVIEW state (opened
+    before the parties decided these themselves) was waiting on an admin who no
+    longer has that step. It now goes to the other side as an ordinary proposal
+    -- accept, counter or contest -- so host and renter settle it between them.
+    The proposed date is the one already on the case if it is still ahead,
+    otherwise the minimum notice from today. Idempotent: routed cases are
+    AWAITING_RESPONSE."""
+    from app.crud.termination import _min_notice_days
+
+    routed = 0
+    for case in db.scalars(select(TerminationCase).where(TerminationCase.status == "PENDING_REVIEW")):
+        today = _now().date()
+        if case.earliest_effective_date is None or case.earliest_effective_date < today:
+            case.earliest_effective_date = today + timedelta(days=_min_notice_days(case.occupancy))
+        proposer = case.initiator_guest_id if case.initiator_guest_id is not None else HOST
+        start_response_round(db, case, proposer=proposer)
+        routed += 1
+        db.commit()
+    return routed

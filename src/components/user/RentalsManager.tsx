@@ -50,6 +50,8 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   addOwnConditionReportItem,
   cancelOwnBookingBeforeMoveIn,
+  endCoTenancy,
+  listCoTenancies,
   confirmHandoverReceipt,
   reviewPaymentRecipient,
   confirmMoveOutReady,
@@ -62,7 +64,7 @@ import {
   listOccupancies,
   listOwnConditionReport,
   listOwnTerminationCases,
-  listPublicListings,
+  listAllPublicListings,
   listSubletRequests,
   lookupSubletRenter,
   requestOwnTermination,
@@ -87,6 +89,7 @@ import { useToast } from "@/components/user/ui";
 import { DepositClaimsSection } from "@/components/user/DepositClaimsSection";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
 import { RentalMessagesTab } from "@/components/user/RentalMessagesTab";
+import { SharedRoomCard } from "@/components/user/SharedRoomsPanel";
 import { RentalReviewCard } from "@/components/user/RentalReviewCard";
 import { InstructionsModalView } from "@/components/user/RentalPaymentsManager";
 import { Modal } from "@/components/ui/Modal";
@@ -171,6 +174,10 @@ export function RentalsManager() {
   const [issueText, setIssueText] = useState("");
   const [publicListings, setPublicListings] = useState<PublicListing[]>([]);
   const [subletRequests, setSubletRequests] = useState<SubletRequest[]>([]);
+  // Rooms the user shares as a co-tenant: listed with their rentals, in the same row format.
+  const [sharedRooms, setSharedRooms] = useState<SubletRequest[]>([]);
+  const [openSharedRoomId, setOpenSharedRoomId] = useState<number | null>(null);
+  const [endingSharedRoomId, setEndingSharedRoomId] = useState<number | null>(null);
 
   // User review state for payment recipient per occupancy (persisted in session)
   const [receiptConfirmedIds, setReceiptConfirmedIds] = useState<Set<number>>(new Set());
@@ -299,7 +306,7 @@ export function RentalsManager() {
         listOccupancies(),
         listMyChangeRequests(),
         listMyAutopayMandates().catch(() => []),
-        listPublicListings({ limit: 100 }).then((p) => p.items).catch(() => []),
+        listAllPublicListings().then((p) => p.items).catch(() => []),
         listSubletRequests().catch(() => []),
       ]);
       setOccupancies(occupanciesData);
@@ -307,6 +314,7 @@ export function RentalsManager() {
       setAutopayMandates(mandatesData);
       setPublicListings(publicListingsData);
       setSubletRequests(subletRequestsData);
+      listCoTenancies().then((rows) => setSharedRooms(rows.filter((r) => r.sharedRoomActive))).catch(() => setSharedRooms([]));
       renterDisputes.listCases().then(setDisputeCases).catch(() => {});
       listMyRefunds().then(setRefunds).catch(() => {});
 
@@ -1181,7 +1189,7 @@ export function RentalsManager() {
         </div>
 
         {/* Rental Rows */}
-        {filteredRentals.length > 0 ? (
+        {filteredRentals.length > 0 || (viewTab !== "history" && sharedRooms.length > 0) ? (
           <div className="divide-y divide-[#EEF1F7]">
             {filteredRentals.map((r) => {
               const isAction = Boolean(r.action);
@@ -1327,6 +1335,90 @@ export function RentalsManager() {
                     )}
                   </div>
                 </article>
+              );
+            })}
+            {viewTab !== "history" && sharedRooms.map((room) => {
+              const open = openSharedRoomId === room.id;
+              return (
+                <div key={`shared-${room.id}`}>
+                  <article className="grid grid-cols-1 lg:grid-cols-[minmax(210px,1.3fr)_minmax(170px,1.1fr)_minmax(150px,1fr)_130px_minmax(140px,1fr)_170px] gap-3.5 p-4 sm:px-6 items-center transition-colors hover:bg-slate-50/60">
+                    <button type="button" onClick={() => setOpenSharedRoomId(open ? null : room.id)} className="flex items-center gap-3.5 text-left group">
+                      <div className="w-12 h-12 rounded-xl bg-[#E3E9F6] text-[#0E2F73] flex items-center justify-center flex-shrink-0 group-hover:bg-[#D9E4FA] transition-colors">
+                        <Home className="w-5 h-5" />
+                      </div>
+                      <div className="flex flex-col gap-0.5 min-w-0">
+                        <span className="font-extrabold text-sm sm:text-[15px] text-[#0B1B3F] group-hover:text-[#D80B0B] transition-colors truncate">
+                          {room.listingName || "Shared room"}
+                        </span>
+                        <span className="text-xs text-[#5B6886] truncate">
+                          {room.roomType || "Private Room"} · {room.listingCity}
+                        </span>
+                      </div>
+                    </button>
+                    <div className="flex flex-col gap-0.5 text-xs">
+                      <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886]">Rental / Term</span>
+                      <strong className="font-mono text-[13px] text-[#0B1B3F]">Shared room #{room.id}</strong>
+                      <span className="text-[#4A5878]">with {room.currentTenantName || "the renter"}</span>
+                      {room.proposedMonthlyRent != null && (
+                        <span className="text-sm font-extrabold text-[#0B1B3F]">
+                          {room.proposedMonthlyRent} <small className="text-xs font-normal text-[#4A5878]">/ month</small>
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-col gap-0.5 text-xs">
+                      <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886]">Agreement</span>
+                      <strong className="text-[13px] text-[#0B1B3F]">Shared tenancy</strong>
+                      <span className="inline-flex items-center gap-1 font-bold text-xs text-[#05603A]">
+                        <Check className="w-3.5 h-3.5" />
+                        Host approved
+                      </span>
+                    </div>
+                    <div>
+                      <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886] block mb-1">Status</span>
+                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#8FD9B4] bg-[#E7F8EF] text-[#05603A] text-xs font-extrabold uppercase">
+                        <Key className="w-3 h-3" />
+                        ACTIVE
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-0.5 text-xs">
+                      <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886]">Next milestone</span>
+                      <span className="font-bold text-[#0B1B3F] text-[13px]">
+                        Shared since {room.decidedAt ? formatDate(room.decidedAt) : "approval"}
+                      </span>
+                    </div>
+                    <div className="flex lg:justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setOpenSharedRoomId(open ? null : room.id)}
+                        className="w-full lg:w-auto h-10 px-4 rounded-xl border border-[#C7D2E6] hover:border-[#0E2F73] text-[#0E2F73] font-bold text-xs sm:text-[13px] bg-white transition-colors whitespace-nowrap"
+                      >
+                        {open ? "Hide Rental" : "Manage Rental"}
+                      </button>
+                    </div>
+                  </article>
+                  {open && (
+                    <div className="px-4 sm:px-6 pb-4">
+                      <SharedRoomCard
+                        request={room}
+                        role="co_tenant"
+                        busy={endingSharedRoomId === room.id}
+                        onEnd={async (reason) => {
+                          setEndingSharedRoomId(room.id);
+                          try {
+                            await endCoTenancy(room.id, reason);
+                            showToast("You've left the shared room.");
+                            setOpenSharedRoomId(null);
+                            setSharedRooms((prev) => prev.filter((r) => r.id !== room.id));
+                          } catch (err) {
+                            showToast(errorMessage(err, "That didn't work. Please try again."), "error");
+                          } finally {
+                            setEndingSharedRoomId(null);
+                          }
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -2569,17 +2661,14 @@ export function RentalsManager() {
                     >
                       <option value="ASSIGNMENT_FULL">Full Assignment (Swap renter)</option>
                       <option value="REPLACEMENT_OCCUPANT">Replacement Occupant</option>
-                      <option value="SUBLEASE_PARTIAL" disabled={!modalOccupancy?.roomHasSpaceForCoTenant}>
-                        Sublease Partial{modalOccupancy?.roomHasSpaceForCoTenant ? "" : " (room is full)"}
-                      </option>
                       <option value="ADD_CO_TENANT" disabled={!modalOccupancy?.roomHasSpaceForCoTenant}>
                         Add Co-Tenant{modalOccupancy?.roomHasSpaceForCoTenant ? "" : " (room is full)"}
                       </option>
                     </select>
                     {!modalOccupancy?.roomHasSpaceForCoTenant && (
                       <p className="mt-1 text-[11px] text-[#5B6886]">
-                        This room is already at its occupant limit, so only a full handover is possible. Your host can
-                        raise the room&apos;s occupant limit if it can be shared.
+                        This room is set to one occupant, so only a full handover is possible. If the room can be shared,
+                        ask your host to raise its occupant limit (Properties &amp; Rooms &rarr; Edit room).
                       </p>
                     )}
                   </div>

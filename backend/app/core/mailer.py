@@ -30,11 +30,12 @@ DEV_MAIL_OUTBOX_DIR = Path("dev_mail_outbox")
 
 SUPPORT_EMAIL = "support@zoikorooms.com"
 
-# One immediate retry for a transient SMTP failure. Kept small on purpose:
-# delivery runs inside the user's request, and a FAILED record can be sent
-# again later by the same dedupe key.
-SMTP_ATTEMPTS = 2
-SMTP_RETRY_DELAY_SECONDS = 0.5
+# Retries for a transient SMTP failure. Gmail/SES can take well over 10s to
+# answer the DATA command on a slow link, so the timeout is generous; slow
+# callers (e.g. forgot-password) send from a background task, not the request.
+SMTP_TIMEOUT_SECONDS = 30
+SMTP_ATTEMPTS = 3
+SMTP_RETRY_DELAY_SECONDS = 1.0
 
 
 # ---------------------------------------------------------------- delivery
@@ -92,11 +93,11 @@ def _send_via_smtp_detailed(
         if settings.smtp_use_ssl:
             # Implicit TLS (e.g. port 465) -- the socket is SSL-wrapped before any
             # SMTP command is sent, so STARTTLS is neither needed nor valid here.
-            with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+            with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
                 smtp.login(settings.smtp_username, settings.smtp_password)
                 smtp.send_message(message)
         else:
-            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
                 if settings.smtp_use_tls:
                     smtp.starttls()
                 smtp.login(settings.smtp_username, settings.smtp_password)
@@ -387,8 +388,9 @@ def send_listing_published_email(
             "Review the public page for accuracy. Keep availability, price, household information and Room Passport "
             "evidence current. Material changes may require a new review before publication continues.",
         ],
-        # "View Live Listing" opens the public page renters see.
-        cta_url=_url(f"/listings/{listing_id}" if listing_id else "/account/host/listings"),
+        # The public page returns "Listing not found" to the host who owns the listing (a host can't
+        # open their own public listing), so the button goes to where they manage it.
+        cta_url=_url("/account/host/listings"),
     ))
 
 

@@ -21,7 +21,6 @@ import {
   Search,
   ShieldCheck,
   X,
-  ExternalLink,
   MoreVertical,
   Bed,
   Calendar,
@@ -104,6 +103,7 @@ interface ListingFormState {
   bathrooms: string;
   size: string;
   minStayNights: string;
+  availableFrom: string;
   description: string;
   amenities: string[];
   images: string[];
@@ -133,6 +133,7 @@ function toFormState(listing: HostedListing): ListingFormState {
     bathrooms: String(listing.bathrooms),
     size: String(listing.size),
     minStayNights: String(listing.minStayNights),
+    availableFrom: listing.availableFrom ?? "",
     description: listing.description,
     amenities: listing.amenities,
     images: listing.images,
@@ -988,6 +989,7 @@ export function HostingListingsManager() {
       amenities: form.amenities,
       images: form.images,
       minStayNights: Math.round(minStay),
+      availableFrom: form.availableFrom || null,
       roomId,
       contactName: form.contactName.trim(),
       contactPhone: form.contactPhone.trim(),
@@ -2617,6 +2619,15 @@ export function HostingListingsManager() {
                 type="number"
                 value={form?.minStayNights ?? "30"}
                 onChange={(e) => setForm((f) => (f ? { ...f, minStayNights: e.target.value } : f))}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="Available from (optional)">
+              <input
+                type="date"
+                min={new Date().toISOString().slice(0, 10)}
+                value={form?.availableFrom ?? ""}
+                onChange={(e) => setForm((f) => (f ? { ...f, availableFrom: e.target.value } : f))}
                 className={inputClass}
               />
             </Field>

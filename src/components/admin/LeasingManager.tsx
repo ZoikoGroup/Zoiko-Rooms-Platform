@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { ListSearchInput, matchesQuery } from "@/components/admin/ListSearchInput";
 import {
   CheckCircle2,
   ClipboardList,
@@ -44,6 +46,10 @@ function applicationDisplay(application: Application): { label: string; tone: "w
 
 export function LeasingManager() {
   const [applications, setApplications] = useState<Application[]>([]);
+  // A global-search result links here with ?q=<guest name>.
+  const searchParams = useSearchParams();
+  const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
+  const visibleApplications = applications.filter((a) => matchesQuery(query, a.guestName, a.guestEmail, a.listingName));
   const [publishedListings, setPublishedListings] = useState<Listing[]>([]);
   const [listingsById, setListingsById] = useState<Record<string, Listing>>({});
   const [ownerNamesById, setOwnerNamesById] = useState<Record<number, string>>({});
@@ -487,7 +493,9 @@ export function LeasingManager() {
         </Button>
       </div>
 
-      {applications.map((application) => {
+      <ListSearchInput value={query} onChange={setQuery} placeholder="Search applications by renter or listing" />
+
+      {visibleApplications.map((application) => {
         const latestDecision = application.decisions[application.decisions.length - 1];
         const offer = application.offer;
         const agreement = offer?.agreement;
@@ -756,6 +764,9 @@ export function LeasingManager() {
 
       {applications.length === 0 && (
         <p className="py-10 text-center text-sm text-slate-400 dark:text-slate-400">No applications yet.</p>
+      )}
+      {applications.length > 0 && visibleApplications.length === 0 && (
+        <p className="py-10 text-center text-sm text-slate-400 dark:text-slate-400">No applications match &ldquo;{query.trim()}&rdquo;.</p>
       )}
 
       <Modal

@@ -81,6 +81,9 @@ class OpenJurisdictionRead(CamelModel):
 class RoomCreate(CamelModel):
     size: int = 0
     has_ensuite: bool = False
+    # How many people can live in the room. Left out (None) = 1 when adding a room, unchanged when
+    # editing one. More than 1 is what lets a renter sublease part of the room or add a co-tenant.
+    max_occupants: int | None = Field(default=None, ge=1, le=10)
 
 
 class RoomRead(CamelModel):
@@ -89,6 +92,7 @@ class RoomRead(CamelModel):
     room_type: str
     size: int
     has_ensuite: bool
+    max_occupants: int = 1
     status: str
     created_at: datetime
 

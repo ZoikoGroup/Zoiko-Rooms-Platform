@@ -359,7 +359,6 @@ class TestPayeeModelResolution:
         db_session.commit()
 
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT")
-        sublet_crud.respond_as_co_tenant(db_session, sublet_request, proposed_user, accept=True)
         host_user = _host_for(db_session, "payeesublease")
 
         r = client.post(f"/api/users/hosting/sublet-requests/{sublet_request.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host_user))
@@ -421,8 +420,8 @@ class TestCoTenancyRequiresCapacity:
         db_session.commit()
 
         sublet_request = sublet_crud.submit_sublet_request(db_session, tenant_user, occupancy_id, proposed_party_id, "ADD_CO_TENANT")
-        # The co-tenant answers first; the host is only asked after that.
-        assert sublet_request.status == "awaiting_co_tenant"
+        # The host is asked first; the co-tenant answers after the host approves.
+        assert sublet_request.status == "pending_admin_review"
 
 
 class TestCoTenancyCreatesRealSeparateAgreement:

@@ -88,6 +88,7 @@ def _notice_for(
             status=live_case.status,
             termination_case_id=live_case.id,
             cause_code=live_case.cause_code,
+            acknowledged_at=live_case.notice_acknowledged_at,
             pending_responders=live_case.pending_responders,
             response_due_at=live_case.response_due_at,
         )

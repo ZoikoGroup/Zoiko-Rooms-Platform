@@ -1,5 +1,4 @@
-"""ADD_CO_TENANT as a shared room: the co-tenant agrees before the Host is
-asked, pays the renter directly (no agreement or obligations of their own),
+"""ADD_CO_TENANT as a shared room: the Host's approval puts the co-tenant in the room; pays the renter directly (no agreement or obligations of their own),
 sees the renter's tenancy read-only while the room is shared, takes a place
 in the room, and any of the three people can end it."""
 
@@ -9,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.crud import sublet as sublet_crud
-from app.crud.eligibility import check_room_capacity
+from app.crud.eligibility import check_room_capacity, room_occupant_count
 from app.models.finance import Obligation
 from app.models.identity_verification import IdentityVerification
 from app.models.leasing import Application
@@ -21,7 +20,7 @@ from tests.test_sublet_arrangement_classification import _host_for, _make_active
 
 
 def _shared_room(db: Session, suffix: str):
-    """A two-person room with an ADD_CO_TENANT request awaiting the co-tenant.
+    """A two-person room with an ADD_CO_TENANT request awaiting the host.
     Both the renter and the co-tenant are identity-verified."""
     tenant_user, co_tenant, co_tenant_party_id, occupancy_id = _make_active_tenancy(db, suffix=suffix)
     occupancy = db.get(Occupancy, occupancy_id)
@@ -34,8 +33,6 @@ def _shared_room(db: Session, suffix: str):
 
 def _approved_shared_room(client, db: Session, suffix: str):
     sr, tenant_user, co_tenant, host, occupancy = _shared_room(db, suffix)
-    r = client.post(f"/api/users/rentals/co-tenancies/{sr.id}/respond", json={"accept": True}, cookies=auth_user_cookie(co_tenant))
-    assert r.status_code == 200, r.text
     r = client.post(f"/api/users/hosting/sublet-requests/{sr.id}/approve", json={}, cookies=auth_user_cookie(host))
     assert r.status_code == 200, r.text
     return sr, tenant_user, co_tenant, host, occupancy, r.json()
@@ -45,15 +42,33 @@ def _titles(db: Session, user_id: int) -> list[str]:
     return list(db.scalars(select(Notification.title).where(Notification.recipient_user_id == user_id)))
 
 
-class TestCoTenantAgreesFirst:
-    def test_request_waits_for_the_co_tenant_and_the_host_is_not_asked_yet(self, client, db_session: Session):
+class TestHostApprovalPutsTheCoTenantInTheRoom:
+    def test_the_request_goes_to_the_host_and_the_co_tenant_hears_nothing_yet(self, client, db_session: Session):
         sr, _tenant, co_tenant, host, _occ = _shared_room(db_session, "sr1")
-        assert sr.status == "awaiting_co_tenant"
-        assert "A sublet was requested for your listing" not in _titles(db_session, host.id)
-        assert "You've been proposed as a sublet occupant" in _titles(db_session, co_tenant.id)
+        assert sr.status == "pending_admin_review"
+        assert "A sublet was requested for your listing" in _titles(db_session, host.id)
+        assert _titles(db_session, co_tenant.id) == []
 
+    def test_the_hosts_approval_is_the_only_step_and_gives_the_co_tenant_one_notification(self, client, db_session: Session):
+        sr, tenant_user, co_tenant, _host, occupancy, body = _approved_shared_room(client, db_session, "sr1b")
+        assert body["status"] == "approved" and body["sharedRoomActive"] is True
+        assert _titles(db_session, co_tenant.id) == ["You're now sharing the room"]
+        assert "Your co-tenant was approved" in _titles(db_session, tenant_user.id)
+        assert room_occupant_count(db_session, occupancy.room) == 2
+
+    def test_there_is_no_accept_or_decline_step(self, client, db_session: Session):
+        sr, _tenant, co_tenant, _host, _occ = _shared_room(db_session, "sr3")
+        r = client.post(f"/api/users/rentals/co-tenancies/{sr.id}/respond", json={"accept": True}, cookies=auth_user_cookie(co_tenant))
+        assert r.status_code in (404, 405)
+
+    def test_an_unverified_co_tenant_cannot_be_approved(self, client, db_session: Session):
+        sr, _tenant, co_tenant, host, _occ = _shared_room(db_session, "sr6")
+        for iv in db_session.scalars(select(IdentityVerification).where(IdentityVerification.party_id == co_tenant.party_id)):
+            iv.status = "rejected"
+        db_session.commit()
         r = client.post(f"/api/users/hosting/sublet-requests/{sr.id}/approve", json={}, cookies=auth_user_cookie(host))
         assert r.status_code == 409
+        assert db_session.get(SubletRequest, sr.id).status == "pending_admin_review"
 
     def test_co_tenant_sees_requests_naming_them(self, client, db_session: Session):
         sr, tenant_user, co_tenant, _host, _occ = _shared_room(db_session, "sr2")
@@ -65,42 +80,6 @@ class TestCoTenantAgreesFirst:
         assert body[0]["proposedRenterIdentityVerified"] is True
         # The renter's own list is unchanged; nobody else sees it as "naming them".
         assert client.get("/api/users/rentals/co-tenancies", cookies=auth_user_cookie(tenant_user)).json() == []
-
-    def test_declining_closes_it_and_tells_the_renter(self, client, db_session: Session):
-        sr, tenant_user, co_tenant, host, occupancy = _shared_room(db_session, "sr3")
-        r = client.post(f"/api/users/rentals/co-tenancies/{sr.id}/respond", json={"accept": False}, cookies=auth_user_cookie(co_tenant))
-        assert r.status_code == 200, r.text
-        assert r.json()["status"] == "declined_by_co_tenant"
-        assert "Your co-tenant declined" in _titles(db_session, tenant_user.id)
-        assert "A sublet was requested for your listing" not in _titles(db_session, host.id)
-        # Closed, so the renter can ask someone else.
-        assert "declined_by_co_tenant" not in sublet_crud.ACTIVE_SUBLET_REQUEST_STATUSES
-        r = client.post(f"/api/users/rentals/occupancies/{occupancy.id}/sublet-request/draft", json={}, cookies=auth_user_cookie(tenant_user))
-        assert r.status_code == 201, r.text
-
-    def test_accepting_sends_it_to_the_host(self, client, db_session: Session):
-        sr, tenant_user, co_tenant, host, _occ = _shared_room(db_session, "sr4")
-        r = client.post(f"/api/users/rentals/co-tenancies/{sr.id}/respond", json={"accept": True}, cookies=auth_user_cookie(co_tenant))
-        assert r.status_code == 200, r.text
-        assert r.json()["status"] == "pending_admin_review"
-        assert r.json()["coTenantRespondedAt"] is not None
-        assert "A sublet was requested for your listing" in _titles(db_session, host.id)
-        assert "Your co-tenant accepted" in _titles(db_session, tenant_user.id)
-
-    def test_only_the_named_person_can_answer(self, client, db_session: Session):
-        sr, tenant_user, _co, _host, _occ = _shared_room(db_session, "sr5")
-        for user in (tenant_user, _make_user(db_session, email="stranger-sr5@test.com")):
-            r = client.post(f"/api/users/rentals/co-tenancies/{sr.id}/respond", json={"accept": True}, cookies=auth_user_cookie(user))
-            assert r.status_code == 403
-
-    def test_an_unverified_co_tenant_cannot_accept(self, client, db_session: Session):
-        sr, _tenant, co_tenant, _host, _occ = _shared_room(db_session, "sr6")
-        for iv in db_session.scalars(select(IdentityVerification).where(IdentityVerification.party_id == co_tenant.party_id)):
-            iv.status = "rejected"
-        db_session.commit()
-        r = client.post(f"/api/users/rentals/co-tenancies/{sr.id}/respond", json={"accept": True}, cookies=auth_user_cookie(co_tenant))
-        assert r.status_code == 403
-        assert db_session.get(SubletRequest, sr.id).status == "awaiting_co_tenant"
 
 
 class TestApprovedSharedRoom:
@@ -131,7 +110,7 @@ class TestApprovedSharedRoom:
         r = client.get(f"/api/users/rentals/co-tenancies/{sr.id}/transaction-record", cookies=auth_user_cookie(stranger))
         assert r.status_code == 403
 
-    def test_the_record_stays_closed_before_approval(self, client, db_session: Session):
+    def test_the_record_stays_closed_until_the_host_approves(self, client, db_session: Session):
         sr, _tenant, co_tenant, _host, _occ = _shared_room(db_session, "sr10")
         r = client.get(f"/api/users/rentals/co-tenancies/{sr.id}/transaction-record", cookies=auth_user_cookie(co_tenant))
         assert r.status_code == 403

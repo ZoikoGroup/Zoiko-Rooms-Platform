@@ -349,6 +349,10 @@ export function HostingRentalRecordsManager() {
     }
   }
 
+  /** A renter's early-end notice the host hasn't yet confirmed receiving. */
+  const renterNoticeNeedsAck = (n: NonNullable<HostRentalRecord["notice"]>) =>
+    n.kind === "TERMINATION_CASE" && n.initiatedBy === "RENTER" && !n.acknowledgedAt && n.terminationCaseId != null;
+
   async function run(action: () => Promise<unknown>, success: string) {
     setBusy(true);
     try {
@@ -774,6 +778,19 @@ export function HostingRentalRecordsManager() {
                       {formatDate(selected.notice.givenAt)}
                       {selected.notice.effectiveDate && <> · ends {formatDate(selected.notice.effectiveDate)}</>} ·{" "}
                       {selected.notice.status.replace(/_/g, " ").toLowerCase()}
+                      {renterNoticeNeedsAck(selected.notice) && (
+                        <p className="mt-1">Confirm you&apos;ve received it so your renter knows. Once they&apos;ve moved out you&apos;ll be asked to confirm the room is handed back.</p>
+                      )}
+                      {renterNoticeNeedsAck(selected.notice) && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => run(() => hostTermination.acknowledge(selected.notice!.terminationCaseId!), "Thanks — your renter has been told you received it.")}
+                          className="mt-2 rounded-lg bg-primary-900 px-3 py-1.5 font-bold text-white disabled:opacity-50"
+                        >
+                          I received this notice
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -970,8 +987,26 @@ export function HostingRentalRecordsManager() {
 
               {drawerTab === "requests" && (
                 <div className="space-y-3 text-xs">
+                  {selected.notice && (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                      <strong>{selected.notice.initiatedBy === "RENTER" ? "Renter" : "You"} gave notice to end the tenancy</strong> on{" "}
+                      {formatDate(selected.notice.givenAt)}
+                      {selected.notice.effectiveDate && <> · ends {formatDate(selected.notice.effectiveDate)}</>} ·{" "}
+                      {selected.notice.status.replace(/_/g, " ").toLowerCase()}
+                      {renterNoticeNeedsAck(selected.notice) && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => run(() => hostTermination.acknowledge(selected.notice!.terminationCaseId!), "Thanks — your renter has been told you received it.")}
+                          className="mt-2 block rounded-lg bg-primary-900 px-3 py-1.5 font-bold text-white disabled:opacity-50"
+                        >
+                          I received this notice
+                        </button>
+                      )}
+                    </div>
+                  )}
                   {changeRequests.filter((b) => b.agreementId === selected.agreementId).length === 0 ? (
-                    <p className="text-neutral-500">The renter hasn&apos;t asked for any changes.</p>
+                    !selected.notice && <p className="text-neutral-500">The renter hasn&apos;t asked for any changes.</p>
                   ) : (
                     changeRequests
                       .filter((b) => b.agreementId === selected.agreementId)

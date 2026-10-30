@@ -44,7 +44,7 @@ def get_room(db: Session, room_id: int) -> Room | None:
 
 
 def create_room(db: Session, prop: Property, data: RoomCreate) -> Room:
-    room = Room(property_id=prop.id, size=data.size, has_ensuite=data.has_ensuite)
+    room = Room(property_id=prop.id, size=data.size, has_ensuite=data.has_ensuite, max_occupants=data.max_occupants or 1)
     db.add(room)
     db.commit()
     db.refresh(room)

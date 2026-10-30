@@ -24,7 +24,7 @@ import {
   signOwnAgreement,
   withdrawRentalApplication,
   tenantAgreementPdfUrl,
-  listPublicListings,
+  listAllPublicListings,
   listMyChangeRequests,
   errorMessage,
   getOwnAgreementPaymentPreview,
@@ -361,7 +361,7 @@ export function ApplicationsManager() {
     try {
       const [appsData, listingsData, changeReqs, conversations] = await Promise.all([
         listRentalApplications().catch(() => []),
-        listPublicListings({ limit: 100 }).then((res) => res.items).catch(() => []),
+        listAllPublicListings().then((res) => res.items).catch(() => []),
         listMyChangeRequests().catch(() => []),
         listRenterConversations().catch(() => []),
       ]);

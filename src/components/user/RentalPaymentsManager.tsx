@@ -1,5 +1,6 @@
 "use client";
 
+import { downloadCsv } from "@/lib/csv-download";
 import { FormEvent, useCallback, useEffect, useId, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -35,7 +36,7 @@ import {
   getMyRentalPaymentInstructions,
   listMyRentalPaymentObligations,
   listOccupancies,
-  listPublicListings,
+  listAllPublicListings,
   markRentalPaymentPaid,
   reportRentalPaymentDiscrepancyAsTenant,
   uploadRentalPaymentEvidence,
@@ -139,7 +140,7 @@ export function RentalPaymentsManager() {
           items: [] as RentalPaymentObligation[],
         })),
         listOccupancies().catch(() => [] as UserOccupancy[]),
-        listPublicListings({ limit: 100 }).then((res) => res.items).catch(() => [] as PublicListing[]),
+        listAllPublicListings().then((res) => res.items).catch(() => [] as PublicListing[]),
       ]);
 
       setObligations(obPage.items || []);
@@ -164,7 +165,9 @@ export function RentalPaymentsManager() {
       const occ = occupancies.find((oc) => oc.id === o.occupancyId || oc.listingId === String(o.agreementId));
       const listing = occ ? publicListings.find((l) => l.id === occ.listingId) : undefined;
 
-      const propName = occ?.propertyAddress
+      const propName = o.contextLabel
+        ? o.contextLabel
+        : occ?.propertyAddress
         ? `${occ.propertyAddress.split(",")[0]} · Room #${occ.roomId || 1}`
         : occ?.listingName
         ? `${occ.listingName} · Room #${occ.roomId || 1}`
@@ -174,7 +177,7 @@ export function RentalPaymentsManager() {
         ? `${o.payeeBasis} · Room #${o.occupancyId || 1}`
         : `Rental #${o.occupancyId || o.id}`;
 
-      const rentalCode = `Rental #ZR-R-${o.occupancyId || o.agreementId || o.id}`;
+      const rentalCode = o.contextLabel ? `Co-tenant rent #${o.id}` : `Rental #ZR-R-${o.occupancyId || o.agreementId || o.id}`;
       const recipientName = o.payeeBasis || occ?.hostName || "Verified Landlord";
 
       return {
@@ -393,26 +396,18 @@ export function RentalPaymentsManager() {
     const rows = filteredObligations.map((o) => {
       const info = getObligationPropertyInfo(o);
       return [
-        `"${info.propertyName.replace(/"/g, '""')}"`,
-        `"${info.rentalCode.replace(/"/g, '""')}"`,
-        `"${o.displayLabel.replace(/"/g, '""')}"`,
-        `"${o.dueDate}"`,
+        info.propertyName,
+        info.rentalCode,
+        o.displayLabel,
+        o.dueDate,
         o.amount,
-        `"${o.currency || "INR"}"`,
-        `"${rentalPaymentStatusLabel[o.status] || o.status}"`,
-        `"${info.recipientName.replace(/"/g, '""')}"`,
+        o.currency || "INR",
+        rentalPaymentStatusLabel[o.status] || o.status,
+        info.recipientName,
       ];
     });
 
-    const csvContent =
-      "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map((e) => e.join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `rental_payment_records_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    downloadCsv(`rental_payment_records_${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
 
     showToast("Payment records exported successfully.", "success");
   }

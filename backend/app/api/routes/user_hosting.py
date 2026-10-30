@@ -35,6 +35,8 @@ from app.models.user_account import UserAccount
 from app.schemas.activation_gate import HandoverEventCreate, HandoverEventRead
 from app.schemas.occupancy import PreMoveInCancellationRead, PreMoveInCancellationRequest
 from app.schemas.sublet_document import SubletDocumentRead
+from app.schemas.host_sublet_policy import HostSubletPolicyRead, HostSubletPolicyUpdate
+from app.crud import host_sublet_policy as host_sublet_policy_crud
 from app.schemas.leasing import (
     AgreementCreateRequest,
     AgreementRead,
@@ -464,6 +466,7 @@ def create_user_room(
         room_type="private_room",
         size=payload.size,
         has_ensuite=payload.has_ensuite,
+        max_occupants=payload.max_occupants or 1,
         status="active",
     )
     db.add(room)
@@ -499,6 +502,16 @@ def update_user_room(
 
     room.size = payload.size
     room.has_ensuite = payload.has_ensuite
+    if payload.max_occupants is not None:
+        from app.crud.eligibility import room_occupant_count
+
+        living_there = room_occupant_count(db, room)
+        if payload.max_occupants < living_there:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{living_there} people already hold a place in this room, so the limit can't be set below {living_there}.",
+            )
+        room.max_occupants = payload.max_occupants
     db.commit()
     db.refresh(room)
 
@@ -957,6 +970,25 @@ def sign_hosted_agreement(
 # representative. Zoiko Rooms records and routes the request; it does not
 # grant permission on the owner's behalf.' -- the Host, not Zoiko Admin, is
 # the real decision-maker.) -------------------------------------------------
+
+
+@router.get("/sublet-policy", response_model=HostSubletPolicyRead)
+def get_my_sublet_policy(user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The host's own sublet rules (Sublet Requests > Sublet policy settings)."""
+    if not user.party_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This account has no associated host party")
+    return host_sublet_policy_crud.get_policy(db, user.party_id)
+
+
+@router.put("/sublet-policy", response_model=HostSubletPolicyRead)
+def put_my_sublet_policy(
+    payload: HostSubletPolicyUpdate, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    if not user.party_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This account has no associated host party")
+    return host_sublet_policy_crud.save_policy(
+        db, user.party_id, min_notice_enabled=payload.min_notice_enabled, min_notice_days=payload.min_notice_days,
+    )
 
 
 @router.get("/sublet-requests", response_model=list[SubletRequestRead])

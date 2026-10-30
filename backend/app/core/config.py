@@ -10,6 +10,9 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 # Placeholder secrets that must never be used beyond local development. If
 # ENVIRONMENT=production is set alongside any of these, the app refuses to boot.
 PLACEHOLDER_JWT_SECRETS = ("dev-secret-change-me", "change-me", "changeme", "secret")
+# The live site. Production email buttons fall back to it if no public https address is configured.
+PRODUCTION_SITE_URL = "https://app.zoikorooms.com"
+
 PLACEHOLDER_PASSWORDS = ("change-this-password", "change-me", "changeme", "password", "password123")
 # A real, valid Fernet key (unlike JWT_SECRET/SEED_ADMIN_PASSWORD's plain
 # placeholder strings, Fernet requires exactly 32 url-safe base64 bytes --
@@ -254,9 +257,14 @@ class Settings(BaseSettings):
 
     frontend_url: str = "http://localhost:3000"
     # Site address put in links inside emails (password reset, confirmations, "open the website"
-    # buttons). Empty = use frontend_url. Kept apart from frontend_url because that one is also where
+    # buttons). Empty = the live site (app.zoikorooms.com). Kept apart from frontend_url because that one is also where
     # Stripe and Veriff send people back to, which has to stay on the machine running the app.
     public_site_url: str = ""
+    # Indicative exchange-rate overrides for the Find a Room price filter (see app/core/fx.py):
+    # a JSON object of US dollars per unit, e.g. {"GBP": 1.31, "INR": 0.0118}. Empty = built-in defaults.
+    fx_rates_json: str = ""
+    # When those rates were last checked, shown to visitors (free text, e.g. "2026-10-29").
+    fx_rates_as_of: str = ""
     password_reset_token_expire_minutes: int = 30
 
     llm_provider: str = "groq"
@@ -428,8 +436,15 @@ class Settings(BaseSettings):
 
     @property
     def email_site_url(self) -> str:
-        """Base address for links written into emails, no trailing slash."""
-        return (self.public_site_url.strip() or self.frontend_url).rstrip("/")
+        """Base address for links written into emails, no trailing slash.
+
+        Always the live site (app.zoikorooms.com), in every environment -- an email is read away from the
+        machine that sent it, so a localhost link is never useful. Only an explicit PUBLIC_SITE_URL that is a
+        public https address (e.g. a staging site) overrides it; FRONTEND_URL is never used for emails."""
+        url = self.public_site_url.strip().rstrip("/")
+        if url.startswith("https://") and "localhost" not in url and "127.0.0.1" not in url:
+            return url
+        return PRODUCTION_SITE_URL
 
     @property
     def is_production(self) -> bool:
@@ -513,6 +528,17 @@ class Settings(BaseSettings):
         if not self.payment_receipt_authority_required:
             problems.append("PAYMENT_RECEIPT_AUTHORITY_REQUIRED must be true in production")
         problems.extend(self._identity_production_problems())
+        configured_site = (self.public_site_url.strip() or self.frontend_url)
+        if not configured_site.startswith("https://") or "localhost" in configured_site:
+            # Not fatal (the site still runs), but every button in every email -- confirm
+            # email, reset password, "choose your path" -- would point at a dead address.
+            import logging
+
+            logging.getLogger("uvicorn.error").warning(
+                "PUBLIC_SITE_URL / FRONTEND_URL is not a public https address in production -- email buttons are "
+                "using %s instead. Set PUBLIC_SITE_URL to make this explicit.",
+                PRODUCTION_SITE_URL,
+            )
         if problems:
             raise ValueError(
                 "Refusing to boot in production due to insecure configuration:\n- " + "\n- ".join(problems)

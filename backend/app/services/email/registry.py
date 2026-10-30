@@ -74,7 +74,7 @@ REGISTRY: dict[str, TemplateSpec] = {t.template_id: t for t in (
        "Review Listing", "Your listing for {room_label} is {listing_review_status}",
        "Review the listing status and any required changes."),
     _T("ZR-EML-LST-002", "1.0.0", "Listing published", TIER_1, streams.TRANSACTIONS, (),
-       "View Live Listing", "Your room listing is live",
+       "Manage Your Listing", "Your room listing is live",
        "Review the public listing and manage availability from your dashboard."),
     # B -- Market Availability, Search and Discovery
     _T("ZR-EML-MKT-001", "1.0.0", "Saved search confirmed", TIER_2, streams.TRANSACTIONS, (),

@@ -24,6 +24,8 @@ class RentalRecordNotice(CamelModel):
     status: str
     termination_case_id: int | None = None
     cause_code: str | None = None
+    # When the receiving side confirmed they got the notice (None = not yet).
+    acknowledged_at: datetime | None = None
     # AWAITING_RESPONSE: who still has to answer, and by when.
     pending_responders: list[str] = []
     response_due_at: datetime | None = None

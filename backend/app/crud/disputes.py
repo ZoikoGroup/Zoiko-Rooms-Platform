@@ -631,7 +631,18 @@ def _is_payment_party(case: DisputeResolutionCase, **who) -> bool:
     return db is not None and case.id in set(db.scalars(_payment_dispute_case_ids(**who)))
 
 
+def _removed_for_opener(case: DisputeResolutionCase, *, guest: Guest | None = None, party_id: int | None = None) -> bool:
+    """The opener removed this completed case from their own view."""
+    if case.removed_by_opener_at is None:
+        return False
+    return (guest is not None and case.opened_by_guest_id == guest.id) or (
+        party_id is not None and case.opened_by_party_id == party_id
+    )
+
+
 def assert_guest_can_access_case(case: DisputeResolutionCase, guest: Guest) -> None:
+    if _removed_for_opener(case, guest=guest):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dispute case not found")
     if case.opened_by_guest_id == guest.id:
         return
     if case.occupancy is not None and case.occupancy.guest_id == guest.id:
@@ -642,6 +653,8 @@ def assert_guest_can_access_case(case: DisputeResolutionCase, guest: Guest) -> N
 
 
 def assert_party_can_access_case(case: DisputeResolutionCase, party_id: int) -> None:
+    if _removed_for_opener(case, party_id=party_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dispute case not found")
     if case.opened_by_party_id == party_id:
         return
     if case.property is not None and case.property.owner_party_id == party_id:
@@ -660,7 +673,13 @@ def list_cases_for_guest(db: Session, guest: Guest) -> list[DisputeResolutionCas
                 DisputeResolutionCase.opened_by_guest_id == guest.id,
                 Occupancy.guest_id == guest.id,
                 DisputeResolutionCase.id.in_(_payment_dispute_case_ids(guest_id=guest.id)),
-            )
+            ),
+            # Not one this person opened and has since removed.
+            or_(
+                DisputeResolutionCase.removed_by_opener_at.is_(None),
+                DisputeResolutionCase.opened_by_guest_id.is_(None),
+                DisputeResolutionCase.opened_by_guest_id != guest.id,
+            ),
         )
         .order_by(DisputeResolutionCase.opened_at.desc())
     )
@@ -676,7 +695,12 @@ def list_cases_for_party(db: Session, party_id: int) -> list[DisputeResolutionCa
                 DisputeResolutionCase.opened_by_party_id == party_id,
                 Property.owner_party_id == party_id,
                 DisputeResolutionCase.id.in_(_payment_dispute_case_ids(party_id=party_id)),
-            )
+            ),
+            or_(
+                DisputeResolutionCase.removed_by_opener_at.is_(None),
+                DisputeResolutionCase.opened_by_party_id.is_(None),
+                DisputeResolutionCase.opened_by_party_id != party_id,
+            ),
         )
         .order_by(DisputeResolutionCase.opened_at.desc())
     )
@@ -1128,3 +1152,55 @@ def request_internal_review(
     db.commit()
     db.refresh(claim)
     return claim
+
+
+# A case counts as completed for the person who opened it once every claim is
+# decided (RESOLVED) or it has been closed.
+OPENER_REMOVABLE_STATUSES = ("RESOLVED", "CLOSED")
+
+
+def remove_case_as_opener(
+    db: Session, case: DisputeResolutionCase, *, guest: Guest | None = None, party_id: int | None = None,
+) -> DisputeResolutionCase:
+    """The person who opened a completed dispute deletes it -- no admin step.
+    It disappears from their own list, and the evidence and messages they
+    contributed are erased. The case row, the other party's view, any money
+    outcome and the audit trail stay, so nothing the other side or the ledger
+    relies on is lost. Refused while any evidence on the case is under a legal
+    hold (a preservation duty beats a deletion request)."""
+    from app.crud import dispute_evidence as evidence_crud
+    from app.models.dispute_evidence import DisputeEvidenceItem
+    from app.models.dispute_message import DisputeCaseMessage
+
+    is_opener = (guest is not None and case.opened_by_guest_id == guest.id) or (
+        party_id is not None and case.opened_by_party_id == party_id
+    )
+    if not is_opener:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the person who opened this dispute can delete it")
+    if case.removed_by_opener_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dispute case not found")
+    if case.status not in OPENER_REMOVABLE_STATUSES:
+        raise HTTPException(status.HTTP_409_CONFLICT, "You can delete a dispute once it has been resolved or closed")
+
+    items = list(db.scalars(select(DisputeEvidenceItem).where(DisputeEvidenceItem.case_id == case.id)))
+    if any(item.legal_hold and item.deleted_at is None for item in items):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "This dispute can't be deleted while its evidence is under a legal hold",
+        )
+    for item in items:
+        mine = (guest is not None and item.uploaded_by_guest_id == guest.id) or (
+            party_id is not None and item.uploaded_by_party_id == party_id
+        )
+        if mine and item.deleted_at is None:
+            evidence_crud.request_deletion(db, item, guest=guest, party_id=party_id)
+
+    for message in db.scalars(select(DisputeCaseMessage).where(DisputeCaseMessage.case_id == case.id)):
+        if (guest is not None and message.sender_guest_id == guest.id) or (
+            party_id is not None and message.sender_party_id == party_id
+        ):
+            message.body = "(deleted by sender)"
+
+    case.removed_by_opener_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(case)
+    return case

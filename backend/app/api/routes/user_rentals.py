@@ -24,7 +24,7 @@ from app.crud import refund_entitlement as refund_entitlement_crud
 from app.crud import review as review_crud
 from app.crud import sublet as sublet_crud
 from app.crud.occupancy_lifecycle import move_out_confirm_days
-from app.crud.rental_message import sublet_held_through
+from app.crud.rental_message import host_thread_available, sublet_held_through
 from app.crud import termination as termination_crud
 from app.crud.listing import assert_party_does_not_own_listing
 from app.crud.rental_transaction_record import build_rental_transaction_record
@@ -68,7 +68,6 @@ from app.schemas.leasing import (
     OfferAcceptRequest,
     OfferCounterCreate,
     OfferRead,
-    CoTenancyResponse,
     SharedRoomEnd,
     SubletRenterLookup,
     SubletRequestCreate,
@@ -184,6 +183,7 @@ def _to_user_occupancy_read(db: Session, occupancy: Occupancy) -> UserOccupancyR
         sublet_from_renter_name=(
             sublet_from.requested_by_guest.name if sublet_from and sublet_from.requested_by_guest else ""
         ),
+        sublet_from_host_thread=bool(sublet_from and host_thread_available(sublet_from)),
     )
 
 
@@ -1305,6 +1305,7 @@ def submit_sublet_request(
         payload.authority_evidence_ref, payload.proposed_monthly_rent, payload.reason,
         idempotency_key=payload.idempotency_key,
         proposed_start_date=payload.proposed_start_date, proposed_end_date=payload.proposed_end_date,
+        proposed_deposit_amount=payload.proposed_deposit_amount,
     )
 
     log_audit_event(db, None, "user_sublet_request.submit", "sublet_request", str(sublet_request.id), get_correlation_id(request), reason=f"user:{user.id}")
@@ -1675,25 +1676,6 @@ def list_co_tenancies_naming_me(
         sublet_crud.to_sublet_request_read(db, sr)
         for sr in sublet_crud.list_shared_room_requests_for_party(db, user.party_id)
     ]
-
-
-@router.post("/co-tenancies/{sublet_request_id}/respond", response_model=SubletRequestRead)
-def respond_to_co_tenancy(
-    sublet_request_id: int,
-    payload: CoTenancyResponse,
-    request: Request,
-    user: UserAccount = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """The named co-tenant accepts (sends it to the Host) or declines (closes it)."""
-    sublet_request = sublet_crud.get_shared_room_for_co_tenant_or_404(db, sublet_request_id, user)
-    updated = sublet_crud.respond_as_co_tenant(db, sublet_request, user, accept=payload.accept)
-    log_audit_event(
-        db, None, "user_sublet_request.co_tenant_" + ("accept" if payload.accept else "decline"),
-        "sublet_request", str(sublet_request_id), get_correlation_id(request), reason=f"user:{user.id}",
-    )
-    db.commit()
-    return sublet_crud.to_sublet_request_read(db, updated)
 
 
 @router.get("/co-tenancies/{sublet_request_id}/transaction-record", response_model=RentalTransactionRecordRead)

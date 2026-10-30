@@ -22,6 +22,20 @@ router = APIRouter(prefix="/api/public", tags=["public"])
 MAX_PUBLIC_LISTINGS_LIMIT = 100
 
 
+@router.get("/exchange-rates")
+def get_exchange_rates():
+    """Indicative rates so the Find a Room price filter can compare a £ room with a ₹ budget. Not
+    live market rates, and never used for payments -- see app/core/fx.py."""
+    from app.core.fx import BASE_CURRENCY, usd_per_unit
+
+    return {
+        "base": BASE_CURRENCY,
+        "usdPerUnit": usd_per_unit(),
+        "asOf": settings.fx_rates_as_of or None,
+        "indicative": True,
+    }
+
+
 @router.get("/listings", response_model=PublicListingsPage)
 def get_public_listings(
     city: str | None = None,
