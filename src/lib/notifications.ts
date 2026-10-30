@@ -65,6 +65,11 @@ export function resolveNotificationHref(
     if (notificationType.startsWith("identity_verification.")) return "/trust-safety";
     if (notificationType.startsWith("sublet_request.")) return "/occupancy";
     if (notificationType.startsWith("dispute.")) return "/finance";
+    // The oversight copies of what hosts and renters are told (crud/notification.py).
+    if (/^(occupancy|termination_case|booking_change_request|sublet|sublet_message|host_entry_visit)\./.test(notificationType)) return "/occupancy";
+    if (/^(rental_payment|rental_payment_return|payment_instruction|payment|payout|refund|refund_entitlement|deposit|deposit_claim|host_refund|listing_fee)\./.test(notificationType)) return "/payments";
+    if (/^(dispute_case|dispute_claim|dispute_settlement|habitability_incident)\./.test(notificationType)) return "/disputes";
+    if (notificationType.startsWith("screening_check.")) return "/trust-safety";
     return null;
   }
 

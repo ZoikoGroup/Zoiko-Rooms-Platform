@@ -19,8 +19,7 @@ interface BrandingResponse {
 }
 
 // The admin's real notification preferences (crud/notification.py honours
-// these when creating each notification): categories that can be switched off,
-// plus quiet hours. Admins have no time zone setting, so quiet hours are UTC.
+// these when creating each notification): the categories that can be switched off.
 const OPTABLE_CATEGORIES: Array<{ key: NotificationCategory; title: string; description: string }> = [
   { key: "LEASING", title: "Listings, applications & agreements", description: "Listings submitted for review, applications, offers and agreements." },
   { key: "OCCUPANCY", title: "Tenancies & sublets", description: "Move-ins, move-outs, notices, change requests and sublet requests." },
@@ -30,14 +29,6 @@ const ALWAYS_ON_CATEGORIES = [
   { title: "Disputes & safety", description: "Disputes, safety reports and identity checks." },
   { title: "Account & support", description: "Support requests and account security." },
 ];
-
-function minutesToTime(m: number) {
-  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
-}
-function timeToMinutes(t: string) {
-  const [h, m] = t.split(":").map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
 
 const tabs = [
   { key: "profile", label: "Profile", icon: User },
@@ -277,34 +268,6 @@ export function SettingsTabs() {
                     </span>
                   </div>
                 ))}
-                <div className="space-y-3 rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-800">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <p className="text-sm font-medium text-slate-700 dark:text-slate-200">Quiet hours (UTC)</p>
-                      <p className="text-xs text-slate-500 dark:text-slate-400">Hold routine notifications during these hours. Urgent ones still arrive.</p>
-                    </div>
-                    <Switch
-                      label="Quiet hours"
-                      checked={notifPref.quietHoursEnabled}
-                      onChange={(on) => setNotifPref((p) => p && { ...p, quietHoursEnabled: on })}
-                    />
-                  </div>
-                  {notifPref.quietHoursEnabled && (
-                    <div className="grid grid-cols-2 gap-3">
-                      {(["quietHoursStartMinute", "quietHoursEndMinute"] as const).map((field) => (
-                        <label key={field} className="text-xs font-semibold text-slate-500 dark:text-slate-400">
-                          {field === "quietHoursStartMinute" ? "From" : "Until"}
-                          <input
-                            type="time"
-                            value={minutesToTime(notifPref[field])}
-                            onChange={(e) => setNotifPref((p) => p && { ...p, [field]: timeToMinutes(e.target.value) })}
-                            className="mt-1 w-full rounded-xl bg-white px-3 py-2 text-sm outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-primary-400 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700"
-                          />
-                        </label>
-                      ))}
-                    </div>
-                  )}
-                </div>
               </>
             )}
             <Button onClick={handleSaveNotifications} loading={savingNotifs} disabled={!notifPref}>
