@@ -25,7 +25,7 @@ from app.services.handoff import handoff_requested
 
 router = APIRouter(prefix="/api/users/chat", tags=["user-chatbot"], dependencies=[Depends(get_current_user)])
 
-MAX_HISTORY_MESSAGES = 30
+MAX_HISTORY_MESSAGES = 12
 TITLE_MAX_LENGTH = 60
 
 logger = logging.getLogger("zoiko.chatbot")

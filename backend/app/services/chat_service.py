@@ -15,7 +15,7 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from typing import Any, Union
 
-from groq import APIConnectionError, Groq
+from groq import APIConnectionError, Groq, RateLimitError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -54,6 +54,14 @@ MAX_TOOL_ROWS = 20
 MAX_TOOL_CALLS_PER_TURN = 8
 GROQ_TIMEOUT_SECONDS = 45.0
 CONNECTION_RETRY_ATTEMPTS = 3
+# Groq 429s are usually a per-minute token window that clears within seconds,
+# so a short wait beats showing "busy". A longer retry-after (e.g. the daily
+# request quota is spent) is surfaced at once rather than holding the chat open.
+RATE_LIMIT_RETRY_ATTEMPTS = 3
+RATE_LIMIT_MAX_WAIT_SECONDS = 8.0
+# Room-search rows handed to the model per call; each row costs prompt tokens
+# on every later round trip of the turn.
+SEARCH_ROOMS_MAX_ROWS = 10
 
 # Runtime metadata (ZR-AI-UX-001 §12.1). These are recorded for every generation
 # so consequential AI behaviour can be audited without retaining unnecessary
@@ -421,8 +429,8 @@ def _user_tool_search_rooms(db: Session, user: UserAccount, args: dict) -> list[
         objective_filters=[str(f) for f in filters][:10] if isinstance(filters, list) else [],
         move_in_from=_parse_date(args.get("move_in_from")),
         move_in_to=_parse_date(args.get("move_in_to")),
-        limit_internal=max(1, int(args.get("limit_internal") or 20)),
-        limit_external=int(args.get("limit_external") or 10),
+        limit_internal=min(max(1, int(args.get("limit_internal") or SEARCH_ROOMS_MAX_ROWS)), SEARCH_ROOMS_MAX_ROWS),
+        limit_external=min(int(args.get("limit_external") or SEARCH_ROOMS_MAX_ROWS), SEARCH_ROOMS_MAX_ROWS),
     )
     res = orchestrator.search(db, query, actor_id=user.id)
     disc = res.discovery
@@ -708,8 +716,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "items": {"type": "string"},
                         "description": "Objective amenities only, e.g. furnished, parking. Never personal characteristics.",
                     },
-                    "limit_internal": {"type": "integer", "minimum": 1, "maximum": 50},
-                    "limit_external": {"type": "integer", "minimum": 0, "maximum": 20},
+                    "limit_internal": {"type": "integer", "minimum": 1, "maximum": 10},
+                    "limit_external": {"type": "integer", "minimum": 0, "maximum": 10},
                 },
                 "required": ["city", "country"],
             },
@@ -1019,17 +1027,42 @@ def build_client() -> Groq:
     return Groq(api_key=settings.groq_api_key, timeout=GROQ_TIMEOUT_SECONDS, max_retries=0)
 
 
-def _open_stream(client: Groq, **kwargs):
-    """Create the chat stream with retries on transient connection failures."""
-    last_exc: Exception | None = None
-    for attempt in range(CONNECTION_RETRY_ATTEMPTS):
+def _rate_limit_wait(exc: RateLimitError, attempt: int) -> float | None:
+    """Seconds to wait before retrying a 429, or None when Groq asks for a
+    wait too long to hold a request open."""
+    headers = getattr(exc.response, "headers", None) or {}
+    try:
+        wait = float(headers.get("retry-after"))
+    except (TypeError, ValueError):
+        wait = 2.0 * (attempt + 1)
+    return max(wait, 0.0) if wait <= RATE_LIMIT_MAX_WAIT_SECONDS else None
+
+
+def create_completion(client: Groq, **kwargs):
+    """Call chat.completions.create, retrying transient connection failures
+    and short rate-limit (429) waits before letting the error surface."""
+    connection_failures = 0
+    rate_limits = 0
+    while True:
         try:
             return client.chat.completions.create(**kwargs)
-        except APIConnectionError as exc:
-            last_exc = exc
-            if attempt < CONNECTION_RETRY_ATTEMPTS - 1:
-                time.sleep(1.0)
-    raise last_exc  # type: ignore[misc]
+        except APIConnectionError:
+            connection_failures += 1
+            if connection_failures >= CONNECTION_RETRY_ATTEMPTS:
+                raise
+            time.sleep(1.0)
+        except RateLimitError as exc:
+            wait = _rate_limit_wait(exc, rate_limits)
+            rate_limits += 1
+            if wait is None or rate_limits >= RATE_LIMIT_RETRY_ATTEMPTS:
+                raise
+            logger.warning("groq rate limited; retrying in %.1fs", wait)
+            time.sleep(wait)
+
+
+def _open_stream(client: Groq, **kwargs):
+    """Create the chat stream (see ``create_completion`` for retries)."""
+    return create_completion(client, **kwargs)
 
 
 def _parse_args(raw_args: str) -> dict:
@@ -1193,8 +1226,9 @@ def stream_assistant_reply(
                     "role": "tool",
                     "tool_call_id": call["id"] or f"call_{i}",
                     # default=str: a tool row must never crash the turn on a
-                    # date/decimal value.
-                    "content": json.dumps(rows, default=str),
+                    # date/decimal value. Compact separators: every byte here
+                    # is resent on each later round trip of the turn.
+                    "content": json.dumps(rows, default=str, separators=(",", ":")),
                 }
             )
 
