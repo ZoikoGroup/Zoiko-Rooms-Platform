@@ -1,6 +1,6 @@
 """Emails follow the recipient's own settings (services/email/recipient.py):
-notification opt-outs and quiet hours, and their time zone / clock / region
-for dates. In-app quiet hours use the user's time zone too."""
+notification opt-outs, and their time zone / clock / region
+for dates."""
 
 from datetime import datetime, timezone
 
@@ -53,14 +53,13 @@ class TestEmailDelivery:
         mailer.send_password_reset_email(user.email, "https://x/reset", 30, "Test User")
         assert logged, "a security email is never suppressed"
 
-    def test_quiet_hours_use_the_users_time_zone(self, db_session: Session, logged):
+    def test_old_quiet_hours_never_hold_an_email_back(self, db_session: Session, logged):
         user = _make_user(db_session, email="email-quiet@test.com")
-        user_settings.update_preferences(db_session, user, {"timeZone": "Asia/Kolkata"})
-        # 21:00-23:00 Kolkata == 15:30-17:30 UTC
-        _prefs(db_session, user, quiet_hours_enabled=True, quiet_hours_start_minute=21 * 60, quiet_hours_end_minute=23 * 60)
+        # A window saved before quiet hours were removed (ZR-61) is ignored.
+        _prefs(db_session, user, quiet_hours_enabled=True, quiet_hours_start_minute=0, quiet_hours_end_minute=1439)
         profile = recipient_prefs.lookup(user.email)
-        assert recipient_prefs.in_quiet_hours(profile, datetime(2026, 10, 15, 16, 0, tzinfo=timezone.utc))
-        assert not recipient_prefs.in_quiet_hours(profile, datetime(2026, 10, 15, 21, 30, tzinfo=timezone.utc))
+        assert recipient_prefs.suppression_reason(
+            profile, tier=2, stream_key="money", related_entity_type="deposit_record") == ""
 
     def test_unknown_address_is_never_suppressed(self, db_session: Session, logged):
         assert recipient_prefs.lookup("nobody@nowhere.test") is None
@@ -76,14 +75,3 @@ class TestEmailDates:
             assert fmt.moment(moment) == "October 15, 2026, 2:05 PM EDT"
             assert fmt.day(datetime(2026, 10, 16, 2, 0, tzinfo=timezone.utc)) == "October 15, 2026"
         assert fmt.moment(moment) == "15 October 2026, 18:05 UTC", "settings don't leak past the email"
-
-
-class TestInAppQuietHours:
-    def test_quiet_hours_for_notifications_use_the_users_zone(self, db_session: Session, monkeypatch):
-        from app.crud import notification as notif_crud
-
-        user = _make_user(db_session, email="inapp-quiet@test.com")
-        user_settings.update_preferences(db_session, user, {"timeZone": "Asia/Kolkata"})
-        zone = notif_crud._recipient_zone(db_session, f"user:{user.id}")
-        assert str(zone) == "Asia/Kolkata"
-        assert notif_crud._recipient_zone(db_session, "admin:1") == timezone.utc

@@ -43,44 +43,13 @@ def _never_raises(fn):
     return wrapper
 
 
-def _recipient_zone(db: Session, recipient_key: str):
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-    if recipient_key.startswith("user:"):
-        from app.crud.user_settings import get_preferences
-        from app.models.user_account import UserAccount
-
-        user = db.get(UserAccount, int(recipient_key.split(":", 1)[1]))
-        if user is not None:
-            try:
-                return ZoneInfo(get_preferences(db, user).get("timeZone") or "UTC")
-            except (ZoneInfoNotFoundError, ValueError):
-                pass
-    return timezone.utc
-
-
-def _is_suppressed_by_preference(db: Session, recipient_key: str, *, category: str, priority: str) -> bool:
-    """Section 11 gap: a hard category opt-out always suppresses (never
-    overridden by priority -- an explicit "don't notify me about X" choice);
-    quiet hours only ever suppress a NORMAL-priority notification -- see
-    models/notification_preference.py's own docstring for both the UTC-only
-    caveat and why this can only ever mean "don't create it", not "deliver
-    it later"."""
+def _is_suppressed_by_preference(db: Session, recipient_key: str, *, category: str) -> bool:
+    """Section 11 gap: a recipient's hard category opt-out suppresses the
+    notification outright. Quiet hours were removed (ZR-61): nobody could tell
+    which notifications counted as urgent, so they only ever caused missed
+    notices; any window saved earlier is ignored."""
     pref = db.scalar(select(NotificationPreference).where(NotificationPreference.recipient_key == recipient_key))
-    if pref is None:
-        return False
-    if category in pref.opted_out_categories:
-        return True
-    if pref.quiet_hours_enabled and priority != "HIGH":
-        # Quiet hours are in the user's own time zone (Settings > Preferences);
-        # admins and users without one use UTC.
-        local_now = datetime.now(timezone.utc).astimezone(_recipient_zone(db, recipient_key))
-        now_minute = local_now.hour * 60 + local_now.minute
-        start, end = pref.quiet_hours_start_minute, pref.quiet_hours_end_minute
-        in_window = (start <= now_minute < end) if start <= end else (now_minute >= start or now_minute < end)
-        if in_window:
-            return True
-    return False
+    return pref is not None and category in pref.opted_out_categories
 
 
 def _admin_switched_off(db: Session, admin_id: int | None, notification_type: str) -> bool:
@@ -122,7 +91,7 @@ def _create(
         return None
     category = category_for_notification_type(notification_type)
     priority = priority_for_notification_type(notification_type)
-    if _is_suppressed_by_preference(db, recipient_key, category=category, priority=priority):
+    if _is_suppressed_by_preference(db, recipient_key, category=category):
         logger.info("notification: suppressed by recipient preference (type=%s recipient=%s)", notification_type, recipient_key)
         return None
     notification = Notification(
@@ -155,7 +124,42 @@ def _create(
             notification_type, related_entity_type, related_entity_id, recipient_key,
         )
         return None
+    if recipient_type == "user":
+        _mirror_to_super_admins(db, notification)
     return notification
+
+
+# ZR-61: super admins are read-only overseers of what happens between hosts and
+# renters, but only ever heard about applications, listings and a few disputes --
+# so their "Tenancies & sublets", "Payments" and "Disputes & safety" notices
+# never arrived. Every such notice a user receives is therefore also raised for
+# the super admins, naming who it went to. LEASING is already covered by its own
+# admin notices; identity / authority / property verification results are
+# private to the user and are not mirrored.
+_OVERSIGHT_LABEL = {"OCCUPANCY": "Tenancy", "PAYMENTS": "Payment", "DISPUTES_AND_SAFETY": "Dispute & safety"}
+_OVERSIGHT_SAFETY_PREFIXES = (
+    "dispute", "dispute_case", "dispute_claim", "dispute_settlement", "habitability_incident", "screening_check",
+)
+
+
+def _mirror_to_super_admins(db: Session, notification: Notification) -> None:
+    prefix = notification.notification_type.split(".", 1)[0]
+    category = notification.category
+    if category not in _OVERSIGHT_LABEL or notification.notification_type.endswith("_admin"):
+        return
+    if category == "DISPUTES_AND_SAFETY" and prefix not in _OVERSIGHT_SAFETY_PREFIXES:
+        return
+    try:
+        user = db.get(UserAccount, notification.recipient_user_id)
+        who = f"{user.full_name or user.email} ({user.email})" if user else "a user"
+        notify_all_super_admins(
+            db, title=f"{_OVERSIGHT_LABEL[category]}: {notification.title}"[:255],
+            message=f"Sent to {who}: {notification.message}"[:2000],
+            notification_type=notification.notification_type,
+            related_entity_type=notification.related_entity_type, related_entity_id=notification.related_entity_id,
+        )
+    except Exception:
+        logger.exception("notification: could not raise the admin oversight copy (type=%s)", notification.notification_type)
 
 
 @_never_raises

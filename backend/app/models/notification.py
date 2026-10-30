@@ -28,15 +28,48 @@ NOTIFICATION_PRIORITIES = ("NORMAL", "HIGH")
 
 _CATEGORY_BY_TYPE_PREFIX = {
     "agreement": "LEASING", "application": "LEASING", "offer": "LEASING", "listing": "LEASING", "rental_message": "LEASING",
+    "review": "LEASING", "external_search": "LEASING",
     "payment": "PAYMENTS", "payout": "PAYMENTS", "refund": "PAYMENTS", "refund_entitlement": "PAYMENTS",
     "deposit": "PAYMENTS", "deposit_claim": "PAYMENTS",
+    # ZR-61: these used to fall through to OCCUPANCY, so switching "Rent &
+    # payments" off never silenced rent notices and switching "Tenancy" off
+    # silenced them instead.
+    "rental_payment": "PAYMENTS", "rental_payment_return": "PAYMENTS", "payment_instruction": "PAYMENTS",
+    "host_refund": "PAYMENTS", "listing_fee": "PAYMENTS",
     "occupancy": "OCCUPANCY", "termination_case": "OCCUPANCY", "booking_change_request": "OCCUPANCY",
-    "host_entry_visit": "OCCUPANCY", "sublet_request": "OCCUPANCY",
+    "host_entry_visit": "OCCUPANCY", "sublet_request": "OCCUPANCY", "sublet": "OCCUPANCY", "sublet_message": "OCCUPANCY",
     "dispute": "DISPUTES_AND_SAFETY", "dispute_case": "DISPUTES_AND_SAFETY", "dispute_claim": "DISPUTES_AND_SAFETY",
     "dispute_settlement": "DISPUTES_AND_SAFETY", "habitability_incident": "DISPUTES_AND_SAFETY",
     "identity_verification": "DISPUTES_AND_SAFETY", "screening_check": "DISPUTES_AND_SAFETY",
+    # Verification outcomes are "checks" like identity -- not a tenancy event the user can mute.
+    "authority": "DISPUTES_AND_SAFETY", "property_verification": "DISPUTES_AND_SAFETY",
+    "property_compliance_credential": "DISPUTES_AND_SAFETY", "occupancy_eligibility": "DISPUTES_AND_SAFETY",
     "support_ticket": "ACCOUNT",
 }
+# A few sublet notices are about money, not the tenancy: matched on the full
+# type, ahead of the prefix table.
+_CATEGORY_BY_FULL_TYPE = {
+    "sublet.payment": "PAYMENTS", "sublet.payment_confirmed": "PAYMENTS",
+    "sublet.deposit_setup_incomplete": "PAYMENTS", "sublet.payee_setup_incomplete": "PAYMENTS",
+    "sublet_request.payee_setup": "PAYMENTS",
+}
+
+
+def category_for_prefix(kind: str) -> str | None:
+    """Category for a notification-type prefix or a related-record kind such
+    as "rental_payment_obligation": the longest known leading run of
+    "_"-separated words wins, so it is never read as the unrelated shorter
+    prefix ("rental") it also starts with."""
+    kind = (kind or "").strip()
+    while kind:
+        if kind in _CATEGORY_BY_TYPE_PREFIX:
+            return _CATEGORY_BY_TYPE_PREFIX[kind]
+        if "_" not in kind:
+            return None
+        kind = kind.rsplit("_", 1)[0]
+    return None
+
+
 # Section 11 gap: quiet hours only ever suppress a NORMAL-priority
 # notification (see crud/notification.py:_create) -- a HIGH-priority one
 # always still gets created, same "real, auditable emergency exception"
@@ -54,6 +87,9 @@ _ADMIN_PREFERENCE_BY_TYPE_PREFIX = {
     "application": "notify_new_booking", "offer": "notify_new_booking", "agreement": "notify_new_booking",
     "occupancy": "notify_new_booking", "booking_change_request": "notify_new_booking",
     "termination_case": "notify_new_booking", "sublet_request": "notify_new_booking",
+    "sublet": "notify_new_booking", "sublet_message": "notify_new_booking", "host_entry_visit": "notify_new_booking",
+    "rental_payment": "notify_payments", "rental_payment_return": "notify_payments",
+    "payment_instruction": "notify_payments", "host_refund": "notify_payments",
     "payment": "notify_payments", "payout": "notify_payments", "refund": "notify_payments",
     "refund_entitlement": "notify_payments", "deposit": "notify_payments", "deposit_claim": "notify_payments",
     "listing_fee": "notify_payments",
@@ -68,11 +104,13 @@ def admin_preference_for_notification_type(notification_type: str) -> str | None
 
 
 def category_for_notification_type(notification_type: str) -> str:
+    if notification_type in _CATEGORY_BY_FULL_TYPE:
+        return _CATEGORY_BY_FULL_TYPE[notification_type]
     prefix = notification_type.split(".", 1)[0]
     # An unmapped/future prefix falls to OCCUPANCY rather than raising --
     # same "never let a notification-layer gap break the caller's own
     # transaction" doctrine as crud/notification.py's own _never_raises.
-    return _CATEGORY_BY_TYPE_PREFIX.get(prefix, "OCCUPANCY")
+    return category_for_prefix(prefix) or "OCCUPANCY"
 
 
 def priority_for_notification_type(notification_type: str) -> str:

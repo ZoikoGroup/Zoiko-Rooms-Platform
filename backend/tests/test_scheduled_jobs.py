@@ -34,6 +34,7 @@ def _notifications(db: Session, notification_type: str, entity_id: int) -> int:
     return db.scalar(
         select(func.count()).select_from(Notification).where(
             Notification.notification_type == notification_type, Notification.related_entity_id == str(entity_id),
+            Notification.recipient_type == "user",  # not the super admins' oversight copy
         )
     )
 
