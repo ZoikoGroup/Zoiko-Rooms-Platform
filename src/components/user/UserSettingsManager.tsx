@@ -101,14 +101,6 @@ const primaryBtn = "rounded-xl bg-primary-900 px-4 py-2 text-xs font-bold text-w
 const secondaryBtn =
   "rounded-xl border border-neutral-300 bg-white px-4 py-2 text-xs font-bold text-neutral-800 hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200";
 
-function minutesToTime(m: number) {
-  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
-}
-function timeToMinutes(t: string) {
-  const [h, m] = t.split(":").map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
-
 function Toggle({ checked, onChange, disabled, label }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; label: string }) {
   return (
     <button
@@ -554,39 +546,6 @@ export function UserSettingsManager({
                       </li>
                     ))}
                   </ul>
-
-                  <div className="space-y-3 border-t border-neutral-100 pt-4 dark:border-neutral-800">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <p className="text-sm font-semibold text-neutral-900 dark:text-white">Quiet hours ({prefs.timeZone})</p>
-                        <p className="text-xs text-neutral-500">Hold routine notifications during these hours. Urgent ones still arrive.</p>
-                      </div>
-                      <Toggle label="Quiet hours" checked={notif.quietHoursEnabled} onChange={(v) => saveNotif({ ...notif, quietHoursEnabled: v })} />
-                    </div>
-                    {notif.quietHoursEnabled && (
-                      <div className="grid grid-cols-2 gap-3">
-                        <label className="text-xs font-bold">
-                          From
-                          <input
-                            type="time"
-                            value={minutesToTime(notif.quietHoursStartMinute)}
-                            onChange={(e) => saveNotif({ ...notif, quietHoursStartMinute: timeToMinutes(e.target.value) })}
-                            className={inputCls}
-                          />
-                        </label>
-                        <label className="text-xs font-bold">
-                          Until
-                          <input
-                            type="time"
-                            value={minutesToTime(notif.quietHoursEndMinute)}
-                            onChange={(e) => saveNotif({ ...notif, quietHoursEndMinute: timeToMinutes(e.target.value) })}
-                            className={inputCls}
-                          />
-                        </label>
-                      </div>
-                    )}
-                  </div>
-
                 </>
               )}
             </section>
