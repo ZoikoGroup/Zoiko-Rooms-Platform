@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
@@ -226,11 +227,57 @@ export function HostApplicationsManager() {
   const [viewTab, setViewTab] = useState<"all" | "room">("all");
 
   // Interactive UI state
-  const [activeMenuId, setActiveMenuId] = useState<number | null>(null);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   const [drawerTarget, setDrawerTarget] = useState<ApplicationRecord | null>(null);
   const [drawerTab, setDrawerTab] = useState<"overview" | "details" | "messages" | "history">(
     "overview"
   );
+
+  // Portal-based three-dots menu state
+  const [menuAnchor, setMenuAnchor] = useState<{
+    app: ApplicationRecord;
+    rect: DOMRect;
+  } | null>(null);
+  const portalMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuAnchor) return;
+
+    function handleClickOutside(event: MouseEvent | TouchEvent) {
+      const target = event.target as Node;
+      if (portalMenuRef.current && !portalMenuRef.current.contains(target)) {
+        setMenuAnchor(null);
+      }
+    }
+
+    function handleScrollOrResize() {
+      setMenuAnchor(null);
+    }
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("touchstart", handleClickOutside);
+    window.addEventListener("scroll", handleScrollOrResize, true);
+    window.addEventListener("resize", handleScrollOrResize);
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("touchstart", handleClickOutside);
+      window.removeEventListener("scroll", handleScrollOrResize, true);
+      window.removeEventListener("resize", handleScrollOrResize);
+    };
+  }, [menuAnchor]);
+
+  // Lock body scroll when drawer is open
+  useEffect(() => {
+    if (!drawerTarget) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [drawerTarget]);
   const [chatInput, setChatInput] = useState("");
   // The real host <-> renter thread for the open application.
   const [thread, setThread] = useState<RentalMessage[]>([]);
@@ -332,25 +379,17 @@ export function HostApplicationsManager() {
     setDeepLinkHandled(true);
   }, [deepLinkId, deepLinkHandled, appRecords]);
 
-  // Close menus on outside click or escape
+  // Close modals or drawer on escape
   useEffect(() => {
-    const handleGlobalClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (!target?.closest("[data-menu-container]")) {
-        setActiveMenuId(null);
-      }
-    };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        setActiveMenuId(null);
+        setMenuAnchor(null);
         if (pendingModal) setPendingModal(null);
         else if (drawerTarget) setDrawerTarget(null);
       }
     };
-    window.addEventListener("click", handleGlobalClick);
     window.addEventListener("keydown", handleKeyDown);
     return () => {
-      window.removeEventListener("click", handleGlobalClick);
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [pendingModal, drawerTarget]);
@@ -762,8 +801,103 @@ export function HostApplicationsManager() {
     return <Loader label="Loading host applications from database..." />;
   }
 
+  // Render portal-anchored 3-dots menu that dynamically flips upward if near the bottom of the screen
+  function renderPortalMenu() {
+    if (typeof window === "undefined" || !menuAnchor) return null;
+
+    const { app, rect } = menuAnchor;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    const menuHeightEstimate = 260;
+    const openUpward = spaceBelow < menuHeightEstimate && spaceAbove > spaceBelow;
+    const rightOffset = Math.max(12, window.innerWidth - rect.right);
+    const isClosed = CLOSED_STATUSES.includes(app.status);
+
+    const style: React.CSSProperties = {
+      position: "fixed",
+      right: `${rightOffset}px`,
+      zIndex: 9999,
+      ...(openUpward
+        ? { bottom: `${window.innerHeight - rect.top + 6}px` }
+        : { top: `${rect.bottom + 6}px` }),
+    };
+
+    return createPortal(
+      <div
+        ref={portalMenuRef}
+        onClick={(e) => e.stopPropagation()}
+        style={style}
+        className="min-w-[200px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl p-1.5 space-y-0.5 animate-in fade-in zoom-in-95 duration-150"
+      >
+        <button
+          type="button"
+          onClick={() => {
+            setMenuAnchor(null);
+            openDrawer(app, "overview");
+          }}
+          className="w-full h-10 px-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-xs font-bold text-[#0C2B4E] dark:text-white transition cursor-pointer text-left"
+        >
+          <Eye className="size-4 text-slate-500" />
+          <span>Open application</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setMenuAnchor(null);
+            openDrawer(app, "messages");
+          }}
+          className="w-full h-10 px-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-xs font-bold text-[#0C2B4E] dark:text-white transition cursor-pointer text-left"
+        >
+          <Send className="size-4 text-slate-500" />
+          <span>Message applicant</span>
+        </button>
+        {!isClosed && (
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuAnchor(null);
+                handleOpenReqInfoModal(app);
+              }}
+              className="w-full h-10 px-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-xs font-bold text-[#0C2B4E] dark:text-white transition cursor-pointer text-left"
+            >
+              <Info className="size-4 text-slate-500" />
+              <span>Request information</span>
+            </button>
+            {app.status !== "short" && app.status !== "selected" && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuAnchor(null);
+                  handleShortlist(app);
+                }}
+                className="w-full h-10 px-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-xs font-bold text-[#0C2B4E] dark:text-white transition cursor-pointer text-left"
+              >
+                <Star className="size-4 text-purple-600" />
+                <span>Shortlist</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setMenuAnchor(null);
+                handleOpenDeclineModal(app);
+              }}
+              className="w-full h-10 px-3 rounded-xl hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2.5 text-xs font-bold text-[#B42318] transition cursor-pointer text-left border-t border-slate-100 dark:border-slate-800 mt-1 pt-1"
+            >
+              <XCircle className="size-4 text-[#B42318]" />
+              <span>Decline</span>
+            </button>
+          </>
+        )}
+      </div>,
+      document.body
+    );
+  }
+
   return (
     <div className="w-full space-y-5 font-sans">
+      {renderPortalMenu()}
       {/* 1. Page Header (Without Application settings button) */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pt-1">
         <div className="space-y-1.5 max-w-3xl">
@@ -1506,85 +1640,23 @@ export function HostApplicationsManager() {
                         )}
 
                         {/* 3-Dots More Menu */}
-                        <div className="relative">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setActiveMenuId((curr) => (curr === app.id ? null : app.id));
-                            }}
-                            aria-expanded={activeMenuId === app.id}
-                            className="size-9 rounded-full border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-slate-600 dark:text-slate-300 transition cursor-pointer"
-                          >
-                            <MoreHorizontal className="size-4" />
-                          </button>
-
-                          {activeMenuId === app.id && (
-                            <div className="absolute right-0 top-11 z-30 min-w-[200px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl p-1.5 space-y-0.5 animate-in fade-in zoom-in-95 duration-150">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setActiveMenuId(null);
-                                  openDrawer(app, "overview");
-                                }}
-                                className="w-full h-10 px-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-xs font-bold text-[#0C2B4E] dark:text-white transition cursor-pointer text-left"
-                              >
-                                <Eye className="size-4 text-slate-500" />
-                                <span>Open application</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setActiveMenuId(null);
-                                  openDrawer(app, "messages");
-                                }}
-                                className="w-full h-10 px-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-xs font-bold text-[#0C2B4E] dark:text-white transition cursor-pointer text-left"
-                              >
-                                <Send className="size-4 text-slate-500" />
-                                <span>Message applicant</span>
-                              </button>
-                              {!isClosed && (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setActiveMenuId(null);
-                                      handleOpenReqInfoModal(app);
-                                    }}
-                                    className="w-full h-10 px-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-xs font-bold text-[#0C2B4E] dark:text-white transition cursor-pointer text-left"
-                                  >
-                                    <Info className="size-4 text-slate-500" />
-                                    <span>Request information</span>
-                                  </button>
-                                  {app.status !== "short" && app.status !== "selected" && (
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setActiveMenuId(null);
-                                        handleShortlist(app);
-                                      }}
-                                      className="w-full h-10 px-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-xs font-bold text-[#0C2B4E] dark:text-white transition cursor-pointer text-left"
-                                    >
-                                      <Star className="size-4 text-purple-600" />
-                                      <span>Shortlist</span>
-                                    </button>
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setActiveMenuId(null);
-                                      handleOpenDeclineModal(app);
-                                    }}
-                                    className="w-full h-10 px-3 rounded-xl hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2.5 text-xs font-bold text-[#B42318] transition cursor-pointer text-left border-t border-slate-100 dark:border-slate-800 mt-1 pt-1"
-                                  >
-                                    <XCircle className="size-4 text-[#B42318]" />
-                                    <span>Decline</span>
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          )}
-                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (menuAnchor?.app.id === app.id) {
+                              setMenuAnchor(null);
+                            } else {
+                              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                              setMenuAnchor({ app, rect });
+                            }
+                          }}
+                          aria-expanded={menuAnchor?.app.id === app.id}
+                          className="size-9 rounded-full border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-slate-600 dark:text-slate-300 transition cursor-pointer shrink-0"
+                          aria-label="More actions"
+                        >
+                          <MoreHorizontal className="size-4" />
+                        </button>
                       </div>
                     </article>
                   );
@@ -1601,9 +1673,9 @@ export function HostApplicationsManager() {
       </p>
 
       {/* ========================================================================= */}
-      {/* 6. SLIDE-OUT DRAWER PANEL                                                 */}
+      {/* 6. SLIDE-OUT DRAWER PANEL (Portaled to document.body to avoid CSS transform clipping) */}
       {/* ========================================================================= */}
-      {drawerTarget && (
+      {mounted && drawerTarget && createPortal(
         <div className="fixed inset-0 z-50 flex justify-end">
           <div
             className="fixed inset-0 bg-slate-900/50 backdrop-blur-[2px] transition-opacity animate-in fade-in duration-200"
@@ -1998,7 +2070,8 @@ export function HostApplicationsManager() {
               )}
             </div>
           </aside>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* ========================================================================= */}
