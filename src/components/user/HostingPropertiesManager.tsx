@@ -125,10 +125,23 @@ function FloatingMenu({
   });
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setPos(null);
+      return;
+    }
     const place = () => {
-      const rect = buttonRef.current?.getBoundingClientRect();
-      if (!rect) return;
+      const btn = buttonRef.current;
+      if (!btn) {
+        setPos(null);
+        return;
+      }
+      const rect = btn.getBoundingClientRect();
+      // If the button is hidden (display: none on another breakpoint), width and height are 0.
+      // Never render the floating portal at (0, 0) / top-left corner!
+      if (!rect || (rect.width === 0 && rect.height === 0)) {
+        setPos(null);
+        return;
+      }
       const below = rect.bottom + 4;
       const top = below + menuHeight > window.innerHeight ? Math.max(8, rect.top - menuHeight - 4) : below;
       const left = Math.min(Math.max(8, rect.right - width), window.innerWidth - width - 8);
@@ -277,13 +290,13 @@ export function HostingPropertiesManager() {
 
   // Three-dots menus open state
   const [openPropertyMenuId, setOpenPropertyMenuId] = useState<number | null>(null);
-  const [openRoomMenuId, setOpenRoomMenuId] = useState<number | null>(null);
+  const [openRoomMenuId, setOpenRoomMenuId] = useState<string | number | null>(null);
   // The room drawer is drawn in a portal on <body>, so it is always pinned to the screen.
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
+    function handleClickOutside(event: MouseEvent | TouchEvent) {
       const target = event.target as HTMLElement | null;
       if (!target?.closest("[data-property-menu]")) {
         setOpenPropertyMenuId(null);
@@ -294,9 +307,11 @@ export function HostingPropertiesManager() {
     }
     if (openPropertyMenuId !== null || openRoomMenuId !== null) {
       document.addEventListener("mousedown", handleClickOutside);
+      document.addEventListener("touchstart", handleClickOutside);
     }
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("touchstart", handleClickOutside);
     };
   }, [openPropertyMenuId, openRoomMenuId]);
 
@@ -1433,10 +1448,10 @@ export function HostingPropertiesManager() {
                                         {room.title}
                                       </p>
 
-                                      {/* Three dots button */}
+                                      {/* Three dots button (Mobile) */}
                                       <RoomActionsMenu
-                                        open={openRoomMenuId === room.id}
-                                        onToggle={() => setOpenRoomMenuId((prev) => (prev === room.id ? null : room.id))}
+                                        open={openRoomMenuId === `m-${room.id}`}
+                                        onToggle={() => setOpenRoomMenuId((prev) => (prev === `m-${room.id}` ? null : `m-${room.id}`))}
                                         onClose={() => setOpenRoomMenuId(null)}
                                         hasListing={Boolean(room.listing)}
                                         hasOccupancy={Boolean(room.occupancyId)}
