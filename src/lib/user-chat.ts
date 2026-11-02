@@ -69,7 +69,8 @@ export function deleteUserChatConversation(conversationId: number): Promise<void
 export async function* streamUserChatMessage(
   conversationId: number,
   content: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  language?: string
 ): AsyncGenerator<UserChatStreamEvent> {
   let res: Response;
   try {
@@ -77,7 +78,7 @@ export async function* streamUserChatMessage(
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, language }),
       signal,
     });
   } catch (err) {

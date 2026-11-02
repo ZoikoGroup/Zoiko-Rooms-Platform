@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from app.schemas.common import CamelModel
 
@@ -19,3 +20,5 @@ class ChatMessageRead(CamelModel):
 
 class ChatSendMessageRequest(CamelModel):
     content: str
+    # Language the assistant should reply in (the chat's own picker); None keeps the default.
+    language: Literal["EN", "DE", "FR", "ES", "PT"] | None = None
