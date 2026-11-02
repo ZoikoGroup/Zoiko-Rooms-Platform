@@ -892,23 +892,23 @@ export function RentalsManager() {
   }
 
   return (
-    <div className="space-y-5 max-w-[1560px] mx-auto pb-12">
+    <div className="space-y-5 max-w-[1560px] mx-auto pb-12 text-[#0B1B3F] dark:text-slate-100">
       {/* 1. Header Section */}
       <section className="flex justify-between items-end gap-5 flex-wrap pt-2 px-1">
         <div>
           <div className="text-xs font-bold uppercase tracking-wider text-[#D80B0B]">
             Renter workspace
           </div>
-          <h1 className="text-3xl sm:text-[38px] leading-[1.05] font-extrabold tracking-tight text-[#0E2F73] mt-1.5">
+          <h1 className="text-3xl sm:text-[38px] leading-[1.05] font-extrabold tracking-tight text-[#0E2F73] dark:text-white mt-1.5">
             My Rentals
           </h1>
-          <p className="text-[15px] text-[#4A5878] mt-2 max-w-2xl">
+          <p className="text-[15px] text-[#4A5878] dark:text-slate-400 mt-2 max-w-2xl">
             Manage your upcoming and active rentals, agreements, payments, notices and sublet requests.
           </p>
         </div>
         <Link
           href="/account/rent"
-          className="inline-flex items-center gap-2 h-11 px-5 rounded-xl border border-slate-200 bg-white text-sm font-bold text-[#0E2F73] hover:border-[#0E2F73] hover:text-[#D80B0B] transition-colors shadow-sm"
+          className="inline-flex items-center gap-2 h-11 px-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-sm font-bold text-[#0E2F73] dark:text-white hover:border-[#0E2F73] hover:text-[#D80B0B] dark:hover:text-red-400 transition-colors shadow-sm"
         >
           <Search className="w-4 h-4" />
           Find a Room
@@ -928,14 +928,14 @@ export function RentalsManager() {
             activeCard === "upcoming" ? "border-[#0E2F73] bg-[#F5F8FE] shadow-sm" : "border-[#E1E7F1] hover:border-[#B8C6E0]"
           }`}
         >
-          <span className="w-[52px] h-[52px] rounded-2xl bg-[#EEF3FF] text-[#1D3F8F] font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
+          <span className="w-[52px] h-[52px] rounded-2xl bg-[#EEF3FF] dark:bg-blue-950/50 text-[#1D3F8F] dark:text-blue-300 font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
             {counts.upcoming}
           </span>
           <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-            <span className="font-extrabold text-base text-[#0B1B3F]">Upcoming</span>
-            <span className="text-[12.5px] text-[#4A5878] truncate">Starts in the future</span>
+            <span className="font-extrabold text-base text-[#0B1B3F] dark:text-white">Upcoming</span>
+            <span className="text-[12.5px] text-[#4A5878] dark:text-slate-400 truncate">Starts in the future</span>
           </div>
-          <Calendar className="w-5 h-5 text-[#1D3F8F] opacity-80 flex-shrink-0 self-start mt-1 hidden sm:block" />
+          <Calendar className="w-5 h-5 text-[#1D3F8F] dark:text-blue-300 opacity-80 flex-shrink-0 self-start mt-1 hidden sm:block" />
         </button>
 
         {/* Card 2: Active */}
@@ -949,14 +949,14 @@ export function RentalsManager() {
             activeCard === "active" ? "border-[#0E2F73] bg-[#F5F8FE] shadow-sm" : "border-[#E1E7F1] hover:border-[#B8C6E0]"
           }`}
         >
-          <span className="w-[52px] h-[52px] rounded-2xl bg-[#E7F8EF] text-[#05603A] font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
+          <span className="w-[52px] h-[52px] rounded-2xl bg-[#E7F8EF] dark:bg-emerald-950/50 text-[#05603A] dark:text-emerald-300 font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
             {counts.active}
           </span>
           <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-            <span className="font-extrabold text-base text-[#0B1B3F]">Active</span>
-            <span className="text-[12.5px] text-[#4A5878] truncate">Rental in effect</span>
+            <span className="font-extrabold text-base text-[#0B1B3F] dark:text-white">Active</span>
+            <span className="text-[12.5px] text-[#4A5878] dark:text-slate-400 truncate">Rental in effect</span>
           </div>
-          <Key className="w-5 h-5 text-[#05603A] opacity-80 flex-shrink-0 self-start mt-1 hidden sm:block" />
+          <Key className="w-5 h-5 text-[#05603A] dark:text-emerald-300 opacity-80 flex-shrink-0 self-start mt-1 hidden sm:block" />
         </button>
 
         {/* Card 3: Ending Soon */}
@@ -974,8 +974,8 @@ export function RentalsManager() {
             {counts.ending}
           </span>
           <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-            <span className="font-extrabold text-base text-[#0B1B3F]">Ending Soon</span>
-            <span className="text-[12.5px] text-[#4A5878] truncate">Confirmed end ahead</span>
+            <span className="font-extrabold text-base text-[#0B1B3F] dark:text-white">Ending Soon</span>
+            <span className="text-[12.5px] text-[#4A5878] dark:text-slate-400 truncate">Confirmed end ahead</span>
           </div>
           <Clock className="w-5 h-5 text-[#93370D] opacity-80 flex-shrink-0 self-start mt-1 hidden sm:block" />
         </button>
@@ -991,28 +991,28 @@ export function RentalsManager() {
             activeCard === "action" ? "border-[#B42318] bg-[#FFF7F7] shadow-sm" : "border-[#E1E7F1] hover:border-[#B8C6E0]"
           }`}
         >
-          <span className="w-[52px] h-[52px] rounded-2xl bg-[#FDECEC] text-[#B42318] font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
+          <span className="w-[52px] h-[52px] rounded-2xl bg-[#FDECEC] dark:bg-rose-950/50 text-[#B42318] dark:text-rose-300 font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
             {counts.action}
           </span>
           <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-            <span className="font-extrabold text-base text-[#0B1B3F]">Action Required</span>
-            <span className="text-[12.5px] text-[#4A5878] truncate">Needs your response</span>
+            <span className="font-extrabold text-base text-[#0B1B3F] dark:text-white">Action Required</span>
+            <span className="text-[12.5px] text-[#4A5878] dark:text-slate-400 truncate">Needs your response</span>
           </div>
-          <AlertTriangle className="w-5 h-5 text-[#B42318] opacity-80 flex-shrink-0 self-start mt-1 hidden sm:block" />
+          <AlertTriangle className="w-5 h-5 text-[#B42318] dark:text-rose-300 opacity-80 flex-shrink-0 self-start mt-1 hidden sm:block" />
         </button>
       </section>
 
       {/* 3. Action Strip Banner (shown when items need attention) */}
       {attentionItems.length > 0 && (
-        <section className="flex items-center justify-between gap-4 p-3.5 sm:px-5 bg-[#FFF5F5] border border-[#F3C2C2] rounded-[18px] flex-wrap">
-          <div className="flex items-center gap-2.5 text-[#B42318] font-bold text-sm">
+        <section className="flex items-center justify-between gap-4 p-3.5 sm:px-5 bg-[#FFF5F5] dark:bg-rose-950/20 border border-[#F3C2C2] dark:border-rose-900/50 rounded-[18px] flex-wrap">
+          <div className="flex items-center gap-2.5 text-[#B42318] dark:text-rose-300 font-bold text-sm">
             <AlertTriangle className="w-5 h-5 flex-shrink-0" />
             <span>
               {attentionItems.length} {attentionItems.length === 1 ? "rental needs" : "rentals need"} your attention
             </span>
           </div>
           <div className="flex items-center gap-3 flex-wrap flex-1 justify-end">
-            <span className="text-sm text-[#3A1B1B]">
+            <span className="text-sm text-[#3A1B1B] dark:text-rose-200">
               {attentionItems[0].action}
             </span>
             <button
@@ -1027,23 +1027,23 @@ export function RentalsManager() {
       )}
 
       {/* 4. Search and Filters Bar */}
-      <section className="bg-white border border-[#E1E7F1] rounded-3xl p-3.5 sm:p-4 shadow-sm">
+      <section className="bg-white dark:bg-slate-900 border border-[#E1E7F1] dark:border-slate-800 rounded-3xl p-3.5 sm:p-4 shadow-sm">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 items-end">
           <div className="flex gap-2">
-            <div className="flex-1 flex items-center gap-2.5 h-11 px-4 bg-[#F4F6FB] border border-[#D5DDEA] rounded-full focus-within:border-[#0E2F73]">
-              <Search className="w-4 h-4 text-[#4A5878] flex-shrink-0" />
+            <div className="flex-1 flex items-center gap-2.5 h-11 px-4 bg-[#F4F6FB] dark:bg-slate-800 border border-[#D5DDEA] dark:border-slate-700 rounded-full focus-within:border-[#0E2F73] dark:focus-within:border-blue-400">
+              <Search className="w-4 h-4 text-[#4A5878] dark:text-slate-400 flex-shrink-0" />
               <input
                 type="search"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search property, room, Rental ID or agreement"
-                className="w-full bg-transparent text-xs text-[#0B1B3F] placeholder-[#4A5878] outline-none"
+                className="w-full bg-transparent text-xs text-[#0B1B3F] dark:text-white placeholder-[#4A5878] dark:placeholder-slate-400 outline-none"
               />
             </div>
             <button
               type="button"
               onClick={() => setMobileFilterOpen(!mobileFilterOpen)}
-              className="lg:hidden flex items-center gap-2 px-4 h-11 rounded-full border border-[#D5DDEA] bg-white text-xs font-bold text-[#0E2F73]"
+              className="lg:hidden flex items-center gap-2 px-4 h-11 rounded-full border border-[#D5DDEA] dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-bold text-[#0E2F73] dark:text-white"
             >
               Filters
             </button>
@@ -1125,10 +1125,10 @@ export function RentalsManager() {
       </section>
 
       {/* 5. Workspace Table Container */}
-      <section className="bg-white border border-[#E1E7F1] rounded-[24px] overflow-hidden shadow-sm">
+      <section className="bg-white dark:bg-slate-900 border border-[#E1E7F1] dark:border-slate-800 rounded-[24px] overflow-hidden shadow-sm">
         {/* Workspace Bar: Current vs History Tabs */}
-        <div className="flex justify-between items-center gap-3 p-4 sm:px-6 border-b border-[#EEF1F7] flex-wrap">
-          <div className="inline-flex gap-1 p-1 bg-[#EEF2F9] rounded-xl" role="tablist">
+        <div className="flex justify-between items-center gap-3 p-4 sm:px-6 border-b border-[#EEF1F7] dark:border-slate-800 flex-wrap">
+          <div className="inline-flex gap-1 p-1 bg-[#EEF2F9] dark:bg-slate-800 rounded-xl" role="tablist">
             <button
               type="button"
               role="tab"
@@ -1163,14 +1163,14 @@ export function RentalsManager() {
           </div>
 
           <div className="flex items-center gap-3">
-            <span className="text-xs sm:text-sm text-[#4A5878]">
+            <span className="text-xs sm:text-sm text-[#4A5878] dark:text-slate-400">
               {filteredRentals.length} {filteredRentals.length === 1 ? "rental" : "rentals"}
             </span>
             {hasActiveFilters && (
               <button
                 type="button"
                 onClick={clearFilters}
-                className="h-8 px-3 rounded-lg bg-[#EEF2F9] hover:bg-[#E1E8F5] text-xs font-bold text-[#0E2F73] transition-colors"
+                className="h-8 px-3 rounded-lg bg-[#EEF2F9] dark:bg-slate-800 hover:bg-[#E1E8F5] dark:hover:bg-slate-700 text-xs font-bold text-[#0E2F73] dark:text-white transition-colors"
               >
                 Clear filters
               </button>
@@ -1179,7 +1179,7 @@ export function RentalsManager() {
         </div>
 
         {/* Table Columns Header (Desktop) */}
-        <div className="hidden lg:grid grid-cols-[minmax(210px,1.3fr)_minmax(170px,1.1fr)_minmax(150px,1fr)_130px_minmax(140px,1fr)_170px] gap-3.5 px-6 py-3 bg-[#F7F9FD] border-b border-[#EEF1F7] text-[11px] font-bold tracking-wider uppercase text-[#5B6886]">
+        <div className="hidden lg:grid grid-cols-[minmax(210px,1.3fr)_minmax(170px,1.1fr)_minmax(150px,1fr)_130px_minmax(140px,1fr)_170px] gap-3.5 px-6 py-3 bg-[#F7F9FD] dark:bg-slate-800/60 border-b border-[#EEF1F7] dark:border-slate-800 text-[11px] font-bold tracking-wider uppercase text-[#5B6886] dark:text-slate-400">
           <div>Property / room</div>
           <div>Rental / term</div>
           <div>Agreement</div>
@@ -1190,7 +1190,7 @@ export function RentalsManager() {
 
         {/* Rental Rows */}
         {filteredRentals.length > 0 || (viewTab !== "history" && sharedRooms.length > 0) ? (
-          <div className="divide-y divide-[#EEF1F7]">
+          <div className="divide-y divide-[#EEF1F7] dark:divide-slate-800">
             {filteredRentals.map((r) => {
               const isAction = Boolean(r.action);
               const isHistory = viewTab === "history";
@@ -1208,14 +1208,14 @@ export function RentalsManager() {
                     onClick={() => handleOpenDrawer(r, "overview")}
                     className="flex items-center gap-3.5 text-left group"
                   >
-                    <div className="w-12 h-12 rounded-xl bg-[#E3E9F6] text-[#0E2F73] flex items-center justify-center flex-shrink-0 group-hover:bg-[#D9E4FA] transition-colors">
+                    <div className="w-12 h-12 rounded-xl bg-[#E3E9F6] dark:bg-slate-800 text-[#0E2F73] dark:text-blue-400 flex items-center justify-center flex-shrink-0 group-hover:bg-[#D9E4FA] dark:group-hover:bg-slate-700 transition-colors">
                       <Home className="w-5 h-5" />
                     </div>
                     <div className="flex flex-col gap-0.5 min-w-0">
-                      <span className="font-extrabold text-sm sm:text-[15px] text-[#0B1B3F] group-hover:text-[#D80B0B] transition-colors truncate">
+                      <span className="font-extrabold text-sm sm:text-[15px] text-[#0B1B3F] dark:text-white group-hover:text-[#D80B0B] dark:group-hover:text-red-400 transition-colors truncate">
                         {r.p} · {r.room}
                       </span>
-                      <span className="text-xs text-[#5B6886] truncate">
+                      <span className="text-xs text-[#5B6886] dark:text-slate-400 truncate">
                         {r.type} · {r.city}
                       </span>
                     </div>
@@ -1223,10 +1223,10 @@ export function RentalsManager() {
 
                   {/* Rental / Term */}
                   <div className="flex flex-col gap-0.5 text-xs">
-                    <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886]">
+                    <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886] dark:text-slate-400">
                       Rental / Term
                     </span>
-                    <strong className="font-mono text-[13px] text-[#0B1B3F]">
+                    <strong className="font-mono text-[13px] text-[#0B1B3F] dark:text-white">
                       Rental #{r.id}
                     </strong>
                     <span className="text-[#4A5878]">
@@ -1247,7 +1247,7 @@ export function RentalsManager() {
                     </strong>
                     <span
                       className={`inline-flex items-center gap-1 font-bold text-xs ${
-                        isHistory ? "text-[#3A4866]" : "text-[#05603A]"
+                        isHistory ? "text-[#3A4866] dark:text-slate-400" : "text-[#05603A] dark:text-emerald-400"
                       }`}
                     >
                       <Check className="w-3.5 h-3.5" />
@@ -1261,31 +1261,31 @@ export function RentalsManager() {
                       Status
                     </span>
                     {r.st === "upcoming" && (
-                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#AFC2EE] bg-[#EEF3FF] text-[#1D3F8F] text-xs font-extrabold uppercase">
+                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#AFC2EE] dark:border-blue-800 bg-[#EEF3FF] dark:bg-blue-950/50 text-[#1D3F8F] dark:text-blue-300 text-xs font-extrabold uppercase">
                         <Calendar className="w-3 h-3" />
                         UPCOMING
                       </span>
                     )}
                     {r.st === "active" && (
-                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#8FD9B4] bg-[#E7F8EF] text-[#05603A] text-xs font-extrabold uppercase">
+                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#8FD9B4] dark:border-emerald-800 bg-[#E7F8EF] dark:bg-emerald-950/50 text-[#05603A] dark:text-emerald-300 text-xs font-extrabold uppercase">
                         <Key className="w-3 h-3" />
                         ACTIVE
                       </span>
                     )}
                     {r.st === "notice" && (
-                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#0E2F73] bg-[#EAF0FB] text-[#0E2F73] text-xs font-extrabold uppercase">
+                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#0E2F73] dark:border-blue-700 bg-[#EAF0FB] dark:bg-blue-950/50 text-[#0E2F73] dark:text-blue-300 text-xs font-extrabold uppercase">
                         <Calendar className="w-3 h-3" />
                         NOTICE GIVEN
                       </span>
                     )}
                     {r.st === "ending" && (
-                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#F2B866] bg-[#FFF4E0] text-[#93370D] text-xs font-extrabold uppercase">
+                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#F2B866] dark:border-amber-700 bg-[#FFF4E0] dark:bg-amber-950/50 text-[#93370D] dark:text-amber-300 text-xs font-extrabold uppercase">
                         <Clock className="w-3 h-3" />
                         ENDING SOON
                       </span>
                     )}
                     {r.st === "ended" && (
-                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#C3CAD6] bg-[#F0F2F6] text-[#344054] text-xs font-extrabold uppercase">
+                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#C3CAD6] dark:border-slate-700 bg-[#F0F2F6] dark:bg-slate-800 text-[#344054] dark:text-slate-300 text-xs font-extrabold uppercase">
                         <Check className="w-3 h-3" />
                         ENDED
                       </span>
@@ -1303,7 +1303,7 @@ export function RentalsManager() {
                     <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886]">
                       Next milestone
                     </span>
-                    <span className="font-bold text-[#0B1B3F] text-[13px]">{r.ms}</span>
+                    <span className="font-bold text-[#0B1B3F] dark:text-white text-[13px]">{r.ms}</span>
                   </div>
 
                   {/* Next Action Button */}
@@ -1320,7 +1320,7 @@ export function RentalsManager() {
                       <button
                         type="button"
                         onClick={() => handleOpenDrawer(r, "overview")}
-                        className="w-full lg:w-auto h-10 px-4 rounded-xl border border-[#C7D2E6] hover:border-[#0E2F73] text-[#0E2F73] font-bold text-xs sm:text-[13px] bg-white transition-colors whitespace-nowrap"
+                        className="w-full lg:w-auto h-10 px-4 rounded-xl border border-[#C7D2E6] dark:border-slate-700 hover:border-[#0E2F73] dark:hover:border-slate-500 text-[#0E2F73] dark:text-white font-bold text-xs sm:text-[13px] bg-white dark:bg-slate-800 transition-colors whitespace-nowrap"
                       >
                         View Rental Record
                       </button>
@@ -1443,24 +1443,24 @@ export function RentalsManager() {
       </section>
 
       {/* Footnote */}
-      <p className="text-xs text-[#4A5878] px-1">
+      <p className="text-xs text-[#4A5878] dark:text-slate-400 px-1">
         Rent and deposits go to the verified recipient shown on each rental — not to Zoiko Rooms. Full payment activity lives in Payments.
       </p>
 
       {/* 6. Empty-state Reference Banner */}
-      <section className="relative flex items-center gap-4 p-5 sm:p-6 border-2 border-dashed border-[#C7D2E6] rounded-[22px] bg-[#F8FAFD] mt-4">
-        <div className="w-14 h-14 rounded-2xl bg-[#EAF0FB] flex items-center justify-center text-[#0E2F73] flex-shrink-0">
+      <section className="relative flex items-center gap-4 p-5 sm:p-6 border-2 border-dashed border-[#C7D2E6] dark:border-slate-800 rounded-[22px] bg-[#F8FAFD] dark:bg-slate-900/60 mt-4">
+        <div className="w-14 h-14 rounded-2xl bg-[#EAF0FB] dark:bg-slate-800 flex items-center justify-center text-[#0E2F73] dark:text-blue-400 flex-shrink-0">
           <Home className="w-7 h-7" />
         </div>
         <div className="flex-1 min-w-0">
-          <strong className="text-[#0B1B3F] text-base block">No rental record yet</strong>
-          <div className="text-[#4A5878] text-sm mt-0.5">
+          <strong className="text-[#0B1B3F] dark:text-white text-base block">No rental record yet</strong>
+          <div className="text-[#4A5878] dark:text-slate-400 text-sm mt-0.5">
             Applications that progress through agreement will appear here.
           </div>
         </div>
         <Link
           href="/account/applications"
-          className="inline-flex items-center justify-center h-10 px-4 rounded-xl border border-[#C7D2E6] bg-white text-sm font-bold text-[#0E2F73] hover:border-[#0E2F73] hover:text-[#D80B0B] transition-colors shadow-sm whitespace-nowrap flex-shrink-0"
+          className="inline-flex items-center justify-center h-10 px-4 rounded-xl border border-[#C7D2E6] dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-bold text-[#0E2F73] dark:text-white hover:border-[#0E2F73] hover:text-[#D80B0B] dark:hover:text-red-400 transition-colors shadow-sm whitespace-nowrap flex-shrink-0"
         >
           View My Applications
         </Link>
@@ -1483,10 +1483,10 @@ export function RentalsManager() {
             {/* Drawer Body */}
             <aside
               ref={drawerRef}
-              className="relative w-full max-w-[540px] h-full bg-white shadow-[-20px_0_50px_rgba(8,22,56,0.25)] flex flex-col overflow-y-auto sm:rounded-l-[24px] z-10 transition-transform duration-200"
+              className="relative w-full max-w-[540px] h-full bg-white dark:bg-slate-900 text-[#0B1B3F] dark:text-slate-100 shadow-[-20px_0_50px_rgba(8,22,56,0.25)] flex flex-col overflow-y-auto sm:rounded-l-[24px] z-10 transition-transform duration-200 border-l border-transparent dark:border-slate-800"
             >
               {/* Header */}
-              <div className="p-6 pb-4 border-b border-[#EEF1F7] flex justify-between items-start gap-4">
+              <div className="p-6 pb-4 border-b border-[#EEF1F7] dark:border-slate-800 flex justify-between items-start gap-4">
                 <div className="flex items-start gap-3.5 min-w-0">
                   <div className="w-12 h-12 rounded-2xl bg-[#E3E9F6] text-[#0E2F73] flex items-center justify-center flex-shrink-0">
                     <Home className="w-6 h-6" />
@@ -1495,10 +1495,10 @@ export function RentalsManager() {
                     <span className="text-[11px] font-bold uppercase tracking-wider text-[#D80B0B] block">
                       Rental #{selectedItem.id}
                     </span>
-                    <h2 className="text-xl font-extrabold text-[#0E2F73] truncate mt-0.5">
+                    <h2 className="text-xl font-extrabold text-[#0E2F73] dark:text-white truncate mt-0.5">
                       {selectedItem.p} · {selectedItem.room}
                     </h2>
-                    <p className="text-xs text-[#5B6886] mt-0.5 truncate">
+                    <p className="text-xs text-[#5B6886] dark:text-slate-400 mt-0.5 truncate">
                       {selectedItem.type} · {selectedItem.city}, Telangana
                     </p>
                   </div>
@@ -1506,7 +1506,7 @@ export function RentalsManager() {
                 <button
                   type="button"
                   onClick={() => setSelectedOccupancy(null)}
-                  className="w-10 h-10 rounded-xl border border-[#D5DDEA] text-[#0E2F73] flex items-center justify-center hover:bg-slate-100 flex-shrink-0 transition-colors"
+                  className="w-10 h-10 rounded-xl border border-[#D5DDEA] dark:border-slate-700 text-[#0E2F73] dark:text-white flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 flex-shrink-0 transition-colors"
                   aria-label="Close"
                 >
                   <X className="w-5 h-5" />
@@ -1514,7 +1514,7 @@ export function RentalsManager() {
               </div>
 
               {/* Status info bar */}
-              <div className="px-6 py-3 bg-[#F7F9FD] border-b border-[#EEF1F7] flex items-center gap-2.5 flex-wrap text-xs">
+              <div className="px-6 py-3 bg-[#F7F9FD] dark:bg-slate-800/60 border-b border-[#EEF1F7] dark:border-slate-800 flex items-center gap-2.5 flex-wrap text-xs">
                 {selectedItem.st === "upcoming" && (
                   <span className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full border border-[#AFC2EE] bg-[#EEF3FF] text-[#1D3F8F] font-extrabold uppercase text-[11px]">
                     <Calendar className="w-3 h-3" /> UPCOMING
@@ -1552,7 +1552,7 @@ export function RentalsManager() {
 
               {/* Tab Navigation in Drawer -- wraps so every tab stays visible (a
                   sideways-scrolling strip hid Documents/Disputes/Record off-screen). */}
-              <div className="flex flex-wrap border-b border-[#E1E7F1] px-4 gap-x-1">
+              <div className="flex flex-wrap border-b border-[#E1E7F1] dark:border-slate-800 px-4 gap-x-1">
                 {(selectedItem.occupancy.status === "PENDING_MOVE_IN" || selectedItem.st === "upcoming") && (
                   <button
                     type="button"

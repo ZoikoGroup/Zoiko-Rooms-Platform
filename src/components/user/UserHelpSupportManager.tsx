@@ -225,6 +225,7 @@ export function UserHelpSupportManager() {
   const [cases, setCases] = useState<SupportCase[]>([]);
   const [casesLoading, setCasesLoading] = useState(true);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [stepError, setStepError] = useState("");
   const [statusModalOpen, setStatusModalOpen] = useState(false);
 
   // Handle escape key and body scroll lock for service status modal
@@ -383,6 +384,7 @@ export function UserHelpSupportManager() {
   const openContactWizard = (category = "payments", issue?: string) => {
     const issues = CAT_ISSUES[category] || ["General inquiry"];
     const items = dynamicItems[category] || DEFAULT_FALLBACK_ITEMS[category] || ["My account"];
+    setStepError("");
     setContactForm({
       step: 1,
       cat: category,
@@ -397,7 +399,9 @@ export function UserHelpSupportManager() {
   };
 
   const handleNextStep = async () => {
+    setStepError("");
     if (contactForm.step === 3 && !contactForm.desc.trim()) {
+      setStepError("Please write a short description of what happened.");
       showToast("Please write a short description of what happened.");
       return;
     }
@@ -507,16 +511,21 @@ export function UserHelpSupportManager() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 text-[#0B1B3F] dark:text-slate-100">
-      {/* Toast popup */}
-      {toastMessage && (
+      {/* Toast popup (Portal-rendered directly into document.body to break out of layout transform contexts and pin to viewport) */}
+      {toastMessage && typeof document !== "undefined" && createPortal(
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-xl bg-primary-950 px-4 py-3 text-sm font-medium text-white shadow-2xl transition-all"
+          className="fixed bottom-6 right-6 z-[10000] flex items-center gap-2.5 rounded-xl bg-[#0B1B3F] px-4 py-3 text-sm font-medium text-white shadow-2xl transition-all border border-slate-700/50 pointer-events-none animate-in fade-in slide-in-from-bottom-2 duration-150"
         >
-          <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+          {/could not|failed|error|please/i.test(toastMessage) ? (
+            <AlertCircle className="h-4 w-4 text-rose-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+          )}
           <span>{toastMessage}</span>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Service Status Modal (Portal-rendered directly into document.body to break out of layout transform contexts) */}
@@ -1935,12 +1944,22 @@ export function UserHelpSupportManager() {
                     id="contact-desc-input"
                     rows={4}
                     value={contactForm.desc}
-                    onChange={(e) =>
-                      setContactForm((prev) => ({ ...prev, desc: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setStepError("");
+                      setContactForm((prev) => ({ ...prev, desc: e.target.value }));
+                    }}
                     placeholder="Describe the issue in a few sentences..."
-                    className="w-full rounded-xl border border-slate-300 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-800"
+                    className={`w-full rounded-xl border p-3 text-sm dark:bg-slate-800 ${
+                      stepError
+                        ? "border-red-500 bg-red-50/20 dark:border-red-500"
+                        : "border-slate-300 bg-white dark:border-slate-700"
+                    }`}
                   />
+                  {stepError && (
+                    <p className="text-xs font-bold text-red-600 dark:text-red-400">
+                      {stepError}
+                    </p>
+                  )}
                 </div>
 
                 <fieldset className="space-y-2">
