@@ -1704,7 +1704,7 @@ export function SubletRequestsList() {
           left: 50%;
           bottom: 24px;
           transform: translateX(-50%);
-          z-index: 10000;
+          z-index: 10050;
           background: #0b1b3f;
           color: #ffffff;
           padding: 12px 20px;
@@ -1713,6 +1713,7 @@ export function SubletRequestsList() {
           font-weight: 600;
           box-shadow: 0 12px 30px rgba(8, 22, 56, 0.3);
           animation: pop 0.2s ease-out;
+          pointer-events: none;
         }
         @keyframes pop {
           from {
@@ -1724,6 +1725,261 @@ export function SubletRequestsList() {
             opacity: 1;
           }
         }
+
+        /* ---------------- DARK MODE OVERRIDES ---------------- */
+        [data-theme="dark"] .scard {
+          background: #0f172a;
+          border-color: #1e293b;
+        }
+        [data-theme="dark"] .scard:hover {
+          border-color: #334155;
+        }
+        [data-theme="dark"] .scard[aria-pressed="true"] {
+          border-color: #38bdf8;
+          background: #0c1a30;
+        }
+        [data-theme="dark"] .scard--action[aria-pressed="true"] {
+          border-color: #f43f5e;
+          background: #271216;
+        }
+        [data-theme="dark"] .snum {
+          background: #1e293b !important;
+          color: #f8fafc !important;
+        }
+        [data-theme="dark"] .sico {
+          color: #94a3b8 !important;
+        }
+        [data-theme="dark"] .stitle {
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .shint {
+          color: #94a3b8;
+        }
+        [data-theme="dark"] .astrip {
+          background: #1f1315;
+          border-color: #4c1d24;
+        }
+        [data-theme="dark"] .atext {
+          color: #fca5a5;
+        }
+        [data-theme="dark"] .filters-wrap {
+          background: #0f172a;
+          border-color: #1e293b;
+        }
+        [data-theme="dark"] .search-box {
+          background: #1e293b;
+          border-color: #334155;
+        }
+        [data-theme="dark"] .search-box input {
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .field label {
+          color: #94a3b8;
+        }
+        [data-theme="dark"] .field input,
+        [data-theme="dark"] .field select {
+          background: #1e293b;
+          border-color: #334155;
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .fpanel.open {
+          background: #0f172a;
+          box-shadow: 0 -20px 50px rgba(0, 0, 0, 0.5);
+        }
+        [data-theme="dark"] .workspace {
+          background: #0f172a;
+          border-color: #1e293b;
+        }
+        [data-theme="dark"] .ws-bar {
+          border-bottom-color: #1e293b;
+        }
+        [data-theme="dark"] .tabs {
+          background: #1e293b;
+        }
+        [data-theme="dark"] .tab {
+          color: #94a3b8;
+        }
+        [data-theme="dark"] .tab[aria-selected="true"] {
+          background: #0f172a;
+          color: #f8fafc;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+        }
+        [data-theme="dark"] .acols {
+          background: #131d31;
+          color: #94a3b8;
+          border-bottom-color: #1e293b;
+        }
+        [data-theme="dark"] .arow {
+          border-bottom-color: #1e293b;
+        }
+        [data-theme="dark"] .arow:hover {
+          background: rgba(30, 41, 59, 0.35);
+        }
+        [data-theme="dark"] .arow--action {
+          background: #1f1315;
+        }
+        [data-theme="dark"] .aname {
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .muted {
+          color: #94a3b8;
+        }
+        [data-theme="dark"] .thumbsm {
+          background: #1e293b;
+          color: #60a5fa;
+        }
+        [data-theme="dark"] .vflag {
+          color: #94a3b8;
+        }
+        [data-theme="dark"] .btn-outline {
+          background: #0f172a;
+          border-color: #334155;
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .btn-outline:hover {
+          border-color: #60a5fa;
+          color: #60a5fa;
+        }
+        [data-theme="dark"] .btn-soft {
+          background: #1e293b;
+          color: #93c5fd;
+        }
+        [data-theme="dark"] .btn-soft:hover {
+          background: #334155;
+        }
+        [data-theme="dark"] .btn-ghost {
+          color: #93c5fd;
+        }
+        [data-theme="dark"] .btn-ghost:hover {
+          background: #1e293b;
+        }
+        [data-theme="dark"] .icon-btn.bordered {
+          background: #1e293b;
+          border-color: #334155;
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .icon-btn:hover {
+          background: #334155;
+        }
+        [data-theme="dark"] .empty-demo {
+          background: #0f172a;
+          border-color: #334155;
+        }
+        [data-theme="dark"] .empty-ill {
+          background: #1e293b;
+          color: #60a5fa;
+        }
+        [data-theme="dark"] .ref-tag {
+          background: #1e293b;
+          color: #94a3b8;
+        }
+        [data-theme="dark"] .drawer {
+          background: #0f172a;
+          color: #f8fafc;
+          border-left: 1px solid #1e293b;
+        }
+        [data-theme="dark"] .dwho h2 {
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .dtabs {
+          border-bottom-color: #1e293b;
+        }
+        [data-theme="dark"] .dtab {
+          color: #94a3b8;
+        }
+        [data-theme="dark"] .dtab:hover {
+          color: #60a5fa;
+        }
+        [data-theme="dark"] .dtab[aria-selected="true"] {
+          color: #60a5fa;
+          border-bottom-color: #60a5fa;
+        }
+        [data-theme="dark"] .dacts {
+          background: #0f172a;
+          border-top-color: #1e293b;
+        }
+        [data-theme="dark"] .kv2 div {
+          border-color: #1e293b;
+          background: rgba(30, 41, 59, 0.4);
+        }
+        [data-theme="dark"] .kv2 span {
+          color: #94a3b8;
+        }
+        [data-theme="dark"] .kv2 strong {
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .scopebox {
+          border-color: #1e293b;
+          background: rgba(30, 41, 59, 0.4);
+        }
+        [data-theme="dark"] .scopetag {
+          background: #1e293b;
+          color: #93c5fd;
+        }
+        [data-theme="dark"] .route {
+          color: #60a5fa;
+        }
+        [data-theme="dark"] .dsec h3 {
+          color: #94a3b8;
+        }
+        [data-theme="dark"] .dalert {
+          background: #271216;
+          color: #fca5a5;
+        }
+        [data-theme="dark"] .dalert.warn {
+          background: #271a0c;
+          color: #fcd34d;
+        }
+        [data-theme="dark"] .dinfo {
+          background: #0c1a30;
+          color: #93c5fd;
+        }
+        [data-theme="dark"] .amlist li {
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .gates,
+        [data-theme="dark"] .evl {
+          border-color: #1e293b;
+        }
+        [data-theme="dark"] .gate,
+        [data-theme="dark"] .evi {
+          border-bottom-color: #1e293b;
+        }
+        [data-theme="dark"] .evico {
+          background: #1e293b;
+          color: #60a5fa;
+        }
+        [data-theme="dark"] .dialog {
+          background: #0f172a;
+          color: #f8fafc;
+          border: 1px solid #1e293b;
+        }
+        [data-theme="dark"] .dialog h2 {
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .fprog {
+          background: #1e293b;
+        }
+        [data-theme="dark"] .roles legend {
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .radio {
+          border-color: #334155;
+          color: #f8fafc;
+        }
+        [data-theme="dark"] .radio:has(input:checked) {
+          border-color: #38bdf8;
+          background: #0c1a30;
+        }
+        [data-theme="dark"] .radio:has(input:checked) .rdot {
+          border-color: #38bdf8;
+        }
+        [data-theme="dark"] .tinput {
+          background: #1e293b;
+          border-color: #334155;
+          color: #f8fafc;
+        }
+
       `}</style>
 
       <div className="flex flex-col gap-[18px] min-w-0">
@@ -1733,10 +1989,10 @@ export function SubletRequestsList() {
             <div className="text-xs font-bold uppercase tracking-wider text-[#D80B0B]">
               Renter workspace
             </div>
-            <h1 className="text-[34px] sm:text-[38px] font-extrabold text-[#0E2F73] tracking-tight leading-tight mt-1">
+            <h1 className="text-[34px] sm:text-[38px] font-extrabold text-[#0E2F73] dark:text-white tracking-tight leading-tight mt-1">
               Sublet Requests
             </h1>
-            <p className="text-[14px] sm:text-[15px] text-[#4A5878] mt-1.5">
+            <p className="text-[14px] sm:text-[15px] text-[#4A5878] dark:text-slate-400 mt-1.5">
               Request permission to sublet, respond to questions, review decisions and track approved sublets.
             </p>
           </div>
@@ -2590,6 +2846,7 @@ export function SubletRequestsList() {
                             </span>
                           </div>
 
+                          {/* Bug ZR 95: Replaced with sticky footer "Submit Response" button so user doesn't need to scroll to find it
                           <button
                             type="button"
                             className="btn btn-navy w-full"
@@ -2598,6 +2855,7 @@ export function SubletRequestsList() {
                           >
                             {infoSubmitting ? "Submitting..." : "Submit Response"}
                           </button>
+                          */}
                         </div>
                       </div>
                     ) : activeRequest.infoResponseNote ? (
@@ -2912,63 +3170,78 @@ export function SubletRequestsList() {
               </div>
 
               {/* Drawer Footer Actions */}
-              <div className="dacts">
-                {HISTORY_STATUSES.has(activeRequest.status) ? (
-                  <p className="muted small">Read-only history.</p>
-                ) : activeRequest.status === "draft" ? (
-                  <>
-                    <button
-                      type="button"
-                      className="btn btn-navy"
-                      onClick={() => {
-                        closeDrawer();
-                        openCreateWizard(activeRequest.currentOccupancyId);
-                      }}
-                    >
-                      Continue Draft
-                    </button>
-                    <span className="flex-grow" />
-                    <button
-                      type="button"
-                      className="btn btn-ghost text-red-600"
-                      onClick={() => setWithdrawTarget(activeRequest)}
-                    >
-                      Delete draft
-                    </button>
-                  </>
-                ) : activeRequest.status === "approved" ? (
-                  <>
-                    <a
-                      href={tenantSubletDecisionRecordUrl(activeRequest.id)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="btn btn-navy"
-                    >
-                      View Next Steps
-                    </a>
-                  </>
-                ) : (
-                  <>
-                    {activeRequest.status === "more_information_requested" && (
+              {activeRequest.status !== "approved" && (
+                <div className="dacts">
+                  {HISTORY_STATUSES.has(activeRequest.status) ? (
+                    <p className="muted small">Read-only history.</p>
+                  ) : activeRequest.status === "draft" ? (
+                    <>
                       <button
                         type="button"
-                        className="btn btn-red"
-                        onClick={() => setDrawerTab("info")}
+                        className="btn btn-navy"
+                        onClick={() => {
+                          closeDrawer();
+                          openCreateWizard(activeRequest.currentOccupancyId);
+                        }}
                       >
-                        Respond
+                        Continue Draft
                       </button>
-                    )}
-                    <span className="flex-grow" />
-                    <button
-                      type="button"
-                      className="btn btn-ghost text-red-600"
-                      onClick={() => setWithdrawTarget(activeRequest)}
-                    >
-                      Withdraw Request
-                    </button>
-                  </>
-                )}
-              </div>
+                      <span className="flex-grow" />
+                      <button
+                        type="button"
+                        className="btn btn-ghost text-red-600"
+                        onClick={() => setWithdrawTarget(activeRequest)}
+                      >
+                        Delete draft
+                      </button>
+                    </>
+                  /* 
+                  ) : activeRequest.status === "approved" ? (
+                    <>
+                      <a
+                        href={tenantSubletDecisionRecordUrl(activeRequest.id)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn btn-navy"
+                      >
+                        View Next Steps
+                      </a>
+                    </>
+                  */
+                  ) : (
+                    <>
+                      {activeRequest.status === "more_information_requested" && (
+                        drawerTab === "info" ? (
+                          <button
+                            type="button"
+                            className="btn btn-navy"
+                            disabled={infoSubmitting}
+                            onClick={() => handleSubmitInfoResponse(activeRequest.id)}
+                          >
+                            {infoSubmitting ? "Submitting..." : "Submit Response"}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-red"
+                            onClick={() => setDrawerTab("info")}
+                          >
+                            Respond
+                          </button>
+                        )
+                      )}
+                      <span className="flex-grow" />
+                      <button
+                        type="button"
+                        className="btn btn-ghost text-red-600"
+                        onClick={() => setWithdrawTarget(activeRequest)}
+                      >
+                        Withdraw Request
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </aside>
           </div>,
           document.body
@@ -3452,12 +3725,15 @@ export function SubletRequestsList() {
           document.body
         )}
 
-      {/* Toast Notification */}
-      {toastMessage && (
-        <div className="toast" role="status" aria-live="polite">
-          {toastMessage}
-        </div>
-      )}
+      {/* Toast Notification (Portaled directly to document.body so it is always on top of modals and drawers) */}
+      {typeof document !== "undefined" &&
+        toastMessage &&
+        createPortal(
+          <div className="toast" role="status" aria-live="polite">
+            {toastMessage}
+          </div>,
+          document.body
+        )}
     </>
   );
 }

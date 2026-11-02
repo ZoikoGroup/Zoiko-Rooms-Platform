@@ -7,6 +7,7 @@ import {
   Clock,
   Ellipsis,
   History,
+  Languages,
   Loader2,
   Mail,
   Maximize2,
@@ -35,6 +36,9 @@ import { ExternalDiscoveryCard } from "@/components/user/chat/ExternalDiscoveryC
 import { AssistantHome } from "@/components/user/chat/AssistantHome";
 import { AssistantStatus } from "@/components/user/chat/AssistantStatus";
 import { ChatHeaderMenu } from "@/components/user/chat/ChatHeaderMenu";
+import { ChatLanguageMenu } from "@/components/user/chat/ChatLanguageMenu";
+import { useChatLanguage } from "@/components/user/chat/chat-language";
+import { suggestFollowUps } from "@/components/user/chat/follow-ups";
 import {
   DEFAULT_LEAD_SUMMARY,
   ExternalCard,
@@ -123,6 +127,9 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [languageOpen, setLanguageOpen] = useState(false);
+  const languageButtonRef = useRef<HTMLButtonElement | null>(null);
+  const { language, setLanguage, t } = useChatLanguage();
   const closeMenu = useCallback(() => setMenuOpen(false), []);
   // Remembered per browser; this panel only renders client-side once opened.
   const [expanded, setExpanded] = useState(() => typeof window !== "undefined" && readExpanded());
@@ -198,8 +205,8 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
   }, [open]);
 
   useEffect(() => {
-    if (stickToBottomRef.current) scrollToBottom();
-  }, [messages, streamingText, toolActivity, scrollToBottom]);
+    if (stickToBottomRef.current) scrollToBottom(!sending);
+  }, [messages, streamingText, toolActivity, sending, scrollToBottom]);
 
   function handleScroll() {
     const el = scrollRef.current;
@@ -382,7 +389,7 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
       abortRef.current = controller;
 
       let assistantDone = "";
-      for await (const event of streamUserChatMessage(conversationId, content, controller.signal)) {
+      for await (const event of streamUserChatMessage(conversationId, content, controller.signal, language)) {
         if (event.type === "text") {
           streamBufRef.current += event.text;
           setStreamingText(streamBufRef.current);
@@ -512,8 +519,25 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
                 {expanded ? <Minimize2 className="h-[18px] w-[18px]" /> : <Maximize2 className="h-[18px] w-[18px]" />}
               </button>
               <button
+                ref={languageButtonRef}
+                onClick={() => {
+                  setMenuOpen(false);
+                  setLanguageOpen((value) => !value);
+                }}
+                aria-label={t("Language")}
+                aria-haspopup="menu"
+                aria-expanded={languageOpen}
+                title={t("Language")}
+                className={HEADER_BUTTON}
+              >
+                <Languages className="h-5 w-5" />
+              </button>
+              <button
                 ref={menuButtonRef}
-                onClick={() => setMenuOpen((value) => !value)}
+                onClick={() => {
+                  setLanguageOpen(false);
+                  setMenuOpen((value) => !value);
+                }}
                 aria-label="More options"
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
@@ -527,7 +551,16 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
               </button>
             </div>
           </div>
+          <ChatLanguageMenu
+            open={languageOpen}
+            language={language}
+            label={t("Language")}
+            onSelect={setLanguage}
+            onClose={() => setLanguageOpen(false)}
+            triggerRef={languageButtonRef}
+          />
           <ChatHeaderMenu
+            t={t}
             open={menuOpen}
             onClose={closeMenu}
             onNewChat={startNewChat}
@@ -594,6 +627,24 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
             )
           )}
 
+          {!sending && messages.length > 0 && messages[messages.length - 1].role === "assistant" && (
+            <div className="animate-chat-fade-slide ml-9 flex flex-wrap gap-1.5">
+              {suggestFollowUps(
+                [...messages].reverse().find((m) => m.role === "user")?.content ?? "",
+                messages.filter((m) => m.role === "user").map((m) => m.content)
+              ).map((question) => (
+                <button
+                  key={question}
+                  type="button"
+                  onClick={() => sendMessage(t(question))}
+                  className="rounded-full px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 transition-colors hover:bg-slate-100 hover:text-slate-800 dark:text-slate-300 dark:ring-white/10 dark:hover:bg-white/10"
+                >
+                  {t(question)}
+                </button>
+              ))}
+            </div>
+          )}
+
           {(streamingText || waitingForFirstToken || toolActivity || toolErrors.length > 0) && (
             <div className="animate-chat-msg-left flex flex-col gap-2">
               {(serverRisk === "R3" || serverRisk === "R4" || serverRisk === "R2" || pendingRisk === "R2") && (
@@ -623,6 +674,7 @@ export function UserChatPanel({ open, onClose }: UserChatPanelProps) {
                 <AssistantAvatar />
               <div className="max-w-[85%] rounded-2xl rounded-tl-sm bg-white px-4 py-2.5 text-sm leading-relaxed text-slate-700 ring-1 ring-slate-200 dark:bg-white/5 dark:text-slate-200 dark:ring-white/10">
                 {streamingText && <MarkdownMessage content={streamingText} />}
+                {streamingText && <span className="chat-reveal-caret" aria-hidden="true" />}
                 {waitingForFirstToken && <TypingDots />}
                 {toolActivity && (
                   <span className="mt-1 flex items-center gap-1.5 text-xs text-slate-400">

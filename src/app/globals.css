@@ -26,6 +26,7 @@
   --color-primary-700: #0e2f73;
   --color-primary-800: #0a2359;
   --color-primary-900: #071a40;
+  --color-primary-950: #040e24;
   --color-primary: #0e2f73;
 
   --color-accent-50: #fdecec;
@@ -410,3 +411,32 @@ select:not([multiple]):not([size]) {
   border-radius: 1rem !important;
 }
 
+/* Soft pulsing dot at the end of a reply while it streams in. */
+.chat-reveal-caret {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 2px;
+  border-radius: 9999px;
+  background: currentColor;
+  vertical-align: middle;
+  animation: chat-reveal-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes chat-reveal-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-reveal-caret {
+    animation: none;
+  }
+}
