@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -174,6 +175,9 @@ export function HostingRentalRecordsManager() {
   const [txRecord, setTxRecord] = useState<RentalTransactionRecord | null>(null);
   const [txLoading, setTxLoading] = useState(false);
   const [txError, setTxError] = useState("");
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
 
   const [modal, setModal] = useState<ModalState>(null);
   const [busy, setBusy] = useState(false);
@@ -217,6 +221,21 @@ export function HostingRentalRecordsManager() {
   }, [load]);
 
   const selected = records.find((r) => r.ref === selectedRef) ?? null;
+
+  // Lock body scroll and close on Escape when detail drawer is open
+  useEffect(() => {
+    if (!selected) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelectedRef(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [selected]);
 
   // Detail for the drawer: the occupancy's transaction record.
   useEffect(() => {
@@ -677,11 +696,16 @@ export function HostingRentalRecordsManager() {
         </>
       )}
 
-      {/* ===== Detail drawer ===== */}
-      {selected && (
-        <div className="fixed inset-0 z-40 flex justify-end bg-black/30" onClick={() => setSelectedRef(null)}>
+      {/* ===== Detail drawer (Portaled to document.body to avoid parent CSS transform clipping and position-fixed displacement) ===== */}
+      {mounted && selected && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-[2px] animate-in fade-in duration-200"
+          onClick={() => setSelectedRef(null)}
+          role="dialog"
+          aria-modal="true"
+        >
           <aside
-            className="flex h-full w-full max-w-xl flex-col overflow-hidden bg-white shadow-xl dark:bg-neutral-900"
+            className="flex h-full w-full max-w-xl flex-col overflow-hidden bg-white shadow-2xl dark:bg-neutral-900 border-l border-neutral-200 dark:border-neutral-800 animate-in slide-in-from-right duration-200"
             onClick={(e) => e.stopPropagation()}
           >
             <header className="flex items-start justify-between gap-3 border-b border-neutral-100 p-5 dark:border-neutral-800">
@@ -1050,7 +1074,8 @@ export function HostingRentalRecordsManager() {
               )}
             </div>
           </aside>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* ===== Sign agreement ===== */}

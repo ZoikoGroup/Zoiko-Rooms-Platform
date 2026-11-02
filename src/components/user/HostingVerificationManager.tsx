@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -121,6 +122,8 @@ export function HostingVerificationManager() {
 
   // Slide-out Drawer state
   const [drawerTarget, setDrawerTarget] = useState<DrawerTarget>(null);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   // Active Wizard Modal states
   const [authorityModalTarget, setAuthorityModalTarget] = useState<{
@@ -135,15 +138,21 @@ export function HostingVerificationManager() {
 
   const [identityModalOpen, setIdentityModalOpen] = useState(false);
 
-  // Close drawer on Escape key
+  // Lock body scroll and close drawer on Escape key
   useEffect(() => {
+    if (!drawerTarget) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && drawerTarget) {
+      if (e.key === "Escape") {
         setDrawerTarget(null);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
   }, [drawerTarget]);
 
   // Fetch live backend records from PostgreSQL via FastAPI
@@ -1157,9 +1166,9 @@ export function HostingVerificationManager() {
       </div>
 
       {/* ========================================================================= */}
-      {/* 7. SLIDE-OUT DRAWER (SIDEBAR) WHEN DATA IS THERE                         */}
+      {/* 7. SLIDE-OUT DRAWER (SIDEBAR) (Portaled to document.body)                  */}
       {/* ========================================================================= */}
-      {drawerTarget && (
+      {mounted && drawerTarget && createPortal(
         <div className="fixed inset-0 z-50 flex justify-end">
           {/* Scrim / Backdrop */}
           <div
@@ -1541,7 +1550,8 @@ export function HostingVerificationManager() {
               )}
             </div>
           </aside>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* MODAL 1: Authority Verification Wizard */}

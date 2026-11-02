@@ -200,6 +200,23 @@ export function HostingListingsManager() {
   const [drawerTab, setDrawerTab] = useState<
     "overview" | "content" | "availability" | "verification" | "applications" | "activity"
   >("overview");
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
+  // Lock body scroll and handle Escape key when drawer is open
+  useEffect(() => {
+    if (!selectedListingForDrawer) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelectedListingForDrawer(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [selectedListingForDrawer]);
 
   // Portal-based Three-dots menu state
   const [menuAnchor, setMenuAnchor] = useState<{
@@ -2047,8 +2064,8 @@ export function HostingListingsManager() {
         </p>
       </div>
 
-      {/* 7. Slide-out Inspection Drawer matching zoiko-rooms-my-listings.html exactly */}
-      {selectedListingForDrawer && (
+      {/* 7. Slide-out Inspection Drawer matching zoiko-rooms-my-listings.html exactly (Portaled to document.body to avoid parent CSS transform clipping and position-fixed displacement) */}
+      {mounted && selectedListingForDrawer && createPortal(
         <div className="fixed inset-0 z-50 flex justify-end">
           {/* Backdrop Scrim */}
           <div
@@ -2555,7 +2572,8 @@ export function HostingListingsManager() {
               </button>
             </div>
           </aside>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 8. Modals: Edit Listing */}
