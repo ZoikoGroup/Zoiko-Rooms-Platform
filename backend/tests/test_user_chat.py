@@ -121,6 +121,32 @@ class TestMessageStream:
             yield "done", {"blocks": [{"type": "text", "text": text}]}
         return _stream
 
+    def test_language_is_forwarded_to_the_assistant(self, client, db_session: Session):
+        user = _make_user(db_session)
+        cookies = auth_user_cookie(user)
+        conv = _create_conversation(client, cookies)
+        seen = {}
+
+        def _stream(db, actor, history, language=None):
+            seen["language"] = language
+            yield "done", {"blocks": [{"type": "text", "text": "Hallo"}]}
+
+        with patch("app.api.routes.user_chat.stream_assistant_reply", _stream):
+            r = client.post(
+                f"{PREFIX}/conversations/{conv['id']}/messages/stream",
+                json={"content": "Hi", "language": "DE"},
+                cookies=cookies,
+            )
+        assert r.status_code == 200
+        assert seen["language"] == "DE"
+
+        r = client.post(
+            f"{PREFIX}/conversations/{conv['id']}/messages/stream",
+            json={"content": "Hi", "language": "XX"},
+            cookies=cookies,
+        )
+        assert r.status_code == 422
+
     def test_send_message_streams_response(self, client, db_session: Session):
         user = _make_user(db_session)
         cookies = auth_user_cookie(user)

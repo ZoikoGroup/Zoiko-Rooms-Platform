@@ -137,6 +137,8 @@ def send_message_stream(
     db.commit()
 
     history = _conversation_history(conversation)
+    # Only passed when the chat picked a language, so the default call is unchanged.
+    reply_options = {"language": payload.language} if payload.language else {}
     correlation_id = get_correlation_id(request)
 
     # Capture PKs into plain locals up front: after a rollback the ORM objects
@@ -164,7 +166,7 @@ def send_message_stream(
             db.commit()
 
         try:
-            for event_type, data in stream_assistant_reply(db, user, history):
+            for event_type, data in stream_assistant_reply(db, user, history, **reply_options):
                 if event_type == "tool":
                     tool_calls_made.append({"name": data["name"]})
                     yield _sse("tool", data)

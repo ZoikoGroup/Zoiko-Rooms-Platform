@@ -9,10 +9,12 @@ interface ChatHeaderMenuProps {
   onNewChat: () => void;
   onContact: () => void;
   triggerRef: React.RefObject<HTMLButtonElement | null>;
+  /** Translates the menu labels into the chat's language. */
+  t?: (text: string) => string;
 }
 
 /** The header's "More options" menu. Closes on Escape, outside click or a choice. */
-export function ChatHeaderMenu({ open, onClose, onNewChat, onContact, triggerRef }: ChatHeaderMenuProps) {
+export function ChatHeaderMenu({ open, onClose, onNewChat, onContact, triggerRef, t = (text) => text }: ChatHeaderMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -47,7 +49,7 @@ export function ChatHeaderMenu({ open, onClose, onNewChat, onContact, triggerRef
     <div
       ref={menuRef}
       role="menu"
-      aria-label="More options"
+      aria-label={t("More options")}
       className="absolute right-3 top-full z-50 mt-1 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-lg dark:border-white/10 dark:bg-slate-900"
     >
       {items.map(({ label, icon: Icon, action }) => (
@@ -62,7 +64,7 @@ export function ChatHeaderMenu({ open, onClose, onNewChat, onContact, triggerRef
           className="flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none dark:text-slate-200 dark:hover:bg-white/5 dark:focus-visible:bg-white/5"
         >
           <Icon aria-hidden="true" className="h-4 w-4 shrink-0 text-primary-700 dark:text-primary-300" />
-          {label}
+          {t(label)}
         </button>
       ))}
     </div>

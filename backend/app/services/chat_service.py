@@ -1120,10 +1120,14 @@ def _audit_circumvention(db: Session, actor: Actor, action: str, masks: dict[str
     )
 
 
+_REPLY_LANGUAGES = {"DE": "German", "FR": "French", "ES": "Spanish", "PT": "Portuguese"}
+
+
 def stream_assistant_reply(
     db: Session,
     actor: Actor,
     history: list[dict],
+    language: str | None = None,
 ) -> Generator[tuple[str, dict], None, None]:
     """Yield ("text"|"tool"|"done", payload) events while producing the final
     assistant message blocks (returned via the final "done" event).
@@ -1133,6 +1137,9 @@ def stream_assistant_reply(
     """
     is_user = isinstance(actor, UserAccount)
     system_prompt = USER_SYSTEM_PROMPT if is_user else ADMIN_SYSTEM_PROMPT
+    reply_language = _REPLY_LANGUAGES.get(language or "")
+    if reply_language:
+        system_prompt += f"\n\nReply language: write the entire answer in {reply_language}, whatever language the question is in."
 
     client = build_client()
     tool_defs = groq_tool_definitions(actor)
