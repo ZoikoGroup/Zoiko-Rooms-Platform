@@ -286,3 +286,18 @@ class TestSubletPaymentRolesAfterHandover:
         assert r.status_code == 200, r.text
         assert r.json()["role"] == "SUBTENANT"
         assert client.get(url, cookies=host_cookies).json()["role"] == "LANDLORD"
+
+
+class TestHostMessageNoticeOpensTheRightPage:
+    def test_notice_type_follows_whether_the_tenancy_has_started(self, client, db_session: Session):
+        from app.models.occupancy import Occupancy
+        from tests.test_host_move_in_confirmation import _drive_agreement_to_signed
+
+        host, renter, host_cookies, _rc, occupancy_id = _drive_agreement_to_signed(
+            client, db_session, host_email="notice-host@test.com", renter_email="notice-renter@test.com",
+        )
+        application_id = db_session.get(Occupancy, occupancy_id).offer.application_id
+        r = client.post(f"/api/users/hosting/applications/{application_id}/messages", json={"body": "Welcome home"}, cookies=host_cookies)
+        assert r.status_code == 201, r.text
+        kinds = [n.notification_type for n in db_session.query(Notification).filter_by(recipient_user_id=renter.id)]
+        assert "rental_message.received_tenancy" in kinds and "rental_message.received" not in kinds

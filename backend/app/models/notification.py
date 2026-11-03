@@ -45,6 +45,8 @@ _CATEGORY_BY_TYPE_PREFIX = {
     "authority": "DISPUTES_AND_SAFETY", "property_verification": "DISPUTES_AND_SAFETY",
     "property_compliance_credential": "DISPUTES_AND_SAFETY", "occupancy_eligibility": "DISPUTES_AND_SAFETY",
     "support_ticket": "ACCOUNT",
+    # "user.registered" (welcome) used to fall through to OCCUPANCY, so switching "Tenancies & sublets" off silenced it.
+    "user": "ACCOUNT",
 }
 # A few sublet notices are about money, not the tenancy: matched on the full
 # type, ahead of the prefix table.
@@ -79,21 +81,13 @@ _HIGH_PRIORITY_TYPE_PREFIXES = (
 )
 
 
-# An admin's own Settings > Notification Preferences switches (AdminSettings
-# notify_*), by notification-type prefix. A prefix not listed here (disputes,
-# identity and property verification, support tickets, listing review...) is
-# operational or safety-related and is never switched off.
+# Legacy AdminSettings switches that still gate a notification type. The
+# new-booking, payments and reviews switches were removed: the Settings page only
+# shows the category toggles (NotificationPreference), so a hidden saved "off"
+# value (reviews defaulted to off) silently blocked an admin's notices with
+# nothing on screen to turn back on. Review alerts now follow the Listings,
+# applications & agreements toggle. A prefix not listed here is never switched off.
 _ADMIN_PREFERENCE_BY_TYPE_PREFIX = {
-    "application": "notify_new_booking", "offer": "notify_new_booking", "agreement": "notify_new_booking",
-    "occupancy": "notify_new_booking", "booking_change_request": "notify_new_booking",
-    "termination_case": "notify_new_booking", "sublet_request": "notify_new_booking",
-    "sublet": "notify_new_booking", "sublet_message": "notify_new_booking", "host_entry_visit": "notify_new_booking",
-    "rental_payment": "notify_payments", "rental_payment_return": "notify_payments",
-    "payment_instruction": "notify_payments", "host_refund": "notify_payments",
-    "payment": "notify_payments", "payout": "notify_payments", "refund": "notify_payments",
-    "refund_entitlement": "notify_payments", "deposit": "notify_payments", "deposit_claim": "notify_payments",
-    "listing_fee": "notify_payments",
-    "review": "notify_reviews",
     "marketing": "notify_marketing",
 }
 

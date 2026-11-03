@@ -61,9 +61,9 @@ const SECTIONS: Array<{ id: SettingsSection; label: string; icon: typeof User }>
 
 // Categories a user can switch off; the rest are always delivered.
 const OPTABLE: Array<{ key: NotificationCategory; title: string; description: string }> = [
-  { key: "LEASING", title: "Applications, offers & agreements", description: "New applications, offers, counter-offers, signatures and messages." },
-  { key: "OCCUPANCY", title: "Tenancy", description: "Move-in and move-out steps, notices, change requests and sublets." },
-  { key: "PAYMENTS", title: "Rent & payments", description: "Rent due reminders, receipts, confirmations and deposit updates." },
+  { key: "LEASING", title: "Listings, applications & agreements", description: "Listings submitted for review, applications, offers and agreements." },
+  { key: "OCCUPANCY", title: "Tenancies & sublets", description: "Move-ins, move-outs, notices, change requests and sublet requests." },
+  { key: "PAYMENTS", title: "Payments", description: "Payments, payouts, refunds, deposits and listing fees." },
 ];
 // Always delivered -- safety notices and replies to your own support requests
 // can't be silenced (backend NOTIFICATION_OPTABLE_CATEGORIES). Shown as a

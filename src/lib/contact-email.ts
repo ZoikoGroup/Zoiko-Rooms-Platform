@@ -51,6 +51,10 @@ export function listAdminSupportTickets(status?: SupportTicketStatus): Promise<A
   return apiClientFetch<AdminSupportTicket[]>(`/api/admin/support/tickets${params}`);
 }
 
+export function getSupportAttentionCount(): Promise<{ count: number }> {
+  return apiClientFetch<{ count: number }>("/api/admin/support/tickets/attention-count");
+}
+
 export function replyAsSupport(ticketId: number, body: string): Promise<AdminSupportTicket> {
   return apiClientFetch<AdminSupportTicket>(`/api/admin/support/tickets/${ticketId}/messages`, {
     method: "POST",

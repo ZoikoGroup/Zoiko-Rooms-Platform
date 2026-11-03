@@ -18,7 +18,7 @@ from app.models.party import Party
 from app.models.rental_message import SubletMessage
 from app.models.rental_payment import RentalPaymentObligation
 from app.models.sublet_request import SubletRequest
-from app.services.shared_room_payments import sweep_shared_room_rent, sync_shared_room_rent
+from app.services.shared_room_payments import LEAD_DAYS, _add_months, _first_due, sweep_shared_room_rent, sync_shared_room_rent
 from tests.conftest import _make_user, auth_user_cookie
 from tests.test_sublet_arrangement_classification import _host_for, _make_active_tenancy
 
@@ -50,7 +50,7 @@ def _rent(db: Session, sr: SubletRequest) -> list[RentalPaymentObligation]:
 class TestCoTenantRentShare:
     def test_approval_records_the_share_the_co_tenant_owes_the_renter(self, client, db_session: Session):
         sr, tenant_user, co_tenant, _host, _occ = _approved(client, db_session, "pay1")
-        [rent] = _rent(db_session, sr)
+        rent = _rent(db_session, sr)[0]  # the first month; a later one is also recorded when it falls within 30 days
         assert float(rent.amount) == 300.0 and rent.obligation_type == "RENT"
         assert rent.tenant_guest_id == get_guest_for_user(db_session, co_tenant).id
         assert rent.recipient_party_id == tenant_user.party_id  # the renter, not the host
@@ -66,7 +66,7 @@ class TestCoTenantRentShare:
 
     def test_the_co_tenant_marks_it_paid_and_the_renter_confirms(self, client, db_session: Session):
         sr, _tenant, co_tenant, _host, _occ = _approved(client, db_session, "pay3")
-        [rent] = _rent(db_session, sr)
+        rent = _rent(db_session, sr)[0]
         guest = get_guest_for_user(db_session, co_tenant)
         record = rp_crud.mark_paid(
             db_session, guest, rent, amount=300, currency=rent.currency, declared_date=date.today(),
@@ -79,11 +79,14 @@ class TestCoTenantRentShare:
 
     def test_each_month_is_added_once_and_only_when_it_is_near(self, client, db_session: Session):
         sr, _t, _c, _h, _occ = _approved(client, db_session, "pay4")
-        assert len(_rent(db_session, sr)) == 1  # this month, at approval
-        # Next month falls due 31 days out, so it is not within the 30-day lead on day 0...
+        # Next month's share is recorded at approval only when it falls due within the 30-day lead
+        # (always true when the next month is 30 days out or less, e.g. from the 3rd of a 30-day month).
+        next_due = _add_months(_first_due(sr), 1)
+        at_approval = 2 if next_due <= date.today() + timedelta(days=LEAD_DAYS) else 1
+        assert len(_rent(db_session, sr)) == at_approval
         assert sync_shared_room_rent(db_session, sr, today=date.today()) == 0
-        # ...but is once ten days have passed -- recorded once, however often the job runs.
-        assert sync_shared_room_rent(db_session, sr, today=date.today() + timedelta(days=10)) == 1
+        # Ten days on, the next month is always inside the lead -- recorded once, however often the job runs.
+        assert sync_shared_room_rent(db_session, sr, today=date.today() + timedelta(days=10)) == 2 - at_approval
         assert sync_shared_room_rent(db_session, sr, today=date.today() + timedelta(days=10)) == 0
         assert len(_rent(db_session, sr)) == 2
         # The tenancy ends in 60 days, so a month falling due after that is never recorded.
@@ -98,9 +101,10 @@ class TestCoTenantRentShare:
     def test_the_daily_job_keeps_every_active_shared_room_up_to_date(self, client, db_session: Session):
         sr, _t, _c, _h, _o = _approved(client, db_session, "pay6")
         assert sweep_shared_room_rent(db_session) == 0  # already recorded at approval
+        recorded = len(_rent(db_session, sr))
         db_session.query(RentalPaymentObligation).filter_by(sublet_request_id=sr.id).delete()
         db_session.commit()
-        assert sweep_shared_room_rent(db_session) == 1 and sweep_shared_room_rent(db_session) == 0
+        assert sweep_shared_room_rent(db_session) == recorded and sweep_shared_room_rent(db_session) == 0
 
     def test_ending_the_co_tenancy_cancels_rent_not_yet_started_but_keeps_what_was_paid(self, client, db_session: Session):
         sr, tenant_user, co_tenant, _host, _occ = _approved(client, db_session, "pay7")

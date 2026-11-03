@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -25,6 +26,7 @@ import {
 import { Logo } from "@/components/ui/Logo";
 import { cn } from "@/lib/utils";
 import { logout } from "@/lib/auth";
+import { getSupportAttentionCount } from "@/lib/contact-email";
 
 const navItems = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
@@ -56,6 +58,17 @@ export function Sidebar({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  // Support cases waiting on us (new, or the customer replied last); refreshed on every page change.
+  const [supportWaiting, setSupportWaiting] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    getSupportAttentionCount()
+      .then((r) => !cancelled && setSupportWaiting(r.count))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [pathname]);
 
   async function handleLogout() {
     await logout();
@@ -129,6 +142,17 @@ export function Sidebar({
               >
                 <Icon className={cn("h-[18px] w-[18px] shrink-0 transition-transform duration-200", !active && "group-hover:scale-110")} />
                 <span className={cn(collapsed && "lg:hidden")}>{item.label}</span>
+                {item.href === "/support" && supportWaiting > 0 && (
+                  <span
+                    aria-label={`${supportWaiting} support cases waiting`}
+                    className={cn(
+                      "ml-auto rounded-full bg-accent-600 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white",
+                      collapsed && "lg:absolute lg:right-1 lg:top-1 lg:ml-0",
+                    )}
+                  >
+                    {supportWaiting}
+                  </span>
+                )}
                 {active && (
                   <span className="absolute -left-3 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-accent-600" />
                 )}

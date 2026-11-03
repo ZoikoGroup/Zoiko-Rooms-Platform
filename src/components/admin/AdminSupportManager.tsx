@@ -129,12 +129,16 @@ export function AdminSupportManager() {
             className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold dark:border-slate-700 dark:bg-slate-900"
             aria-label="Filter tickets"
           >
-            <option value="open">Open — all not resolved or closed ({counts.open})</option>
-            {(Object.keys(STATUS_LABEL) as SupportTicketStatus[]).map((s) => (
-              <option key={s} value={s}>
-                {STATUS_LABEL[s]} only ({counts.byStatus[s] ?? 0})
-              </option>
-            ))}
+            <option value="open">
+              Open = Submitted + In review + Action required ({counts.open})
+            </option>
+            <optgroup label="Single status">
+              {(Object.keys(STATUS_LABEL) as SupportTicketStatus[]).map((s) => (
+                <option key={s} value={s}>
+                  {STATUS_LABEL[s]} only ({counts.byStatus[s] ?? 0})
+                </option>
+              ))}
+            </optgroup>
             <option value="all">All cases ({counts.all})</option>
           </select>
           <button

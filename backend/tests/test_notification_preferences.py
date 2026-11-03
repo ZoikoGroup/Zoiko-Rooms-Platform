@@ -185,11 +185,11 @@ class TestSuperAdminOversightCopy:
         assert mine.title == f"{label}: Heads up" and renter.email in mine.message
         assert db_session.query(Notification).filter_by(recipient_admin_id=other.id).count() == 0
 
-    def test_private_and_leasing_notices_are_not_copied(self, db_session: Session):
+    def test_private_notices_are_not_copied(self, db_session: Session):
         admin = _make_admin(db_session, email="np-over-skip@test.com", role="super_admin")
         renter = _make_user(db_session, email="np-over-skip-user@test.com")
         db_session.commit()
-        for kind in ("identity_verification.verified", "authority.status", "offer.created", "support_ticket.reply"):
+        for kind in ("identity_verification.verified", "authority.status", "rental_message.received_for_host", "support_ticket.reply"):
             notification_crud.notify_user(db_session, renter.id, title="x", message="x", notification_type=kind,
                                           related_entity_type="x", related_entity_id="1")
         assert db_session.query(Notification).filter_by(recipient_admin_id=admin.id).count() == 0
@@ -207,3 +207,37 @@ class TestSuperAdminOversightCopy:
                                       related_entity_type="occupancy", related_entity_id="1")
         kinds = [n.notification_type for n in db_session.query(Notification).filter_by(recipient_admin_id=admin.id)]
         assert kinds == ["occupancy.x"]
+
+
+class TestSuperAdminOversightWhenUserMutes:
+    def test_super_admin_still_gets_the_notice_when_the_user_muted_the_category(self, client, db_session: Session):
+        renter = _make_user(db_session, email="notif-oversight-muted@test.com")
+        admin = _make_admin(db_session, email="notif-oversight-admin@test.com", role="super_admin")
+        client.put(
+            "/api/users/notifications/preferences",
+            json={"optedOutCategories": ["OCCUPANCY"], "quietHoursEnabled": False},
+            cookies=auth_user_cookie(renter),
+        )
+
+        assert notification_crud.notify_user(
+            db_session, renter.id, title="Move-in confirmed", message="x",
+            notification_type="occupancy.move_in_confirmed", related_entity_type="occupancy", related_entity_id="1",
+        ) is None
+        assert db_session.scalar(select(Notification).where(Notification.recipient_user_id == renter.id)) is None
+        copy = db_session.scalar(select(Notification).where(Notification.recipient_admin_id == admin.id))
+        assert copy is not None and copy.title.startswith("Tenancy:")
+
+    def test_leasing_notices_are_copied_but_private_chat_is_not(self, db_session: Session):
+        renter = _make_user(db_session, email="notif-oversight-leasing@test.com")
+        admin = _make_admin(db_session, email="notif-oversight-leasing-admin@test.com", role="super_admin")
+        for kind in ("application.received", "offer.sent", "agreement.sent"):
+            notification_crud.notify_user(
+                db_session, renter.id, title="t", message="x", notification_type=kind,
+                related_entity_type="x", related_entity_id="1",
+            )
+        notification_crud.notify_user(
+            db_session, renter.id, title="t", message="x", notification_type="rental_message.received_for_host",
+            related_entity_type="x", related_entity_id="1",
+        )
+        types = {n.notification_type for n in db_session.scalars(select(Notification).where(Notification.recipient_admin_id == admin.id))}
+        assert types == {"application.received", "offer.sent", "agreement.sent"}

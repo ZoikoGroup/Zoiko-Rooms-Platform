@@ -199,6 +199,21 @@ class RentalPaymentObligation(Base):
         return None
 
     @property
+    def room_id(self) -> int | None:
+        room = self.room
+        return room.id if room else None
+
+    @property
+    def listing_name(self) -> str:
+        """The listing (property) name this payment belongs to, so a host with several rooms can tell
+        payments apart; "" when the obligation has neither agreement nor occupancy."""
+        if self.agreement:
+            return self.agreement.offer.listing.name
+        if self.occupancy and self.occupancy.listing is not None:
+            return self.occupancy.listing.name
+        return ""
+
+    @property
     def jurisdiction_code(self) -> str | None:
         room = self.room
         return room.property.jurisdiction_code if room and room.property else None
