@@ -23,6 +23,9 @@ def list_renter_conversations(user: UserAccount = Depends(get_current_user), db:
 @renter_router.get("/applications/{application_id}/messages", response_model=list[RentalMessageRead])
 def list_renter_messages(application_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
     application, guest = crud.get_renter_thread_or_403(db, application_id, user)
+    sublet = crud.sublet_host_thread_for(db, application, guest)
+    if sublet is not None:
+        return crud.list_sublet_messages(db, sublet, crud.SUBTENANT, crud.THREAD_HOST)
     return crud.list_messages(db, application, guest, crud.RENTER)
 
 
@@ -34,6 +37,9 @@ def send_renter_message(
     user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     application, guest = crud.get_renter_thread_or_403(db, application_id, user)
+    sublet = crud.sublet_host_thread_for(db, application, guest)
+    if sublet is not None:
+        return crud.send_sublet_message(db, sublet, user, crud.SUBTENANT, payload.body, crud.THREAD_HOST)
     return crud.send_message(db, application, guest, user, crud.RENTER, payload.body)
 
 
@@ -58,6 +64,9 @@ def list_host_messages(
     user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     application, guest = crud.get_host_thread_or_403(db, application_id, user, guest_id)
+    sublet = crud.sublet_host_thread_for(db, application, guest)
+    if sublet is not None:
+        return crud.list_sublet_messages(db, sublet, crud.HOST, crud.THREAD_HOST)
     return crud.list_messages(db, application, guest, crud.HOST)
 
 
@@ -69,6 +78,9 @@ def send_host_message(
     user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     application, guest = crud.get_host_thread_or_403(db, application_id, user, guest_id)
+    sublet = crud.sublet_host_thread_for(db, application, guest)
+    if sublet is not None:
+        return crud.send_sublet_message(db, sublet, user, crud.HOST, payload.body, crud.THREAD_HOST)
     return crud.send_message(db, application, guest, user, crud.HOST, payload.body)
 
 

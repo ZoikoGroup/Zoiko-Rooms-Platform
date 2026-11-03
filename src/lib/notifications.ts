@@ -127,6 +127,8 @@ export function resolveNotificationHref(
   }
   if (notificationType.startsWith("application.")) return "/account/applications";
   if (notificationType === "rental_message.received") return "/account/applications";
+  // Once the tenancy has started the application is in History; the thread lives on My Rentals.
+  if (notificationType === "rental_message.received_tenancy") return "/account/rentals";
   // A subtenant never applied -- their host and sublet threads live on My Rentals.
   if (notificationType === "rental_message.received_subtenant") return "/account/rentals";
   if (notificationType === "sublet_message.received_subtenant") return "/account/rentals";

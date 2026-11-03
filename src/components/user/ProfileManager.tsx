@@ -20,9 +20,9 @@ import { splitPhoneNumber, validatePhoneWithCountry } from "@/lib/phone-validati
 // drops it from any update anyway, so it's never offered as a toggle in the
 // first place.
 const OPTABLE_CATEGORIES: { value: NotificationCategory; label: string; hint: string }[] = [
-  { value: "PAYMENTS", label: "Payments & refunds", hint: "Rent payment records and confirmations, Listing Fee receipts, refunds, deposit updates." },
-  { value: "LEASING", label: "Applications & agreements", hint: "Application, offer, agreement and listing updates." },
-  { value: "OCCUPANCY", label: "Tenancy & occupancy", hint: "Move-in/out, termination cases, sublets, host visits." },
+  { value: "LEASING", label: "Listings, applications & agreements", hint: "Listings submitted for review, applications, offers and agreements." },
+  { value: "OCCUPANCY", label: "Tenancies & sublets", hint: "Move-ins, move-outs, notices, change requests and sublet requests." },
+  { value: "PAYMENTS", label: "Payments", hint: "Payments, payouts, refunds, deposits and listing fees." },
 ];
 
 function minutesToTimeInput(minutes: number): string {

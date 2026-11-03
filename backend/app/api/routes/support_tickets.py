@@ -100,6 +100,27 @@ def download_my_attachment(
     return crud.attachment_response(db, ticket, attachment_id)
 
 
+def _email_customer(ticket: SupportTicket, subject: str, heading: str, lines: list[str], background: BackgroundTasks) -> None:
+    """The customer chose "app and email" when filing: mirror support's reply
+    or status change to their inbox. Sent from a background task and never
+    raises, so a mail problem cannot fail the support action."""
+    user = ticket.user
+    if ticket.reply_channel != "both" or user is None or not user.email:
+        return
+    from app.core.config import settings
+    from app.core.mailer import send_email
+
+    background.add_task(
+        send_email, user.email, subject, heading=heading, body_lines=lines,
+        cta_label="Open your case", cta_url=f"{settings.email_site_url}/account/support",
+    )
+
+
+def _clip(text: str | None, limit: int = 1500) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + "..."
+
+
 # --- Support staff ---------------------------------------------------------
 
 
@@ -116,6 +137,18 @@ def list_all_tickets(status_filter: str | None = Query(default=None, alias="stat
     return [_admin_read(t) for t in crud.list_tickets(db, status_filter)]
 
 
+@admin_router.get("/tickets/attention-count")
+def tickets_needing_support(db: Session = Depends(get_db)) -> dict:
+    """Cases waiting on support: not yet picked up, or open with the customer's message last."""
+    waiting = 0
+    for t in crud.list_tickets(db, None):
+        if t.status == "SUBMITTED":
+            waiting += 1
+        elif t.status == "IN_REVIEW" and t.messages and t.messages[-1].sender == "USER":
+            waiting += 1
+    return {"count": waiting}
+
+
 @admin_router.get("/tickets/{ticket_id}", response_model=AdminSupportTicketRead)
 def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
     return _admin_read(crud.get_ticket_or_404(db, ticket_id))
@@ -123,20 +156,32 @@ def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
 
 @admin_router.post("/tickets/{ticket_id}/messages", response_model=AdminSupportTicketRead)
 def reply_to_ticket(
-    ticket_id: int, payload: SupportReplyCreate,
+    ticket_id: int, payload: SupportReplyCreate, background: BackgroundTasks,
     admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):
     ticket = crud.get_ticket_or_404(db, ticket_id)
-    return _admin_read(crud.add_support_reply(db, ticket, admin.id, payload.body))
+    updated = crud.add_support_reply(db, ticket, admin.id, payload.body)
+    _email_customer(
+        updated, f"Support replied on {updated.ref}", f"Support replied on {updated.ref}",
+        [_clip(payload.body)], background,
+    )
+    return _admin_read(updated)
 
 
 @admin_router.post("/tickets/{ticket_id}/status", response_model=AdminSupportTicketRead)
 def update_ticket_status(
-    ticket_id: int, payload: AdminSupportStatusUpdate,
+    ticket_id: int, payload: AdminSupportStatusUpdate, background: BackgroundTasks,
     admin: AdminUser = Depends(get_current_admin), db: Session = Depends(get_db),
 ):
     ticket = crud.get_ticket_or_404(db, ticket_id)
-    return _admin_read(crud.set_status(db, ticket, admin.id, payload.status, payload.action_request, payload.resolution))
+    updated = crud.set_status(db, ticket, admin.id, payload.status, payload.action_request, payload.resolution)
+    label = updated.status.replace("_", " ").capitalize()
+    detail = payload.action_request if updated.status == "ACTION_REQUIRED" else payload.resolution
+    _email_customer(
+        updated, f"{updated.ref} is now {label.lower()}", f"{updated.ref}: {label}",
+        [_clip(detail)] if (detail or "").strip() else [f"Your case is now {label.lower()}."], background,
+    )
+    return _admin_read(updated)
 
 
 @admin_router.get("/tickets/{ticket_id}/attachments/{attachment_id}")
