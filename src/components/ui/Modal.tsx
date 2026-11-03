@@ -32,6 +32,7 @@ export function Modal({
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
   useEffect(() => {
@@ -61,10 +62,11 @@ export function Modal({
   }, [open, onClose]);
 
   useEffect(() => {
-    if (!open || !contentRef.current) return;
+    if (!open) return;
+    containerRef.current?.scrollTo({ top: 0 });
     // A form's own overflow-y-auto container can end up scrolled (e.g. by
     // browser autofill jumping to a field) -- always reset it to the top on open.
-    const scrollable = contentRef.current.querySelector<HTMLElement>(".overflow-y-auto");
+    const scrollable = contentRef.current?.querySelector<HTMLElement>(".overflow-y-auto");
     scrollable?.scrollTo({ top: 0 });
   }, [open]);
 
@@ -91,7 +93,10 @@ export function Modal({
   if (!open || typeof document === "undefined") return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[200] flex items-start justify-center overflow-y-auto p-4 pt-10 sm:pt-16">
+    <div
+      ref={containerRef}
+      className="fixed inset-0 z-[10000] flex items-start justify-center overflow-y-auto p-4 pt-6 sm:pt-10"
+    >
       <button
         aria-label="Close modal"
         onClick={onClose}

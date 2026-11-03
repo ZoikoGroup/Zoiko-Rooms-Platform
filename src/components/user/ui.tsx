@@ -91,7 +91,7 @@ export function Toast({ toast }: { toast: { message: string; tone: ToastTone } |
       role="status"
       aria-live="polite"
       aria-atomic="true"
-      className="animate-fade-up fixed bottom-24 right-6 z-[9999] flex max-w-sm items-start gap-2 rounded-xl bg-primary-900 px-4 py-3 text-sm font-medium text-white shadow-2xl"
+      className="animate-fade-up fixed bottom-24 right-6 z-[10050] flex max-w-sm items-start gap-2 rounded-xl bg-primary-900 px-4 py-3 text-sm font-medium text-white shadow-2xl"
     >
       {toast.tone === "success" ? (
         <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" aria-hidden="true" />

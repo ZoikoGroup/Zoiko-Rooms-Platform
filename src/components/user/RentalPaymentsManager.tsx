@@ -1598,7 +1598,7 @@ export function SingleObligationPaymentCard({
 
   return (
     <>
-      <div className="flex flex-wrap items-center justify-between gap-3 p-4 bg-slate-50 dark:bg-slate-800 rounded-2xl border border-slate-200">
+      <div className="flex flex-wrap items-center justify-between gap-3 p-4 bg-slate-50 dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700">
         <div>
           <span className="text-xs font-bold uppercase tracking-wider text-slate-400 block">
             {obligation.displayLabel}
@@ -1606,7 +1606,7 @@ export function SingleObligationPaymentCard({
           <span className="text-lg font-extrabold text-[#0C2B4E] dark:text-white">
             {formatCurrency(obligation.amount, obligation.currency)}
           </span>
-          <span className="text-xs text-slate-500 ml-2">Due {formatDate(obligation.dueDate)}</span>
+          <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">Due {formatDate(obligation.dueDate)}</span>
         </div>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" onClick={() => setShowInstructions(true)}>

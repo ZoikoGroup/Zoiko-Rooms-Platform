@@ -28,7 +28,7 @@ import {
   disputeSettlementStatusTone,
   disputeSeverityTone,
 } from "@/lib/status";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import { errorMessage, renterDisputes } from "@/lib/user-api";
 import { Card, EmptyState, Field, inputClass, selectClass } from "@/components/user/ui";
 import type { ToastTone } from "@/components/user/ui";
@@ -440,6 +440,7 @@ function DisputeCaseDetail({
   const [evidenceNote, setEvidenceNote] = useState("");
   const [evidenceClaimIds, setEvidenceClaimIds] = useState<number[]>([]);
   const [evidenceBusy, setEvidenceBusy] = useState(false);
+  const [evidenceError, setEvidenceError] = useState("");
 
   // Messages
   const [messageDraft, setMessageDraft] = useState("");
@@ -573,9 +574,12 @@ function DisputeCaseDetail({
 
   async function handleUploadEvidence() {
     if (!evidenceFile && !evidenceNote.trim()) {
-      showToast("Choose a file to upload or write a note — evidence can't be empty.", "error");
+      const msg = "Choose a file to upload or write a note — evidence can't be empty.";
+      setEvidenceError(msg);
+      showToast(msg, "error");
       return;
     }
+    setEvidenceError("");
     setEvidenceBusy(true);
     try {
       await client.uploadEvidence(caseId, {
@@ -586,10 +590,13 @@ function DisputeCaseDetail({
       setEvidenceFile(null);
       setEvidenceNote("");
       setEvidenceClaimIds([]);
+      setEvidenceError("");
       showToast("Evidence uploaded.");
       await loadAll();
     } catch (err) {
-      showToast(errorMessage(err, "Could not upload this evidence."), "error");
+      const msg = errorMessage(err, "Could not upload this evidence.");
+      setEvidenceError(msg);
+      showToast(msg, "error");
     } finally {
       setEvidenceBusy(false);
     }
@@ -1125,12 +1132,30 @@ function DisputeCaseDetail({
               <Field label="File">
                 <input
                   type="file"
-                  onChange={(e) => setEvidenceFile(e.target.files?.[0] ?? null)}
-                  className={inputClass}
+                  onChange={(e) => {
+                    setEvidenceFile(e.target.files?.[0] ?? null);
+                    if (evidenceError) setEvidenceError("");
+                  }}
+                  className={cn(
+                    inputClass,
+                    evidenceError && !evidenceFile && "border-rose-400 ring-1 ring-rose-400 focus:border-rose-500 focus:ring-rose-400/20"
+                  )}
                 />
               </Field>
               <Field label="Note">
-                <input type="text" value={evidenceNote} onChange={(e) => setEvidenceNote(e.target.value)} className={inputClass} />
+                <input
+                  type="text"
+                  placeholder="Add a note or explanation"
+                  value={evidenceNote}
+                  onChange={(e) => {
+                    setEvidenceNote(e.target.value);
+                    if (evidenceError) setEvidenceError("");
+                  }}
+                  className={cn(
+                    inputClass,
+                    evidenceError && !evidenceNote.trim() && "border-rose-400 ring-1 ring-rose-400 focus:border-rose-500 focus:ring-rose-400/20"
+                  )}
+                />
               </Field>
               {caseData.claims.length > 0 && (
                 <div>
@@ -1147,6 +1172,15 @@ function DisputeCaseDetail({
                       </label>
                     ))}
                   </div>
+                </div>
+              )}
+              {evidenceError && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-xl bg-rose-50 p-2.5 text-xs font-semibold text-rose-700 dark:bg-rose-500/10 dark:text-rose-300"
+                >
+                  <FileWarning className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" aria-hidden="true" />
+                  <span>{evidenceError}</span>
                 </div>
               )}
               <Button size="sm" variant="primary" fullWidth loading={evidenceBusy} onClick={handleUploadEvidence}>

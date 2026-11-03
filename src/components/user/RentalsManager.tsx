@@ -85,7 +85,7 @@ import {
   renterDisputes,
 } from "@/lib/user-api";
 import { DisputeCasesSection } from "@/components/user/DisputeCasePanel";
-import { useToast } from "@/components/user/ui";
+import { Toast, useToast } from "@/components/user/ui";
 import { DepositClaimsSection } from "@/components/user/DepositClaimsSection";
 import { RentalTransactionRecord } from "@/components/user/RentalTransactionRecord";
 import { RentalMessagesTab } from "@/components/user/RentalMessagesTab";
@@ -924,8 +924,10 @@ export function RentalsManager() {
             setActiveCard(activeCard === "upcoming" ? "" : "upcoming");
             setViewTab("current");
           }}
-          className={`flex items-center gap-3.5 p-4 rounded-[20px] text-left transition-all border-2 bg-white ${
-            activeCard === "upcoming" ? "border-[#0E2F73] bg-[#F5F8FE] shadow-sm" : "border-[#E1E7F1] hover:border-[#B8C6E0]"
+          className={`flex items-center gap-3.5 p-4 rounded-[20px] text-left transition-all border-2 ${
+            activeCard === "upcoming"
+              ? "border-[#0E2F73] dark:border-blue-500 bg-[#F5F8FE] dark:bg-blue-950/30 shadow-sm"
+              : "bg-white dark:bg-slate-900 border-[#E1E7F1] dark:border-slate-800 hover:border-[#B8C6E0] dark:hover:border-slate-700"
           }`}
         >
           <span className="w-[52px] h-[52px] rounded-2xl bg-[#EEF3FF] dark:bg-blue-950/50 text-[#1D3F8F] dark:text-blue-300 font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
@@ -945,8 +947,10 @@ export function RentalsManager() {
             setActiveCard(activeCard === "active" ? "" : "active");
             setViewTab("current");
           }}
-          className={`flex items-center gap-3.5 p-4 rounded-[20px] text-left transition-all border-2 bg-white ${
-            activeCard === "active" ? "border-[#0E2F73] bg-[#F5F8FE] shadow-sm" : "border-[#E1E7F1] hover:border-[#B8C6E0]"
+          className={`flex items-center gap-3.5 p-4 rounded-[20px] text-left transition-all border-2 ${
+            activeCard === "active"
+              ? "border-[#0E2F73] dark:border-emerald-500 bg-[#F5F8FE] dark:bg-emerald-950/30 shadow-sm"
+              : "bg-white dark:bg-slate-900 border-[#E1E7F1] dark:border-slate-800 hover:border-[#B8C6E0] dark:hover:border-slate-700"
           }`}
         >
           <span className="w-[52px] h-[52px] rounded-2xl bg-[#E7F8EF] dark:bg-emerald-950/50 text-[#05603A] dark:text-emerald-300 font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
@@ -966,18 +970,20 @@ export function RentalsManager() {
             setActiveCard(activeCard === "ending" ? "" : "ending");
             setViewTab("current");
           }}
-          className={`flex items-center gap-3.5 p-4 rounded-[20px] text-left transition-all border-2 bg-white ${
-            activeCard === "ending" ? "border-[#0E2F73] bg-[#F5F8FE] shadow-sm" : "border-[#E1E7F1] hover:border-[#B8C6E0]"
+          className={`flex items-center gap-3.5 p-4 rounded-[20px] text-left transition-all border-2 ${
+            activeCard === "ending"
+              ? "border-[#0E2F73] dark:border-amber-500 bg-[#F5F8FE] dark:bg-amber-950/30 shadow-sm"
+              : "bg-white dark:bg-slate-900 border-[#E1E7F1] dark:border-slate-800 hover:border-[#B8C6E0] dark:hover:border-slate-700"
           }`}
         >
-          <span className="w-[52px] h-[52px] rounded-2xl bg-[#FFF4E0] text-[#93370D] font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
+          <span className="w-[52px] h-[52px] rounded-2xl bg-[#FFF4ED] dark:bg-amber-950/50 text-[#B54708] dark:text-amber-300 font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
             {counts.ending}
           </span>
           <div className="flex flex-col gap-0.5 min-w-0 flex-1">
             <span className="font-extrabold text-base text-[#0B1B3F] dark:text-white">Ending Soon</span>
             <span className="text-[12.5px] text-[#4A5878] dark:text-slate-400 truncate">Confirmed end ahead</span>
           </div>
-          <Clock className="w-5 h-5 text-[#93370D] opacity-80 flex-shrink-0 self-start mt-1 hidden sm:block" />
+          <Clock className="w-5 h-5 text-[#B54708] dark:text-amber-300 opacity-80 flex-shrink-0 self-start mt-1 hidden sm:block" />
         </button>
 
         {/* Card 4: Action Required */}
@@ -987,8 +993,10 @@ export function RentalsManager() {
             setActiveCard(activeCard === "action" ? "" : "action");
             setViewTab("current");
           }}
-          className={`flex items-center gap-3.5 p-4 rounded-[20px] text-left transition-all border-2 bg-white ${
-            activeCard === "action" ? "border-[#B42318] bg-[#FFF7F7] shadow-sm" : "border-[#E1E7F1] hover:border-[#B8C6E0]"
+          className={`flex items-center gap-3.5 p-4 rounded-[20px] text-left transition-all border-2 ${
+            activeCard === "action"
+              ? "border-[#B42318] dark:border-rose-500 bg-[#FFF7F7] dark:bg-rose-950/30 shadow-sm"
+              : "bg-white dark:bg-slate-900 border-[#E1E7F1] dark:border-slate-800 hover:border-[#B8C6E0] dark:hover:border-slate-700"
           }`}
         >
           <span className="w-[52px] h-[52px] rounded-2xl bg-[#FDECEC] dark:bg-rose-950/50 text-[#B42318] dark:text-rose-300 font-extrabold text-2xl flex items-center justify-center flex-shrink-0">
@@ -1138,8 +1146,8 @@ export function RentalsManager() {
               }}
               className={`h-9 px-4 rounded-lg text-xs sm:text-sm font-bold transition-all ${
                 viewTab === "current"
-                  ? "bg-white text-[#0E2F73] shadow-sm"
-                  : "text-[#3A4866] hover:text-[#0E2F73]"
+                  ? "bg-white dark:bg-slate-900 text-[#0E2F73] dark:text-white shadow-sm"
+                  : "text-[#3A4866] dark:text-slate-400 hover:text-[#0E2F73] dark:hover:text-white"
               }`}
             >
               Current ({currentRentals.length})
@@ -1154,8 +1162,8 @@ export function RentalsManager() {
               }}
               className={`h-9 px-4 rounded-lg text-xs sm:text-sm font-bold transition-all ${
                 viewTab === "history"
-                  ? "bg-white text-[#0E2F73] shadow-sm"
-                  : "text-[#3A4866] hover:text-[#0E2F73]"
+                  ? "bg-white dark:bg-slate-900 text-[#0E2F73] dark:text-white shadow-sm"
+                  : "text-[#3A4866] dark:text-slate-400 hover:text-[#0E2F73] dark:hover:text-white"
               }`}
             >
               History ({historyRentals.length})
@@ -1229,20 +1237,20 @@ export function RentalsManager() {
                     <strong className="font-mono text-[13px] text-[#0B1B3F] dark:text-white">
                       Rental #{r.id}
                     </strong>
-                    <span className="text-[#4A5878]">
+                    <span className="text-[#4A5878] dark:text-slate-400">
                       {r.from} – {r.to}
                     </span>
-                    <span className="text-sm font-extrabold text-[#0B1B3F]">
-                      {r.rent} <small className="text-xs font-normal text-[#4A5878]">/ month</small>
+                    <span className="text-sm font-extrabold text-[#0B1B3F] dark:text-white">
+                      {r.rent} <small className="text-xs font-normal text-[#4A5878] dark:text-slate-400">/ month</small>
                     </span>
                   </div>
 
                   {/* Agreement */}
                   <div className="flex flex-col gap-0.5 text-xs">
-                    <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886]">
+                    <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886] dark:text-slate-400">
                       Agreement
                     </span>
-                    <strong className="font-mono text-[13px] text-[#0B1B3F]">
+                    <strong className="font-mono text-[13px] text-[#0B1B3F] dark:text-white">
                       #{r.agr}
                     </strong>
                     <span
@@ -1257,7 +1265,7 @@ export function RentalsManager() {
 
                   {/* Status Badge */}
                   <div>
-                    <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886] block mb-1">
+                    <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886] dark:text-slate-400 block mb-1">
                       Status
                     </span>
                     {r.st === "upcoming" && (
@@ -1291,7 +1299,7 @@ export function RentalsManager() {
                       </span>
                     )}
                     {r.st === "cancelled" && (
-                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#C3CAD6] bg-[#F0F2F6] text-[#344054] text-xs font-extrabold uppercase">
+                      <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full border border-[#C3CAD6] dark:border-slate-700 bg-[#F0F2F6] dark:bg-slate-800 text-[#344054] dark:text-slate-300 text-xs font-extrabold uppercase">
                         <X className="w-3 h-3" />
                         CANCELLED
                       </span>
@@ -1300,7 +1308,7 @@ export function RentalsManager() {
 
                   {/* Next Milestone */}
                   <div className="flex flex-col gap-0.5 text-xs">
-                    <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886]">
+                    <span className="lg:hidden text-[10px] font-bold uppercase tracking-wider text-[#5B6886] dark:text-slate-400">
                       Next milestone
                     </span>
                     <span className="font-bold text-[#0B1B3F] dark:text-white text-[13px]">{r.ms}</span>
@@ -1328,7 +1336,7 @@ export function RentalsManager() {
                       <button
                         type="button"
                         onClick={() => handleOpenDrawer(r, "overview")}
-                        className="w-full lg:w-auto h-10 px-4 rounded-xl border border-[#C7D2E6] hover:border-[#0E2F73] text-[#0E2F73] font-bold text-xs sm:text-[13px] bg-white transition-colors whitespace-nowrap"
+                        className="w-full lg:w-auto h-10 px-4 rounded-xl border border-[#C7D2E6] dark:border-slate-700 hover:border-[#0E2F73] dark:hover:border-slate-500 text-[#0E2F73] dark:text-white font-bold text-xs sm:text-[13px] bg-white dark:bg-slate-800 transition-colors whitespace-nowrap"
                       >
                         Manage Rental
                       </button>
@@ -1424,11 +1432,11 @@ export function RentalsManager() {
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center py-16 px-4 text-center gap-3">
-            <span className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center text-slate-400">
+            <span className="w-12 h-12 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 dark:text-slate-300">
               <Search className="w-6 h-6" />
             </span>
-            <strong className="text-base text-[#0B1B3F]">No rentals match these filters.</strong>
-            <p className="text-xs text-[#4A5878]">
+            <strong className="text-base text-[#0B1B3F] dark:text-white">No rentals match these filters.</strong>
+            <p className="text-xs text-[#4A5878] dark:text-slate-400">
               Try clearing your search keyword or selected status and location filters.
             </p>
             <button
@@ -2965,6 +2973,7 @@ export function RentalsManager() {
           document.body
         )}
       <DepositClaimsSection side="renter" showToast={showToast} />
+      <Toast toast={toast} />
     </div>
   );
 }
