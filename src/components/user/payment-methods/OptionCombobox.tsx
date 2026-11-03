@@ -73,8 +73,20 @@ export function OptionCombobox({
 
   useEffect(() => {
     if (!open) return;
-    document.getElementById(`${optionIdPrefix}-${active}`)?.scrollIntoView({ block: "nearest" });
-  }, [active, open, optionIdPrefix]);
+    const listEl = document.getElementById(listId);
+    const optionEl = document.getElementById(`${optionIdPrefix}-${active}`);
+    if (listEl && optionEl) {
+      const listTop = listEl.scrollTop;
+      const listBottom = listTop + listEl.clientHeight;
+      const optTop = optionEl.offsetTop;
+      const optBottom = optTop + optionEl.offsetHeight;
+      if (optTop < listTop) {
+        listEl.scrollTop = optTop;
+      } else if (optBottom > listBottom) {
+        listEl.scrollTop = optBottom - listEl.clientHeight;
+      }
+    }
+  }, [active, open, optionIdPrefix, listId]);
 
   function openList() {
     const index = Math.max(0, options.findIndex((o) => o.value === value));
