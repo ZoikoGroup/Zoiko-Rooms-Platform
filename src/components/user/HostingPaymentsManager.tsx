@@ -136,12 +136,13 @@ export function HostingPaymentsManager() {
   // Derive Property name / Rental details for an obligation
   const getObligationPropertyInfo = useCallback(
     (o: RentalPaymentObligation) => {
-      // Live DB matching
+      // The API resolves the listing and room from the obligation's agreement / occupancy.
       const prop = properties.find((p) => p.id === o.occupancyId || p.id === o.agreementId);
-      const propName = prop
-        ? `${prop.address.split(",")[0] || prop.city} · Room #${o.occupancyId || 1}`
-        : o.payeeBasis
-        ? `${o.payeeBasis} · Room #${o.occupancyId || 1}`
+      const roomSuffix = o.roomId ? ` · Room #${o.roomId}` : "";
+      const propName = o.listingName
+        ? `${o.listingName}${roomSuffix}`
+        : o.contextLabel
+        ? o.contextLabel
         : `Rental #${o.occupancyId || o.id}`;
       const rentalCode = `Rental #ZR-R-${o.occupancyId || o.agreementId || o.id}`;
       const tenantName = o.tenantGuestId ? `Tenant #${o.tenantGuestId.replace("guest_", "")}` : "Tenant";

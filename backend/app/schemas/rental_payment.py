@@ -133,6 +133,9 @@ class RentalPaymentObligationRead(CamelModel):
     display_label: str
     # What a payment with no agreement/occupancy is for, e.g. "Shared room · Sunny room" (co-tenant rent share).
     context_label: str = ""
+    # Which listing / room the payment belongs to ("" / None when it has no agreement or occupancy).
+    listing_name: str = ""
+    room_id: int | None = None
     # ISO country the payment-method list resolves from ("" = unknown).
     country_code: str = ""
     waived_reason: str

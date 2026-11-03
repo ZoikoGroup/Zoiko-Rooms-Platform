@@ -2042,25 +2042,25 @@ export function ApplicationsManager() {
         /* ---------------- DARK MODE OVERRIDES ---------------- */
         [data-theme="dark"] .head h1,
         [data-theme="dark"] #title {
-          color: #f8fafc;
+          color: #f8fafc !important;
         }
         [data-theme="dark"] .head p {
-          color: #94a3b8;
+          color: #94a3b8 !important;
         }
         [data-theme="dark"] .scard {
-          background: #0f172a;
-          border-color: #1e293b;
+          background: #0f172a !important;
+          border-color: #1e293b !important;
         }
         [data-theme="dark"] .scard:hover {
-          border-color: #334155;
+          border-color: #334155 !important;
         }
         [data-theme="dark"] .scard[aria-pressed="true"] {
-          border-color: #38bdf8;
-          background: #0c1a30;
+          border-color: #38bdf8 !important;
+          background: #0c1a30 !important;
         }
         [data-theme="dark"] .scard--action[aria-pressed="true"] {
-          border-color: #f43f5e;
-          background: #271216;
+          border-color: #f43f5e !important;
+          background: #271216 !important;
         }
         [data-theme="dark"] .snum {
           background: #1e293b !important;
@@ -2070,219 +2070,234 @@ export function ApplicationsManager() {
           color: #94a3b8 !important;
         }
         [data-theme="dark"] .stitle {
-          color: #f8fafc;
+          color: #f8fafc !important;
         }
         [data-theme="dark"] .shint {
-          color: #94a3b8;
+          color: #94a3b8 !important;
         }
         [data-theme="dark"] .astrip {
-          background: #1f1315;
-          border-color: #4c1d24;
+          background: #1f1315 !important;
+          border-color: #4c1d24 !important;
         }
         [data-theme="dark"] .atext {
-          color: #fca5a5;
+          color: #fca5a5 !important;
         }
         [data-theme="dark"] .filters-wrap {
-          background: #0f172a;
-          border-color: #1e293b;
+          background: #0f172a !important;
+          border-color: #1e293b !important;
         }
         [data-theme="dark"] .search-box {
-          background: #1e293b;
-          border-color: #334155;
+          background: #1e293b !important;
+          border-color: #334155 !important;
         }
         [data-theme="dark"] .search-box input {
-          color: #f8fafc;
+          color: #f8fafc !important;
         }
         [data-theme="dark"] .field label {
-          color: #94a3b8;
+          color: #94a3b8 !important;
         }
         [data-theme="dark"] .field input,
         [data-theme="dark"] .field select {
-          background: #1e293b;
-          border-color: #334155;
-          color: #f8fafc;
+          background: #1e293b !important;
+          border-color: #334155 !important;
+          color: #f8fafc !important;
         }
         [data-theme="dark"] .fpanel.open {
-          background: #0f172a;
-          box-shadow: 0 -20px 50px rgba(0, 0, 0, 0.5);
+          background: #0f172a !important;
+          box-shadow: 0 -20px 50px rgba(0, 0, 0, 0.5) !important;
         }
         [data-theme="dark"] .fsheet-head {
-          border-bottom-color: #1e293b;
+          border-bottom-color: #1e293b !important;
         }
         [data-theme="dark"] .fsheet-head strong {
-          color: #f8fafc;
+          color: #f8fafc !important;
         }
         [data-theme="dark"] .workspace {
-          background: #0f172a;
-          border-color: #1e293b;
+          background: #0f172a !important;
+          border-color: #1e293b !important;
         }
         [data-theme="dark"] .ws-bar {
-          border-bottom-color: #1e293b;
+          border-bottom-color: #1e293b !important;
         }
         [data-theme="dark"] .tabs {
-          background: #1e293b;
+          background: #1e293b !important;
         }
         [data-theme="dark"] .tab {
-          color: #94a3b8;
+          color: #94a3b8 !important;
         }
         [data-theme="dark"] .tab[aria-selected="true"] {
-          background: #0f172a;
-          color: #f8fafc;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+          background: #0f172a !important;
+          color: #f8fafc !important;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4) !important;
         }
         [data-theme="dark"] .acols {
-          background: #131d31;
-          color: #94a3b8;
-          border-bottom-color: #1e293b;
+          background: #131d31 !important;
+          color: #cbd5e1 !important;
+          border-bottom-color: #1e293b !important;
+        }
+        [data-theme="dark"] .acols div {
+          color: #cbd5e1 !important;
         }
         [data-theme="dark"] .arow {
-          border-bottom-color: #1e293b;
+          border-bottom-color: #1e293b !important;
+          color: #f8fafc !important;
         }
         [data-theme="dark"] .arow:hover {
-          background: rgba(30, 41, 59, 0.35);
+          background: rgba(30, 41, 59, 0.35) !important;
         }
         [data-theme="dark"] .arow--action {
-          background: #1f1315;
+          background: #1f1315 !important;
         }
         [data-theme="dark"] .aname {
-          color: #f8fafc;
+          color: #f8fafc !important;
         }
-        [data-theme="dark"] .thumbsm {
-          background: #1e293b;
-          color: #60a5fa;
+        [data-theme="dark"] .mono {
+          color: #f8fafc !important;
         }
-        [data-theme="dark"] .btn-outline {
-          background: #0f172a;
-          border-color: #334155;
-          color: #f8fafc;
-        }
-        [data-theme="dark"] .btn-outline:hover {
-          border-color: #60a5fa;
-          color: #60a5fa;
-        }
-        [data-theme="dark"] .btn-soft {
-          background: #1e293b;
-          color: #93c5fd;
-        }
-        [data-theme="dark"] .btn-soft:hover {
-          background: #334155;
-        }
-        [data-theme="dark"] .btn-ghost {
-          color: #93c5fd;
-        }
-        [data-theme="dark"] .btn-ghost:hover {
-          background: #1e293b;
-        }
-        [data-theme="dark"] .icon-btn.bordered {
-          background: #1e293b;
-          border-color: #334155;
-          color: #f8fafc;
-        }
-        [data-theme="dark"] .icon-btn:hover {
-          background: #334155;
-        }
-        [data-theme="dark"] .empty-demo {
-          background: #0f172a;
-          border-color: #334155;
-        }
-        [data-theme="dark"] .empty-ill {
-          background: #1e293b;
-          color: #60a5fa;
-        }
-        [data-theme="dark"] .ref-tag {
-          background: #1e293b;
-          color: #94a3b8;
-        }
-        [data-theme="dark"] .drawer {
-          background: #0f172a;
-          color: #f8fafc;
-          border-left: 1px solid #1e293b;
-        }
-        [data-theme="dark"] .dhead-sticky {
-          background: #0f172a;
-          border-bottom-color: #1e293b;
-        }
-        [data-theme="dark"] .dhead h2 {
-          color: #f8fafc;
-        }
-        [data-theme="dark"] .dtabs {
-          border-bottom-color: #1e293b;
-        }
-        [data-theme="dark"] .dtab {
-          color: #94a3b8;
-        }
-        [data-theme="dark"] .dtab:hover {
-          color: #60a5fa;
-        }
-        [data-theme="dark"] .dtab[aria-selected="true"] {
-          color: #60a5fa;
-          border-bottom-color: #60a5fa;
-        }
-        [data-theme="dark"] .dacts {
-          background: #0f172a;
-          border-top-color: #1e293b;
-        }
-        [data-theme="dark"] .kv2 div {
-          border-color: #1e293b;
-          background: rgba(30, 41, 59, 0.4);
-        }
-        [data-theme="dark"] .kv2 span {
-          color: #94a3b8;
-        }
-        [data-theme="dark"] .kv2 strong {
-          color: #f8fafc;
-        }
-        [data-theme="dark"] .dsec h3 {
-          color: #94a3b8;
-        }
-        [data-theme="dark"] .dalert {
-          background: #271216;
-          color: #fca5a5;
-        }
-        [data-theme="dark"] .dalert.warn {
-          background: #271a0c;
-          color: #fcd34d;
-        }
-        [data-theme="dark"] .dinfo {
-          background: #0c1a30;
-          color: #93c5fd;
-        }
-        [data-theme="dark"] .dialog {
-          background: #0f172a;
-          color: #f8fafc;
-          border: 1px solid #1e293b;
-        }
-        [data-theme="dark"] .dialog h2 {
-          color: #f8fafc;
-        }
-        [data-theme="dark"] .bub.in {
-          background: #1e293b;
-          color: #f8fafc;
-        }
-        [data-theme="dark"] .composer input {
-          background: #1e293b;
-          border-color: #334155;
-          color: #f8fafc;
-        }
-        [data-theme="dark"] .drop {
-          background: #131d31;
-          border-color: #2563eb;
-          color: #93c5fd;
-        }
-        [data-theme="dark"] .check {
-          color: #f8fafc;
-        }
-        [data-theme="dark"] .unread {
-          background: #1e293b;
-          color: #93c5fd;
-        }
-        [data-theme="dark"] .vflag {
-          color: #94a3b8;
+        [data-theme="dark"] .price {
+          color: #f8fafc !important;
         }
         [data-theme="dark"] .price small {
-          color: #94a3b8;
+          color: #94a3b8 !important;
         }
-
+        [data-theme="dark"] .stage {
+          color: #94a3b8 !important;
+        }
+        [data-theme="dark"] .dash {
+          color: #64748b !important;
+        }
+        [data-theme="dark"] .thumbsm {
+          background: #1e293b !important;
+          color: #60a5fa !important;
+        }
+        [data-theme="dark"] .btn-outline {
+          background: #0f172a !important;
+          border-color: #334155 !important;
+          color: #f8fafc !important;
+        }
+        [data-theme="dark"] .btn-outline:hover {
+          border-color: #60a5fa !important;
+          color: #60a5fa !important;
+        }
+        [data-theme="dark"] .btn-soft {
+          background: #1e293b !important;
+          color: #93c5fd !important;
+        }
+        [data-theme="dark"] .btn-soft:hover {
+          background: #334155 !important;
+        }
+        [data-theme="dark"] .btn-ghost {
+          color: #93c5fd !important;
+        }
+        [data-theme="dark"] .btn-ghost:hover {
+          background: #1e293b !important;
+        }
+        [data-theme="dark"] .icon-btn.bordered {
+          background: #1e293b !important;
+          border-color: #334155 !important;
+          color: #f8fafc !important;
+        }
+        [data-theme="dark"] .icon-btn:hover {
+          background: #334155 !important;
+        }
+        [data-theme="dark"] .empty-demo {
+          background: #0f172a !important;
+          border-color: #334155 !important;
+        }
+        [data-theme="dark"] .empty-ill {
+          background: #1e293b !important;
+          color: #60a5fa !important;
+        }
+        [data-theme="dark"] .ref-tag {
+          background: #1e293b !important;
+          color: #94a3b8 !important;
+        }
+        [data-theme="dark"] .drawer {
+          background: #0f172a !important;
+          color: #f8fafc !important;
+          border-left: 1px solid #1e293b !important;
+        }
+        [data-theme="dark"] .dhead-sticky {
+          background: #0f172a !important;
+          border-bottom-color: #1e293b !important;
+        }
+        [data-theme="dark"] .dhead h2 {
+          color: #f8fafc !important;
+        }
+        [data-theme="dark"] .dtabs {
+          border-bottom-color: #1e293b !important;
+        }
+        [data-theme="dark"] .dtab {
+          color: #94a3b8 !important;
+        }
+        [data-theme="dark"] .dtab:hover {
+          color: #60a5fa !important;
+        }
+        [data-theme="dark"] .dtab[aria-selected="true"] {
+          color: #60a5fa !important;
+          border-bottom-color: #60a5fa !important;
+        }
+        [data-theme="dark"] .dacts {
+          background: #0f172a !important;
+          border-top-color: #1e293b !important;
+        }
+        [data-theme="dark"] .kv2 div {
+          border-color: #1e293b !important;
+          background: rgba(30, 41, 59, 0.4) !important;
+        }
+        [data-theme="dark"] .kv2 span {
+          color: #94a3b8 !important;
+        }
+        [data-theme="dark"] .kv2 strong {
+          color: #f8fafc !important;
+        }
+        [data-theme="dark"] .dsec h3 {
+          color: #94a3b8 !important;
+        }
+        [data-theme="dark"] .dalert {
+          background: #271216 !important;
+          color: #fca5a5 !important;
+        }
+        [data-theme="dark"] .dalert.warn {
+          background: #271a0c !important;
+          color: #fcd34d !important;
+        }
+        [data-theme="dark"] .dinfo {
+          background: #0c1a30 !important;
+          color: #93c5fd !important;
+        }
+        [data-theme="dark"] .dialog {
+          background: #0f172a !important;
+          color: #f8fafc !important;
+          border: 1px solid #1e293b !important;
+        }
+        [data-theme="dark"] .dialog h2 {
+          color: #f8fafc !important;
+        }
+        [data-theme="dark"] .bub.in {
+          background: #1e293b !important;
+          color: #f8fafc !important;
+        }
+        [data-theme="dark"] .composer input {
+          background: #1e293b !important;
+          border-color: #334155 !important;
+          color: #f8fafc !important;
+        }
+        [data-theme="dark"] .drop {
+          background: #131d31 !important;
+          border-color: #2563eb !important;
+          color: #93c5fd !important;
+        }
+        [data-theme="dark"] .check {
+          color: #f8fafc !important;
+        }
+        [data-theme="dark"] .unread {
+          background: #1e293b !important;
+          color: #93c5fd !important;
+        }
+        [data-theme="dark"] .vflag {
+          color: #94a3b8 !important;
+        }
       `}</style>
 
       {/* Page Header */}
@@ -2603,7 +2618,7 @@ export function ApplicationsManager() {
           </div>
 
           <div className="ws-right">
-            <span id="ws-count" className="text-sm text-[#4a5878]">
+            <span id="ws-count" className="text-sm text-[#4a5878] dark:text-slate-400">
               {filteredList.length} {filteredList.length === 1 ? "application" : "applications"}
             </span>
             {hasActiveFilters && (
@@ -2671,13 +2686,13 @@ export function ApplicationsManager() {
                   <div className="flex flex-col gap-1">
                     <span className="zl">Application</span>
                     <strong className="mono">#{x.id}</strong>
-                    <span className="text-xs text-[#4a5878]">Applied {x.applied}</span>
+                    <span className="text-xs text-[#4a5878] dark:text-slate-400">Applied {x.applied}</span>
                   </div>
 
                   {/* Requested Terms */}
                   <div className="flex flex-col gap-1">
                     <span className="zl">Requested terms</span>
-                    <strong className="text-sm">
+                    <strong className="text-sm dark:text-white">
                       {safeFormatDate(x.mi)} · {x.dur}
                     </strong>
                     <span className="price">
@@ -2802,7 +2817,7 @@ export function ApplicationsManager() {
         {/* Empty state when filters return 0 */}
         {!loading && filteredList.length === 0 && (
           <div className="flex flex-col items-center justify-center p-12 text-center gap-3">
-            <strong className="text-base text-[#0B1B3F]">No applications match these filters.</strong>
+            <strong className="text-base text-[#0B1B3F] dark:text-white">No applications match these filters.</strong>
             <button
               type="button"
               className="btn btn-navy btn-sm"
@@ -2815,7 +2830,7 @@ export function ApplicationsManager() {
       </section>
 
       {/* Footer Snapshot Disclaimer */}
-      <p className="text-xs text-[#5b6886] px-1">
+      <p className="text-xs text-[#5b6886] dark:text-slate-400 px-1">
         Requested terms are a snapshot of the listing when you applied. Interest in rooms found outside Zoiko Rooms appears in Find a Room, not here.
       </p>
 
@@ -2826,8 +2841,8 @@ export function ApplicationsManager() {
             <SvgIcon name="check" size={30} strokeWidth={1.8} color="#0E2F73" />
           </div>
           <div>
-            <strong className="text-base text-[#0B1B3F]">No applications yet</strong>
-            <div className="text-sm text-[#4a5878]">You have not applied for a room yet.</div>
+            <strong className="text-base text-[#0B1B3F] dark:text-white">No applications yet</strong>
+            <div className="text-sm text-[#4a5878] dark:text-slate-400">You have not applied for a room yet.</div>
           </div>
           <Link href="/find-a-room" className="btn btn-navy btn-sm ml-auto">
             <SvgIcon name="search" size={14} strokeWidth={2.4} />

@@ -46,3 +46,36 @@ class TestHandoverHostThread:
         assert mine and mine[0]["subletFromHostThread"] is True and mine[0]["subletFromRequestId"] == sr.id
         db_session.expire_all()
         assert db_session.get(Occupancy, occupancy_id).guest_id != sr.requested_by_guest_id
+
+
+@pytest.mark.parametrize("arrangement", ["ASSIGNMENT_FULL", "REPLACEMENT_OCCUPANT"])
+def test_host_applications_page_and_subtenant_share_one_thread(client, db_session: Session, arrangement):
+    """The reported bug: host -> subtenant and subtenant -> host never arrived, because the host typed into the
+    application thread while the subtenant used the sublet's host thread."""
+    from app.crud.guest import get_guest_for_user
+    from app.models.leasing import Offer
+
+    sr, _t, incoming, host, occupancy_id = _handover(client, db_session, f"hh3{arrangement[:3]}", arrangement)
+    assert client.post(f"/api/users/hosting/sublet-requests/{sr.id}/approve", json={"stepUpPassword": "password123"}, cookies=auth_user_cookie(host)).status_code == 200
+    db_session.expire_all()
+    occ = db_session.get(Occupancy, occupancy_id)
+    application_id = db_session.get(Offer, occ.offer_id).application_id
+    guest_id = get_guest_for_user(db_session, incoming).id
+    host_app = f"/api/users/hosting/applications/{application_id}/messages?guestId={guest_id}"
+    host_c, inc_c = auth_user_cookie(host), auth_user_cookie(incoming)
+
+    # Host (Applications page) -> subtenant (My Rentals).
+    assert client.post(host_app, json={"body": "Welcome from the host"}, cookies=host_c).status_code == 201
+    seen = client.get(URL.format(id=sr.id), cookies=inc_c).json()
+    assert [m["body"] for m in seen] == ["Welcome from the host"] and seen[0]["mine"] is False
+    assert db_session.query(Notification).filter_by(recipient_user_id=incoming.id, notification_type="sublet_message.received_subtenant").count() == 1
+
+    # Subtenant -> host: shows on the host's Applications page, with an unread count on the renter list.
+    assert client.post(URL.format(id=sr.id), json={"body": "Thanks host"}, cookies=inc_c).status_code == 201
+    renters = client.get(f"/api/users/hosting/applications/{application_id}/renters", cookies=host_c).json()
+    assert [r["unreadCount"] for r in renters if r["guestId"] == guest_id] == [1]
+    got = client.get(host_app, cookies=host_c).json()
+    assert [m["body"] for m in got] == ["Welcome from the host", "Thanks host"]
+    assert [m["mine"] for m in got] == [True, False]
+    renters = client.get(f"/api/users/hosting/applications/{application_id}/renters", cookies=host_c).json()
+    assert [r["unreadCount"] for r in renters if r["guestId"] == guest_id] == [0]

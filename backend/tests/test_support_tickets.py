@@ -189,3 +189,57 @@ class TestSupportAutomation:
         for t in (waiting, resolved, fresh):
             db_session.refresh(t)
         assert waiting.status == "CLOSED" and resolved.status == "CLOSED" and fresh.status == "ACTION_REQUIRED"
+
+
+class TestSupportEmailAndBadge:
+    def _sent(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr("app.core.mailer.send_email", lambda to, subject, **kw: sent.append((to, subject, kw)) or True)
+        return sent
+
+    def test_reply_and_status_change_are_emailed_when_customer_chose_email(self, client, db_session: Session, monkeypatch):
+        sent = self._sent(monkeypatch)
+        user = _make_user(db_session, email="sup-mail-user@test.com")
+        admin = _make_admin(db_session, email="sup-mail-admin@test.com")
+        db_session.commit()
+        tid = _file_ticket(client, user, replyChannel="both").json()["ref"]
+        admin_cookies = auth_admin_cookie(admin)
+        [t] = client.get("/api/admin/support/tickets", cookies=admin_cookies).json()
+
+        r = client.post(f"/api/admin/support/tickets/{t['id']}/messages", json={"body": "Looking into it"}, cookies=admin_cookies)
+        assert r.status_code == 200, r.text
+        r = client.post(
+            f"/api/admin/support/tickets/{t['id']}/status", json={"status": "RESOLVED", "resolution": "Fixed the record"},
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 200, r.text
+        assert [s[0] for s in sent] == ["sup-mail-user@test.com"] * 2
+        assert "Looking into it" in sent[0][2]["body_lines"][0] and tid in sent[0][1]
+        assert "Fixed the record" in sent[1][2]["body_lines"][0]
+
+    def test_no_email_when_customer_chose_app_only(self, client, db_session: Session, monkeypatch):
+        sent = self._sent(monkeypatch)
+        user = _make_user(db_session, email="sup-app-user@test.com")
+        admin = _make_admin(db_session, email="sup-app-admin@test.com")
+        db_session.commit()
+        _file_ticket(client, user, replyChannel="app")
+        admin_cookies = auth_admin_cookie(admin)
+        [t] = client.get("/api/admin/support/tickets", cookies=admin_cookies).json()
+        client.post(f"/api/admin/support/tickets/{t['id']}/messages", json={"body": "Hi"}, cookies=admin_cookies)
+        assert sent == []
+
+    def test_attention_count_tracks_cases_waiting_on_support(self, client, db_session: Session):
+        user = _make_user(db_session, email="sup-badge-user@test.com")
+        admin = _make_admin(db_session, email="sup-badge-admin@test.com")
+        db_session.commit()
+        admin_cookies, user_cookies = auth_admin_cookie(admin), auth_user_cookie(user)
+        count = lambda: client.get("/api/admin/support/tickets/attention-count", cookies=admin_cookies).json()["count"]
+        assert count() == 0
+
+        ref = _file_ticket(client, user, replyChannel="app").json()["ref"]
+        assert count() == 1  # new, not picked up
+        [t] = client.get("/api/admin/support/tickets", cookies=admin_cookies).json()
+        client.post(f"/api/admin/support/tickets/{t['id']}/messages", json={"body": "On it"}, cookies=admin_cookies)
+        assert count() == 0  # support answered, ball is with the customer
+        client.post(f"/api/users/support/tickets/{ref}/messages", data={"body": "Thanks, one more thing"}, cookies=user_cookies)
+        assert count() == 1  # the customer spoke last

@@ -91,9 +91,7 @@ def _create(
         return None
     category = category_for_notification_type(notification_type)
     priority = priority_for_notification_type(notification_type)
-    if _is_suppressed_by_preference(db, recipient_key, category=category):
-        logger.info("notification: suppressed by recipient preference (type=%s recipient=%s)", notification_type, recipient_key)
-        return None
+    suppressed = _is_suppressed_by_preference(db, recipient_key, category=category)
     notification = Notification(
         recipient_type=recipient_type,
         recipient_user_id=recipient_user_id,
@@ -107,6 +105,12 @@ def _create(
         category=category,
         priority=priority,
     )
+    if suppressed:
+        logger.info("notification: suppressed by recipient preference (type=%s recipient=%s)", notification_type, recipient_key)
+        # The user muting a category must not hide it from the super admins' oversight.
+        if recipient_type == "user":
+            _mirror_to_super_admins(db, notification)
+        return None
     try:
         with db.begin_nested():
             db.add(notification)
@@ -133,10 +137,16 @@ def _create(
 # renters, but only ever heard about applications, listings and a few disputes --
 # so their "Tenancies & sublets", "Payments" and "Disputes & safety" notices
 # never arrived. Every such notice a user receives is therefore also raised for
-# the super admins, naming who it went to. LEASING is already covered by its own
-# admin notices; identity / authority / property verification results are
-# private to the user and are not mirrored.
-_OVERSIGHT_LABEL = {"OCCUPANCY": "Tenancy", "PAYMENTS": "Payment", "DISPUTES_AND_SAFETY": "Dispute & safety"}
+# the super admins, naming who it went to. LEASING is mirrored only for
+# applications, offers, agreements and listings (the admin notices raised
+# directly cover just listing submissions and a few listing-fee events, never
+# an application, offer or agreement); private chat and reviews are not copied.
+# Identity / authority / property verification results are private to the user
+# and are not mirrored.
+_OVERSIGHT_LABEL = {
+    "OCCUPANCY": "Tenancy", "PAYMENTS": "Payment", "DISPUTES_AND_SAFETY": "Dispute & safety", "LEASING": "Leasing",
+}
+_OVERSIGHT_LEASING_PREFIXES = ("application", "offer", "agreement", "listing")
 _OVERSIGHT_SAFETY_PREFIXES = (
     "dispute", "dispute_case", "dispute_claim", "dispute_settlement", "habitability_incident", "screening_check",
 )
@@ -148,6 +158,8 @@ def _mirror_to_super_admins(db: Session, notification: Notification) -> None:
     if category not in _OVERSIGHT_LABEL or notification.notification_type.endswith("_admin"):
         return
     if category == "DISPUTES_AND_SAFETY" and prefix not in _OVERSIGHT_SAFETY_PREFIXES:
+        return
+    if category == "LEASING" and prefix not in _OVERSIGHT_LEASING_PREFIXES:
         return
     try:
         user = db.get(UserAccount, notification.recipient_user_id)

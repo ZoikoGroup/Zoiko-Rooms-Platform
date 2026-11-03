@@ -160,8 +160,10 @@ class TestReviewEligibility:
         )
         assert r.status_code == 401, r.text
 
-    def test_new_review_alert_reaches_only_admins_who_switched_it_on(self, client, db_session: Session):
-        """ZR-20: 'New review alerts' (Settings > Notification Preferences) is off by default."""
+    def test_new_review_alert_reaches_every_admin_and_follows_the_leasing_toggle(self, client, db_session: Session):
+        """The old 'New review alerts' switch is gone (no screen offered it and it defaulted to off, so no admin
+        ever heard about a review). Review alerts now follow the Listings, applications & agreements toggle."""
+        from app.crud import notification as notif_crud
         from app.models.admin_user import AdminSettings
         from app.models.notification import Notification
         from tests.conftest import _make_admin
@@ -173,6 +175,10 @@ class TestReviewEligibility:
         off = _make_admin(db_session, email="review-off@test.com")
         db_session.add(AdminSettings(admin_user_id=on.id, notify_reviews=True))
         db_session.commit()
+        notif_crud.update_preference(
+            db_session, notif_crud.get_or_create_preference_for_admin(db_session, off.id),
+            opted_out_categories=["LEASING"], quiet_hours_enabled=False, quiet_hours_start_minute=0, quiet_hours_end_minute=0,
+        )
 
         r = client.post(
             "/api/users/rentals/reviews", json={"listingId": listing.id, "rating": 4, "comment": "Nice"},

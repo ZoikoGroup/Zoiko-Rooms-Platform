@@ -83,6 +83,21 @@ def list_renter_threads_for_host(db: Session, application: Application) -> list[
             "unread_count": unread.get(conversation.id, 0) if conversation else 0,
             "last_message_at": conversation.last_message_at if conversation else None,
         })
+        sublet = sublet_host_thread_for(db, application, guest) if guest else None
+        if sublet is not None:
+            # Their messages to the host are in the sublet's host thread.
+            out[-1]["unread_count"] = db.scalar(
+                select(func.count()).select_from(SubletMessage).where(
+                    SubletMessage.sublet_request_id == sublet.id, SubletMessage.thread == THREAD_HOST,
+                    SubletMessage.sender_role == SUBTENANT, SubletMessage.read_at.is_(None),
+                )
+            ) or 0
+            last = db.scalar(
+                select(func.max(SubletMessage.created_at)).where(
+                    SubletMessage.sublet_request_id == sublet.id, SubletMessage.thread == THREAD_HOST,
+                )
+            )
+            out[-1]["last_message_at"] = last or out[-1]["last_message_at"]
     return out
 
 
@@ -147,6 +162,19 @@ def list_messages(db: Session, application: Application, guest: Guest, viewer_ro
     return [_to_message_read(m, viewer_role) for m in conversation.messages]
 
 
+def _host_message_notification_type(db: Session, application: Application, guest: Guest) -> str:
+    """Where the renter should land: a renter whose tenancy has started reads the
+    thread under My Rentals -- their application has moved to History by then --
+    so the notice must open there, not the Applications page."""
+    if guest.id != application.guest_id:
+        return "rental_message.received_subtenant"
+    has_tenancy = db.scalar(
+        select(Occupancy.id).join(Offer, Offer.id == Occupancy.offer_id)
+        .where(Offer.application_id == application.id, Occupancy.guest_id == guest.id).limit(1)
+    )
+    return "rental_message.received_tenancy" if has_tenancy else "rental_message.received"
+
+
 def send_message(
     db: Session, application: Application, guest: Guest, sender: UserAccount, sender_role: str, body: str,
 ) -> RentalMessageRead:
@@ -181,9 +209,7 @@ def send_message(
             db, guest,
             title=f"New message from {_host_name(db, application)}",
             message=f'About "{listing_name}": {preview}',
-            notification_type=(
-                "rental_message.received" if guest.id == application.guest_id else "rental_message.received_subtenant"
-            ),
+            notification_type=_host_message_notification_type(db, application, guest),
             related_entity_type="application", related_entity_id=f"{application.id}:{message.id}",
         )
     db.commit()
@@ -241,7 +267,43 @@ def list_conversations_for_host(db: Session, user: UserAccount) -> list[RentalCo
         c for c in db.scalars(select(RentalConversation))
         if c.application.listing and party_id_for_listing(c.application.listing) == user.party_id
     ]
-    return _to_conversation_reads(db, conversations, HOST)
+    out = _to_conversation_reads(db, conversations, HOST)
+    out.extend(_handover_host_threads(db, user))
+    return sorted(out, key=lambda c: c.last_message_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+
+
+def _handover_host_threads(db: Session, user: UserAccount) -> list[RentalConversationRead]:
+    """The host's thread with someone who took a room over through a sublet lives in the sublet's host thread
+    (see sublet_host_thread_for); list it beside the application threads so its unread count shows on the
+    host's Applications page too."""
+    out = []
+    requests = db.scalars(
+        select(SubletRequest).where(
+            SubletRequest.id.in_(select(SubletMessage.sublet_request_id).where(SubletMessage.thread == THREAD_HOST)),
+        )
+    )
+    for sr in requests:
+        occupancy = sr.current_occupancy
+        listing = occupancy.listing if occupancy else None
+        if listing is None or party_id_for_listing(listing) != user.party_id or not host_thread_available(sr):
+            continue
+        application_id = occupancy.offer.application_id if occupancy.offer else None
+        application = db.get(Application, application_id) if application_id else None
+        if application is None or occupancy.guest_id == application.guest_id:
+            continue
+        messages = list(db.scalars(
+            select(SubletMessage).where(SubletMessage.sublet_request_id == sr.id, SubletMessage.thread == THREAD_HOST)
+            .order_by(SubletMessage.id)
+        ))
+        guest = db.get(Guest, occupancy.guest_id)
+        out.append(RentalConversationRead(
+            application_id=application.id, guest_id=occupancy.guest_id, listing_id=application.listing_id,
+            listing_name=listing.name, counterpart_name=guest.name if guest else "Renter",
+            last_message_at=messages[-1].created_at if messages else None,
+            last_message_preview=messages[-1].body[:120] if messages else "",
+            unread_count=sum(1 for m in messages if m.sender_role == SUBTENANT and m.read_at is None),
+        ))
+    return out
 
 
 # -- renter <-> subtenant ------------------------------------------------------
@@ -364,6 +426,22 @@ def send_sublet_message(
     db.commit()
     db.refresh(message)
     return _to_sublet_message_read(message, sender_role)
+
+
+def sublet_host_thread_for(db: Session, application: Application, guest: Guest) -> SubletRequest | None:
+    """The sublet whose host thread is this renter's line to the host, if the
+    renter is someone who got into the room through a sublet. Such a person
+    reads and writes that thread on their side, so the host's Applications
+    page must use it too -- otherwise host and subtenant talk past each other."""
+    if guest.id == application.guest_id:
+        return None
+    occupancy = db.scalar(
+        select(Occupancy).join(Offer, Offer.id == Occupancy.offer_id)
+        .where(Offer.application_id == application.id, Occupancy.guest_id == guest.id)
+        .order_by(Occupancy.id.desc()).limit(1)
+    )
+    sublet = sublet_held_through(db, occupancy) if occupancy else None
+    return sublet if sublet is not None and host_thread_available(sublet) else None
 
 
 def sublet_held_through(db: Session, occupancy: Occupancy) -> SubletRequest | None:

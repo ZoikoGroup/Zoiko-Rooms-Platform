@@ -1071,6 +1071,9 @@ export interface RentalPaymentObligation {
   displayLabel: string;
   /** What a payment with no agreement or occupancy is for, e.g. "Shared room · Sunny room" (a co-tenant's rent share). */
   contextLabel?: string;
+  /** Listing (property) name and room the payment belongs to, for telling a host's payments apart. */
+  listingName?: string;
+  roomId?: number | null;
   /** ISO country the payment-method list resolves from ("" = unknown). */
   countryCode: string;
   waivedReason: string;
