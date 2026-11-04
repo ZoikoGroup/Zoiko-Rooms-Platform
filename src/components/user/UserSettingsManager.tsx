@@ -8,6 +8,8 @@ import {
   Camera,
   CheckCircle2,
   Download,
+  Eye,
+  EyeOff,
   Lock,
   LogOut,
   Mail,
@@ -157,6 +159,11 @@ export function UserSettingsManager({
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showOldPassword, setShowOldPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [showEmailPassword, setShowEmailPassword] = useState(false);
+  const [showClosePassword, setShowClosePassword] = useState(false);
   const [closePassword, setClosePassword] = useState("");
   const [closeReason, setCloseReason] = useState("");
 
@@ -294,6 +301,7 @@ export function UserSettingsManager({
   async function submitPassword(e: FormEvent) {
     e.preventDefault();
     if (newPassword.length < 8) return setModalError("New password must be at least 8 characters.");
+    if (newPassword === oldPassword) return setModalError("New password must be different from your current password.");
     if (newPassword !== confirmPassword) return setModalError("The new passwords don't match.");
     setBusy(true);
     setModalError("");
@@ -750,17 +758,99 @@ export function UserSettingsManager({
           <form onSubmit={submitPassword} className="space-y-4 text-xs">
             <label className="block font-bold">
               Current password
-              <input type="password" required value={oldPassword} onChange={(e) => setOldPassword(e.target.value)} autoComplete="current-password" className={inputCls} />
+              <div className="relative mt-1">
+                <input
+                  type={showOldPassword ? "text" : "password"}
+                  required
+                  value={oldPassword}
+                  onChange={(e) => {
+                    setOldPassword(e.target.value);
+                    if (modalError) setModalError("");
+                  }}
+                  autoComplete="current-password"
+                  className={cn(
+                    inputCls,
+                    "mt-0 pr-10",
+                    modalError.includes("different from your current password") && "border-rose-400 ring-1 ring-rose-400 focus:border-rose-500"
+                  )}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowOldPassword((s) => !s)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors cursor-pointer"
+                  aria-label={showOldPassword ? "Hide current password" : "Show current password"}
+                >
+                  {showOldPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </label>
             <label className="block font-bold">
               New password (at least 8 characters)
-              <input type="password" required minLength={8} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} autoComplete="new-password" className={inputCls} />
+              <div className="relative mt-1">
+                <input
+                  type={showNewPassword ? "text" : "password"}
+                  required
+                  minLength={8}
+                  value={newPassword}
+                  onChange={(e) => {
+                    setNewPassword(e.target.value);
+                    if (modalError) setModalError("");
+                  }}
+                  autoComplete="new-password"
+                  className={cn(
+                    inputCls,
+                    "mt-0 pr-10",
+                    (modalError.includes("different from your current password") || modalError.includes("8 characters")) &&
+                      "border-rose-400 ring-1 ring-rose-400 focus:border-rose-500"
+                  )}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPassword((s) => !s)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors cursor-pointer"
+                  aria-label={showNewPassword ? "Hide new password" : "Show new password"}
+                >
+                  {showNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </label>
             <label className="block font-bold">
               Confirm new password
-              <input type="password" required value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} autoComplete="new-password" className={inputCls} />
+              <div className="relative mt-1">
+                <input
+                  type={showConfirmPassword ? "text" : "password"}
+                  required
+                  value={confirmPassword}
+                  onChange={(e) => {
+                    setConfirmPassword(e.target.value);
+                    if (modalError) setModalError("");
+                  }}
+                  autoComplete="new-password"
+                  className={cn(
+                    inputCls,
+                    "mt-0 pr-10",
+                    modalError.includes("don't match") && "border-rose-400 ring-1 ring-rose-400 focus:border-rose-500"
+                  )}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPassword((s) => !s)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors cursor-pointer"
+                  aria-label={showConfirmPassword ? "Hide confirm password" : "Show confirm password"}
+                >
+                  {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </label>
-            {modalError && <p className="font-semibold text-rose-600">{modalError}</p>}
+            {modalError && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-xl bg-rose-50 p-2.5 text-xs font-semibold text-rose-700 dark:bg-rose-500/10 dark:text-rose-300"
+              >
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" aria-hidden="true" />
+                <span>{modalError}</span>
+              </div>
+            )}
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setModal(null)} className={secondaryBtn}>Cancel</button>
               <button type="submit" disabled={busy} className={primaryBtn}>Change password</button>
