@@ -46,7 +46,11 @@ def _ns(value: Any) -> Any:
 def _raise_for_status(response: httpx.Response) -> None:
     if response.status_code < 400:
         return
-    message = f"Gemini error {response.status_code}"
+    try:
+        detail = response.text[:300]
+    except Exception:  # noqa: BLE001 - streamed body not read
+        detail = ""
+    message = f"Gemini error {response.status_code}: {detail}"
     if response.status_code == 429:
         raise RateLimitError(message, response=response, body=None)
     raise APIStatusError(message, response=response, body=None)
@@ -107,6 +111,7 @@ class _GeminiCompletions:
 
     def _iter_stream(self, client: httpx.Client, response: httpx.Response) -> Iterator[Any]:
         saw_tool_call = False
+        next_index = 0
         try:
             for line in response.iter_lines():
                 if not line.startswith("data:"):
@@ -117,8 +122,12 @@ class _GeminiCompletions:
                 data = json.loads(payload)
                 for choice in data.get("choices", []):
                     delta = choice.get("delta") or {}
-                    for pos, call in enumerate(delta.get("tool_calls") or []):
-                        call.setdefault("index", pos)
+                    for call in delta.get("tool_calls") or []:
+                        # Gemini sends each call whole and (often) in its own
+                        # chunk with no per-call index; a running counter keeps
+                        # parallel calls from being merged into one.
+                        call["index"] = next_index
+                        next_index += 1
                         # Gemini sends whole calls (not fragments); give each a
                         # stable id so the result can be matched back.
                         call.setdefault("id", f"call_{uuid.uuid4().hex[:12]}")
@@ -155,9 +164,12 @@ class _FailoverCompletions:
                     raise
                 reason = type(exc).__name__
             except APIStatusError as exc:
-                if exc.status_code not in (401, 402, 403) and exc.status_code < 500 or self._fallback is None:
+                # Any provider-side HTTP error (400 tool_use_failed, 413 too
+                # large, 401/403 key problems, 5xx...) is worth one try on the
+                # other provider rather than surfacing a generic error.
+                if self._fallback is None:
                     raise
-                reason = f"HTTP {exc.status_code}"
+                reason = f"HTTP {exc.status_code}: {str(exc)[:300]}"
             logger.warning("groq unavailable (%s); failing over to gemini", reason)
         kwargs = {**kwargs, "model": self._fallback_model}
         return self._fallback.chat.completions.create(**kwargs)
