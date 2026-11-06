@@ -80,10 +80,10 @@ logger = logging.getLogger("uvicorn.error")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-if settings.llm_provider == "groq" and not settings.groq_api_key:
+if settings.llm_provider == "groq" and not settings.groq_api_key and not settings.gemini_api_key:
     logger.warning(
-        "chatbot: GROQ_API_KEY is not set -- the admin assistant will reply with a "
-        "configuration error until you add it to backend/.env and restart."
+        "chatbot: neither GROQ_API_KEY nor GEMINI_API_KEY is set -- the admin assistant will "
+        "reply with a configuration error until you add one to backend/.env and restart."
     )
 
 async def _scheduler_loop() -> None:

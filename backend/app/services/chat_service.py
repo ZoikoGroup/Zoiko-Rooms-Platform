@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any, Union
 
 from groq import APIConnectionError, Groq, RateLimitError
+
+from app.services.llm_client import FailoverClient, GeminiClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -1012,19 +1014,30 @@ class ChatServiceError(Exception):
         self.log_detail = log_detail
 
 
-def build_client() -> Groq:
+def build_client():
+    """Groq primary with Gemini failover; either key alone is enough."""
     if settings.llm_provider != "groq":
         logger.error("chatbot: unsupported LLM_PROVIDER %s", settings.llm_provider)
         raise ChatServiceError(
             "Assistant isn't configured yet. Contact your administrator.",
             log_detail=f"unsupported provider {settings.llm_provider}",
         )
-    if not settings.groq_api_key:
+    if not settings.groq_api_key and not settings.gemini_api_key:
         raise ChatServiceError(
             "Assistant isn't configured yet. Contact your administrator.",
-            log_detail="GROQ_API_KEY missing",
+            log_detail="GROQ_API_KEY and GEMINI_API_KEY missing",
         )
-    return Groq(api_key=settings.groq_api_key, timeout=GROQ_TIMEOUT_SECONDS, max_retries=0)
+    primary = (
+        Groq(api_key=settings.groq_api_key, timeout=GROQ_TIMEOUT_SECONDS, max_retries=0)
+        if settings.groq_api_key
+        else None
+    )
+    fallback = (
+        GeminiClient(settings.gemini_api_key, timeout=GROQ_TIMEOUT_SECONDS)
+        if settings.gemini_api_key
+        else None
+    )
+    return FailoverClient(primary, fallback, settings.gemini_model)
 
 
 def _rate_limit_wait(exc: RateLimitError, attempt: int) -> float | None:
@@ -1038,7 +1051,7 @@ def _rate_limit_wait(exc: RateLimitError, attempt: int) -> float | None:
     return max(wait, 0.0) if wait <= RATE_LIMIT_MAX_WAIT_SECONDS else None
 
 
-def create_completion(client: Groq, **kwargs):
+def create_completion(client, **kwargs):
     """Call chat.completions.create, retrying transient connection failures
     and short rate-limit (429) waits before letting the error surface."""
     connection_failures = 0
@@ -1060,7 +1073,7 @@ def create_completion(client: Groq, **kwargs):
             time.sleep(wait)
 
 
-def _open_stream(client: Groq, **kwargs):
+def _open_stream(client, **kwargs):
     """Create the chat stream (see ``create_completion`` for retries)."""
     return create_completion(client, **kwargs)
 
