@@ -244,6 +244,9 @@ class Settings(BaseSettings):
     llm_provider: str = "groq"
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
+    # Failover when Groq is rate limited / down (Google OpenAI-compatible API).
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.5-flash-lite"
 
     # "file" (default) writes emails to dev_mail_outbox/ instead of sending them --
     # safe for every environment that hasn't explicitly opted in. Set to "smtp" in
