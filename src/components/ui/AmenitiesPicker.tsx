@@ -10,7 +10,16 @@ import { COMMON_AMENITIES, COMMON_AMENITY_VALUES, FURNISHING_OPTIONS } from "@/l
  * a host adds via "Other" is kept and rendered as its own removable chip, so
  * nothing typed in the old free-text field is lost by switching to this.
  */
-export function AmenitiesPicker({ value, onChange }: { value: string[]; onChange: (next: string[]) => void }) {
+export function AmenitiesPicker({
+  value,
+  onChange,
+  hide = [],
+}: {
+  value: string[];
+  onChange: (next: string[]) => void;
+  /** Amenity values to leave out of the list because another part of the form already asks for them. */
+  hide?: string[];
+}) {
   const [customInput, setCustomInput] = useState("");
 
   const customAmenities = value.filter((a) => !COMMON_AMENITY_VALUES.has(a));
@@ -50,7 +59,7 @@ export function AmenitiesPicker({ value, onChange }: { value: string[]; onChange
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {COMMON_AMENITIES.map((amenity) => {
+        {COMMON_AMENITIES.filter((amenity) => !hide.includes(amenity.value)).map((amenity) => {
           const selected = value.includes(amenity.value);
           return (
             <button

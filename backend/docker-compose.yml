@@ -10,6 +10,48 @@ services:
       - "5435:5432"
     volumes:
       - zoiko_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zoiko -d zoiko_rooms"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # Inside Docker the database is the "db" service, not localhost:5435.
+      DATABASE_URL: postgresql+psycopg://zoiko:zoiko@db:5432/zoiko_rooms
+      PUBLIC_API_URL: http://localhost:8000
+      FRONTEND_URL: http://localhost:3000
+      PUBLIC_SITE_URL: http://localhost:3000
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./secure_uploads:/app/secure_uploads
+      - ./data:/app/data
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        # What the browser calls (your machine's port 8000).
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      # What the Next.js server itself calls, inside the Docker network.
+      API_URL: http://backend:8000
+    ports:
+      - "3000:3000"
 
 volumes:
   zoiko_pgdata:

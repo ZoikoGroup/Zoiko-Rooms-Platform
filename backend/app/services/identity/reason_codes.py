@@ -1,9 +1,8 @@
 """ZR-IDENTITY-001 Section 10: normalized, safe reason codes and the plain
-language the person sees for each. Veriff's own reason codes are mapped to
-these (services/identity/golive.py:map_reason); the person never sees
-vendor scores, fraud rules or raw provider text. Verification is decided by
-the provider only, so every remediation is "capture again with Veriff",
-"fix your details", "try later" or "contact support"."""
+language the person sees for each. The identity check is a face match between
+the uploaded document photo and a selfie; the person never sees scores or
+thresholds. Every remediation is "take the photos again", "fix your details",
+"try later" or "contact support"."""
 
 from __future__ import annotations
 
@@ -90,11 +89,41 @@ REASON_CODES: dict[str, ReasonCode] = {
             "We need to verify your identity again.",
             (RETRY_CAPTURE,),
         ),
-        # Veriff outcomes, mapped to safe copy (ZR-IDV-ADR-001 Section 9).
+        # Face-match outcomes.
         ReasonCode(
             "PROVIDER_DECLINED",
-            "We couldn't verify your identity. You can try again or contact support.",
+            "The photo of you doesn't match the photo on your identity document. You can try again or contact support.",
             (RETRY_CAPTURE, CONTACT_SUPPORT),
+        ),
+        ReasonCode(
+            "FACE_MATCH_UNSURE",
+            "We couldn't be sure your photo matches your document. Try again in good light, facing the camera, with a clear photo of your document.",
+            (RETRY_CAPTURE,),
+        ),
+        ReasonCode(
+            "NO_FACE_IN_DOCUMENT",
+            "We couldn't find your face on the document photo. Photograph the side with your picture, flat and sharp.",
+            (RETRY_CAPTURE,),
+        ),
+        ReasonCode(
+            "NO_FACE_IN_SELFIE",
+            "We couldn't see your face in the selfie. Face the camera in good light and try again.",
+            (RETRY_CAPTURE,),
+        ),
+        ReasonCode(
+            "MULTIPLE_FACES_IN_SELFIE",
+            "More than one face is in your selfie. Make sure only you are in the picture.",
+            (RETRY_CAPTURE,),
+        ),
+        ReasonCode(
+            "FACE_TOO_SMALL",
+            "Move a little closer so your face fills more of the selfie.",
+            (RETRY_CAPTURE,),
+        ),
+        ReasonCode(
+            "FACE_NOT_FRONTAL",
+            "Look straight at the camera so we can see your whole face.",
+            (RETRY_CAPTURE,),
         ),
         ReasonCode(
             "SESSION_EXPIRED",

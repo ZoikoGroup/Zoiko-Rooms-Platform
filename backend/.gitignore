@@ -11,3 +11,9 @@ db_backups/
 .env
 .env.*
 !.env.example
+
+# Offline GeoIP database (CC BY 4.0, refreshed monthly by update_geoip.py)
+data/geoip/
+
+# Face-match models (downloaded by download_face_models.py)
+models/*.onnx

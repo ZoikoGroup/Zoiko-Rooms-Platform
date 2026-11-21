@@ -17,6 +17,11 @@ os.environ["EMAIL_PROVIDER"] = "file"
 # The app now assumes production unless told otherwise (core/config.py) --
 # the suite is explicitly a development environment.
 os.environ["ENVIRONMENT"] = "development"
+# Never fetch live exchange rates or look IPs up online from the suite.
+os.environ["FX_LIVE_ENABLED"] = "false"
+os.environ["IP_GEOLOCATION_URL"] = ""
+os.environ["IP_GEOLOCATION_FALLBACK_URL"] = ""
+os.environ["GEOIP_DATABASE_PATH"] = ""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -49,15 +54,6 @@ def _isolate_from_real_provider_credentials(monkeypatch):
     monkeypatch.setattr(settings, "scheduler_enabled", False)
     monkeypatch.setattr(settings, "stripe_webhook_secret", "")
     monkeypatch.setattr(settings, "stripe_listing_fee_webhook_secret", "")
-    # Same for Veriff: tests that need it set fake keys (tests/test_identity_veriff.py).
-    # The env vars cover tests that build a fresh Settings() (which would
-    # otherwise read real keys from backend/.env).
-    monkeypatch.setattr(settings, "veriff_api_key", "")
-    monkeypatch.setattr(settings, "veriff_shared_secret", "")
-    # " " not "": on Windows an empty value unsets the variable (so .env would
-    # win); Settings strips it back to "" (config.py:_strip_secret).
-    monkeypatch.setenv("VERIFF_API_KEY", " ")
-    monkeypatch.setenv("VERIFF_SHARED_SECRET", " ")
     # Location lookups stay offline unless a test opts in (services/location.py).
     monkeypatch.setattr(settings, "google_maps_api_key", "")
     monkeypatch.setenv("GOOGLE_MAPS_API_KEY", " ")
@@ -379,19 +375,18 @@ def _make_admin(db: Session, *, email: str = "admin@test.com", role: str = "admi
 
 
 def approve_identity_via_provider(db: Session, record):
-    """Verifies an identity the only way production can: a Veriff
-    "approved" decision applied to the attempt (services/identity/
-    service.py:apply_result). For tests that need a verified identity as
-    setup rather than testing the Veriff flow itself."""
+    """Verifies an identity the only way production can: a normalized PASS applied to the attempt
+    (services/identity/service.py:apply_result), which is what the face match produces. For tests that need a
+    verified identity as setup rather than testing the face match itself."""
     from app.services.identity import providers
     from app.services.identity import service as identity_service
 
     if record.session_state not in ("IN_PROGRESS", "PROCESSING", "ACTION_REQUIRED"):
         record.session_state = "PROCESSING"
-    record.provider_code = "veriff"
+    record.provider_code = "face_match"
     db.flush()
     return identity_service.apply_result(db, record, providers.NormalizedResult(
-        provider_code="veriff", normalized_outcome="PASS", provider_decision="approved",
+        provider_code="face_match", normalized_outcome="PASS", provider_decision="approved",
     ))
 
 

@@ -15,9 +15,7 @@ from app.db.session import get_db
 from app.models.admin_user import AdminUser
 from app.schemas.identity import (
     IdentityErasureRequest,
-    IdentityGateUpdate,
     IdentityPackUpdate,
-    IdentityReasonMappingUpsert,
 )
 from app.schemas.marketplace import (
     BreakGlassAccessRequest,
@@ -38,7 +36,7 @@ def get_identity_verifications(
 
 
 # ZR-IDV-ADR-001: identities are decided only by the identity provider
-# (Veriff). There are no admin create / approve / reject / request-evidence
+# (face match). There are no admin create / approve / reject / request-evidence
 # routes -- admins can view cases, reconcile with the provider, erase data
 # and manage the country packs and provider configuration.
 
@@ -125,27 +123,8 @@ def get_identity_case(verification_id: int, admin: AdminUser = Depends(get_curre
     }
 
 
-@router.post("/{verification_id}/reconcile", dependencies=[Depends(require_super_admin)])
-def post_identity_reconcile(verification_id: int, request: Request, admin: AdminUser = Depends(require_super_admin),
-                            db: Session = Depends(get_db)):
-    """ZR-IDV-ADR-001 Section 10: ask the provider for this session's decision."""
-    from app.services.identity import service as identity_service
-
-    record = crud.get_identity_verification(db, verification_id)
-    if not record:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Identity verification not found")
-    outcome = identity_service.reconcile(db, record, correlation_id=get_correlation_id(request))
-    log_audit_event(db, admin, "identity_verification.reconcile", "identity_verification", str(verification_id),
-                    get_correlation_id(request), reason=outcome)
-    db.commit()
-    return {"result": outcome}
 
 
-# ZR-IDV-ADR-001 Section 10: the internal reconciliation action at the path
-# the ADR names. Not customer-facing: super admin only.
-internal_router = APIRouter(prefix="/internal/identity-verifications", tags=["identity-verifications"],
-                            dependencies=[Depends(require_super_admin)])
-internal_router.add_api_route("/{verification_id}/reconcile", post_identity_reconcile, methods=["POST"])
 
 
 @router.post("/parties/{party_id}/erase", dependencies=[Depends(require_super_admin)])
@@ -198,68 +177,14 @@ def put_identity_pack(pack_id: int, payload: IdentityPackUpdate, request: Reques
     return _camel({"id": new.id, "version": new.version, **policy.pack_summary(new, db)})
 
 
-@router.get("/providers/veriff/readiness", dependencies=[Depends(require_super_admin)])
-def get_veriff_readiness(db: Session = Depends(get_db)):
-    """ZR-IDV-ADR-001 Sections 15 / 17: automated checks + go-live gates."""
-    from app.services.identity import golive
-
-    result = golive.readiness(db)
-    db.commit()
-    return _camel(result)
 
 
-@router.put("/providers/veriff/gates/{gate_code}", dependencies=[Depends(require_super_admin)])
-def put_veriff_gate(gate_code: str, payload: IdentityGateUpdate, request: Request,
-                    admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db)):
-    from app.services.identity import golive
-
-    gate = golive.set_gate(db, admin, gate_code, confirmed=payload.confirmed, note=payload.note,
-                           evidence_reference=payload.evidence_reference)
-    log_audit_event(db, admin, f"identity_go_live_gate.{'confirm' if gate.confirmed else 'reopen'}",
-                    "identity_go_live_gate", gate_code, get_correlation_id(request), reason=payload.evidence_reference[:200])
-    db.commit()
-    return _camel(golive.readiness(db))
 
 
-@router.post("/providers/veriff/connection-test", dependencies=[Depends(require_super_admin)])
-def post_veriff_connection_test(request: Request, admin: AdminUser = Depends(require_super_admin),
-                                db: Session = Depends(get_db)):
-    from app.services.identity import golive
-
-    check = golive.run_connection_test(db, admin)
-    log_audit_event(db, admin, "identity_provider.connection_test", "identity_provider", "veriff",
-                    get_correlation_id(request), reason="ok" if check.ok else check.detail[:200])
-    db.commit()
-    return _camel(golive.readiness(db))
 
 
-@router.get("/providers/reason-mappings", dependencies=[Depends(require_super_admin)])
-def get_reason_mappings(db: Session = Depends(get_db)):
-    from app.services.identity import golive
-
-    rows = golive.list_reason_mappings(db)
-    db.commit()
-    return [_camel({"id": r.id, "provider_code": r.provider_code, "provider_decision": r.provider_decision,
-                    "provider_reason_code": r.provider_reason_code, "zoiko_reason_code": r.zoiko_reason_code,
-                    "description": r.description}) for r in rows]
 
 
-@router.put("/providers/reason-mappings", dependencies=[Depends(require_super_admin)])
-def put_reason_mapping(payload: IdentityReasonMappingUpsert, request: Request,
-                       admin: AdminUser = Depends(require_super_admin), db: Session = Depends(get_db)):
-    from app.services.identity import golive
-
-    row = golive.upsert_reason_mapping(
-        db, provider_code=payload.provider_code, provider_decision=payload.provider_decision,
-        provider_reason_code=payload.provider_reason_code, zoiko_reason_code=payload.zoiko_reason_code,
-        description=payload.description,
-    )
-    log_audit_event(db, admin, "identity_reason_mapping.upsert", "identity_provider_reason_mapping", str(row.id),
-                    get_correlation_id(request), reason=f"{row.provider_reason_code}->{row.zoiko_reason_code}")
-    db.commit()
-    return _camel({"id": row.id, "provider_code": row.provider_code, "provider_decision": row.provider_decision,
-                   "provider_reason_code": row.provider_reason_code, "zoiko_reason_code": row.zoiko_reason_code,
-                   "description": row.description})
 
 
 @router.get("/{verification_id}/document")

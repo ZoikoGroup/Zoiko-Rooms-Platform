@@ -12,16 +12,8 @@ import {
   IdentityMetrics,
   IdentityPackAdmin,
   PROVIDER_OPTIONS,
-  ReasonMapping,
-  VeriffReadiness,
-  getVeriffReadiness,
-  listReasonMappings,
-  runVeriffConnectionTest,
-  setVeriffGate,
-  upsertReasonMapping,
   eraseIdentityData,
   listIdentityPacks,
-  reconcileIdentityCase,
   updateIdentityPack,
   IdentityQueueItem,
   IdentityState,
@@ -37,12 +29,9 @@ import { IdentityDocumentType } from "@/lib/types";
 import { formatDate } from "@/lib/utils";
 
 /**
- * ZR-IDENTITY-001 / ZR-IDV-ADR-001 -- internal identity view (not
- * customer-facing). Identities are decided only by Veriff: admins see the
- * verifications, a read-only case (header, normalized checks, history), can
- * reconcile a session with Veriff, erase data, and manage the country packs,
- * go-live readiness and reason-code mappings. There is no approve / reject.
- * Section 15 metrics sit above the list.
+ * ZR-IDENTITY-001 -- internal identity view (not customer-facing). Identities are decided only by the server's
+ * face match: admins see the verifications and a read-only case (header, checks, history), can erase data, and manage
+ * the country packs. There is no approve / reject. Metrics sit above the list.
  */
 
 const FILTERS: { value: string; label: string }[] = [
@@ -110,13 +99,11 @@ export function IdentityVerificationsManager() {
       <div className="flex items-center gap-2">
         <ShieldCheck className="h-5 w-5 text-primary-700 dark:text-primary-300" aria-hidden="true" />
         <h2 className="font-heading text-base font-bold text-primary-900 dark:text-white">Identity verifications</h2>
-        <span className="text-xs text-slate-400">Decided by Veriff -- internal view, not customer-facing</span>
+        <span className="text-xs text-slate-400">Decided by the face match -- internal view, not customer-facing</span>
       </div>
 
       {metrics && <MetricsStrip metrics={metrics} />}
-      <ReadinessPanel showToast={showToast} />
       <PacksPanel showToast={showToast} />
-      <ReasonMappingsPanel showToast={showToast} />
 
       <div className="flex flex-wrap gap-2" role="tablist" aria-label="Filter identity verifications">
         {FILTERS.map((f) => (
@@ -186,8 +173,6 @@ export function IdentityVerificationsManager() {
 function MetricsStrip({ metrics }: { metrics: IdentityMetrics }) {
   const pct = (v: number | null) => (v === null ? "--" : `${v}%`);
   const hrs = (v: number | null) => (v === null ? "--" : v < 1 ? `${Math.round(v * 60)} min` : `${v} h`);
-  const money = (v: number | null, currency: string) =>
-    v === null ? "--" : new Intl.NumberFormat(undefined, { style: "currency", currency }).format(v);
   const topReasons = Object.entries(metrics.reasonCodes).slice(0, 3);
   return (
     <div className="space-y-2 rounded-xl bg-slate-50 p-4 dark:bg-slate-800/60">
@@ -198,18 +183,8 @@ function MetricsStrip({ metrics }: { metrics: IdentityMetrics }) {
         <Metric label="Start to verified" value={pct(metrics.startToVerifiedRate)} />
         <Metric label="Action-required recovery" value={pct(metrics.actionRequiredRecoveryRate)} />
         <Metric label="Decision time (median / p90)" value={`${hrs(metrics.timeToDecisionHours.median)} / ${hrs(metrics.timeToDecisionHours.p90)}`} />
-        <Metric label="Provider error rate" value={pct(metrics.providerErrorRate)} />
+        <Metric label="Face check unavailable" value={pct(metrics.providerErrorRate)} />
         <Metric label="Top reasons" value={topReasons.length ? topReasons.map(([c, n]) => `${codeLabel(c)} (${n})`).join(", ") : "--"} />
-        <Metric label="Provider outcomes" value={Object.entries(metrics.providerOutcomes ?? {}).map(([k, v]) => `${codeLabel(k)} ${v}`).join(", ") || "--"} />
-        <Metric label="Webhook auth failures" value={String(metrics.webhookAuthFailures ?? 0)} />
-        <Metric label="Webhook duplicates / lag" value={`${pct(metrics.webhookDuplicateRate ?? null)} · ${metrics.webhookProcessingLagSeconds ?? "--"} s`} />
-        <Metric label="Unprocessed / stale" value={`${metrics.webhookUnprocessed ?? 0} events · ${metrics.staleSessions ?? 0} sessions`} />
-        <Metric
-          label="Provider cost (per completed / per approved)"
-          value={metrics.providerCost
-            ? `${money(metrics.providerCost.perCompletedVerification, metrics.providerCost.currency)} / ${money(metrics.providerCost.perApprovedAccount, metrics.providerCost.currency)}`
-            : "Not configured"}
-        />
       </dl>
     </div>
   );
@@ -273,13 +248,13 @@ function CaseModal({ id, admin, onClose, showToast }: {
                 <SecureEvidenceViewer id={record.id} contentType={record.documentContentType} watermark={`${admin?.email ?? ""} · ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`} />
               ) : (
                 <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-800/60">
-                  Captured and checked inside Veriff -- no copy is stored at Zoiko.
+                  Photos are compared in memory and never stored.
                 </p>
               )}
               {record.verifierNotes && <p className="text-xs text-slate-500">Note: {record.verifierNotes}</p>}
             </div>
 
-            {/* Normalized checks (Veriff decides) */}
+            {/* Checks (the face match decides) */}
             <div className="space-y-4">
               <div className="space-y-2">
                 <h3 className="text-sm font-semibold text-primary-900 dark:text-white">Normalized checks</h3>
@@ -304,7 +279,8 @@ function CaseModal({ id, admin, onClose, showToast }: {
               </div>
 
               <p className="text-sm text-slate-500">
-                Veriff decides this verification. To fetch a delayed decision, use &ldquo;Reconcile with provider&rdquo; above.
+                The face match decides this verification. Only the face on the document photo was compared with the
+                selfie: the document itself was not checked.
               </p>
             </div>
           </div>
@@ -396,25 +372,11 @@ function SecureEvidenceViewer({ id, contentType, watermark }: { id: number; cont
   );
 }
 
-/** Reconcile a hosted session with the provider; lawful erasure (DSAR). */
+/** Lawful erasure (DSAR). */
 function CaseTools({ record, showToast, onChanged }: { record: IdentityCase; showToast: (m: string) => void; onChanged: () => void }) {
   const [eraseOpen, setEraseOpen] = useState(false);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
-  const hostedOpen = record.providerSessionRef && ["IN_PROGRESS", "PROCESSING"].includes(record.state);
-
-  async function reconcile() {
-    setBusy(true);
-    try {
-      const { result } = await reconcileIdentityCase(record.id);
-      showToast(result === "applied" ? "Provider decision applied" : `Provider: ${codeLabel(result)}`);
-      onChanged();
-    } catch {
-      showToast("Could not reach the provider");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function erase() {
     if (!reason.trim()) {
@@ -424,7 +386,7 @@ function CaseTools({ record, showToast, onChanged }: { record: IdentityCase; sho
     setBusy(true);
     try {
       const r = await eraseIdentityData(record.partyId, reason.trim());
-      showToast(`Erased ${r.sessions} verification(s); provider deleted ${r.providerDeleted}${r.providerFailed ? `, ${r.providerFailed} failed` : ""}`);
+      showToast(`Erased ${r.sessions} verification(s)`);
       setEraseOpen(false);
       onChanged();
     } catch {
@@ -436,14 +398,13 @@ function CaseTools({ record, showToast, onChanged }: { record: IdentityCase; sho
 
   return (
     <div className="flex flex-wrap items-start gap-2">
-      {hostedOpen && <Button size="sm" variant="outline" loading={busy} onClick={reconcile}>Reconcile with provider</Button>}
       {!eraseOpen ? (
         <Button size="sm" variant="ghost" onClick={() => setEraseOpen(true)}>Erase identity data (privacy request)</Button>
       ) : (
         <div className="w-full space-y-2 rounded-xl bg-accent-50 p-3 dark:bg-accent-500/10">
           <p className="text-xs text-accent-700 dark:text-accent-300">
-            Deletes stored evidence, document numbers, names and dates of birth for this account, asks the provider to delete its
-            sessions, and leaves the person unverified. Decisions and the audit trail are kept.
+            Deletes stored evidence, document numbers, names and dates of birth for this account, and leaves the person
+            unverified. Decisions and the audit trail are kept.
           </p>
           <input className="w-full rounded-xl bg-white px-3 py-2 text-sm ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700"
             placeholder="Request reference / reason" value={reason} onChange={(e) => setReason(e.target.value)} />
@@ -543,222 +504,9 @@ function PacksPanel({ showToast }: { showToast: (m: string) => void }) {
           </tbody>
         </table>
         <p className="mt-2 text-xs text-slate-400">
-          Veriff credentials are set on the server (VERIFF_API_KEY / VERIFF_SHARED_SECRET) -- they are never entered or shown here.
+          The face thresholds and models are set on the server (FACE_MATCH_PASS / FACE_MATCH_FAIL) -- they are never entered or shown here.
         </p>
       </div>
-    </details>
-  );
-}
-
-/** ZR-IDV-ADR-001 Sections 15 / 17: is Veriff ready for traffic here? */
-function ReadinessPanel({ showToast }: { showToast: (m: string) => void }) {
-  const [ready, setReady] = useState<VeriffReadiness | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [evidence, setEvidence] = useState("");
-  const [note, setNote] = useState("");
-
-  useEffect(() => {
-    getVeriffReadiness().then(setReady).catch(() => setReady(null));
-  }, []);
-
-  if (!ready) return null;
-  const openGates = ready.gates.filter((g) => !g.confirmed).length;
-
-  async function test() {
-    setBusy(true);
-    try {
-      const next = await runVeriffConnectionTest();
-      setReady(next);
-      showToast(next.lastConnectionTest?.ok ? "Connection test passed" : `Connection test failed: ${next.lastConnectionTest?.detail ?? ""}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveGate(code: string, confirmed: boolean) {
-    try {
-      setReady(await setVeriffGate(code, confirmed, evidence, note));
-      setEditing(null);
-      setEvidence("");
-      setNote("");
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Could not update the gate");
-    }
-  }
-
-  return (
-    <details className="rounded-xl bg-slate-50 p-4 dark:bg-slate-800/60">
-      <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm font-semibold text-primary-900 dark:text-white">
-        Veriff go-live readiness
-        <Badge tone={ready.enabled ? "success" : "warning"}>{ready.enabled ? "Accepting verifications" : "Not accepting verifications"}</Badge>
-        <span className="text-xs font-normal text-slate-500">{ready.integration} integration · {ready.plan === "full_auto" ? "Full Auto webhook" : "Decision webhook"}</span>
-      </summary>
-      <div className="mt-3 space-y-4 text-sm">
-        {!ready.enabled && ready.disabledReason && <p className="text-xs text-amber-700 dark:text-amber-300">{ready.disabledReason}</p>}
-
-        <div>
-          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Automated checks</p>
-          <ul className="space-y-1">
-            {ready.checks.map((c) => (
-              <li key={c.code} className="flex items-center justify-between gap-2">
-                <span>{c.label}</span>
-                <Badge tone={c.ok ? "success" : "neutral"}>{c.ok ? "OK" : "Not yet"}</Badge>
-              </li>
-            ))}
-          </ul>
-          <div className="mt-2 flex flex-wrap items-center gap-3">
-            <Button size="sm" variant="outline" loading={busy} onClick={test}>Run connection test</Button>
-            {ready.lastConnectionTest && (
-              <span className="text-xs text-slate-500">
-                Last: {ready.lastConnectionTest.ok ? "passed" : "failed"} · {formatDate(ready.lastConnectionTest.at)} · {ready.lastConnectionTest.detail}
-              </span>
-            )}
-          </div>
-        </div>
-
-        <div>
-          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Webhook URLs to set on the Veriff integration</p>
-          <ul className="space-y-0.5 font-mono text-xs text-slate-600 dark:text-slate-300">
-            <li>{ready.plan === "full_auto" ? ready.webhookUrls.fullAuto : ready.webhookUrls.decision}</li>
-            <li>{ready.webhookUrls.events} <span className="font-sans text-slate-400">(progress only)</span></li>
-          </ul>
-          <p className="mt-1 text-xs text-slate-500">
-            Last signed webhook: {ready.lastAuthenticatedWebhookAt ? formatDate(ready.lastAuthenticatedWebhookAt) : "none yet"}
-            {ready.lastRejectedWebhookAt && ` · last rejected: ${formatDate(ready.lastRejectedWebhookAt)}`}
-          </p>
-        </div>
-
-        <div>
-          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Go-live gates {ready.isProduction ? `(${openGates} open -- production stays off until all are confirmed)` : "(required before switching to the production integration)"}
-          </p>
-          <ul className="space-y-2">
-            {ready.gates.map((g) => (
-              <li key={g.code} className="rounded-lg bg-white p-3 ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span>{g.label}</span>
-                  <span className="flex items-center gap-2">
-                    <Badge tone={g.confirmed ? "success" : "neutral"}>{g.confirmed ? "Confirmed" : "Open"}</Badge>
-                    {g.confirmed ? (
-                      <Button size="sm" variant="ghost" onClick={() => saveGate(g.code, false)}>Reopen</Button>
-                    ) : (
-                      <Button size="sm" variant="outline" onClick={() => { setEditing(g.code); setEvidence(""); setNote(""); }}>Confirm</Button>
-                    )}
-                  </span>
-                </div>
-                {g.confirmed && (
-                  <p className="mt-1 text-xs text-slate-500">
-                    {g.evidenceReference && `Evidence: ${g.evidenceReference} · `}{g.confirmedAt && formatDate(g.confirmedAt)}{g.note && ` · ${g.note}`}
-                  </p>
-                )}
-                {editing === g.code && (
-                  <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-                    <input className="rounded-lg bg-slate-50 px-2 py-1.5 text-xs ring-1 ring-slate-200 dark:bg-slate-800 dark:ring-slate-700"
-                      placeholder="Evidence reference (contract, ticket, link)" value={evidence} onChange={(e) => setEvidence(e.target.value)}
-                      aria-label="Evidence reference" />
-                    <input className="rounded-lg bg-slate-50 px-2 py-1.5 text-xs ring-1 ring-slate-200 dark:bg-slate-800 dark:ring-slate-700"
-                      placeholder="Note" value={note} onChange={(e) => setNote(e.target.value)} aria-label="Note" />
-                    <Button size="sm" onClick={() => saveGate(g.code, true)}>Save</Button>
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </details>
-  );
-}
-
-const MAPPING_DECISIONS = ["resubmission_requested", "declined", "review", "expired", "abandoned"];
-const ZOIKO_CODES = [
-  "DOCUMENT_UNREADABLE", "DOCUMENT_NUMBER_INVALID", "DOCUMENT_UNSUPPORTED", "DOCUMENT_EXPIRED", "NAME_MISMATCH",
-  "BINDING_FAILED", "MORE_INFORMATION_NEEDED", "RESUBMISSION_REQUESTED", "PROVIDER_DECLINED", "SESSION_EXPIRED",
-  "SESSION_ABANDONED",
-];
-
-/** Provider reason codes -> Zoiko safe reason codes (contract-dependent). */
-function ReasonMappingsPanel({ showToast }: { showToast: (m: string) => void }) {
-  const [rows, setRows] = useState<ReasonMapping[]>([]);
-  const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState({ providerDecision: "resubmission_requested", providerReasonCode: "", zoikoReasonCode: "DOCUMENT_UNREADABLE", description: "" });
-
-  const load = useCallback(() => {
-    listReasonMappings().then(setRows).catch(() => setRows([]));
-  }, []);
-
-  useEffect(() => {
-    if (open) load();
-  }, [open, load]);
-
-  async function save(mapping: Omit<ReasonMapping, "id">) {
-    if (!mapping.providerReasonCode.trim()) {
-      showToast("Enter the provider's reason code");
-      return;
-    }
-    try {
-      await upsertReasonMapping(mapping);
-      showToast("Reason mapping saved");
-      load();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Could not save the mapping");
-    }
-  }
-
-  const selectClass = "rounded-lg bg-white px-2 py-1 text-xs ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-700";
-  return (
-    <details className="rounded-xl bg-slate-50 p-4 dark:bg-slate-800/60" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-      <summary className="cursor-pointer text-sm font-semibold text-primary-900 dark:text-white">Provider reason-code mapping</summary>
-      <p className="mt-2 text-xs text-slate-500">
-        How Veriff&apos;s own reason codes appear to people. Confirm the list against the contracted Veriff product.
-        Unmapped codes fall back to generic, safe wording.
-      </p>
-      <table className="mt-2 w-full text-left text-xs">
-        <thead className="text-slate-500">
-          <tr><th className="py-1 pr-2">Decision</th><th className="py-1 pr-2">Veriff code</th><th className="py-1 pr-2">Shown as</th><th className="py-1 pr-2">Description</th></tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.id} className="border-t border-slate-200 dark:border-slate-700">
-              <td className="py-1.5 pr-2">{codeLabel(r.providerDecision)}</td>
-              <td className="py-1.5 pr-2 font-mono">{r.providerReasonCode}</td>
-              <td className="py-1.5 pr-2">
-                <select className={selectClass} value={r.zoikoReasonCode} aria-label={`Zoiko code for ${r.providerReasonCode}`}
-                  onChange={(e) => save({ ...r, zoikoReasonCode: e.target.value })}>
-                  {ZOIKO_CODES.map((c) => <option key={c} value={c}>{codeLabel(c)}</option>)}
-                </select>
-              </td>
-              <td className="py-1.5 pr-2 text-slate-500">{r.description}</td>
-            </tr>
-          ))}
-          <tr className="border-t border-slate-200 dark:border-slate-700">
-            <td className="py-1.5 pr-2">
-              <select className={selectClass} value={draft.providerDecision} aria-label="Provider decision"
-                onChange={(e) => setDraft({ ...draft, providerDecision: e.target.value })}>
-                {MAPPING_DECISIONS.map((d) => <option key={d} value={d}>{codeLabel(d)}</option>)}
-              </select>
-            </td>
-            <td className="py-1.5 pr-2">
-              <input className={`${selectClass} w-20`} value={draft.providerReasonCode} placeholder="code" aria-label="Veriff reason code"
-                onChange={(e) => setDraft({ ...draft, providerReasonCode: e.target.value })} />
-            </td>
-            <td className="py-1.5 pr-2">
-              <select className={selectClass} value={draft.zoikoReasonCode} aria-label="Shown as"
-                onChange={(e) => setDraft({ ...draft, zoikoReasonCode: e.target.value })}>
-                {ZOIKO_CODES.map((c) => <option key={c} value={c}>{codeLabel(c)}</option>)}
-              </select>
-            </td>
-            <td className="py-1.5 pr-2">
-              <span className="flex gap-2">
-                <input className={selectClass} value={draft.description} placeholder="description" aria-label="Description"
-                  onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
-                <Button size="sm" variant="outline" onClick={() => save({ providerCode: "veriff", ...draft })}>Add</Button>
-              </span>
-            </td>
-          </tr>
-        </tbody>
-      </table>
     </details>
   );
 }

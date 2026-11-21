@@ -21,7 +21,8 @@ import {
 } from "@/lib/user-api";
 import { RegionSelect } from "@/components/user/RegionSelect";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
-import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
+import { ListingFilterFields, hasFurnishingAnswer } from "@/components/user/ListingFilterFields";
+import { roomTypeChoices } from "@/lib/room-types";
 import { formatCurrency, resolveImageUrl } from "@/lib/utils";
 import { Field, inputClass, selectClass } from "@/components/user/ui";
 import { useUserSession } from "@/components/user/UserSessionContext";
@@ -160,6 +161,14 @@ export function ListARoomWizard({
     jurisdictionCode: "",
   });
   const [roomChoice, setRoomChoice] = useState<RoomChoice>({ mode: "new", size: "", hasEnsuite: false });
+  // The bathroom filter reads the room's own en-suite setting, so the listing step just shows it.
+  const selectedRoomBathroom: "Private" | "Shared" | null =
+    roomChoice.mode === "new"
+      ? roomChoice.hasEnsuite ? "Private" : "Shared"
+      : (() => {
+          const chosen = rooms.find((r) => r.id === roomChoice.roomId);
+          return chosen ? (chosen.hasEnsuite ? "Private" : "Shared") : null;
+        })();
   const [details, setDetails] = useState<ListingDetailsForm>(emptyDetails(contact));
 
   const [submitting, setSubmitting] = useState(false);
@@ -268,6 +277,11 @@ export function ListARoomWizard({
       const minStay = Number(details.minStayNights);
       if (!Number.isFinite(minStay) || minStay < 30) {
         setError("Zoiko is a long-stay marketplace — the minimum stay must be at least 30 nights.");
+        return;
+      }
+      // Renters filter by furnishing, so a listing that doesn't say is invisible to that filter.
+      if (!hasFurnishingAnswer(details.amenities)) {
+        setError("Choose Furnished, Part Furnished or Unfurnished so renters can find the room.");
         return;
       }
     }
@@ -566,11 +580,17 @@ export function ListARoomWizard({
                     />
                   </Field>
                   <Field label="Room type">
-                    <input
+                    <select
                       value={details.roomType}
                       onChange={(e) => setDetails((d) => ({ ...d, roomType: e.target.value }))}
-                      className={inputClass}
-                    />
+                      className={selectClass}
+                    >
+                      {roomTypeChoices(details.roomType).map((type) => (
+                        <option key={type} value={type}>
+                          {type}
+                        </option>
+                      ))}
+                    </select>
                   </Field>
                   <Field label="Price per night">
                     <input
@@ -712,12 +732,11 @@ export function ListARoomWizard({
                   />
                 </Field>
 
-                <Field label="Amenities" hint="Pick what's available, or add your own.">
-                  <AmenitiesPicker
-                    value={details.amenities}
-                    onChange={(amenities) => setDetails((d) => ({ ...d, amenities }))}
-                  />
-                </Field>
+                <ListingFilterFields
+                  amenities={details.amenities}
+                  onChange={(amenities) => setDetails((d) => ({ ...d, amenities }))}
+                  bathroom={selectedRoomBathroom}
+                />
 
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                   <Field label="Contact name">

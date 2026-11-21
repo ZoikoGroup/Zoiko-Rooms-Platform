@@ -152,5 +152,11 @@ class Listing(Base):
     market_release: Mapped["MarketRelease"] = relationship(back_populates="listings")
     bookings: Mapped[list["Booking"]] = relationship(back_populates="listing")
     reviews: Mapped[list["Review"]] = relationship(back_populates="listing")
+
+    @property
+    def has_ensuite(self) -> bool | None:
+        """Whether the linked room has its own bathroom (None when not linked to a room)."""
+        return bool(self.room.has_ensuite) if self.room is not None else None
+
     current_draft_version: Mapped["ListingVersion"] = relationship(foreign_keys=[current_draft_version_id])
     current_public_version: Mapped["ListingVersion"] = relationship(foreign_keys=[current_public_version_id])

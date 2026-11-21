@@ -51,6 +51,8 @@ export interface Listing {
   minStayNights: number;
   /** First day the room can be moved into (YYYY-MM-DD); empty = available now. */
   availableFrom?: string | null;
+  /** From the room itself: true = its own bathroom, false = shared, null/absent = unknown. */
+  hasEnsuite?: boolean | null;
   marketReleaseId: number | null;
   state: ListingState;
   rejectionReason: string;
@@ -2127,6 +2129,8 @@ export interface PublicListing {
   minStayNights: number;
   /** First day the room can be moved into (YYYY-MM-DD); empty = available now. */
   availableFrom?: string | null;
+  /** From the room itself: true = its own bathroom, false = shared, null/absent = unknown. */
+  hasEnsuite?: boolean | null;
   // Deliberately no ownerEmail/ownerPhone -- the public endpoint never returns a
   // host's contact details to an unauthenticated caller.
   ownerName: string;

@@ -67,7 +67,7 @@ async def save_identity_document(db: Session, file: UploadFile) -> tuple[str, st
     ZR-ENG-CLR-012 Section 18: 'Hash evidence artifacts at ingest' -- the
     returned sha256_hash is what crud.evidence_vault registers as the
     tamper-evident fingerprint of the original. (Identity documents are no
-    longer uploaded -- Veriff captures them -- so the callers are other
+    longer uploaded -- the face match never stores photos -- so the callers are other
     evidence uploads such as finance.)"""
     contents = await file.read()
     size = len(contents)

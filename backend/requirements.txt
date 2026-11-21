@@ -19,3 +19,7 @@ Pillow>=11.0.0
 pillow-heif>=0.18  # iPhone HEIC photos -> JPEG on upload
 pytesseract>=0.3.13
 pdf2image>=1.17.0
+maxminddb>=2.6.0  # offline IP -> country (DB-IP Lite) for the Find a Room currency
+babel>=2.14.0  # CLDR country -> currency
+numpy>=1.26
+opencv-python-headless>=4.8  # identity: face detection + comparison (YuNet / SFace)

@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
@@ -362,7 +363,15 @@ def to_public_listing_read(listing: Listing) -> PublicListingRead:
         # A live fact the host can change at once, so it is read from the listing itself, not the snapshot.
         available_from=listing.available_from,
         owner_name=listing.contact_name or (listing.owner.full_name if listing.owner else "Host"),
+        has_ensuite=listing.has_ensuite,
     )
+
+
+def normalize_room_type(raw: str) -> str:
+    """Store a room type the way it is shown and filtered on: "private_room" / " private  room " ->
+    "Private room". The Find a Room Room Type filter compares these strings, so one spelling matters."""
+    text = re.sub(r"\s+", " ", (raw or "").replace("_", " ")).strip()
+    return text[:1].upper() + text[1:]
 
 
 def _unique_slug(db: Session, name: str) -> str:
@@ -390,6 +399,7 @@ def create_listing(db: Session, data: ListingCreate, owner: AdminUser) -> Listin
     _validate_image_count(data.images)
 
     payload = data.model_dump()
+    payload["room_type"] = normalize_room_type(data.room_type) or "Private room"
     payload.update(_canonical_location(db, data.room_id))
     listing = Listing(
         id=new_id("L"),
@@ -421,6 +431,7 @@ def create_listing_for_party(db: Session, data: ListingCreate, party_id: int) ->
 
     assert_party_owns_room(db, data.room_id, party_id)
     payload = data.model_dump()
+    payload["room_type"] = normalize_room_type(data.room_type) or "Private room"
     payload.update(_canonical_location(db, data.room_id))
     listing = Listing(
         id=new_id("L"), slug=_unique_slug(db, data.name), rating=4.5, review_count=0,
@@ -464,6 +475,8 @@ def update_listing(db: Session, listing: Listing, data: ListingUpdate) -> Listin
         _validate_image_count(data.images)
 
     updates = data.model_dump(exclude_unset=True)
+    if updates.get("room_type") is not None:
+        updates["room_type"] = normalize_room_type(updates["room_type"]) or "Private room"
     # Agreement details are replaced as a whole (every field defaulted), never
     # merged from a partial dump; an explicit null leaves them unchanged.
     if "agreement_details" in updates:
