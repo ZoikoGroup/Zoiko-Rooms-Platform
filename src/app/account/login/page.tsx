@@ -216,7 +216,12 @@
 
 "use client";
 
-import { useState, type FormEvent, type InputHTMLAttributes, type ReactNode } from "react";
+import {
+  useState,
+  type FormEvent,
+  type InputHTMLAttributes,
+  type ReactNode,
+} from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -259,7 +264,10 @@ type SocialProviderItem = {
 
 /** Only same-site account paths are followed after login (no open redirect). */
 function safeNextPath(next: string | null): string {
-  return next && next.startsWith("/account/") && !next.startsWith("//") && !next.includes("://")
+  return next &&
+    next.startsWith("/account/") &&
+    !next.startsWith("//") &&
+    !next.includes("://")
     ? next
     : "/account";
 }
@@ -318,17 +326,25 @@ function GoogleIcon() {
 
 function AuthAside() {
   return (
-    <aside className="relative min-h-[420px] overflow-hidden bg-[#f2f8fc] xl:min-h-0">
+    <aside className="relative hidden overflow-hidden bg-[#f2f8fc] xl:block">
+      {/* Image pinned to bottom, full width; extra height is cropped from the TOP */}
       <Image
         src="/1.png"
         alt=""
-        fill
+        width={1600}
+        height={1200}
         priority
-        sizes="(min-width: 1280px) 52vw, 100vw"
-        className="object-cover"
+        sizes="52vw"
+        className="absolute inset-x-0 bottom-0 h-auto w-full"
       />
 
-      <div className="relative z-10 px-6 pb-16 pt-12 sm:px-12 xl:pb-0 xl:pl-[86px] xl:pr-[129.67px] xl:pt-[175px]">
+      {/* Bluish gradient: top only */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 z-[5] h-[38%] bg-gradient-to-b from-[#eaf3fb] via-[#eaf3fb]/80 to-transparent"
+      />
+
+      <div className="relative z-10 xl:pl-[86px] xl:pr-[129.67px] xl:pt-[clamp(40px,10vh,140px)]">
         <Link
           href="/"
           aria-label="Zoiko Rooms home"
@@ -665,7 +681,9 @@ function LoginForm() {
           <SocialButton
             key={provider.id}
             label={provider.label}
-            icon={provider.id === "microsoft" ? <MicrosoftIcon /> : <GoogleIcon />}
+            icon={
+              provider.id === "microsoft" ? <MicrosoftIcon /> : <GoogleIcon />
+            }
             onClick={() => handleSocial(provider.name)}
           />
         ))}
