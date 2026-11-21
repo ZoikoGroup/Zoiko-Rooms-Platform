@@ -33,12 +33,16 @@ import {
   convertAmount,
   dominantCurrency,
   priceStepsFor,
+  humanizeRoomType,
+  compareByRent,
+  effectiveMoveIn,
   roomMatchesSearch,
 } from "@/lib/find-a-room-search";
 import {
   errorMessage,
   listHostedListings,
   getExchangeRates,
+  getVisitorCurrency,
   listAllPublicListings,
   listRentalApplications,
   getUserPreferences,
@@ -46,6 +50,7 @@ import {
 } from "@/lib/user-api";
 import { useUserSession } from "@/components/user/UserSessionContext";
 import { ListingReviews } from "@/components/user/ListingReviews";
+import { AreaDistributionMap, type MapArea } from "@/components/user/AreaDistributionMap";
 import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 
 /** Room representation dynamically mapped from backend listings */
@@ -60,6 +65,9 @@ export interface FindARoomItem {
   roomType: string;
   monthlyRent: number;
   currency: string;
+  /** Public (rounded) map coordinates, when the listing has them. */
+  latitude?: number | null;
+  longitude?: number | null;
   minStayMonths: number;
   availableDate: string;
   roomState: "available" | "offer";
@@ -101,7 +109,12 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
 
   const currency = item.currency || "INR";
   const minStayMonths = Math.max(1, Math.round((item.minStayNights || 30) / 30));
-  const bathroomType = item.bathrooms && item.bathrooms >= 1 ? "Private" : "Shared";
+  // Private = the room has its own bathroom (the room's own flag, set when the host added it). Older data
+  // without the flag falls back to what the amenities say; a bare bathroom count says nothing (every room
+  // has at least one bathroom in the flat), so it is not used.
+  const amenityText = (item.amenities || []).join(" ").toLowerCase();
+  const bathroomType: "Private" | "Shared" =
+    item.hasEnsuite ?? /attached|en-?suite|private bath/.test(amenityText) ? "Private" : "Shared";
 
   // What the amenities and tags say about furnishing and accessibility (see lib/find-a-room-search.ts).
   const furnishedState = deriveFurnishedState(item.amenities || []);
@@ -122,9 +135,11 @@ function mapListingToFindARoomItem(item: PublicListing | HostedListing, idx: num
     area: item.location || item.city || "",
     city: item.city || "",
     roomNumber: item.roomId ? `Room #${item.roomId}` : `Room #${item.id.slice(0, 4)}`,
-    roomType: item.roomType || "Private room",
+    roomType: humanizeRoomType(item.roomType) || "Private room",
     monthlyRent,
     currency,
+    latitude: item.latitude ?? null,
+    longitude: item.longitude ?? null,
     minStayMonths,
     availableDate: availabilityDate(item.availableFrom, todayIsoDate()),
     roomState: isOffer ? "offer" : "available",
@@ -333,14 +348,18 @@ export function RentBrowser() {
     showToast("Recent searches cleared");
   };
 
-  // Discovered room types
+  // Room types that actually exist on the platform (plus the one currently chosen, so a saved link still
+  // shows its selection). Compared case-insensitively, so "Private room" is listed once.
   const availableRoomTypes = useMemo(() => {
-    const set = new Set<string>(["En-suite", "Studio", "Single", "Double", "Private room"]);
-    allRooms.forEach((r) => {
-      if (r.roomType) set.add(r.roomType);
-    });
-    return Array.from(set);
-  }, [allRooms]);
+    const seen = new Map<string, string>();
+    const add = (type: string) => {
+      const key = type.trim().toLowerCase();
+      if (key && key !== "all" && !seen.has(key)) seen.set(key, type.trim());
+    };
+    allRooms.forEach((r) => add(r.roomType));
+    add(roomTypeFilter);
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  }, [allRooms, roomTypeFilter]);
 
   // Filter & match logic
   // Cities the renter has shown interest in: rooms they applied to and places they searched.
@@ -359,9 +378,22 @@ export function RentBrowser() {
       .catch(() => setRates(null));
   }, []);
 
-  // Price limits are offered in the currency of the rooms in the place being searched (£ for London,
-  // ₹ for Mumbai), so a limit is always compared with prices in that same currency.
+  // The currency the visitor most likely thinks in, from their location (see GET /api/public/visitor-currency):
+  // not fixed to any one currency. Null until known, or when nothing usable was found.
+  const [visitorCurrency, setVisitorCurrency] = useState<string | null>(null);
+  useEffect(() => {
+    const region = typeof navigator !== "undefined" ? (navigator.language.split("-")[1] ?? "").slice(0, 2) : "";
+    const tz = typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "";
+    getVisitorCurrency(region, tz)
+      .then((r) => setVisitorCurrency(r.currency))
+      .catch(() => setVisitorCurrency(null));
+  }, []);
+
+  // Price limits are offered in the visitor's own currency (detected from their location). Rooms listed in
+  // other currencies are compared at the indicative rates. If the visitor's currency can't be detected or
+  // compared, fall back to the currency of the rooms in the place being searched (£ for London, ₹ for Mumbai).
   const priceCurrency = useMemo(() => {
+    if (visitorCurrency && rates?.usdPerUnit?.[visitorCurrency]) return visitorCurrency;
     const inPlace = allRooms.filter((r) =>
       roomMatchesSearch(r, {
         query: activeLocationQuery, price: "all", priceCurrency: "", roomType: "all", furnished: "all",
@@ -369,7 +401,7 @@ export function RentBrowser() {
       }),
     );
     return dominantCurrency(inPlace.length > 0 ? inPlace : allRooms);
-  }, [allRooms, activeLocationQuery]);
+  }, [allRooms, activeLocationQuery, visitorCurrency, rates]);
 
   const filteredRooms = useMemo(() => {
     const criteria = {
@@ -380,19 +412,22 @@ export function RentBrowser() {
       roomType: roomTypeFilter,
       furnished: furnishedFilter,
       availability: availabilityFilter,
-      moveIn: moveInDate,
+      // A move-in date in the past counts as today -- no room can be moved into yesterday.
+      moveIn: effectiveMoveIn(moveInDate, todayIsoDate()),
       stayMonths,
       bathrooms: selectedBathrooms,
       amenities: selectedAmenities,
       accessibility: selectedAccessibility,
     };
+    const rateTable = rates?.usdPerUnit ?? null;
 
     return allRooms
       .filter((r) => roomMatchesSearch(r, criteria))
       .sort((a, b) => {
-        if (sortBy === "plow") return a.monthlyRent - b.monthlyRent;
-        if (sortBy === "phigh") return b.monthlyRent - a.monthlyRent;
-        if (sortBy === "soon") return a.availableDate.localeCompare(b.availableDate);
+        // Rents are compared in one currency (the price filter's), not as bare numbers across currencies.
+        if (sortBy === "plow") return compareByRent(a, b, priceCurrency, rateTable);
+        if (sortBy === "phigh") return compareByRent(a, b, priceCurrency, rateTable, "desc");
+        if (sortBy === "soon") return a.availableDate.localeCompare(b.availableDate) || compareByRent(a, b, priceCurrency, rateTable);
 
         // Best match algorithm. With personalised recommendations on, rooms in
         // cities the renter applied to or searched come first -- but never ahead
@@ -513,14 +548,28 @@ export function RentBrowser() {
     }
   };
 
-  // Map view areas computed dynamically from actual rooms
-  const dynamicMapAreas = useMemo(() => {
-    const counts: Record<string, number> = {};
+  // Map view areas computed from the rooms on screen: one marker per area, at the middle of its rooms.
+  const { mapAreas, roomsWithoutPin } = useMemo(() => {
+    const groups = new Map<string, { count: number; lat: number; lng: number; pinned: number }>();
+    let unpinned = 0;
     filteredRooms.forEach((r) => {
-      const mainArea = r.area.split(" · ")[0].trim() || r.city || "Central";
-      counts[mainArea] = (counts[mainArea] || 0) + 1;
+      const name = r.area.split(" · ")[0].trim() || r.city || "Central";
+      const g = groups.get(name) ?? { count: 0, lat: 0, lng: 0, pinned: 0 };
+      g.count += 1;
+      if (typeof r.latitude === "number" && typeof r.longitude === "number") {
+        g.lat += r.latitude;
+        g.lng += r.longitude;
+        g.pinned += 1;
+      } else {
+        unpinned += 1;
+      }
+      groups.set(name, g);
     });
-    return counts;
+    const areas: MapArea[] = [];
+    groups.forEach((g, name) => {
+      if (g.pinned > 0) areas.push({ name, count: g.count, latitude: g.lat / g.pinned, longitude: g.lng / g.pinned });
+    });
+    return { mapAreas: areas, roomsWithoutPin: unpinned };
   }, [filteredRooms]);
 
   return (
@@ -565,8 +614,14 @@ export function RentBrowser() {
               <Calendar className="h-4 w-4 text-[#0E2F73] shrink-0 dark:text-blue-400" />
               <input
                 type="date"
+                min={todayIsoDate()}
                 value={moveInDate}
-                onChange={(e) => setMoveInDate(e.target.value)}
+                onChange={(e) => {
+                  // Picking a move-in date shows the rooms that are available by then (the Availability
+                  // filter can still be set back to "Any"); clearing the date lifts the filter.
+                  setMoveInDate(e.target.value);
+                  setAvailabilityFilter(e.target.value ? "date" : "all");
+                }}
                 className="w-full bg-transparent text-sm sm:text-base font-bold text-slate-900 focus:outline-none dark:text-white"
               />
             </div>
@@ -778,7 +833,6 @@ export function RentBrowser() {
               options={[
                 { value: "all", label: "Any" },
                 { value: "date", label: "By my move-in date" },
-                { value: "future", label: "Later is fine" },
               ]}
               size="sm"
             />
@@ -893,59 +947,15 @@ export function RentBrowser() {
           </div>
 
           <div className="mt-4 relative w-full overflow-hidden rounded-2xl bg-gradient-to-b from-[#F7F9FD] to-[#EEF3FA] dark:from-slate-950 dark:to-slate-900 border border-slate-200 dark:border-slate-800">
-            {Object.keys(dynamicMapAreas).length > 0 ? (
-              <svg viewBox="0 0 900 380" className="w-full h-auto">
-                <defs>
-                  <radialGradient id="mapDotGrad" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stopColor="#D80B0B" stopOpacity="0.8" />
-                    <stop offset="100%" stopColor="#0E2F73" stopOpacity="0.9" />
-                  </radialGradient>
-                </defs>
-
-                {/* Grid guidelines */}
-                <path d="M 50 190 Q 450 170 850 190" stroke="#CBD5E1" strokeWidth="1" strokeDasharray="4 4" fill="none" opacity="0.4" />
-                <path d="M 200 60 Q 450 320 700 60" stroke="#CBD5E1" strokeWidth="1" strokeDasharray="4 4" fill="none" opacity="0.4" />
-
-                {Object.entries(dynamicMapAreas).map(([areaName, count], idx) => {
-                  const total = Object.keys(dynamicMapAreas).length;
-                  const stepX = 700 / Math.max(1, total);
-                  const x = 120 + idx * stepX;
-                  const y = 140 + (idx % 2 === 0 ? -40 : 40);
-                  const radius = Math.min(48, Math.max(26, 22 + count * 5));
-
-                  return (
-                    <g
-                      key={areaName}
-                      className="cursor-pointer transition-transform duration-200 hover:scale-105"
-                      onClick={() => {
-                        setLocationInput(areaName);
-                        setActiveLocationQuery(areaName);
-                        showToast(`Filtered by ${areaName}`);
-                      }}
-                    >
-                      <circle cx={x} cy={y} r={radius} fill="url(#mapDotGrad)" className="opacity-80" />
-                      <circle cx={x} cy={y} r={radius - 4} fill="#FFFFFF" opacity="0.9" />
-                      <text x={x} y={y - 2} textAnchor="middle" fontSize="14" fontWeight="800" fill="#0E2F73">
-                        {count}
-                      </text>
-                      <text x={x} y={y + 12} textAnchor="middle" fontSize="9" fontWeight="700" fill="#64748B">
-                        ROOMS
-                      </text>
-                      <text
-                        x={x}
-                        y={y + radius + 16}
-                        textAnchor="middle"
-                        fontSize="12"
-                        fontWeight="700"
-                        fill="#0B1B3F"
-                        className="dark:fill-white font-sans"
-                      >
-                        {areaName}
-                      </text>
-                    </g>
-                  );
-                })}
-              </svg>
+            {mapAreas.length > 0 ? (
+              <AreaDistributionMap
+                areas={mapAreas}
+                onSelect={(areaName) => {
+                  setLocationInput(areaName);
+                  setActiveLocationQuery(areaName);
+                  showToast(`Filtered by ${areaName}`);
+                }}
+              />
             ) : (
               <div className="py-20 flex flex-col items-center justify-center text-center">
                 <MapPin className="h-10 w-10 text-slate-400" />
@@ -956,7 +966,7 @@ export function RentBrowser() {
             )}
           </div>
           <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-            ⓘ Circles show approximate areas only — exact addresses are verified and shared at later stages.
+            ⓘ Markers show approximate areas only — exact addresses are verified and shared at later stages.{roomsWithoutPin > 0 ? ` ${roomsWithoutPin} room${roomsWithoutPin === 1 ? "" : "s"} without a map location ${roomsWithoutPin === 1 ? "isn’t" : "aren’t"} shown here.` : ""}
           </p>
         </section>
       )}
@@ -1175,7 +1185,9 @@ export function RentBrowser() {
 
       {/* 5. Bottom Footnote */}
       <p className="text-xs text-slate-500 dark:text-slate-400">
-        Prices are shown in each listing’s currency. Locations are approximate until later stages of your application.
+        Prices are shown in each listing’s currency. Locations are approximate until later stages of your application.{" "}
+        Price limits use the currency of your location (
+        <a href="https://db-ip.com" target="_blank" rel="noopener noreferrer" className="underline">IP geolocation by DB-IP</a>).
       </p>
 
       {/* 6. Slide-Over Room Detail Drawer */}
@@ -1488,6 +1500,7 @@ export function RentBrowser() {
                   <input
                     type="date"
                     required
+                    min={todayIsoDate()}
                     value={applyDesiredMoveIn}
                     onChange={(e) => setApplyDesiredMoveIn(e.target.value)}
                     className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs font-semibold focus:border-[#0E2F73] focus:outline-none dark:border-slate-700 dark:bg-slate-800"

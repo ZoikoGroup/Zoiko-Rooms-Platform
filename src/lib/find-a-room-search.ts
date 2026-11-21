@@ -11,6 +11,10 @@ export interface SearchableRoom {
   currency: string;
   minStayMonths: number;
   availableDate: string;
+  /** "offer" = a renter already has an offer on it. Optional so older callers keep working. */
+  roomState?: "available" | "offer";
+  /** "closed" = the host isn't taking applications. */
+  applicationsState?: "open" | "closed";
   furnishedState: "yes" | "part" | "no" | "unknown";
   bathroomType: string;
   amenities: string[];
@@ -39,6 +43,13 @@ export interface SearchCriteria {
   accessibility: string[];
 }
 
+/** A room type as people read it: a listing may store "private_room" or "Private room" -- show and compare
+ *  both as "Private room" so the Room Type filter doesn't list (or miss) the same type twice. */
+export function humanizeRoomType(raw: string | null | undefined): string {
+  const text = (raw ?? "").replace(/_/g, " ").replace(/\s+/g, " ").trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : "";
+}
+
 export function roomMatchesSearch(room: SearchableRoom, c: SearchCriteria): boolean {
   // Location text: matches the area, the city or the title.
   const q = c.query.toLowerCase().trim();
@@ -59,7 +70,12 @@ export function roomMatchesSearch(room: SearchableRoom, c: SearchCriteria): bool
 
   if (c.furnished !== "all" && room.furnishedState !== c.furnished) return false;
 
-  if (c.availability === "date" && room.availableDate > c.moveIn) return false;
+  // By move-in date: only rooms that are free by then AND can actually be moved into -- not one that already
+  // has an offer on it or that isn't taking applications.
+  if (c.availability === "date") {
+    if (room.availableDate > c.moveIn) return false;
+    if (room.roomState === "offer" || room.applicationsState === "closed") return false;
+  }
 
   if (c.stayMonths > 0 && room.minStayMonths > c.stayMonths) return false;
 
@@ -163,6 +179,29 @@ export function convertAmount(
   const toRate = usdPerUnit?.[to.toUpperCase()];
   if (!fromRate || !toRate) return null;
   return (amount * fromRate) / toRate;
+}
+
+/** Compare two rooms' monthly rent for "Price, low to high" even when they are priced in different currencies:
+ *  both are expressed in `currency` at the indicative rates. A room whose rent can't be converted goes last
+ *  (comparing 24,000 rupees with 800 pounds as bare numbers would be meaningless). */
+export function compareByRent(
+  a: { monthlyRent: number; currency: string },
+  b: { monthlyRent: number; currency: string },
+  currency: string,
+  usdPerUnit?: Record<string, number> | null,
+  direction: "asc" | "desc" = "asc",
+): number {
+  const rentA = convertAmount(a.monthlyRent, a.currency, currency, usdPerUnit);
+  const rentB = convertAmount(b.monthlyRent, b.currency, currency, usdPerUnit);
+  if (rentA === null && rentB === null) return 0;
+  if (rentA === null) return 1; // unconvertible rooms go last in either direction
+  if (rentB === null) return -1;
+  return direction === "asc" ? rentA - rentB : rentB - rentA;
+}
+
+/** The move-in date to search with: a date before today can't be moved into, so it counts as today. */
+export function effectiveMoveIn(moveIn: string, today: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(moveIn) && moveIn >= today ? moveIn : today;
 }
 
 /** The day a room can be moved into: the host's date, or today when there is none or it has passed. */

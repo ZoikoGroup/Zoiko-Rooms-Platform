@@ -34,7 +34,6 @@ import {
   createIdentityHandoff,
   getIdentityPolicy,
   identityStateLabel,
-  refreshIdentitySession,
   restartIdentitySession,
   identityStateTone,
   listIdentityCountries,
@@ -46,14 +45,13 @@ import {
 } from "@/lib/identity";
 
 /**
- * ZR-IDENTITY-001 / ZR-IDV-ADR-001 -- the person's identity verification flow:
+ * ZR-IDENTITY-001 -- the person's identity verification flow:
  * 0 Intro -> 1 Confirm details -> 2 How verification works (consent) ->
- * 3 Review & attest -> 4 Take photos (document + selfie, on our own screens),
- * then the durable status pages (checking, verified + role routing, action
- * required). Each photo is relayed straight to Veriff, which decides whether
- * the document is genuine and belongs to the person; no person reviews it.
- * Progress is saved on the server at every step, and nothing here can mark
- * anyone verified.
+ * 3 Review & attest -> 4 Photos (a picture of the identity document + a selfie),
+ * then the durable status pages (verified + role routing, action required).
+ * The server compares the face on the document with the selfie and the result comes straight back; the photos
+ * are not stored and no person reviews it. Only the face match is checked -- not that the document is genuine.
+ * Progress is saved on the server at every step, and nothing here can mark anyone verified.
  */
 
 type Step = 0 | 1 | 2 | 3 | 4;
@@ -145,7 +143,7 @@ export function IdentityVerificationWizard() {
   }, [profile]);
 
   /** Back to the capture screens for an open attempt -- to finish it, or to
-   *  take new photos when Veriff asked for a resubmission. */
+   *  take new photos when we asked for clearer ones. */
   function continueCapture(current: IdentitySession) {
     setErrors([]);
     setSession(current);
@@ -157,7 +155,12 @@ export function IdentityVerificationWizard() {
     setSession(updated);
     await refreshIdentity();
     setWizardOpen(false);
-    showToast("Thanks -- we're checking your identity. We'll update your status here.");
+    // The comparison is instant: the result is already in `updated`.
+    showToast(
+      updated.state === "VERIFIED" ? "Your identity is verified."
+        : updated.state === "ACTION_REQUIRED" ? "We need clearer photos -- see the message below."
+        : "We couldn't verify your identity -- see the message below.",
+    );
   }
 
   async function startAgain(current: IdentitySession) {
@@ -270,7 +273,7 @@ export function IdentityVerificationWizard() {
               const submitted = await submitIdentitySession(session.id, true);
               setSession(submitted);
               if (submitted.captureAvailable) go(4);
-              // Veriff unavailable: nobody is verified, progress is saved.
+              // The face check is unavailable: nobody is verified, progress is saved.
               else setErrors([submitted.message || UNAVAILABLE]);
             } catch (err) {
               setErrors([errorMessage(err, "We couldn't submit your verification.")]);
@@ -347,8 +350,8 @@ function IntroStep({ role, setRole, onNext }: { role: IdentityRole; setRole: (r:
         license, depending on your country -- and a device with a camera.
       </InfoBlock>
       <InfoBlock title="How it works" tone="info">
-        You&apos;ll photograph your document and take a quick selfie right here. Our verification partner checks
-        automatically that the document is genuine and that it&apos;s you.
+        You&apos;ll photograph your identity document (or upload a clear picture of it) and take a quick selfie right
+        here. We compare the face on the document with your selfie, and if they match you&apos;re verified.
       </InfoBlock>
       <InfoBlock title="Privacy">
         We only request information needed for verification. Your identity documents are not shown to renters or other Hosts.
@@ -470,8 +473,8 @@ function HowItWorksStep({ pack, busy, session, onBack, onNext, onPhone, onError 
         This confirms the document belongs to you. You&apos;ll be asked to allow camera access.
       </InfoBlock>
       <InfoBlock title="3. Automatic decision" tone="ok">
-        Our verification partner checks that the document is genuine and that it&apos;s you, and you&apos;ll see the result
-        here. You take the photos right here -- you won&apos;t be sent to another website.
+        We compare the face on your document with your selfie, and you&apos;ll see the result straight away. Your photos
+        are compared on our server and are not stored.
       </InfoBlock>
       {pack.biometricConsentText && <InfoBlock title="Before the camera check" tone="info">{pack.biometricConsentText}</InfoBlock>}
 
@@ -523,7 +526,7 @@ function ReviewStep({ profile, countries, busy, onBack, onSubmit }: {
       <dl className="grid gap-3 rounded-xl bg-slate-50 p-4 text-sm sm:grid-cols-2 dark:bg-slate-800/60">
         <SummaryItem label="Name" value={legalName} />
         <SummaryItem label="Country" value={country} />
-        <SummaryItem label="Method" value="Identity document and selfie, with our verification partner" />
+        <SummaryItem label="Method" value="Face match: your identity document photo and a selfie" />
       </dl>
       <label className="flex items-start gap-2 text-sm text-slate-700 dark:text-slate-200">
         <input type="checkbox" className="mt-1" checked={attested} onChange={(e) => setAttested(e.target.checked)} />
@@ -563,19 +566,6 @@ function StatusScreen({ profile, onStart, onRefresh, errors, onContinueCapture, 
   const checking = state === "PROCESSING" || state === "PENDING_REVIEW";
   const available = profile.pack.providerAvailable;
 
-  // While Veriff checks, refresh now and then -- no countdown, no spinner
-  // trap. This also asks the server to check with Veriff's decision API
-  // (useful where its webhooks can't reach the server, e.g. localhost).
-  const sessionId = current?.id;
-  useEffect(() => {
-    if (!checking) return;
-    const tick = async () => {
-      if (sessionId) await refreshIdentitySession(sessionId).catch(() => undefined);
-      await onRefresh();
-    };
-    const timer = setInterval(() => void tick(), 15000);
-    return () => clearInterval(timer);
-  }, [checking, sessionId, onRefresh]);
 
   const icon = useMemo(() => {
     if (state === "VERIFIED") return <BadgeCheck className="h-6 w-6 text-emerald-600" aria-hidden="true" />;
@@ -641,7 +631,7 @@ function StatusScreen({ profile, onStart, onRefresh, errors, onContinueCapture, 
       {checking && (
         <>
           <InfoBlock title="Status" tone="info">
-            <span className="flex items-center gap-1.5"><Clock className="h-4 w-4" aria-hidden="true" /> Our verification partner is checking your document and selfie</span>
+            <span className="flex items-center gap-1.5"><Clock className="h-4 w-4" aria-hidden="true" /> We are comparing your document photo with your selfie</span>
           </InfoBlock>
           <Actions>
             <Button variant="ghost" onClick={() => void onRefresh()}>Refresh status</Button>

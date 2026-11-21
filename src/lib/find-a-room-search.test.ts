@@ -80,6 +80,20 @@ describe("Find a Room: search together with filters", () => {
     expect(search(all)).toEqual(["R5"]);
     expect(search({ ...all, price: "20000" })).toEqual([]); // R5 costs 30000
   });
+  it("availability by move-in date: today or tomorrow shows only rooms that can be moved into by then", () => {
+    const rooms = [
+      { ...ROOMS[0], id: "NOW", availableDate: "2026-11-21" },
+      { ...ROOMS[1], id: "TOMORROW", availableDate: "2026-11-22" },
+      { ...ROOMS[2], id: "NEXT_WEEK", availableDate: "2026-11-28" },
+      { ...ROOMS[3], id: "OFFER", availableDate: "2026-11-21", roomState: "offer" as const },
+      { ...ROOMS[4], id: "CLOSED", availableDate: "2026-11-21", applicationsState: "closed" as const },
+    ];
+    const ids = (moveIn: string) => rooms.filter((r) => roomMatchesSearch(r, { ...NONE, availability: "date", moveIn })).map((r) => r.id);
+    expect(ids("2026-11-21")).toEqual(["NOW"]);
+    expect(ids("2026-11-22")).toEqual(["NOW", "TOMORROW"]);
+    expect(ids("2026-11-28")).toEqual(["NOW", "TOMORROW", "NEXT_WEEK"]);
+  });
+
   it("availability by move-in date: a room free later than the chosen date is hidden", () => {
     const later = ROOMS.map((r) => (r.id === "R2" ? { ...r, availableDate: "2026-12-01" } : r));
     const ids = later.filter((r) => roomMatchesSearch(r, { ...NONE, availability: "date", moveIn: "2026-11-01" })).map((r) => r.id);

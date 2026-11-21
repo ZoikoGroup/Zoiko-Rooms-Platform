@@ -1,9 +1,6 @@
-"""ZR-IDENTITY-001 global identity verification on top of the Veriff-only
-flow (ZR-IDV-ADR-001): account-level profile, country packs, the session
-API, re-verification, phone handoff and the privacy rules (masked numbers,
-safe events, retention, the admin case view). Veriff's own decisions are
-covered in test_identity_veriff.py; here they're the way someone becomes
-verified."""
+"""ZR-IDENTITY-001 identity verification: account-level profile, country packs, the session API, re-verification,
+phone handoff and the privacy rules (safe events, retention, the admin case view). The identity check itself is a
+face match (see test_identity_face_match.py); here it is the way someone becomes verified."""
 
 from __future__ import annotations
 
@@ -24,18 +21,17 @@ from app.models.party import Party
 from app.services.identity import policy
 from app.services.identity import service as identity_service
 from tests.conftest import _make_admin, _make_user, auth_admin_cookie, auth_user_cookie
-from tests.test_identity_veriff import API_KEY, SECRET, FakeVeriff, _sign
+from tests.helpers_identity import FakeFaces, face_match_request
 
 PASSPORT = "P1234567"
 BASE = "/api/users/identity"
 
 
 @pytest.fixture(autouse=True)
-def veriff(monkeypatch):
-    monkeypatch.setattr(settings, "veriff_api_key", API_KEY)
-    monkeypatch.setattr(settings, "veriff_shared_secret", SECRET)
-    fake = FakeVeriff()
-    monkeypatch.setattr(httpx, "request", fake)
+def faces(monkeypatch):
+    """The face models aren't needed here: the comparison is scripted (score 0.9 = same person)."""
+    fake = FakeFaces()
+    fake.install(monkeypatch)
     return fake
 
 
@@ -75,15 +71,14 @@ def _submit(client, user, session_id, attested=True):
 
 
 def _decide(client, db: Session, session_id: int, decision: str = "approved"):
+    """Submit the two photos; the (scripted) face match decides: approved = same person, declined = different."""
     session = db.get(IdentityVerification, session_id)
-    db.refresh(session)
-    body = json.dumps({"status": "success", "verification": {
-        "id": session.provider_session_id, "attemptId": "att-1", "status": decision, "vendorData": f"zr-idv-{session.id}",
-        "person": {"firstName": "Asha", "lastName": "Rao", "dateOfBirth": "1990-05-01"},
-        "document": {"number": PASSPORT, "type": "PASSPORT", "country": "GB", "validUntil": "2031-01-01"},
-    }}).encode()
-    r = client.post("/api/v1/webhooks/veriff/decision", content=body,
-                    headers={"x-auth-client": API_KEY, "x-hmac-signature": _sign(body)})
+    user_id = None
+    from app.models.user_account import UserAccount
+
+    user = db.query(UserAccount).filter(UserAccount.party_id == session.party_id).first()
+    FakeFaces.current.score = 0.9 if decision == "approved" else 0.05
+    r = face_match_request(client, user, session_id)
     assert r.status_code == 200, r.text
     db.expire_all()
     return db.get(IdentityVerification, session_id)
@@ -131,14 +126,14 @@ class TestProfileAndPolicy:
         assert other["countryCode"] == "*"
         for pack in (gb, india, other):
             assert (pack["captureMode"], pack["availableMethods"], pack["providerAvailable"]) == (
-                "PROVIDER_HOSTED", ["DOCUMENT"], True)
+                "FACE_MATCH", ["DOCUMENT"], True)
         countries = {c["countryCode"] for c in client.get(f"{BASE}/countries", cookies=auth_user_cookie(user)).json()}
         assert {"GB", "IN", "US"} <= countries and "*" not in countries
 
-    def test_new_packs_use_veriff(self, db_session: Session):
+    def test_new_packs_use_face_match(self, db_session: Session):
         policy.ensure_default_packs(db_session)
         packs = db_session.query(IdentityRegulatoryPack).filter_by(active=True).all()
-        assert packs and all(p.document_provider_code == "veriff" for p in packs)
+        assert packs and all(p.document_provider_code == "face_match" for p in packs)
         assert all("another verification option" not in p.biometric_consent_text for p in packs)
 
     def test_a_pack_edited_in_the_database_wins(self, client, db_session: Session):
@@ -149,7 +144,7 @@ class TestProfileAndPolicy:
         db_session.commit()
         assert client.get(f"{BASE}/policy?country=GB", cookies=auth_user_cookie(user)).json()["acceptedDocumentTypes"] == ["passport"]
 
-    def test_a_pack_cannot_be_switched_to_a_non_veriff_provider_or_manual_method(self, db_session: Session):
+    def test_a_pack_cannot_be_switched_to_another_provider_or_manual_method(self, db_session: Session):
         policy.ensure_default_packs(db_session)
         gb = db_session.query(IdentityRegulatoryPack).filter_by(country_code="GB", active=True).one()
         with pytest.raises(ValueError):
@@ -173,13 +168,16 @@ class TestProfileAndPolicy:
 
 
 class TestVerification:
-    def test_a_veriff_approval_verifies_the_account(self, client, db_session: Session):
+    def test_a_matching_face_verifies_the_account(self, client, db_session: Session):
         user, sid, record = _verified(client, db_session, "idg-pass@test.com")
-        assert (record.session_state, record.status, record.provider_code) == ("VERIFIED", "verified", "veriff")
-        assert record.masked_document_number == "••••4567"
-        assert record.match_results["document_authenticity"] == "PASS"
+        assert (record.session_state, record.status, record.provider_code) == ("VERIFIED", "verified", "face_match")
+        # Nothing is read from the document, so no number is kept and authenticity is not claimed.
+        assert record.masked_document_number == ""
+        assert record.match_results["person_document_binding"] == "PASS"
+        assert record.match_results["document_authenticity"] == "NOT_CHECKED"
         profile = identity_service.get_profile(db_session, user.party_id)
-        assert (profile.state, profile.assurance_level, profile.verified_legal_name) == ("VERIFIED", "IV-1", "Asha Rao")
+        # The name is the one the person confirmed (not read from the document); the lowest assurance level.
+        assert (profile.state, profile.assurance_level, profile.verified_legal_name) == ("VERIFIED", "IV-0", "Asha Rao")
         assert idv_crud.get_verified_identity_for_party(db_session, user.party_id).id == sid
         assert idv_crud.get_valid_identity_credential(db_session, user.party_id) is not None
 
@@ -189,7 +187,7 @@ class TestVerification:
         assert profile.reverification_required_at is None
         assert db_session.get(IdentityVerification, sid).expires_at is None
 
-    def test_submitting_only_opens_veriff_and_never_verifies_by_itself(self, client, db_session: Session):
+    def test_submitting_only_opens_the_photo_step_and_never_verifies_by_itself(self, client, db_session: Session):
         user = _person(db_session, "idg-submit@test.com")
         _details(client, user)
         sid = _start(client, user).json()["id"]
@@ -197,13 +195,29 @@ class TestVerification:
         assert body["state"] == "IN_PROGRESS" and body["captureAvailable"] is True
         assert idv_crud.get_verified_identity_for_party(db_session, user.party_id) is None
 
-    def test_under_the_minimum_age_fails_without_opening_veriff(self, client, db_session: Session, veriff):
+    def test_under_the_minimum_age_fails_without_comparing_anything(self, client, db_session: Session, faces):
         user = _person(db_session, "idg-young@test.com")
         _details(client, user, dob=(date.today() - timedelta(days=365 * 15)).isoformat())
         sid = _start(client, user).json()["id"]
         body = _submit(client, user, sid).json()
         assert (body["state"], body["reasonCodes"]) == ("FAILED", ["AGE_REQUIREMENT_NOT_MET"])
-        assert not any(call[0] == "POST" for call in veriff.calls)
+        assert faces.calls == 0
+
+
+class TestAgeCorrection:
+    def test_a_mistyped_date_of_birth_can_be_corrected_and_the_check_restarted(self, client, db_session: Session):
+        user = _person(db_session, "idg-typo@test.com")
+        _details(client, user, dob=(date.today() - timedelta(days=365 * 2)).isoformat())  # typed 2 years ago by mistake
+        sid = _start(client, user).json()["id"]
+        assert _submit(client, user, sid).json()["state"] == "FAILED"
+        cookies = auth_user_cookie(user)
+        # Still under age on the account: restarting is refused.
+        assert client.post(f"{BASE}/verifications/{sid}/restart", cookies=cookies).status_code == 409
+        # Correct the date of birth, then the restart is allowed and the details can be confirmed again.
+        assert _details(client, user, dob="1990-05-01").status_code == 200
+        r = client.post(f"{BASE}/verifications/{sid}/restart", cookies=cookies)
+        assert r.status_code == 201, r.text
+        assert _submit(client, user, r.json()["id"]).json()["captureAvailable"] is True
 
 
 class TestSessionRules:
@@ -255,7 +269,7 @@ class TestReverification:
         assert r.json()["dashboard"]["primaryAction"] == "Verify again"
         assert idv_crud.get_verified_identity_for_party(db_session, user.party_id) is None
         assert idv_crud.get_valid_identity_credential(db_session, user.party_id) is None
-        # And they verify again with Veriff.
+        # And they verify again with a new face match.
         sid = _start(client, user).json()["id"]
         assert _submit(client, user, sid).json()["captureAvailable"] is True
         assert _decide(client, db_session, sid).session_state == "VERIFIED"
@@ -313,12 +327,13 @@ class TestPhoneHandoff:
 
 
 class TestPrivacy:
-    def test_the_full_document_number_is_never_stored_or_returned(self, client, db_session):
+    def test_the_photos_are_never_stored_and_no_document_number_exists(self, client, db_session, uploads):
         user, sid, record = _verified(client, db_session, "idg-privacy@test.com")
         assert record.encrypted_reference is None and record.document_file_path is None
+        assert not list(uploads.iterdir())  # nothing written to the secure evidence folder
         admin = _super_admin(db_session)
         listed = client.get("/api/identity-verifications", cookies=auth_admin_cookie(admin)).text
-        assert PASSPORT not in listed and "encryptedReference" not in listed
+        assert "encryptedReference" not in listed
         mine = client.get("/api/users/identity-verifications", cookies=auth_user_cookie(user)).text
         assert PASSPORT not in mine
         assert PASSPORT not in client.get(BASE, cookies=auth_user_cookie(user)).text
@@ -422,9 +437,10 @@ class TestAdminCase:
         assert r.status_code == 200, r.text
         body = r.json()
         assert (body["state"], body["roleContext"], body["countryCode"], body["providerCode"]) == (
-            "VERIFIED", "OWNER", "GB", "veriff")
+            "VERIFIED", "OWNER", "GB", "face_match")
         assert body["providerDecision"] == "approved"
-        assert body["checks"]["document_authenticity"] == "PASS"
+        assert body["checks"]["person_document_binding"] == "PASS"
+        assert body["checks"]["document_authenticity"] == "NOT_CHECKED"
         assert "escalated" not in body and "alternativeReason" not in body
         assert [h["eventType"] for h in body["history"]][-1] == "IDENTITY_VERIFIED"
         assert PASSPORT not in r.text

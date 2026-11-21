@@ -133,7 +133,7 @@ class IdentityVerification(Base):
     # period after the decision has passed; the decision, masked number and
     # hashes stay (services/identity/service.py:purge_expired_evidence).
     evidence_purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # ZR-IDV-ADR-001 Section 11 -- hosted provider (Veriff) session.
+    # Legacy: columns from the retired hosted-provider flow, kept so existing rows are not lost; no longer written.
     # The launch URL is Fernet-encrypted (it lets someone continue the
     # capture) and never logged; sessionToken is deliberately not stored.
     provider_session_url_encrypted: Mapped[str | None] = mapped_column(String(2048), nullable=True)

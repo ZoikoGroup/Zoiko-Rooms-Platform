@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -26,14 +26,28 @@ MAX_PUBLIC_LISTINGS_LIMIT = 100
 def get_exchange_rates():
     """Indicative rates so the Find a Room price filter can compare a £ room with a ₹ budget. Not
     live market rates, and never used for payments -- see app/core/fx.py."""
-    from app.core.fx import BASE_CURRENCY, usd_per_unit
+    from app.core.fx import BASE_CURRENCY, live_rates_as_of, usd_per_unit
 
     return {
         "base": BASE_CURRENCY,
         "usdPerUnit": usd_per_unit(),
-        "asOf": settings.fx_rates_as_of or None,
+        "asOf": settings.fx_rates_as_of or live_rates_as_of() or None,
         "indicative": True,
     }
+
+
+@router.get("/visitor-currency")
+def get_visitor_currency(
+    request: Request,
+    region: str | None = Query(default=None, max_length=2),
+    tz: str | None = Query(default=None, max_length=64),
+):
+    """The currency to offer price limits in, from the visitor's location (CDN country header, then IP
+    lookup, then the browser's time zone `tz` / language `region`). `currency` is null when nothing usable was found -- the page
+    then falls back to the currency of the rooms it is showing. Never used for payments."""
+    from app.core.visitor_currency import detect_visitor_currency
+
+    return detect_visitor_currency(request.headers, request.client.host if request.client else None, region, tz)
 
 
 @router.get("/listings", response_model=PublicListingsPage)

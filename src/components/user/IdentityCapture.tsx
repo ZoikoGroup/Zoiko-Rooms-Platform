@@ -1,60 +1,34 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Camera, CheckCircle2, RefreshCw, ShieldCheck, Upload } from "lucide-react";
+import { ArrowLeft, Camera, RefreshCw, ShieldCheck, Upload } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { documentTypeLabel } from "@/lib/identity-documents";
 import { IdentityDocumentType } from "@/lib/types";
 import { errorMessage } from "@/lib/user-api";
-import {
-  CaptureContext,
-  IdentityPack,
-  IdentitySession,
-  captureIdentityPhoto,
-  completeIdentityCapture,
-} from "@/lib/identity";
+import { IdentityPack, IdentitySession, submitFaceMatch } from "@/lib/identity";
 
 /**
- * ZR-IDV-ADR-001 capture, on Zoiko's own screens: choose the document,
- * photograph its front (and back where it has one), take a selfie, then
- * submit. Each photo goes to our backend, which relays it straight to Veriff
- * (never stored); Veriff decides. Nothing here can mark anyone verified.
+ * Identity check, on Zoiko's own screens: choose the document, photograph it (or upload a clear picture of it) so
+ * the face on it can be seen, take one selfie, then submit both together. The server compares the two faces and the
+ * result comes straight back. Nothing is read from the document, the photos are not stored, and nothing here can
+ * mark anyone verified -- only the server's comparison can.
  */
 
-type Phase = "document" | CaptureContext | "review";
+type Phase = "document" | "document-photo" | "selfie" | "review";
 
-const NO_BACK_SIDE = ["passport", "pan_card"];
-
-const PHASE_COPY: Record<CaptureContext, { title: string; hint: string; facing: "environment" | "user" }> = {
-  "document-front": {
-    title: "Photograph the front of your document",
-    hint: "Place the original document on a flat, dark surface. Fit all four corners in the frame -- no glare, no fingers over the text.",
-    facing: "environment",
+const PHASE_COPY = {
+  "document-photo": {
+    title: "Photograph your identity document",
+    hint: "Show the side with your photo. Place the original on a flat, dark surface, fit all four corners in the frame, and avoid glare. You can also upload a clear picture of it.",
+    facing: "environment" as const,
   },
-  "document-back": {
-    title: "Now the back of your document",
-    hint: "Turn the document over and fit all four corners in the frame.",
-    facing: "environment",
-  },
-  face: {
+  selfie: {
     title: "Take a selfie",
-    hint: "Face the camera in good light. Remove sunglasses or a hat, and keep a neutral expression.",
-    facing: "user",
+    hint: "Face the camera in good light, looking straight ahead. Remove sunglasses or a hat, and make sure only you are in the picture.",
+    facing: "user" as const,
   },
 };
-
-function needsBack(documentType: string): boolean {
-  return Boolean(documentType) && !NO_BACK_SIDE.includes(documentType);
-}
-
-function firstMissing(session: IdentitySession, documentType: string): Phase {
-  if (!documentType) return "document";
-  const done = new Set(session.captured);
-  if (!done.has("document-front")) return "document-front";
-  if (needsBack(documentType) && !done.has("document-back")) return "document-back";
-  if (!done.has("face")) return "face";
-  return "review";
-}
 
 export function IdentityCapture({ session: initial, pack, onSubmitted, onExit }: {
   session: IdentitySession;
@@ -62,46 +36,37 @@ export function IdentityCapture({ session: initial, pack, onSubmitted, onExit }:
   onSubmitted: (session: IdentitySession) => void;
   onExit: () => void;
 }) {
-  const [session, setSession] = useState(initial);
-  // A resubmission starts a fresh set of photos, but keeps the chosen document.
+  // After "we need clearer photos" the person starts the photos again, keeping the document they chose.
   const resubmitting = initial.state === "ACTION_REQUIRED";
   const [documentType, setDocumentType] = useState(initial.documentType || "");
-  const [phase, setPhase] = useState<Phase>(() =>
-    resubmitting ? (initial.documentType ? "document-front" : "document") : firstMissing(initial, initial.documentType || ""));
-  const [previews, setPreviews] = useState<Partial<Record<CaptureContext, string>>>({});
+  const [phase, setPhase] = useState<Phase>(initial.documentType ? "document-photo" : "document");
+  const [photos, setPhotos] = useState<{ document?: Blob; selfie?: Blob }>({});
+  const [previews, setPreviews] = useState<{ document?: string; selfie?: string }>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => () => Object.values(previews).forEach((url) => url && URL.revokeObjectURL(url)), [previews]);
 
-  const steps: Phase[] = ["document", "document-front", ...(needsBack(documentType) ? ["document-back" as const] : []), "face", "review"];
+  const steps: Phase[] = ["document", "document-photo", "selfie", "review"];
   const position = Math.max(0, steps.indexOf(phase));
 
-  async function send(context: CaptureContext, photo: Blob) {
-    setBusy(true);
-    setError("");
-    try {
-      const updated = await captureIdentityPhoto(session.id, context, photo, context === "document-front" ? documentType : "");
-      setSession(updated);
-      setPreviews((current) => {
-        if (current[context]) URL.revokeObjectURL(current[context]!);
-        return { ...current, [context]: URL.createObjectURL(photo) };
-      });
-      setPhase(firstMissing({ ...updated, captured: updated.captured }, documentType));
-    } catch (err) {
-      setError(errorMessage(err, "We couldn't use this photo. Please try again."));
-    } finally {
-      setBusy(false);
-    }
+  function keep(kind: "document" | "selfie", photo: Blob) {
+    setPhotos((current) => ({ ...current, [kind]: photo }));
+    setPreviews((current) => {
+      if (current[kind]) URL.revokeObjectURL(current[kind]!);
+      return { ...current, [kind]: URL.createObjectURL(photo) };
+    });
+    setPhase(kind === "document" ? "selfie" : "review");
   }
 
   async function submit() {
+    if (!photos.document || !photos.selfie) return;
     setBusy(true);
     setError("");
     try {
-      onSubmitted(await completeIdentityCapture(session.id));
+      onSubmitted(await submitFaceMatch(initial.id, documentType, photos.document, photos.selfie));
     } catch (err) {
-      setError(errorMessage(err, "We couldn't submit your photos. Please try again."));
+      setError(errorMessage(err, "We couldn't check your photos. Please try again."));
     } finally {
       setBusy(false);
     }
@@ -110,58 +75,55 @@ export function IdentityCapture({ session: initial, pack, onSubmitted, onExit }:
   return (
     <div className="space-y-4">
       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-        Photo {Math.min(position, steps.length - 2) || 1} of {steps.length - 2}
+        Step {position + 1} of {steps.length}
       </p>
       {error && (
         <div role="alert" className="rounded-xl bg-accent-50 px-4 py-3 text-sm text-accent-700 ring-1 ring-accent-200 dark:bg-accent-500/10 dark:text-accent-300 dark:ring-accent-500/20">
           {error}
         </div>
       )}
-      {resubmitting && phase !== "review" && session.message && (
-        <div className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">{session.message}</div>
+      {resubmitting && phase !== "review" && initial.message && (
+        <div className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">{initial.message}</div>
       )}
 
       {phase === "document" && (
-        <DocumentChoice
-          pack={pack} value={documentType} onChange={setDocumentType} onBack={onExit}
-          onNext={() => setPhase("document-front")}
-        />
+        <DocumentChoice pack={pack} value={documentType} onChange={setDocumentType} onBack={onExit}
+          onNext={() => setPhase("document-photo")} />
       )}
 
-      {(phase === "document-front" || phase === "document-back" || phase === "face") && (
+      {(phase === "document-photo" || phase === "selfie") && (
         <CameraCapture
           key={phase}
           title={PHASE_COPY[phase].title}
           hint={PHASE_COPY[phase].hint}
           facing={PHASE_COPY[phase].facing}
-          frame={phase === "face" ? "face" : "document"}
+          frame={phase === "selfie" ? "face" : "document"}
+          allowUpload={phase === "document-photo"}
           busy={busy}
-          onBack={() => setPhase(phase === "document-front" ? "document" : phase === "document-back" ? "document-front"
-            : needsBack(documentType) ? "document-back" : "document-front")}
-          onPhoto={(photo) => void send(phase, photo)}
+          onBack={() => setPhase(phase === "document-photo" ? "document" : "document-photo")}
+          onPhoto={(photo) => keep(phase === "selfie" ? "selfie" : "document", photo)}
         />
       )}
 
       {phase === "review" && (
         <div className="space-y-4">
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            Check your photos are sharp and readable, then submit. Our verification partner checks that your
-            {" "}{documentTypeLabel[documentType as IdentityDocumentType] ?? "document"} is genuine and that it&apos;s you.
+            Check that your face is clearly visible in both pictures, then submit. We compare the face on your
+            {" "}{documentTypeLabel[documentType as IdentityDocumentType] ?? "document"} with your selfie.
           </p>
-          <div className="grid gap-3 sm:grid-cols-3">
-            {(["document-front", ...(needsBack(documentType) ? ["document-back"] : []), "face"] as CaptureContext[]).map((context) => (
-              <figure key={context} className="space-y-1">
+          <div className="grid gap-3 sm:grid-cols-2">
+            {(["document", "selfie"] as const).map((kind) => (
+              <figure key={kind} className="space-y-1">
                 <div className="flex aspect-[4/3] items-center justify-center overflow-hidden rounded-xl bg-slate-100 dark:bg-slate-800">
-                  {previews[context] ? (
+                  {previews[kind] && (
                     // eslint-disable-next-line @next/next/no-img-element -- local blob preview; next/image cannot load it
-                    <img src={previews[context]} alt="" className="h-full w-full object-cover" />
-                  ) : (
-                    <CheckCircle2 className="h-8 w-8 text-emerald-600" aria-hidden="true" />
+                    <img src={previews[kind]} alt="" className="h-full w-full object-cover" />
                   )}
                 </div>
                 <figcaption className="flex items-center justify-between text-xs text-slate-500">
-                  {context === "face" ? "Selfie" : context === "document-front" ? "Front" : "Back"}
-                  <button type="button" className="font-semibold text-primary-700 hover:underline dark:text-primary-300" onClick={() => setPhase(context)}>
+                  {kind === "selfie" ? "Selfie" : "Identity document"}
+                  <button type="button" className="font-semibold text-primary-700 hover:underline dark:text-primary-300"
+                    onClick={() => setPhase(kind === "selfie" ? "selfie" : "document-photo")}>
                     Retake
                   </button>
                 </figcaption>
@@ -170,11 +132,11 @@ export function IdentityCapture({ session: initial, pack, onSubmitted, onExit }:
           </div>
           <p className="flex items-start gap-2 text-xs text-slate-500">
             <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-            Your photos are sent securely to our verification partner and are not stored by Zoiko Rooms.
+            Your photos are compared on our server and are not stored.
           </p>
           <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-between">
-            <Button variant="ghost" onClick={() => setPhase("face")}><ArrowLeft className="h-4 w-4" aria-hidden="true" /> Back</Button>
-            <Button loading={busy} onClick={() => void submit()}>Submit for verification</Button>
+            <Button variant="ghost" disabled={busy} onClick={() => setPhase("selfie")}><ArrowLeft className="h-4 w-4" aria-hidden="true" /> Back</Button>
+            <Button loading={busy} onClick={() => void submit()}>Verify my identity</Button>
           </div>
         </div>
       )}
@@ -195,11 +157,10 @@ function DocumentChoice({ pack, value, onChange, onBack, onNext }: {
           }`}>
             <input type="radio" name="identity-document" checked={value === type} onChange={() => onChange(type)} />
             <span className="text-primary-900 dark:text-white">{documentTypeLabel[type as IdentityDocumentType] ?? type}</span>
-            {!needsBack(type) && <span className="text-xs text-slate-400">front only</span>}
           </label>
         ))}
       </fieldset>
-      <p className="text-xs text-slate-500">Use the original document -- not a photocopy, a screenshot or a photo of a screen.</p>
+      <p className="text-xs text-slate-500">Choose a document with your photo on it. Only the face on it is compared with your selfie.</p>
       <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-between">
         <Button variant="ghost" onClick={onBack}><ArrowLeft className="h-4 w-4" aria-hidden="true" /> Save and exit</Button>
         <Button disabled={!value} onClick={onNext}><Camera className="h-4 w-4" aria-hidden="true" /> Continue</Button>
@@ -210,8 +171,8 @@ function DocumentChoice({ pack, value, onChange, onBack, onNext }: {
 
 /** Live camera with a framing guide; falls back to the device's camera app
  *  (file input with `capture`) when the browser can't open the camera. */
-function CameraCapture({ title, hint, facing, frame, busy, onBack, onPhoto }: {
-  title: string; hint: string; facing: "environment" | "user"; frame: "document" | "face"; busy: boolean;
+function CameraCapture({ title, hint, facing, frame, allowUpload = false, busy, onBack, onPhoto }: {
+  title: string; hint: string; facing: "environment" | "user"; frame: "document" | "face"; allowUpload?: boolean; busy: boolean;
   onBack: () => void; onPhoto: (photo: Blob) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -337,10 +298,16 @@ function CameraCapture({ title, hint, facing, frame, busy, onBack, onPhoto }: {
             </>
           ) : (
             <>
+              {allowUpload && (
+                <label className="relative inline-flex cursor-pointer items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-primary-700 ring-1 ring-primary-200 focus-within:ring-2 focus-within:ring-primary-400 dark:text-primary-300 dark:ring-primary-500/30">
+                  <Upload className="h-4 w-4" aria-hidden="true" /> Upload a picture
+                  <input type="file" accept="image/jpeg,image/png" className="absolute inset-0 h-full w-full cursor-pointer opacity-0" onChange={fromDeviceCamera} />
+                </label>
+              )}
               {cameraState !== "live" && (
-                <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-primary-700 ring-1 ring-primary-200 focus-within:ring-2 focus-within:ring-primary-400 dark:text-primary-300 dark:ring-primary-500/30">
+                <label className="relative inline-flex cursor-pointer items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-primary-700 ring-1 ring-primary-200 focus-within:ring-2 focus-within:ring-primary-400 dark:text-primary-300 dark:ring-primary-500/30">
                   <Upload className="h-4 w-4" aria-hidden="true" /> Use device camera
-                  <input type="file" accept="image/jpeg,image/png" capture={facing} className="sr-only" onChange={fromDeviceCamera} />
+                  <input type="file" accept="image/jpeg,image/png" capture={facing} className="absolute inset-0 h-full w-full cursor-pointer opacity-0" onChange={fromDeviceCamera} />
                 </label>
               )}
               {cameraState === "unavailable" && (

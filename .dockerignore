@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.claude
+backend
+standalone
+docs
+*.md
+tsconfig.tsbuildinfo
+.env
+# .env.local is kept on purpose: it holds only the public (browser) Google Maps key, which is baked into the bundle anyway.

@@ -1,10 +1,8 @@
 /**
- * ZR-IDENTITY-001 / ZR-IDV-ADR-001 identity verification -- types and API
- * client for the person's flow (/api/users/identity) and the admin case
- * view. The document and selfie are photographed in Zoiko's own capture
- * screens; each photo goes from our backend straight to Veriff (never
- * stored) and only Veriff's decision can verify someone -- there is no
- * manual-review route. The client never decides whether someone is verified.
+ * Identity verification -- types and API client for the person's flow (/api/users/identity) and the admin case
+ * view. The person uploads a photo of their identity document and takes one selfie; the server compares the two
+ * faces (it never stores the photos) and, if they match, the identity is verified. Nothing is read from the
+ * document and there is no liveness test. The client never decides whether someone is verified.
  */
 
 import { apiClientFetch } from "@/lib/api-client";
@@ -24,14 +22,12 @@ export type IdentityState =
 export type IdentityMethod = "DOCUMENT";
 export type IdentityRole = "OWNER" | "AGENT" | "SUBLETTER";
 
-/** A provider (Veriff) session decides the verification. */
-export type CaptureMode = "PROVIDER_HOSTED";
-/** The photos taken in Zoiko's capture screens (Veriff media contexts). */
-export type CaptureContext = "document-front" | "document-back" | "face";
+/** The server compares the face on the document photo with the selfie. */
+export type CaptureMode = "FACE_MATCH";
 
 export interface IdentityPack {
   captureMode: CaptureMode;
-  /** False when Veriff isn't configured / enabled: nobody can verify now. */
+  /** False when the face models aren't installed on the server: nobody can verify right now. */
   providerAvailable: boolean;
   selfieCheck: boolean;
   countryCode: string;
@@ -67,12 +63,8 @@ export interface IdentitySession {
   reasonCodes: string[];
   message: string;
   actions: string[];
-  /** Photos can be taken now (in progress, or Veriff asked for new ones). */
+  /** The document photo and selfie can be submitted now (details confirmed; in progress or asked for clearer photos). */
   captureAvailable: boolean;
-  /** Which photos were already sent to Veriff for this attempt. */
-  captured: CaptureContext[];
-  /** The chosen document has a back side Veriff needs. */
-  backRequired: boolean;
   canRestart: boolean;
   createdAt: string;
   submittedAt: string | null;
@@ -149,27 +141,18 @@ export function submitIdentitySession(id: number, attested: boolean): Promise<Id
   });
 }
 
-/** Send one photo from the capture screen; the backend relays it straight
- *  to Veriff. `documentType` is required with the document's front. */
-export function captureIdentityPhoto(id: number, context: CaptureContext, photo: Blob, documentType = ""): Promise<IdentitySession> {
+/** THE identity check: send the photo of the identity document and the selfie together. The server compares the
+ *  two faces (nothing is stored) and the result is in the response: VERIFIED, ACTION_REQUIRED (clearer photos
+ *  needed) or FAILED. */
+export function submitFaceMatch(id: number, documentType: string, document: Blob, selfie: Blob): Promise<IdentitySession> {
   const form = new FormData();
-  form.append("context", context);
   form.append("document_type", documentType);
-  form.append("file", photo, photo.type === "image/png" ? "photo.png" : "photo.jpg");
-  return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/capture`, { method: "POST", body: form });
+  form.append("document", document, document.type === "image/png" ? "document.png" : "document.jpg");
+  form.append("selfie", selfie, selfie.type === "image/png" ? "selfie.png" : "selfie.jpg");
+  return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/face-match`, { method: "POST", body: form });
 }
 
-/** All photos taken: Veriff starts deciding. The result arrives later. */
-export function completeIdentityCapture(id: number): Promise<IdentitySession> {
-  return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/complete`, { method: "POST" });
-}
-
-/** Ask the server to check with the provider for a decision (rate-limited). */
-export function refreshIdentitySession(id: number): Promise<IdentitySession> {
-  return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/refresh`, { method: "POST" });
-}
-
-/** A new attempt after an expired, abandoned or declined one. */
+/** A new attempt after a declined one. */
 export function restartIdentitySession(id: number): Promise<IdentitySession> {
   return apiClientFetch<IdentitySession>(`${BASE}/verifications/${id}/restart`, { method: "POST" });
 }
@@ -182,7 +165,7 @@ export function claimIdentityHandoff(token: string): Promise<IdentitySession> {
   return apiClientFetch<IdentitySession>(`${BASE}/handoff/claim`, { method: "POST", body: JSON.stringify({ token }) });
 }
 
-// --- Admin case view (read-only: Veriff decides) -------------------------------
+// --- Admin case view (read-only: the face match decides) -------------------------------
 
 export interface IdentityCaseHistoryItem {
   eventType: string;
@@ -251,25 +234,6 @@ export interface IdentityMetrics {
   timeToDecisionHours: { median: number | null; p90: number | null };
   byMethod: Record<string, { submitted: number; verified: number }>;
   reasonCodes: Record<string, number>;
-  providerOutcomes: Record<string, number>;
-  providerSessionsCreated: number;
-  webhookAuthFailures: number;
-  webhookEvents: number;
-  webhookDuplicateRate: number | null;
-  webhookProcessingLagSeconds: number | null;
-  webhookUnprocessed: number;
-  webhookFailed: number;
-  reconciledSessions: number;
-  staleSessions: number;
-  /** Null until VERIFF_COST_PER_SESSION is configured. */
-  providerCost: {
-    currency: string;
-    perSession: number;
-    sessions: number;
-    total: number;
-    perCompletedVerification: number | null;
-    perApprovedAccount: number | null;
-  } | null;
 }
 
 export interface IdentityPackAdmin extends IdentityPack {
@@ -282,7 +246,7 @@ export interface IdentityPackAdmin extends IdentityPack {
 }
 
 export const PROVIDER_OPTIONS: { value: string; label: string }[] = [
-  { value: "veriff", label: "Veriff (document + selfie)" },
+  { value: "face_match", label: "Face match (document photo + selfie)" },
 ];
 
 export function listIdentityPacks(): Promise<IdentityPackAdmin[]> {
@@ -296,11 +260,7 @@ export function updateIdentityPack(id: number, changes: Partial<Record<string, u
   });
 }
 
-export function reconcileIdentityCase(id: number): Promise<{ result: string }> {
-  return apiClientFetch(`/api/identity-verifications/${id}/reconcile`, { method: "POST" });
-}
-
-export function eraseIdentityData(partyId: number, reason: string): Promise<{ sessions: number; providerDeleted: number; providerFailed: number }> {
+export function eraseIdentityData(partyId: number, reason: string): Promise<{ sessions: number }> {
   return apiClientFetch(`/api/identity-verifications/parties/${partyId}/erase`, {
     method: "POST",
     body: JSON.stringify({ reason }),
@@ -357,68 +317,8 @@ export const roleLabel: Record<IdentityRole, string> = {
 };
 
 export const remediationLabel: Record<string, string> = {
-  RETRY_CAPTURE: "Take new photos of your document and a selfie",
+  RETRY_CAPTURE: "Take a new photo of your document and a new selfie",
   EDIT_DETAILS: "Review your details",
   CONTACT_SUPPORT: "Contact support",
   TRY_LATER: "Try again later",
 };
-
-// --- Veriff go-live readiness (ZR-IDV-ADR-001 Sections 15 / 17) ---------------------
-
-export interface VeriffReadiness {
-  provider: string;
-  integration: string;
-  isProduction: boolean;
-  plan: "decision" | "full_auto" | string;
-  enabled: boolean;
-  disabledReason: string;
-  webhookUrls: { decision: string; events: string; fullAuto: string };
-  checks: { code: string; label: string; ok: boolean }[];
-  lastConnectionTest: { ok: boolean; detail: string; at: string; integration: string } | null;
-  lastAuthenticatedWebhookAt: string | null;
-  lastRejectedWebhookAt: string | null;
-  gates: {
-    code: string;
-    label: string;
-    confirmed: boolean;
-    confirmedAt: string | null;
-    confirmedByAdminId: number | null;
-    evidenceReference: string;
-    note: string;
-  }[];
-}
-
-export interface ReasonMapping {
-  id: number;
-  providerCode: string;
-  providerDecision: string;
-  providerReasonCode: string;
-  zoikoReasonCode: string;
-  description: string;
-}
-
-export function getVeriffReadiness(): Promise<VeriffReadiness> {
-  return apiClientFetch<VeriffReadiness>(`/api/identity-verifications/providers/veriff/readiness`);
-}
-
-export function setVeriffGate(code: string, confirmed: boolean, evidenceReference: string, note: string): Promise<VeriffReadiness> {
-  return apiClientFetch<VeriffReadiness>(`/api/identity-verifications/providers/veriff/gates/${code}`, {
-    method: "PUT",
-    body: JSON.stringify({ confirmed, evidenceReference, note }),
-  });
-}
-
-export function runVeriffConnectionTest(): Promise<VeriffReadiness> {
-  return apiClientFetch<VeriffReadiness>(`/api/identity-verifications/providers/veriff/connection-test`, { method: "POST" });
-}
-
-export function listReasonMappings(): Promise<ReasonMapping[]> {
-  return apiClientFetch<ReasonMapping[]>(`/api/identity-verifications/providers/reason-mappings`);
-}
-
-export function upsertReasonMapping(mapping: Omit<ReasonMapping, "id">): Promise<ReasonMapping> {
-  return apiClientFetch<ReasonMapping>(`/api/identity-verifications/providers/reason-mappings`, {
-    method: "PUT",
-    body: JSON.stringify(mapping),
-  });
-}

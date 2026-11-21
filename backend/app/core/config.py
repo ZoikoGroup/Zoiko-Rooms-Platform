@@ -58,38 +58,18 @@ class Settings(BaseSettings):
     # `python -c "from cryptography.fernet import Fernet;
     # print(Fernet.generate_key().decode())"` for any real deployment.
     field_encryption_key: str = DEV_FIELD_ENCRYPTION_KEY
-    # ZR-IDV-ADR-001: Veriff, the primary identity provider (Document + Selfie
-    # IDV). Credentials come only from the environment / secret store -- a
-    # separate integration per environment, rotated without code changes,
-    # never sent to a browser or app. Blank = Veriff not configured.
-    veriff_api_key: str = ""
-    veriff_shared_secret: str = ""
-    veriff_base_url: str = "https://stationapi.veriff.com"
-    # Non-secret label for which integration this is ("sandbox" / "production").
-    veriff_integration_id: str = "sandbox"
-    veriff_timeout_seconds: float = 10.0
-    # Hosted sessions with no decision after this long are reconciled against
-    # Veriff's decision API (Section 8 / 13).
-    veriff_reconcile_after_minutes: int = 60
-    # Which result webhook the contracted Veriff plan provides (ADR Section 2):
-    # "decision" (Plus / Premium -- Decision Webhook) or "full_auto" (Essential).
-    veriff_plan: str = "decision"
-    # Optional extra control on the Veriff webhooks (ADR Section 8): comma-
-    # separated IPs / CIDR ranges Veriff publishes. Blank = no IP filter. It
-    # never replaces the HMAC check -- both must pass.
-    veriff_webhook_allowed_ips: str = ""
-    # How many reverse proxies sit in front of the API and append to
-    # X-Forwarded-For. 0 = use the direct peer address. Only used for the
-    # allow-list above, so the caller's address can't be spoofed by a header.
-    veriff_webhook_trusted_proxy_hops: int = 0
-    # Contracted price per Veriff session, for the cost-per-verification
-    # metric (ADR Section 14). 0 = not reported.
-    veriff_cost_per_session: float = 0.0
-    veriff_cost_currency: str = "EUR"
-    # (The webhook URLs on the readiness page are built from public_api_url.)
+    # Identity verification is a face match run on this server (services/identity/face_match.py): the selfie is
+    # compared with the face on the uploaded identity document. Same-person scores are cosine similarities
+    # (OpenCV SFace): at or above `face_match_pass` the identity is verified; below `face_match_fail` the faces are
+    # clearly different (declined); in between the person is asked to retake the photos. Calibrate on your own
+    # photos: a genuine selfie against a small printed ID photo commonly scores 0.4-0.6.
+    face_match_pass: float = 0.40
+    face_match_fail: float = 0.25
+    # ONNX models (run `python download_face_models.py`); relative paths are from the backend folder.
+    face_detector_model: str = "models/yunet.onnx"
+    face_recognizer_model: str = "models/sface.onnx"
     # Provider written into new country packs; packs are edited afterwards.
-    # Veriff is the only identity provider (no manual or built-in route).
-    identity_default_provider: str = "veriff"
+    identity_default_provider: str = "face_match"
     # Comma-separated allow-list. Includes the authenticated platform frontend
     # and the public marketing site (local dev + deployed) so the anonymous
     # assistant widget can call /api/public/assistant cross-origin.
@@ -258,13 +238,27 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:3000"
     # Site address put in links inside emails (password reset, confirmations, "open the website"
     # buttons). Empty = the live site (app.zoikorooms.com). Kept apart from frontend_url because that one is also where
-    # Stripe and Veriff send people back to, which has to stay on the machine running the app.
+    # Stripe sends people back to, which has to stay on the machine running the app.
     public_site_url: str = ""
     # Indicative exchange-rate overrides for the Find a Room price filter (see app/core/fx.py):
     # a JSON object of US dollars per unit, e.g. {"GBP": 1.31, "INR": 0.0118}. Empty = built-in defaults.
     fx_rates_json: str = ""
     # When those rates were last checked, shown to visitors (free text, e.g. "2026-10-29").
     fx_rates_as_of: str = ""
+    # Find a Room price filter: where to look up a visitor's country from their IP when the host/CDN sends no
+    # country header (see app/core/visitor_currency.py). "{ip}" is replaced; the response must be the plain
+    # 2-letter country code. The visitor's IP is sent to this service -- set it empty to switch lookups off
+    # (the browser's language region is then used instead).
+    ip_geolocation_url: str = "https://ipapi.co/{ip}/country/"
+    # Tried when the first lookup fails. Plain 2-letter code or JSON with country / country_code / countryCode.
+    ip_geolocation_fallback_url: str = "https://api.country.is/{ip}"
+    # Offline IP -> country database (DB-IP Lite, CC BY 4.0 -- needs the attribution link shown on the Find a
+    # Room page). Checked BEFORE any online lookup, so the visitor's IP stays on our server. Download/refresh it
+    # with `python update_geoip.py`; if the file is missing the online lookups are used instead.
+    geoip_database_path: str = "data/geoip/dbip-country-lite.mmdb"
+    # Live indicative exchange rates for the price filter (Frankfurter, then open.er-api.com). Off = built-in table.
+    fx_live_enabled: bool = True
+    fx_live_refresh_hours: int = 12
     password_reset_token_expire_minutes: int = 30
 
     llm_provider: str = "groq"
@@ -442,7 +436,12 @@ class Settings(BaseSettings):
         machine that sent it, so a localhost link is never useful. Only an explicit PUBLIC_SITE_URL that is a
         public https address (e.g. a staging site) overrides it; FRONTEND_URL is never used for emails."""
         url = self.public_site_url.strip().rstrip("/")
-        if url.startswith("https://") and "localhost" not in url and "127.0.0.1" not in url:
+        is_local = "localhost" in url or "127.0.0.1" in url
+        if url.startswith("https://") and not is_local:
+            return url
+        # Local dev only: an explicit http://localhost PUBLIC_SITE_URL makes email links (password reset,
+        # confirm email, ...) open the local frontend. Never honoured in production, which always gets the live site.
+        if is_local and url.startswith(("http://", "https://")) and not self.is_production:
             return url
         return PRODUCTION_SITE_URL
 
@@ -481,7 +480,7 @@ class Settings(BaseSettings):
             logger.warning("stripe (test mode, not enforced): %s", gap)
         return []
 
-    @field_validator("veriff_api_key", "veriff_shared_secret", "google_maps_api_key", "mapbox_access_token",
+    @field_validator("google_maps_api_key", "mapbox_access_token",
                      "here_api_key", "public_search_service_token", "parallel_api_key", "tinyfish_api_key",
                      "brave_search_api_key", "rentcast_api_key", "domain_api_key", mode="before")
     @classmethod
@@ -546,25 +545,12 @@ class Settings(BaseSettings):
         return self
 
     def _identity_production_problems(self) -> list[str]:
-        """ZR-IDV-ADR-001 Sections 12 / 17: identity verification settings
-        that must be right before production traffic."""
+        """Identity (face match) settings that must be right before production traffic."""
         problems = []
-        if self.identity_default_provider != "veriff":
-            problems.append("IDENTITY_DEFAULT_PROVIDER must be 'veriff'")
-        if self.veriff_webhook_trusted_proxy_hops < 0:
-            problems.append("VERIFF_WEBHOOK_TRUSTED_PROXY_HOPS must be 0 or more")
-        if self.veriff_plan not in ("decision", "full_auto"):
-            problems.append("VERIFF_PLAN must be 'decision' or 'full_auto'")
-        veriff_keys = bool(self.veriff_api_key) + bool(self.veriff_shared_secret)
-        if veriff_keys == 1:
-            problems.append("VERIFF_API_KEY and VERIFF_SHARED_SECRET must be set together")
-        if self.veriff_integration_id == "production" and veriff_keys != 2:
-            problems.append("VERIFF_INTEGRATION_ID=production needs VERIFF_API_KEY and VERIFF_SHARED_SECRET")
-        if veriff_keys == 2:
-            if not self.veriff_base_url.startswith("https://"):
-                problems.append("VERIFF_BASE_URL must be https")
-            if not self.public_api_url.startswith("https://"):
-                problems.append("PUBLIC_API_URL must be the public https URL Veriff sends webhooks to")
+        if self.identity_default_provider != "face_match":
+            problems.append("IDENTITY_DEFAULT_PROVIDER must be 'face_match'")
+        if not (0.0 < self.face_match_fail < self.face_match_pass < 1.0):
+            problems.append("FACE_MATCH_FAIL must be above 0 and below FACE_MATCH_PASS, which must be below 1")
         return problems
 
     @property

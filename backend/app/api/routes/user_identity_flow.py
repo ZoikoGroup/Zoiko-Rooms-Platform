@@ -1,16 +1,12 @@
-"""ZR-IDENTITY-001 Section 8.3 / ZR-IDV-ADR-001 -- the person's identity
-verification flow: profile + details, country policy, sessions (create /
-reuse, attest, capture photos, complete, refresh, restart, resume / phone
-handoff) and Veriff's webhooks. The document and selfie are photographed in
-Zoiko's own screens and each photo is relayed straight to Veriff (never
-stored); Veriff decides and no person at Zoiko reviews it. Every status
-returned is server-authoritative."""
+"""ZR-IDENTITY-001 Section 8.3 -- the person's identity verification flow: profile + details, country policy, sessions
+(create / reuse, attest, restart, resume / phone handoff) and the face match. The person uploads a photo of their
+identity document and takes one selfie; the server compares the two faces (never storing the photos) and, if they
+match, the identity is verified. No person at Zoiko reviews it. Every status returned is server-authoritative."""
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.core.config import settings
 from app.core.correlation import get_correlation_id
 from app.db.session import get_db
 from app.models.identity_profile import IdentityProfile
@@ -43,8 +39,6 @@ def session_read(session: IdentityVerification) -> dict:
     )
     return {
         "capture_available": identity_service.capture_open(session),
-        "captured": identity_service.captured_contexts(session),
-        "back_required": identity_service.back_side_required(session.document_type),
         "can_restart": restartable and "AGE_REQUIREMENT_NOT_MET" not in (session.reason_codes or []),
         "id": session.id,
         "state": session.session_state,
@@ -158,37 +152,27 @@ def post_identity_submit(
     ))
 
 
-@router.post("/verifications/{session_id}/capture", response_model=IdentitySessionRead)
-async def post_identity_capture(
+
+
+
+
+
+
+@router.post("/verifications/{session_id}/face-match", response_model=IdentitySessionRead)
+async def post_identity_face_match(
     session_id: int, request: Request,
-    context: str = Form(...), document_type: str = Form(""), file: UploadFile = File(...),
+    document_type: str = Form(...), document: UploadFile = File(...), selfie: UploadFile = File(...),
     user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    """One photo (document-front / document-back / face) taken in Zoiko's
-    capture screen. It goes straight to Veriff -- never to disk or the
-    database."""
+    """THE identity check. The photo of the identity document and the selfie arrive together; the server compares
+    the two faces in memory (nothing is stored) and the result is in the response: VERIFIED, ACTION_REQUIRED
+    (clearer photos needed) or FAILED. Only the face match is checked."""
     session = identity_service.get_session_for_user(db, user, session_id)
-    content = await file.read(10 * 1024 * 1024 + 1)
-    return session_read(identity_service.capture_photo(
-        db, user, session, context=context, content=content, document_type=document_type,
-        correlation_id=get_correlation_id(request),
+    max_bytes = 10 * 1024 * 1024 + 1
+    return session_read(identity_service.verify_faces(
+        db, user, session, document_photo=await document.read(max_bytes), selfie=await selfie.read(max_bytes),
+        document_type=document_type, correlation_id=get_correlation_id(request),
     ))
-
-
-@router.post("/verifications/{session_id}/complete", response_model=IdentitySessionRead)
-def post_identity_complete(
-    session_id: int, request: Request, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db),
-):
-    """All photos taken: Veriff starts deciding (result by webhook / decision API)."""
-    session = identity_service.get_session_for_user(db, user, session_id)
-    return session_read(identity_service.complete_capture(db, user, session, correlation_id=get_correlation_id(request)))
-
-
-@router.post("/verifications/{session_id}/refresh", response_model=IdentitySessionRead)
-def post_identity_refresh(session_id: int, user: UserAccount = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Check with the provider whether a decision is in (rate-limited)."""
-    session = identity_service.get_session_for_user(db, user, session_id)
-    return session_read(identity_service.refresh_from_provider(db, user, session))
 
 
 @router.post("/verifications/{session_id}/restart", response_model=IdentitySessionRead, status_code=status.HTTP_201_CREATED)
@@ -216,65 +200,18 @@ def post_identity_handoff_claim(
     return session_read(identity_service.claim_handoff_token(db, user, payload.token))
 
 
-def _client_ip(request: Request) -> str:
-    """The webhook caller's address for the optional IP allow-list. Behind
-    N trusted proxies it's the N-th address from the right of
-    X-Forwarded-For (the ones those proxies appended), so a caller can't
-    choose it by sending the header themselves."""
-    hops = settings.veriff_webhook_trusted_proxy_hops
-    if hops > 0:
-        chain = [part.strip() for part in request.headers.get("x-forwarded-for", "").split(",") if part.strip()]
-        if len(chain) >= hops:
-            return chain[-hops]
-        return ""
-    return request.client.host if request.client else ""
 
 
-def _process_events_later(app, event_ids: list[int], correlation_id: str) -> None:
-    """Runs after the acknowledgement is sent (ADR Section 8: authenticate,
-    persist, acknowledge, then process). Uses its own database session; an
-    event that fails here stays "accepted" for the scheduled sweeper."""
-    session_factory = app.dependency_overrides.get(get_db, get_db)
-    sessions = session_factory()
-    db = next(sessions)
-    try:
-        identity_service.process_webhook_events(db, event_ids, correlation_id=correlation_id)
-    finally:
-        sessions.close()
 
 
-async def _ingest(request: Request, background: BackgroundTasks, db: Session, provider_code: str, kind: str) -> dict:
-    body = await request.body()  # the exact raw bytes, for the HMAC check
-    correlation_id = get_correlation_id(request)
-    result = identity_service.ingest_webhook(
-        db, provider_code, dict(request.headers), body, kind=kind, client_ip=_client_ip(request),
-        correlation_id=correlation_id,
-    )
-    event_ids = result.pop("event_ids")
-    if event_ids:
-        background.add_task(_process_events_later, request.app, event_ids, correlation_id)
-    return result
 
 
-# ZR-IDV-ADR-001 Section 10: Veriff's decision and event webhooks.
-veriff_webhook_router = APIRouter(prefix="/api/v1/webhooks/veriff", tags=["identity-webhooks"])
 
 
-@veriff_webhook_router.post("/decision")
-async def post_veriff_decision(request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
-    return await _ingest(request, background, db, "veriff", "decision")
 
 
-@veriff_webhook_router.post("/full-auto")
-async def post_veriff_full_auto(request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
-    """Essential-plan "Full Auto" result webhook (used when VERIFF_PLAN=full_auto)."""
-    return await _ingest(request, background, db, "veriff", "full_auto")
 
 
-@veriff_webhook_router.post("/events")
-async def post_veriff_events(request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
-    """Progress only (started / submitted) -- never a verification decision."""
-    return await _ingest(request, background, db, "veriff", "events")
 
 
 # ZR-IDV-ADR-001 Section 10 internal API contract, at the paths the ADR names.

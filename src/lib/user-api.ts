@@ -2033,3 +2033,22 @@ export interface ExchangeRates {
 export function getExchangeRates(): Promise<ExchangeRates> {
   return apiClientFetch<ExchangeRates>("/api/public/exchange-rates");
 }
+
+// --- Visitor currency (Find a Room price filter) ---
+
+export interface VisitorCurrency {
+  /** ISO currency the visitor most likely thinks in, or null when it couldn't be worked out. */
+  currency: string | null;
+  country: string | null;
+  source: "header" | "ip" | "browser" | null;
+}
+
+/** Detected from the visitor's location (not fixed to any currency). `region` is the browser's language
+ *  region and `tz` its time zone -- only used by the server when the IP can't say (e.g. local development). */
+export function getVisitorCurrency(region?: string, tz?: string): Promise<VisitorCurrency> {
+  const params = new URLSearchParams();
+  if (region && /^[A-Za-z]{2}$/.test(region)) params.set("region", region.toUpperCase());
+  if (tz && tz.length <= 64) params.set("tz", tz);
+  const query = params.toString();
+  return apiClientFetch<VisitorCurrency>(`/api/public/visitor-currency${query ? `?${query}` : ""}`);
+}

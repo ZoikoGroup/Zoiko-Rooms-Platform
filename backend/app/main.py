@@ -111,6 +111,11 @@ async def lifespan(_app: FastAPI):
 
         assert_protocol_invariants()  # ZR-AI-SEARCH-001 Appendix A
     task = asyncio.create_task(_scheduler_loop()) if settings.scheduler_enabled else None
+    # Fetch the free live exchange rates in the background now, so the first visitor already gets them
+    # (the Find a Room price filter; falls back to the built-in rates if every source is down).
+    from app.core.fx import usd_per_unit
+
+    usd_per_unit()
     try:
         yield
     finally:
@@ -160,7 +165,6 @@ app.include_router(auth.router)
 app.include_router(user_auth.router)
 app.include_router(user_identity.router)
 app.include_router(user_identity_flow.router)
-app.include_router(user_identity_flow.veriff_webhook_router)
 app.include_router(user_identity_flow.v1_router)
 app.include_router(user_payments.router)
 app.include_router(user_rentals.router)
@@ -203,7 +207,6 @@ app.include_router(property_location.admin_router)
 app.include_router(authority_verification.router)
 app.include_router(authority_verification.confirmation_router)
 app.include_router(authority_verification.admin_router)
-app.include_router(identity_verification.internal_router)
 app.include_router(room_passport.router)
 app.include_router(occupancy_classification.router)
 app.include_router(leasing.router)
