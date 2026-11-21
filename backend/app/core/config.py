@@ -483,6 +483,13 @@ class Settings(BaseSettings):
             logger.warning("stripe (test mode, not enforced): %s", gap)
         return []
 
+    @field_validator("identity_default_provider", mode="before")
+    @classmethod
+    def _identity_provider_is_always_face_match(cls, _value):
+        """Face match is the only identity provider. An old server .env that still says IDENTITY_DEFAULT_PROVIDER=veriff
+        must not stop the app from booting (it did: production refused to start and the deploy failed)."""
+        return "face_match"
+
     @field_validator("google_maps_api_key", "mapbox_access_token",
                      "here_api_key", "public_search_service_token", "parallel_api_key", "tinyfish_api_key",
                      "brave_search_api_key", "rentcast_api_key", "domain_api_key", mode="before")
@@ -550,8 +557,6 @@ class Settings(BaseSettings):
     def _identity_production_problems(self) -> list[str]:
         """Identity (face match) settings that must be right before production traffic."""
         problems = []
-        if self.identity_default_provider != "face_match":
-            problems.append("IDENTITY_DEFAULT_PROVIDER must be 'face_match'")
         if not (0.0 < self.face_match_fail < self.face_match_pass < 1.0):
             problems.append("FACE_MATCH_FAIL must be above 0 and below FACE_MATCH_PASS, which must be below 1")
         return problems
