@@ -146,3 +146,13 @@ class TestRealModels:
 
     def test_garbage_bytes_are_reported_not_raised(self):
         assert face_match.compare_faces(b"not an image", b"not an image").issues == ["DOCUMENT_UNREADABLE"]
+
+
+def test_a_leftover_veriff_setting_in_an_old_env_does_not_break_startup(monkeypatch):
+    """Regression: production refused to boot (and the deploy failed) because the server's .env still said veriff."""
+    from app.core.config import Settings
+
+    monkeypatch.setenv("IDENTITY_DEFAULT_PROVIDER", "veriff")
+    monkeypatch.setenv("VERIFF_API_KEY", "left-over-key")
+    assert Settings().identity_default_provider == "face_match"
+    assert Settings(identity_default_provider="anything").identity_default_provider == "face_match"
