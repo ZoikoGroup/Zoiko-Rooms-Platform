@@ -121,20 +121,14 @@ def list_countries(db: Session) -> list[IdentityRegulatoryPack]:
 
 
 def pack_summary(pack: IdentityRegulatoryPack, db: Session | None = None) -> dict:
-    """What the person-facing flow needs from a pack: whether the provider
-    (Veriff) is available to verify right now, never any credential."""
-    from app.services.identity.providers import PROVIDER_HOSTED, get_provider
+    """What the person-facing flow needs from a pack: whether the face check can run right now on this server,
+    never any internal setting."""
+    from app.services.identity import face_match
 
-    if db is not None:
-        from app.services.identity.golive import resolve_provider
-
-        provider = resolve_provider(db, pack.document_provider_code)
-    else:
-        provider = get_provider(pack.document_provider_code)
     return {
-        "capture_mode": PROVIDER_HOSTED,
-        "provider_available": provider is not None,
-        "selfie_check": bool(provider and provider.checks_person_binding),
+        "capture_mode": "FACE_MATCH",
+        "provider_available": face_match.is_available(),
+        "selfie_check": True,
         "country_code": pack.country_code,
         "country_name": pack.country_name,
         "version": pack.version,

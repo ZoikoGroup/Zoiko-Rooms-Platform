@@ -44,11 +44,28 @@ export function rasterTiles(provider: BrowserMapProvider): { url: string; attrib
 
 let googleLoader: Promise<typeof google.maps> | null = null;
 
+const authFailureListeners = new Set<() => void>();
+let googleAuthFailed = false;
+
+/** Google calls window.gm_authFailure when it rejects the key (billing off, API not enabled, or this site
+ *  not allowed by the key's referrer restriction) and then paints its own "can't load Google Maps
+ *  correctly" box over the map. Listen here so a page can swap that box for its own fallback.
+ *  Returns an unsubscribe function; the callback also fires at once if the key was already rejected. */
+export function onGoogleMapsAuthFailure(cb: () => void): () => void {
+  if (googleAuthFailed) cb();
+  authFailureListeners.add(cb);
+  return () => { authFailureListeners.delete(cb); };
+}
+
 /** Loads the Maps JavaScript API once with the restricted browser key. */
 export function loadGoogleMaps(): Promise<typeof google.maps> {
   if (typeof window === "undefined") return Promise.reject(new Error("Google Maps needs a browser"));
   if (window.google?.maps?.Map) return Promise.resolve(window.google.maps);
   if (!googleLoader) {
+    (window as unknown as Record<string, () => void>).gm_authFailure = () => {
+      googleAuthFailed = true;
+      authFailureListeners.forEach((cb) => cb());
+    };
     googleLoader = new Promise((resolve, reject) => {
       const script = document.createElement("script");
       script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_BROWSER_KEY)}&v=weekly&loading=async&callback=__zoikoMapsReady`;

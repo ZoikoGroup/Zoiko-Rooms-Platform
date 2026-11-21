@@ -38,6 +38,32 @@ export const COMMON_AMENITIES: AmenityOption[] = [
   { value: "Gym", label: "Gym" },
   { value: "Swimming Pool", label: "Swimming Pool" },
   { value: "Kitchen Access", label: "Kitchen Access" },
+  // The words the Find a Room amenity filter uses (see FILTER_FEATURES below).
+  { value: "Workspace", label: "Workspace" },
+  { value: "Laundry", label: "Laundry" },
+  { value: "Kitchen", label: "Kitchen" },
+];
+
+/** What renters can filter on in Find a Room, so the listing form asks for exactly these. `value` is what is
+ *  saved in the listing's amenities; `wanted` is the filter's own name for it (lib/find-a-room-search.ts
+ *  also recognises older wordings such as "Washing Machine", "Study Table" or "WiFi"). */
+export const FILTER_FEATURES = [
+  { label: "Wi-Fi", value: "Wi-Fi", wanted: "wi-fi" },
+  { label: "Workspace / desk", value: "Workspace", wanted: "workspace" },
+  { label: "Laundry / washing machine", value: "Laundry", wanted: "laundry" },
+  { label: "Kitchen access", value: "Kitchen", wanted: "kitchen" },
+] as const;
+
+export const FILTER_ACCESSIBILITY = [
+  { label: "Step-free entrance", value: "Step-free Entrance", filterName: "Step-free entrance" },
+  { label: "Lift / elevator access", value: "Lift / Elevator", filterName: "Lift access" },
+] as const;
+
+/** Amenity values the dedicated filter sections handle, so the general amenities list doesn't repeat them. */
+export const FILTER_HANDLED_AMENITIES: string[] = [
+  ...FURNISHING_OPTIONS,
+  "Wi-Fi", "Workspace", "Laundry", "Kitchen", "Washing Machine", "Study Table", "Kitchen Access",
+  "Lift / Elevator", "Step-free Entrance", "Attached Bathroom",
 ];
 
 export const COMMON_AMENITY_VALUES = new Set(COMMON_AMENITIES.map((a) => a.value));

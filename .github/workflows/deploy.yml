@@ -36,6 +36,11 @@ jobs:
 
             source venv/bin/activate
             pip install -r requirements.txt
+            # Offline IP -> country database for the Find a Room currency (gitignored, so fetched here).
+            # Best effort: if the download fails the app uses the online lookups instead.
+            python update_geoip.py || echo "GeoIP database not refreshed (continuing)"
+            # Face-match models for identity verification (best effort; identity stays "unavailable" without them).
+            python download_face_models.py || echo "Face models not downloaded (continuing)"
             alembic upgrade head
             deactivate
             sudo systemctl restart zoiko-rooms-backend

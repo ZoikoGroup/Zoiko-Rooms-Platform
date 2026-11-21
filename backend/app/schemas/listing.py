@@ -109,6 +109,7 @@ class ListingRead(ListingBase):
     # moved in. Computed by crud.listing.annotate_availability/is_listing_available
     # -- never trust Listing.state alone for "is this actually live" in a new caller.
     available: bool = True
+    has_ensuite: bool | None = None
 
 
 class ListingRejectRequest(CamelModel):
@@ -138,6 +139,9 @@ class PublicListingRead(ListingBase):
     rating: float
     review_count: int
     owner_name: str
+    # From the room itself (set when the host added the room): true = its own bathroom, false = shared,
+    # None = not linked to a room. The Find a Room "Bathroom" filter reads this.
+    has_ensuite: bool | None = None
 
 
 class PublicListingsPage(CamelModel):

@@ -28,7 +28,7 @@ IDENTITY_STATES = (
 # Section 2.3 -- internal assurance levels (not NIST IAL claims).
 ASSURANCE_LEVELS = ("IV-0", "IV-1", "IV-2")
 # Section 12.1 verification_method, normalized.
-# Document + Selfie through the identity provider (Veriff) is the only method.
+# Document photo + selfie, compared by face match on this server, is the only method.
 VERIFICATION_METHODS = ("DOCUMENT",)
 # Section 8.2 normalized_outcome.
 NORMALIZED_OUTCOMES = ("PASS", "REVIEW", "ACTION_REQUIRED", "FAIL")
@@ -112,8 +112,8 @@ class IdentityRegulatoryPack(Base):
     # Periodic renewal; None = no time-based re-verification (Section 7.3).
     reverification_interval_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reverify_on_account_recovery: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Which provider adapter handles DOCUMENT verifications here (Veriff).
-    document_provider_code: Mapped[str] = mapped_column(String(50), default="veriff")
+    # Which provider handles DOCUMENT verifications here ("face_match"; older rows may still say "veriff").
+    document_provider_code: Mapped[str] = mapped_column(String(50), default="face_match")
     # Server-enforced retry policy (ZR-IDV-ADR-001 Section 10 /restart).
     max_attempts_per_day: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
 
@@ -122,7 +122,8 @@ class IdentityRegulatoryPack(Base):
 
 
 class IdentityProviderEvent(Base):
-    """Section 8.3/14 -- webhook ledger: one row per provider event id, so a
+    """RETIRED (kept so existing rows and the table are not lost; nothing writes to it now).
+    Section 8.3/14 -- webhook ledger: one row per provider event id, so a
     replayed or duplicate callback is recognised and never reprocessed."""
 
     __tablename__ = "identity_provider_events"

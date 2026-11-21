@@ -1,7 +1,7 @@
 """Identity verification records -- the admin list and the gates other
 modules call. The verification logic itself lives in
 services/identity/service.py (ZR-IDENTITY-001); identities are decided only
-by the identity provider (Veriff, ZR-IDV-ADR-001), never by a person here."""
+by the server-side face match (services/identity/service.py:verify_faces), never by a person here."""
 
 import logging
 from datetime import datetime, timezone

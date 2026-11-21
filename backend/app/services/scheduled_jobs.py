@@ -211,19 +211,8 @@ def purge_identity_evidence(db: Session) -> int:
     return purge_expired_evidence(db)
 
 
-def reconcile_identity_sessions(db: Session) -> int:
-    """ZR-IDV-ADR-001 Section 8/13: hosted identity sessions with no decision
-    after the threshold are checked with the provider's decision API."""
-    from app.services.identity.service import reconcile_stale_sessions
-
-    return reconcile_stale_sessions(db)
 
 
-def process_identity_webhooks(db: Session) -> int:
-    """Retry identity provider webhook events accepted but not yet processed."""
-    from app.services.identity.service import process_pending_webhook_events
-
-    return process_pending_webhook_events(db)
 
 
 def reconcile_listing_fee_refunds(db: Session) -> int:
@@ -480,8 +469,6 @@ JOBS: tuple[tuple[str, Callable[[Session], int]], ...] = (
     ("link_payment_disputes_to_cases", link_payment_disputes_to_cases),
     ("sweep_identity_reverification", sweep_identity_reverification),
     ("purge_identity_evidence", purge_identity_evidence),
-    ("process_identity_webhooks", process_identity_webhooks),
-    ("reconcile_identity_sessions", reconcile_identity_sessions),
     ("expire_property_verifications", expire_property_verifications),
     ("purge_property_location_evidence", purge_property_location_evidence),
     ("expire_authority_verifications", expire_authority_verifications),

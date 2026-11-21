@@ -39,7 +39,7 @@ def _to_user_read(record: IdentityVerification) -> dict:
 
 
 # Uploading a document here is no longer possible: identity is verified only
-# through the identity provider's own capture (/api/users/identity, Veriff).
+# through the face-match flow (/api/users/identity).
 # These routes are read-only history.
 
 

@@ -62,7 +62,8 @@ import { Field, Toast, inputClass, selectClass, useToast } from "@/components/us
 import { HostMoveInSteps } from "@/components/user/HostMoveInSteps";
 import { toAgreementDetailsForm } from "@/components/user/ListingAgreementDetailsFields";
 import { ImageGalleryUploader } from "@/components/admin/ImageGalleryUploader";
-import { AmenitiesPicker } from "@/components/ui/AmenitiesPicker";
+import { ListingFilterFields, hasFurnishingAnswer } from "@/components/user/ListingFilterFields";
+import { roomTypeChoices } from "@/lib/room-types";
 import { RoundedFilterDropdown } from "@/components/ui/RoundedFilterDropdown";
 import { ListingFeeCheckout, StripeReturn } from "@/components/user/ListingFeeCheckout";
 import { PropertyVerificationWizard } from "@/components/user/PropertyVerificationWizard";
@@ -988,6 +989,10 @@ export function HostingListingsManager() {
     const price = Number(form.pricePerNight);
     if (!Number.isFinite(price) || price <= 0) {
       setError("Enter a nightly price greater than zero.");
+      return;
+    }
+    if (!hasFurnishingAnswer(form.amenities)) {
+      setError("Choose Furnished, Part Furnished or Unfurnished so renters can find the room.");
       return;
     }
 
@@ -2610,6 +2615,20 @@ export function HostingListingsManager() {
             </Field>
           </div>
 
+          <Field label="Room type">
+            <select
+              value={form?.roomType ?? "Private room"}
+              onChange={(e) => setForm((f) => (f ? { ...f, roomType: e.target.value } : f))}
+              className={selectClass}
+            >
+              {roomTypeChoices(form?.roomType ?? "Private room").map((type) => (
+                <option key={type} value={type}>
+                  {type}
+                </option>
+              ))}
+            </select>
+          </Field>
+
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <Field label="Nightly rate">
               <input
@@ -2678,12 +2697,14 @@ export function HostingListingsManager() {
             />
           </Field>
 
-          <Field label="Amenities">
-            <AmenitiesPicker
-              value={form?.amenities ?? []}
-              onChange={(amenities) => setForm((f) => (f ? { ...f, amenities } : f))}
-            />
-          </Field>
+          <ListingFilterFields
+            amenities={form?.amenities ?? []}
+            onChange={(amenities) => setForm((f) => (f ? { ...f, amenities } : f))}
+            bathroom={(() => {
+              const chosen = roomById.get(Number(form?.roomId));
+              return chosen ? (chosen.hasEnsuite ? "Private" : "Shared") : null;
+            })()}
+          />
 
           {error && (
             <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700 ring-1 ring-red-200">

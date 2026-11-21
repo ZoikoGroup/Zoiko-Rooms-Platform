@@ -8,9 +8,8 @@ from app.schemas.common import CamelModel
 
 
 class IdentityPackRead(CamelModel):
-    # UPLOAD (document uploaded to Zoiko) or PROVIDER_HOSTED (captured inside
-    # the provider's own document + selfie flow, e.g. Veriff).
-    capture_mode: str = "UPLOAD"
+    # FACE_MATCH: the person uploads a photo of their document and takes a selfie; the server compares the faces.
+    capture_mode: str = "FACE_MATCH"
     provider_available: bool = True
     selfie_check: bool = False
     country_code: str
@@ -52,11 +51,8 @@ class IdentitySessionRead(CamelModel):
     message: str = ""
     actions: list[str] = []
     escalated: bool = False
-    # Zoiko's capture screens: whether photos can be taken now, which were
-    # already sent to the provider, and whether the document's back is needed.
+    # Whether the photos (document + selfie) can be submitted now.
     capture_available: bool = False
-    captured: list[str] = []
-    back_required: bool = False
     can_restart: bool = False
     created_at: datetime
     submitted_at: datetime | None = None
@@ -106,20 +102,6 @@ class IdentityHandoffRead(CamelModel):
 
 class IdentityHandoffClaim(CamelModel):
     token: str
-
-
-class IdentityGateUpdate(CamelModel):
-    confirmed: bool
-    note: str = ""
-    evidence_reference: str = ""
-
-
-class IdentityReasonMappingUpsert(CamelModel):
-    provider_code: str = "veriff"
-    provider_decision: str
-    provider_reason_code: str
-    zoiko_reason_code: str
-    description: str = ""
 
 
 class IdentityErasureRequest(CamelModel):

@@ -33,9 +33,17 @@ class TestEmailSiteUrl:
         assert site(environment="development", frontend_url="http://localhost:3000",
                     public_site_url="https://staging.zoikorooms.com/") == "https://staging.zoikorooms.com"
 
-    @pytest.mark.parametrize("bad", ["http://localhost:3000", "https://localhost", "http://app.zoikorooms.com", "https://127.0.0.1:3000"])
-    def test_a_localhost_or_plain_http_public_site_url_is_ignored(self, site, bad):
+    @pytest.mark.parametrize("bad", ["http://app.zoikorooms.com", "ftp://localhost"])
+    def test_a_plain_http_public_site_url_is_ignored(self, site, bad):
         assert site(environment="development", frontend_url="http://localhost:3000", public_site_url=bad) == PRODUCTION_SITE_URL
+
+    @pytest.mark.parametrize("local", ["http://localhost:3000", "https://127.0.0.1:3000"])
+    def test_a_localhost_public_site_url_is_honoured_outside_production(self, site, local):
+        assert site(environment="development", frontend_url="", public_site_url=local) == local
+
+    @pytest.mark.parametrize("local", ["http://localhost:3000", "https://localhost", "https://127.0.0.1:3000"])
+    def test_a_localhost_public_site_url_is_never_honoured_in_production(self, site, local):
+        assert site(environment="production", frontend_url="", public_site_url=local) == PRODUCTION_SITE_URL
 
 
 class TestEmailButtons:

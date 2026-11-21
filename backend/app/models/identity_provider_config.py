@@ -1,4 +1,7 @@
-"""ZR-IDV-ADR-001 provider configuration that must not live in code:
+"""RETIRED: the outside identity provider was removed and identity is now a face match on this server. These tables
+and classes are kept only so existing rows are not lost; nothing reads or writes them any more.
+
+Originally -- ZR-IDV-ADR-001 provider configuration that must not live in code:
 
 - IdentityProviderReasonMapping: the provider's own reason codes (e.g.
   Veriff resubmission / decline codes) -> Zoiko safe reason codes. These
