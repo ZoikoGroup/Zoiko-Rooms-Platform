@@ -346,7 +346,7 @@ function AuthAside() {
 
       <div className="relative z-10 xl:pl-[86px] xl:pr-[129.67px] xl:pt-[clamp(40px,10vh,140px)]">
         <Link
-          href="/"
+          href="https://zoikorooms.com/"
           aria-label="Zoiko Rooms home"
           className="block h-[46.67px] pt-[3px]"
         >
